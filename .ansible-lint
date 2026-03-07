@@ -1,0 +1,13 @@
+---
+profile: production
+
+exclude_paths:
+  - .venv/
+  - collections/
+  - molecule/
+
+skip_list:
+  - command-instead-of-module
+  - no-changed-when
+  - risky-shell-pipe
+  - var-naming[no-role-prefix]

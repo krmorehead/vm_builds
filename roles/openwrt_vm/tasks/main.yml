@@ -1,0 +1,206 @@
+---
+- name: Check if OpenWrt VM already exists
+  ansible.builtin.command:
+    cmd: qm status {{ openwrt_vm_id }}
+  register: vm_status
+  failed_when: false
+  changed_when: false
+
+- name: Set VM existence flag
+  ansible.builtin.set_fact:
+    vm_exists: "{{ vm_status.rc == 0 }}"
+
+# ── Image upload & VM creation ───────────────────────────────────
+
+- name: Upload OpenWrt image to Proxmox node
+  ansible.builtin.copy:
+    src: "{{ openwrt_image_path if openwrt_image_path.startswith('/') else (playbook_dir + '/../' + openwrt_image_path) }}"
+    dest: "{{ openwrt_tmp_image }}"
+    mode: "0644"
+  when: not vm_exists | bool
+
+- name: Create OpenWrt VM shell (no disk)
+  community.proxmox.proxmox_kvm:
+    node: "{{ proxmox_node }}"
+    api_host: "{{ proxmox_api_host }}"
+    api_user: "{{ proxmox_api_user }}"
+    api_token_id: "{{ proxmox_api_token_id }}"
+    api_token_secret: "{{ proxmox_api_token_secret }}"
+    vmid: "{{ openwrt_vm_id }}"
+    name: "{{ openwrt_vm_name }}"
+    memory: "{{ openwrt_vm_memory }}"
+    cores: "{{ openwrt_vm_cores }}"
+    ostype: l26
+    machine: "{{ 'q35' if (wifi_pci_devices | default([]) | length > 0) else omit }}"
+    scsihw: virtio-scsi-pci
+    serial:
+      serial0: socket
+    state: present
+  delegate_to: localhost
+  when: not vm_exists | bool
+
+# ── Disk import ──────────────────────────────────────────────────
+
+- name: Import disk image into VM storage
+  ansible.builtin.command:
+    cmd: >-
+      qm importdisk {{ openwrt_vm_id }}
+      {{ openwrt_tmp_image }}
+      {{ proxmox_storage }}
+  register: disk_import
+  when: not vm_exists | bool
+
+- name: Parse imported disk path
+  ansible.builtin.set_fact:
+    imported_disk: >-
+      {{ disk_import.stdout
+         | regex_search("imported disk '([^']+)'", '\1')
+         | first }}
+  when: not vm_exists | bool
+
+- name: Attach disk and configure boot order
+  ansible.builtin.command:
+    cmd: >-
+      qm set {{ openwrt_vm_id }}
+      --scsi0 {{ imported_disk }}
+      --boot order=scsi0
+  when: not vm_exists | bool
+
+- name: Resize boot disk
+  ansible.builtin.command:
+    cmd: >-
+      qm resize {{ openwrt_vm_id }}
+      scsi0 {{ openwrt_vm_disk_size }}
+  when: not vm_exists | bool
+
+# ── Upstream MAC cloning ─────────────────────────────────────────
+
+- name: Detect default gateway IP
+  ansible.builtin.shell:
+    cmd: ip route show default | awk '{print $3}' | head -1
+    executable: /bin/bash
+  register: gw_ip_result
+  changed_when: false
+  when: openwrt_clone_wan_mac | bool
+
+- name: Ping gateway to populate neighbour table
+  ansible.builtin.command:
+    cmd: ping -c 1 -W 2 {{ gw_ip_result.stdout | trim }}
+  changed_when: false
+  failed_when: false
+  when:
+    - openwrt_clone_wan_mac | bool
+    - gw_ip_result.stdout | trim | length > 0
+
+- name: Read upstream gateway MAC from neighbour table
+  ansible.builtin.command:
+    cmd: ip neigh show {{ gw_ip_result.stdout | trim }}
+  register: gw_neigh_result
+  changed_when: false
+  when:
+    - openwrt_clone_wan_mac | bool
+    - gw_ip_result.stdout | trim | length > 0
+
+- name: Set upstream MAC fact
+  ansible.builtin.set_fact:
+    upstream_mac: >-
+      {{ gw_neigh_result.stdout
+         | regex_search('([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})')
+         | default('') }}
+  when:
+    - openwrt_clone_wan_mac | bool
+    - gw_neigh_result is defined
+    - gw_neigh_result.stdout | default('') | length > 0
+
+# ── NIC attachment ───────────────────────────────────────────────
+
+- name: Attach NIC to each bridge
+  ansible.builtin.command:
+    cmd: >-
+      qm set {{ openwrt_vm_id }}
+      --net{{ idx }}
+      {{ ('virtio=' + upstream_mac + ',bridge=' + bridge)
+         if (idx == 0 and upstream_mac | default('') | length > 0)
+         else ('virtio,bridge=' + bridge) }}
+  loop: "{{ proxmox_all_bridges }}"
+  loop_control:
+    index_var: idx
+    loop_var: bridge
+  when: not vm_exists | bool
+
+# ── WiFi PCIe passthrough ──────────────────────────────────────
+
+- name: Attach WiFi PCIe devices to VM
+  ansible.builtin.command:
+    cmd: >-
+      qm set {{ openwrt_vm_id }}
+      --hostpci{{ idx }} {{ pci_addr }},pcie=1
+  loop: "{{ wifi_pci_devices | default([]) }}"
+  loop_control:
+    index_var: idx
+    loop_var: pci_addr
+  when:
+    - not vm_exists | bool
+    - wifi_pci_devices | default([]) | length > 0
+
+- name: Clean up uploaded image
+  ansible.builtin.file:
+    path: "{{ openwrt_tmp_image }}"
+    state: absent
+
+# ── Start VM ─────────────────────────────────────────────────────
+
+- name: Start OpenWrt VM
+  community.proxmox.proxmox_kvm:
+    node: "{{ proxmox_node }}"
+    api_host: "{{ proxmox_api_host }}"
+    api_user: "{{ proxmox_api_user }}"
+    api_token_id: "{{ proxmox_api_token_id }}"
+    api_token_secret: "{{ proxmox_api_token_secret }}"
+    vmid: "{{ openwrt_vm_id }}"
+    state: started
+  delegate_to: localhost
+
+# ── Bootstrap connectivity to OpenWrt LAN ────────────────────────
+
+- name: Select LAN-side bridge for bootstrap
+  ansible.builtin.set_fact:
+    _bootstrap_bridge: >-
+      {{ openwrt_bootstrap_bridge
+         | default(proxmox_all_bridges | first, true) }}
+    cacheable: true
+
+- name: Check if bootstrap IP is already present
+  ansible.builtin.command:
+    cmd: ip addr show dev {{ _bootstrap_bridge }}
+  register: bridge_addr
+  changed_when: false
+
+- name: Add temporary IP to LAN bridge
+  ansible.builtin.command:
+    cmd: >-
+      ip addr add
+      {{ openwrt_bootstrap_ip }}/{{ openwrt_bootstrap_cidr }}
+      dev {{ _bootstrap_bridge }}
+  when: "openwrt_bootstrap_ip not in bridge_addr.stdout"
+
+- name: Wait for OpenWrt SSH on LAN interface
+  ansible.builtin.wait_for:
+    host: "{{ openwrt_bootstrap_gw }}"
+    port: 22
+    delay: 15
+    timeout: 180
+
+- name: Add OpenWrt VM to dynamic inventory
+  ansible.builtin.add_host:
+    name: "{{ openwrt_vm_name }}"
+    groups: openwrt
+    ansible_host: "{{ openwrt_bootstrap_gw }}"
+    ansible_user: root
+    ansible_ssh_pass: ""
+    ansible_ssh_common_args: >-
+      -o ProxyJump=root@{{ ansible_host }}
+      -o StrictHostKeyChecking=no
+      -o UserKnownHostsFile=/dev/null
+      -o PubkeyAuthentication=no
+      -o ConnectTimeout=10

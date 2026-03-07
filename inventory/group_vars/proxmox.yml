@@ -1,0 +1,9 @@
+---
+ansible_user: root
+ansible_python_interpreter: /usr/bin/python3
+
+proxmox_node: "{{ inventory_hostname }}"
+proxmox_api_host: "{{ ansible_host }}"
+proxmox_api_user: root@pam
+proxmox_api_token_id: ansible
+proxmox_api_token_secret: "{{ lookup('env', 'PROXMOX_API_TOKEN_SECRET') }}"

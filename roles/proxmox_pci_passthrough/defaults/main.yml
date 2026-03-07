@@ -1,0 +1,3 @@
+---
+pci_passthrough_allow_reboot: false
+wifi_driver_blacklist: []

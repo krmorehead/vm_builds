@@ -1,0 +1,133 @@
+---
+- name: Verify Proxmox host state
+  hosts: proxmox
+  gather_facts: false
+  tasks:
+    - name: List physical-NIC-backed bridges
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          for br in /sys/class/net/vmbr*/; do
+            brname=$(basename "$br")
+            if ls "$br"/brif/*/device 2>/dev/null | head -1 | grep -q device; then
+              echo "$brname"
+            fi
+          done
+        executable: /bin/bash
+      register: bridge_list
+      changed_when: false
+
+    - name: Assert at least two physical bridges exist
+      ansible.builtin.assert:
+        that: bridge_list.stdout_lines | length >= 2
+        fail_msg: "Expected at least 2 physical-NIC bridges, found {{ bridge_list.stdout_lines | length }}"
+
+    - name: Check OpenWrt VM is running
+      ansible.builtin.command:
+        cmd: qm status {{ openwrt_vm_id | default(100) }}
+      register: vm_running
+      changed_when: false
+
+    - name: Assert VM is in running state
+      ansible.builtin.assert:
+        that: "'running' in vm_running.stdout"
+        fail_msg: "VM {{ openwrt_vm_id | default(100) }} is not running: {{ vm_running.stdout }}"
+
+    - name: Check IOMMU status
+      ansible.builtin.shell:
+        cmd: dmesg | grep -i -c 'IOMMU enabled\|DMAR.*IOMMU\|Adding to iommu group'
+        executable: /bin/bash
+      register: iommu_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Report IOMMU status
+      ansible.builtin.debug:
+        msg: >-
+          IOMMU {{ 'active' if (iommu_verify.stdout | int) > 0
+          else 'not active (no WiFi passthrough)' }}
+
+- name: Verify OpenWrt VM state
+  hosts: openwrt
+  gather_facts: false
+  tasks:
+    - name: Check SSH connectivity
+      ansible.builtin.raw: echo ok
+      register: ssh_check
+      retries: 6
+      delay: 5
+      until: ssh_check is success
+      ignore_unreachable: true
+
+    - name: Assert SSH is reachable
+      ansible.builtin.assert:
+        that: ssh_check is success
+        fail_msg: "Cannot reach OpenWrt VM via SSH"
+
+    - name: Read WAN interface and IP
+      ansible.builtin.raw: >-
+        ip -o -4 addr show dev
+        $(ip -o route show default | awk '{print $5}' | head -1)
+        2>/dev/null | awk '{print $2, $4}'
+      register: wan_info
+      changed_when: false
+
+    - name: Assert WAN has an IP address
+      ansible.builtin.assert:
+        that: wan_info.stdout | trim | length > 0
+        fail_msg: "WAN interface has no IPv4 address"
+
+    - name: Read LAN IP
+      ansible.builtin.raw: uci get network.lan.ipaddr
+      register: lan_ip
+      changed_when: false
+
+    - name: Read WAN IP prefix
+      ansible.builtin.raw: >-
+        wan_dev=$(ip -o route show default | awk '{print $5}' | head -1);
+        ip -o -4 addr show dev "$wan_dev"
+        | awk '{print $4}' | cut -d/ -f1 | cut -d. -f1-3
+      register: wan_prefix
+      changed_when: false
+
+    - name: Read LAN IP prefix
+      ansible.builtin.set_fact:
+        lan_prefix: "{{ (lan_ip.stdout | trim).split('.')[0:3] | join('.') }}"
+
+    - name: Assert LAN subnet does not collide with WAN
+      ansible.builtin.assert:
+        that: lan_prefix != (wan_prefix.stdout | trim)
+        fail_msg: >-
+          LAN prefix {{ lan_prefix }} collides with WAN prefix
+          {{ wan_prefix.stdout | trim }}
+
+    - name: Check for WiFi radios
+      ansible.builtin.raw: ls -1 /sys/class/ieee80211/ 2>/dev/null | wc -l
+      register: radio_count
+      changed_when: false
+
+    - name: Verify mesh configuration (when WiFi is present)
+      ansible.builtin.raw: >-
+        uci show wireless 2>/dev/null | grep "mode='mesh'" | wc -l
+      register: mesh_iface_count
+      changed_when: false
+      when: (radio_count.stdout | trim | int) > 0
+
+    - name: Assert mesh interfaces match radio count
+      ansible.builtin.assert:
+        that: >-
+          (mesh_iface_count.stdout | trim | int) >=
+          (radio_count.stdout | trim | int)
+        fail_msg: >-
+          Expected {{ radio_count.stdout | trim }} mesh interfaces,
+          found {{ mesh_iface_count.stdout | trim }}
+      when: (radio_count.stdout | trim | int) > 0
+
+    - name: Report verification results
+      ansible.builtin.debug:
+        msg: >-
+          Verification passed:
+          WAN={{ wan_info.stdout | trim }},
+          LAN={{ lan_ip.stdout | trim }},
+          WiFi radios={{ radio_count.stdout | trim }},
+          Mesh={{ mesh_iface_count.stdout | default('0') | trim }}

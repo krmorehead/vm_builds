@@ -1,0 +1,32 @@
+---
+description: Safety rules for remote Proxmox host management
+alwaysApply: true
+---
+
+# Proxmox Host Safety
+
+## NEVER do these on a remote host
+- `ifdown --all` -- kills the management network, makes the host unreachable. Requires physical console to recover.
+- `systemctl stop networking` -- same effect.
+- `ip link delete vmbr0` -- destroys the management bridge.
+- Any command that tears down ALL interfaces simultaneously.
+
+## Safe alternatives
+- To bring UP new interfaces: `ifup --all --force` (additive, safe).
+- To reload after config changes: use `ifreload -a` or restart specific interfaces.
+- To tear down ansible-created bridges: iterate and skip bridges defined in `/etc/network/interfaces` (the management bridge).
+
+## Bootstrap bridge selection
+- OpenWrt's default LAN is on eth0, which maps to the FIRST bridge (typically vmbr0).
+- The bootstrap IP can safely coexist on vmbr0 if it's on a different subnet than the management IP.
+- Previous bug: we excluded vmbr0 and tried to connect through vmbr1 (which has no IP in OpenWrt).
+
+## PCI passthrough prerequisites
+- WiFi PCIe passthrough requires the `q35` machine type. Set `machine: q35` when `wifi_pci_devices` is non-empty.
+- IOMMU group isolation is mandatory. Always verify before binding to vfio-pci.
+- WiFi NICs must be excluded from bridge creation (they're passed through via PCIe, not bridged).
+
+## Backup before changes
+- Every playbook run should back up host config and existing VMs first (Play 0: `proxmox_backup`).
+- Use `vzdump` for VM backups, tar for host config.
+- Never destroy VMs without a backup manifest confirming they were backed up.

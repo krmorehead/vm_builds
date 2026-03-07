@@ -1,0 +1,3 @@
+---
+ansible_host: "{{ lookup('env', 'PROXMOX_HOST') }}"
+pci_passthrough_allow_reboot: true

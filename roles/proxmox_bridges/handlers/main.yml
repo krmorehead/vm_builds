@@ -1,0 +1,4 @@
+---
+- name: Reload networking
+  ansible.builtin.command:
+    cmd: ifup --all --force

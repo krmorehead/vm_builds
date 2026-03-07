@@ -1,0 +1,27 @@
+# Environment (production secrets)
+.env
+.venv/
+# Disk images
+*.img
+*.qcow2
+*.raw
+
+# Ansible retry files
+*.retry
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
+
+# Galaxy-installed dependencies
+collections/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

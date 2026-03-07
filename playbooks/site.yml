@@ -1,0 +1,34 @@
+---
+- name: Back up current Proxmox state
+  hosts: proxmox
+  gather_facts: true
+  roles:
+    - proxmox_backup
+
+- name: Provision OpenWrt VM on Proxmox
+  hosts: proxmox
+  gather_facts: true
+  roles:
+    - proxmox_bridges
+    - proxmox_pci_passthrough
+    - openwrt_vm
+
+- name: Configure OpenWrt
+  hosts: openwrt
+  gather_facts: false
+  roles:
+    - openwrt_configure
+
+- name: Clean up bootstrap networking
+  hosts: proxmox
+  gather_facts: false
+  tasks:
+    - name: Remove temporary bootstrap IP from LAN bridge
+      ansible.builtin.command:
+        cmd: >-
+          ip addr del
+          {{ openwrt_bootstrap_ip }}/{{ openwrt_bootstrap_cidr }}
+          dev {{ _bootstrap_bridge }}
+      failed_when: false
+      changed_when: true
+      when: _bootstrap_bridge is defined

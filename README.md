@@ -1,1 +1,443 @@
 # vm_builds
+
+Ansible project for provisioning and configuring VMs on Proxmox VE. Deploys an **OpenWrt** router VM with full NIC bridge passthrough, WiFi PCIe passthrough with 802.11s mesh, upstream MAC cloning, WAN auto-detection, collision-free LAN subnet selection, and baseline firewall/DHCP.
+
+## Architecture
+
+```
+ Linux Mint               Proxmox Node              OpenWrt VM
+ (Control)                                         ┌──────────┐
+ ┌────────┐   API token   ┌──────────┐  vmbr0 ────│ eth0 WAN │
+ │ Ansible │──────────────▶│ Proxmox  │  vmbr1 ────│ eth1 LAN │
+ │         │──────SSH─────▶│          │  vmbr2 ────│ eth2 LAN │
+ └────────┘               └──────────┘  PCIe  ────│ wlan0    │
+      │                                            └──────────┘
+      │       images/openwrt.img                     802.11s
+      └──────▶ (local to project root)                mesh
+```
+
+**Play 0 -- Backup** (targets Proxmox host):
+back up host config (`/etc/network`, `/etc/modprobe.d`, GRUB, `/etc/pve`)
+and snapshot existing VMs with `vzdump` before making any changes.
+
+**Play 1 -- Provision** (targets Proxmox host via API + SSH):
+discover physical NICs, create one virtual bridge per NIC, detect WiFi
+PCIe devices and configure IOMMU/vfio-pci passthrough, clone the
+upstream router's MAC address, upload the OpenWrt disk image, create and
+boot the VM, then establish a temporary bootstrap connection to the VM's
+LAN side.
+
+**Play 2 -- Configure** (targets OpenWrt VM via SSH through Proxmox):
+wait for WAN DHCP, detect the WAN interface, auto-select a LAN subnet
+that does not collide with the WAN network, assign remaining interfaces
+to a LAN bridge, install mesh-capable WiFi packages, configure 802.11s
+mesh on all detected radios, configure firewall zones and DHCP.
+
+**Play 3 -- Cleanup** (targets Proxmox host):
+remove the temporary bootstrap IP from the Proxmox bridge.
+
+---
+
+## Prerequisites
+
+| Component | Notes |
+|---|---|
+| Linux Mint (or any Debian-based distro) | Control machine |
+| `sshpass` | System package -- required for initial OpenWrt login |
+| SSH key access to Proxmox | Root SSH from control machine to each node |
+| Proxmox VE 7.x / 8.x | Target hypervisor with 2+ physical NICs |
+| Proxmox API token | Created in the PVE web UI (see below) |
+| OpenWrt `.img` | Placed in `images/` directory (see step 7) |
+
+---
+
+## Setup
+
+### 1. Install system packages
+
+```bash
+sudo apt update
+sudo apt install -y sshpass
+```
+
+### 2. Clone the repo
+
+```bash
+git clone <repo-url>
+cd vm_builds
+```
+
+### 3. Run the setup script
+
+This creates the Python virtual environment and installs all
+dependencies (Ansible, Molecule, linters, Galaxy collections/roles):
+
+```bash
+./setup.sh
+```
+
+To update dependencies later, run `./setup.sh` again.
+
+### 4. Set up SSH keys for Proxmox
+
+If you do not already have a key pair:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ""
+```
+
+Copy it to each Proxmox node:
+
+```bash
+ssh-copy-id root@<proxmox-ip>
+```
+
+Verify passwordless login:
+
+```bash
+ssh root@<proxmox-ip> hostname
+```
+
+### 5. Create a Proxmox API token
+
+On the Proxmox web UI go to **Datacenter > Permissions > API Tokens**:
+
+- User: `root@pam`
+- Token ID: `ansible`
+- **Uncheck** Privilege Separation
+
+Copy the token secret -- it is shown only once.
+
+### 6. Configure your environment
+
+Copy `test.env` to `.env` and fill in real values:
+
+```bash
+cp test.env .env
+```
+
+Edit `.env`:
+
+```
+PROXMOX_API_TOKEN_SECRET=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+PROXMOX_HOST=192.168.1.100
+MESH_KEY=your-secure-mesh-passphrase
+```
+
+| Variable | Description |
+|---|---|
+| `PROXMOX_API_TOKEN_SECRET` | API token secret from step 5 |
+| `PROXMOX_HOST` | IP address of your Proxmox node |
+| `MESH_KEY` | WPA3-SAE passphrase for the 802.11s mesh network |
+
+If your Proxmox **node name** (shown in the PVE UI sidebar) differs
+from `home`, rename `inventory/host_vars/home.yml` to match and update
+the hostname in `inventory/hosts.yml`.
+
+Review `inventory/group_vars/all.yml` to confirm the image path and VM
+settings match your environment.
+
+### 7. Place the OpenWrt image
+
+Download an OpenWrt image from https://downloads.openwrt.org.
+Grab the **combined ext4** or **combined squashfs** `.img.gz` for the
+`x86/64` target, decompress it, and place the `.img` at the configured
+path:
+
+```bash
+mkdir -p images
+gunzip openwrt-*-combined-ext4.img.gz
+cp openwrt-*-combined-ext4.img images/openwrt.img
+```
+
+### 8. Run
+
+```bash
+./run.sh
+```
+
+Or activate the venv manually:
+
+```bash
+source .venv/bin/activate
+set -a; source .env; set +a
+ansible-playbook playbooks/site.yml
+```
+
+At the end of the run, a debug message prints the chosen LAN address
+(e.g. `10.10.10.1`) so you know where to reach the new router.
+
+---
+
+## Testing
+
+Tests run against a dedicated Proxmox test machine. The `test.env` file
+ships with the test machine's IP (`192.168.86.201`).
+
+### Lint + syntax (no hardware needed)
+
+```bash
+source .venv/bin/activate
+ansible-lint
+yamllint .
+ansible-playbook playbooks/site.yml --syntax-check
+```
+
+### Full test pipeline (Molecule)
+
+Runs lint, converge (full playbook), verify (assertions), and cleanup
+(destroy the test VM) against the test machine:
+
+```bash
+source .venv/bin/activate
+set -a; source test.env; set +a
+molecule test
+```
+
+Useful Molecule commands during development:
+
+```bash
+molecule converge    # run the playbook only (no verify/cleanup)
+molecule verify      # re-run verification without re-converging
+molecule destroy     # tear down the test VM
+molecule test        # full pipeline: lint -> converge -> verify -> cleanup
+```
+
+### What the verify step checks
+
+- At least 2 physical-NIC-backed bridges exist on Proxmox
+- OpenWrt VM is running
+- SSH connectivity to the VM
+- WAN interface has a DHCP lease
+- LAN subnet does not collide with WAN
+- WiFi radios are detected (if hardware present)
+- 802.11s mesh interfaces are configured per radio
+
+---
+
+## Variable Reference
+
+### Global (`inventory/group_vars/all.yml`)
+
+| Variable | Default | Description |
+|---|---|---|
+| `openwrt_image_path` | `images/openwrt.img` | Path to the OpenWrt disk image (relative to project root, or absolute) |
+| `openwrt_vm_id` | `100` | Proxmox VM ID |
+| `openwrt_vm_name` | `openwrt-router` | VM display name |
+| `openwrt_vm_memory` | `512` | RAM in MB |
+| `openwrt_vm_cores` | `2` | CPU cores |
+| `openwrt_vm_disk_size` | `512M` | Boot disk size after resize |
+| `proxmox_storage` | `local-lvm` | Proxmox storage pool for the imported disk |
+
+### Environment variables (`.env`)
+
+| Variable | Description |
+|---|---|
+| `PROXMOX_API_TOKEN_SECRET` | API token secret value |
+| `PROXMOX_HOST` | IP address of the target Proxmox node |
+| `MESH_KEY` | WPA3-SAE passphrase for 802.11s mesh |
+
+### Bridge role (`roles/proxmox_bridges/defaults/main.yml`)
+
+| Variable | Default | Description |
+|---|---|---|
+| `bridge_exclude_patterns` | *(see file)* | Regex patterns for interfaces to skip during NIC discovery |
+
+### PCI passthrough role (`roles/proxmox_pci_passthrough/defaults/main.yml`)
+
+| Variable | Default | Description |
+|---|---|---|
+| `pci_passthrough_allow_reboot` | `false` | Allow automatic Proxmox reboot to enable IOMMU |
+| `wifi_driver_blacklist` | `[]` | Override auto-detected WiFi driver blacklist |
+
+### OpenWrt VM role (`roles/openwrt_vm/defaults/main.yml`)
+
+| Variable | Default | Description |
+|---|---|---|
+| `openwrt_tmp_image` | `/tmp/openwrt.img` | Temp upload path on the Proxmox node |
+| `openwrt_clone_wan_mac` | `true` | Clone the upstream router's MAC onto the VM's WAN NIC |
+| `openwrt_bootstrap_gw` | `192.168.1.1` | OpenWrt factory-default LAN IP (used for initial SSH) |
+| `openwrt_bootstrap_ip` | `192.168.1.2` | Temp IP assigned to a Proxmox bridge for bootstrap |
+| `openwrt_bootstrap_cidr` | `24` | Netmask for the bootstrap subnet |
+| `openwrt_bootstrap_bridge` | *(auto)* | Override which bridge is used for bootstrapping |
+
+### OpenWrt configure role (`roles/openwrt_configure/defaults/main.yml`)
+
+| Variable | Default | Description |
+|---|---|---|
+| `openwrt_lan_auto_subnet` | `true` | Auto-select a LAN subnet that avoids the WAN range |
+| `openwrt_lan_subnet_candidates` | *(see file)* | Ordered list of candidate `{ip, netmask}` subnets |
+| `openwrt_lan_ip` | `10.10.10.1` | Fallback LAN gateway (used when auto-subnet is off) |
+| `openwrt_lan_netmask` | `255.255.255.0` | LAN subnet mask |
+| `openwrt_dhcp_start` | `100` | DHCP pool start offset |
+| `openwrt_dhcp_limit` | `150` | DHCP pool size |
+| `openwrt_dhcp_leasetime` | `12h` | DHCP lease duration |
+| `openwrt_mesh_enabled` | `true` | Enable 802.11s mesh on detected WiFi radios |
+| `openwrt_mesh_id` | `vm-builds-mesh` | Mesh network identifier (must match across nodes) |
+| `openwrt_mesh_key` | *(from MESH_KEY env)* | WPA3-SAE passphrase for mesh encryption |
+| `openwrt_mesh_channel` | `auto` | WiFi channel (must match across mesh nodes) |
+| `openwrt_mesh_encryption` | `sae` | Mesh encryption mode |
+
+---
+
+## Adding a New Proxmox Node
+
+1. Add a host entry under `proxmox` in `inventory/hosts.yml`.
+2. Create `inventory/host_vars/<hostname>.yml` with
+   `ansible_host: "{{ lookup('env', 'PROXMOX_HOST') }}"` or a static IP.
+3. Ensure SSH key access works: `ssh root@<ip> hostname`.
+4. Run the playbook.
+
+---
+
+## Project Structure
+
+```
+vm_builds/
+├── setup.sh                           # Bootstrap venv + all deps
+├── run.sh                             # Source .env and run playbook
+├── test.env                           # Test machine env (committed)
+├── ansible.cfg
+├── requirements.yml
+├── .gitignore
+├── .ansible-lint
+├── .yamllint.yml
+├── .venv/                             # Python venv (committed)
+├── inventory/
+│   ├── hosts.yml
+│   ├── group_vars/
+│   │   ├── all.yml
+│   │   └── proxmox.yml
+│   └── host_vars/
+│       └── home.yml
+├── cleanup.sh                         # Restore / full-restore / clean
+├── playbooks/
+│   ├── site.yml
+│   └── cleanup.yml                    # Tag-driven restore playbook
+├── molecule/
+│   └── default/
+│       ├── molecule.yml
+│       ├── converge.yml
+│       ├── verify.yml
+│       └── cleanup.yml
+├── docs/
+│   └── architecture/
+│       ├── overview.md
+│       ├── openwrt-build.md
+│       ├── roles.md
+│       └── roadmap.md
+└── roles/
+    ├── proxmox_backup/
+    │   ├── defaults/main.yml
+    │   └── tasks/main.yml
+    ├── proxmox_bridges/
+    │   ├── defaults/main.yml
+    │   ├── tasks/main.yml
+    │   ├── templates/bridges.conf.j2
+    │   └── handlers/main.yml
+    ├── proxmox_pci_passthrough/
+    │   ├── defaults/main.yml
+    │   ├── tasks/main.yml
+    │   ├── templates/
+    │   │   ├── blacklist-wifi.conf.j2
+    │   │   └── vfio-pci.conf.j2
+    │   └── handlers/main.yml
+    ├── openwrt_vm/
+    │   ├── defaults/main.yml
+    │   └── tasks/main.yml
+    └── openwrt_configure/
+        ├── defaults/main.yml
+        ├── meta/main.yml
+        └── tasks/main.yml
+```
+
+---
+
+## How It Works
+
+### MAC Cloning
+
+The VM's WAN NIC gets the MAC address of the current upstream gateway
+(detected via ARP on the Proxmox host). When you physically swap the
+old router for this VM, the ISP sees the same MAC and existing DHCP
+leases carry over. Set `openwrt_clone_wan_mac: false` to disable.
+
+### WiFi PCIe Passthrough
+
+The `proxmox_pci_passthrough` role detects WiFi PCIe devices on the
+Proxmox host, verifies IOMMU is active (configuring GRUB and rebooting
+if needed), checks that each WiFi card is in an isolated IOMMU group,
+blacklists the host WiFi driver, and binds the device to `vfio-pci`.
+The `openwrt_vm` role then passes the device into the VM via `hostpci`.
+
+If IOMMU is not active and `pci_passthrough_allow_reboot` is false
+(the default), the playbook fails with instructions rather than
+rebooting Proxmox unannounced. Set it to `true` or reboot manually.
+
+If no WiFi hardware is detected, all passthrough tasks are skipped
+and the playbook continues without mesh networking.
+
+### 802.11s Mesh
+
+When WiFi radios are detected inside the OpenWrt VM, the configure role
+replaces the default `wpad-basic` package with `wpad-mesh-openssl`,
+enables each radio, and creates a mesh point interface with the
+configured mesh ID and SAE encryption key. The mesh interface is bridged
+to the LAN network, so wired and wireless mesh clients share the same
+subnet. All mesh nodes must use the same `openwrt_mesh_id`,
+`openwrt_mesh_key`, and `openwrt_mesh_channel`.
+
+### LAN Subnet Auto-Selection
+
+The configure role reads the WAN's assigned IP, extracts the `/24`
+network prefix, and picks the first entry from
+`openwrt_lan_subnet_candidates` whose prefix does not match.
+Default candidates: `10.10.10.0/24`, `192.168.2.0/24`, `172.16.0.0/24`,
+`192.168.10.0/24`. Set `openwrt_lan_auto_subnet: false` to pin a
+specific `openwrt_lan_ip` instead.
+
+### Bootstrap Sequence
+
+The configure role needs SSH access to the OpenWrt VM, but fresh
+OpenWrt only listens on its LAN interface (`192.168.1.1`). The playbook
+temporarily assigns `192.168.1.2/24` to a Proxmox bridge that connects
+to a LAN NIC, then SSH-es through the Proxmox host as a jump box. After
+configuration, the LAN IP typically changes (to avoid WAN collisions),
+so the bootstrap SSH session drops. All UCI changes are committed before
+the network restart.
+
+### Backup & Restore
+
+Every playbook run creates a backup (Play 0) in `/var/backups/ansible/`
+on the Proxmox host containing host config and VM snapshots. Use
+`cleanup.sh` to restore:
+
+```bash
+./cleanup.sh restore            # restore host config only
+./cleanup.sh full-restore       # destroy current VMs, restore backed-up VMs + host config
+./cleanup.sh clean              # destroy all VMs, restore host config (test reset)
+./cleanup.sh clean test.env     # specify which env file to source (default: test.env)
+```
+
+### Re-runs
+
+VM creation is skipped when the VM already exists. Bridge creation is
+idempotent. The bootstrap always connects to `192.168.1.1` (OpenWrt's
+factory default), which will fail if the LAN IP was previously changed.
+To re-provision, destroy the VM first (`qm destroy <vmid>`) and re-run.
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `proxmoxer` import error | Not running inside the venv | `source .venv/bin/activate` |
+| `sshpass` not found | Missing system package | `sudo apt install sshpass` |
+| `PROXMOX_API_TOKEN_SECRET` empty | `.env` not sourced | `set -a; source .env; set +a` or use `./run.sh` |
+| `node ... does not exist` | `proxmox_node` doesn't match PVE hostname | Set `proxmox_node` in host_vars |
+| SSH timeout on bootstrap | Proxmox bridge not reaching OpenWrt LAN | Check `openwrt_bootstrap_bridge` |
+| WAN detection timeout | No upstream DHCP on the WAN bridge | Verify `vmbr0` has a physical NIC with upstream connectivity |
+| Play ends with unreachable host | Expected when LAN IP changes | Check debug output for the new LAN address |
+| IOMMU reboot required | First-time WiFi passthrough | Re-run with `-e pci_passthrough_allow_reboot=true` |
+| WiFi IOMMU group shared | Onboard WiFi shares group with NIC | Check BIOS ACS settings or add `pcie_acs_override` to GRUB |

@@ -1,0 +1,13 @@
+---
+# NICs to exclude from bridge creation (regex patterns)
+bridge_exclude_patterns:
+  - "^lo$"
+  - "^vmbr.*"
+  - "^tap.*"
+  - "^fwbr.*"
+  - "^fwln.*"
+  - "^fwpr.*"
+  - "^docker.*"
+  - "^veth.*"
+  - "^bond.*"
+  - "^dummy.*"

@@ -1,0 +1,4 @@
+# Managed by Ansible — do not edit manually
+{% for driver in _effective_blacklist %}
+blacklist {{ driver }}
+{% endfor %}

@@ -1,0 +1,2 @@
+# Managed by Ansible — do not edit manually
+options vfio-pci ids={{ wifi_vd_ids.results | map(attribute='stdout') | map('trim') | join(',') }}

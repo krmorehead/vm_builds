@@ -1,0 +1,21 @@
+---
+description: Update skills and rules when encountering new issues to prevent recurrence
+alwaysApply: true
+---
+
+# Learn from mistakes
+
+When a task fails, an unexpected error occurs, or a workaround is needed:
+
+1. **Fix the immediate problem first.** Don't stop to write a skill mid-debug.
+2. **After fixing, check if an existing skill or rule should be updated.** Search `.cursor/skills/` and `.cursor/rules/` for related content.
+3. **If the lesson is new, add it.** Append to the relevant skill's Rules or Patterns section. If no skill fits, create one.
+4. **Format for LLMs.** Use NEVER/ALWAYS constraints, not suggestions. Include a one-line "what went wrong" before the rule.
+
+Trigger: any of these happened during the session:
+- A command made a remote host unreachable
+- A playbook failed due to an assumption that was wrong
+- A workaround was needed for a tool/module bug
+- A variable was undefined at runtime
+- A test failed for a non-obvious reason
+- Something that worked locally broke on the real host

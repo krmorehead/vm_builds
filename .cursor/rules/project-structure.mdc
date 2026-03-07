@@ -1,0 +1,30 @@
+---
+description: Project structure and architecture context for vm_builds
+alwaysApply: true
+---
+
+# Project Structure
+
+## Playbook execution order
+Play 0: `proxmox_backup` (back up host config + VMs)
+Play 1: `proxmox_bridges`, `proxmox_pci_passthrough`, `openwrt_vm` (provision)
+Play 2: `openwrt_configure` (configure OpenWrt via raw SSH)
+Play 3: Bootstrap cleanup (remove temp IP)
+
+## Key files
+- `setup.sh` -- bootstrap venv + deps
+- `run.sh` -- source .env + run playbook
+- `cleanup.sh` -- restore/full-restore/clean subcommands
+- `test.env` -- test machine config (committed)
+- `.env` -- production secrets (gitignored)
+
+## Test machine
+- IP: configured via `PROXMOX_HOST` env var (test default: `192.168.86.201`)
+- Node name in Proxmox: `home`
+- Inventory host: `home` (in `inventory/hosts.yml`)
+- Host vars: `inventory/host_vars/home.yml`
+
+## Image management
+- OpenWrt `.img` stored in `images/` directory (gitignored)
+- `openwrt_image_path` defaults to `images/openwrt.img` (relative to project root)
+- Absolute paths are also supported

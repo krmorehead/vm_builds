@@ -1,0 +1,78 @@
+---
+- name: Create backup directory
+  ansible.builtin.file:
+    path: "{{ backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+# ── Host config backup ──────────────────────────────────────────
+
+- name: Back up host configuration
+  community.general.archive:
+    path:
+      - /etc/network
+      - /etc/modprobe.d
+      - /etc/default/grub
+      - /etc/modules
+      - /etc/pve
+    dest: "{{ backup_dir }}/host-config.tar.gz"
+    format: gz
+    mode: "0600"
+    force_archive: true
+
+# ── VM backup via vzdump ────────────────────────────────────────
+
+- name: List existing VMs
+  ansible.builtin.shell:
+    cmd: qm list 2>/dev/null | awk 'NR>1 {print $1}'
+    executable: /bin/bash
+  register: existing_vms
+  changed_when: false
+  when: backup_vms | bool
+
+- name: Set VM list fact
+  ansible.builtin.set_fact:
+    _vm_ids: "{{ existing_vms.stdout_lines | default([]) }}"
+
+- name: Back up each VM with vzdump
+  ansible.builtin.command:
+    cmd: >-
+      vzdump {{ item }}
+      --mode {{ vzdump_mode }}
+      --compress {{ vzdump_compress }}
+      {{ ('--storage ' + backup_storage) if backup_storage | length > 0
+         else ('--dumpdir ' + backup_dir) }}
+  loop: "{{ _vm_ids }}"
+  when:
+    - backup_vms | bool
+    - _vm_ids | length > 0
+
+# ── Find vzdump files and write manifest ────────────────────────
+
+- name: Find vzdump archive files
+  ansible.builtin.find:
+    paths: "{{ backup_dir }}"
+    patterns: "vzdump-qemu-*.vma*"
+    file_type: file
+  register: vzdump_files
+  when: backup_vms | bool
+
+- name: Write backup manifest
+  ansible.builtin.copy:
+    content: |
+      {{ _manifest | to_nice_json }}
+    dest: "{{ backup_dir }}/manifest.json"
+    owner: root
+    group: root
+    mode: "0600"
+  vars:
+    _manifest:
+      timestamp: "{{ ansible_date_time.iso8601 | default(lookup('pipe', 'date -Iseconds')) }}"
+      host: "{{ inventory_hostname }}"
+      host_config: "{{ backup_dir }}/host-config.tar.gz"
+      vms: >-
+        {{ vzdump_files.files | default([])
+           | map(attribute='path') | list }}
+      vm_ids: "{{ _vm_ids | default([]) }}"

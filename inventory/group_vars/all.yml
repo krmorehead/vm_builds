@@ -1,0 +1,10 @@
+---
+openwrt_image_path: images/openwrt.img
+
+openwrt_vm_id: 100
+openwrt_vm_name: openwrt-router
+openwrt_vm_memory: 512
+openwrt_vm_cores: 2
+openwrt_vm_disk_size: 512M
+
+proxmox_storage: local-lvm

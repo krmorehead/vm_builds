@@ -1,0 +1,25 @@
+---
+openwrt_lan_auto_subnet: true
+
+openwrt_lan_subnet_candidates:
+  - ip: "10.10.10.1"
+    netmask: "255.255.255.0"
+  - ip: "192.168.2.1"
+    netmask: "255.255.255.0"
+  - ip: "172.16.0.1"
+    netmask: "255.255.255.0"
+  - ip: "192.168.10.1"
+    netmask: "255.255.255.0"
+
+openwrt_lan_ip: "10.10.10.1"
+openwrt_lan_netmask: "255.255.255.0"
+
+openwrt_dhcp_start: 100
+openwrt_dhcp_limit: 150
+openwrt_dhcp_leasetime: 12h
+
+openwrt_mesh_enabled: true
+openwrt_mesh_id: "vm-builds-mesh"
+openwrt_mesh_key: "{{ lookup('env', 'MESH_KEY') | default('changeme', true) }}"
+openwrt_mesh_channel: auto
+openwrt_mesh_encryption: sae

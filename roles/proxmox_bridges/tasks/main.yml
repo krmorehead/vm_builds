@@ -1,0 +1,123 @@
+---
+- name: List all network interfaces
+  ansible.builtin.command:
+    cmd: ls /sys/class/net/
+  register: raw_interfaces
+  changed_when: false
+
+- name: Filter candidate physical NICs
+  ansible.builtin.set_fact:
+    candidate_nics: >-
+      {{ raw_interfaces.stdout_lines
+         | reject('match', bridge_exclude_patterns | join('|'))
+         | list }}
+
+- name: Check for physical device backing
+  ansible.builtin.stat:
+    path: "/sys/class/net/{{ item }}/device"
+  loop: "{{ candidate_nics }}"
+  register: nic_device_checks
+
+- name: Check for wireless capability
+  ansible.builtin.stat:
+    path: "/sys/class/net/{{ item }}/wireless"
+  loop: "{{ nic_device_checks.results | selectattr('stat.exists') | map(attribute='item') | list }}"
+  register: wireless_checks
+
+- name: Set confirmed physical NIC list (excluding WiFi)
+  ansible.builtin.set_fact:
+    physical_nics: >-
+      {{ wireless_checks.results
+         | rejectattr('stat.exists')
+         | map(attribute='item')
+         | sort | list }}
+
+- name: Discover which bridge each physical NIC belongs to
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      for nic in {{ physical_nics | join(' ') }}; do
+        for br in /sys/class/net/vmbr*/brif/"$nic"; do
+          if [ -e "$br" ]; then
+            brdir=$(dirname "$(dirname "$br")")
+            echo "$(basename "$brdir")=$nic"
+          fi
+        done
+      done
+    executable: /bin/bash
+  register: bridge_nic_map_raw
+  changed_when: false
+  failed_when: false
+
+- name: Parse existing bridge-NIC pairs
+  ansible.builtin.set_fact:
+    _bridge_nic_pairs: >-
+      {{ bridge_nic_map_raw.stdout_lines | default([])
+         | map('split', '=') | list }}
+
+- name: Set lists of already-bridged NICs and their bridges
+  ansible.builtin.set_fact:
+    bridged_nics: "{{ _bridge_nic_pairs | map('last') | list }}"
+    existing_physical_bridges: "{{ _bridge_nic_pairs | map('first') | unique | sort | list }}"
+
+- name: Compute unbridged NICs
+  ansible.builtin.set_fact:
+    unbridged_nics: "{{ physical_nics | difference(bridged_nics) | sort | list }}"
+
+- name: Discover highest existing bridge index
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      ls -1d /sys/class/net/vmbr*/ 2>/dev/null \
+        | xargs -I{} basename {} \
+        | grep -oP '\d+' \
+        | sort -n | tail -1
+    executable: /bin/bash
+  register: max_bridge_raw
+  changed_when: false
+  failed_when: false
+
+- name: Set max bridge index
+  ansible.builtin.set_fact:
+    max_vmbr_index: "{{ max_bridge_raw.stdout | default('-1') | int }}"
+
+- name: Ensure interfaces.d is sourced from main config
+  ansible.builtin.lineinfile:
+    path: /etc/network/interfaces
+    line: "source /etc/network/interfaces.d/*"
+    state: present
+
+- name: Deploy bridge configuration for unbridged NICs
+  ansible.builtin.template:
+    src: bridges.conf.j2
+    dest: /etc/network/interfaces.d/ansible-bridges.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when: unbridged_nics | length > 0
+  notify: Reload networking
+
+- name: Apply pending bridge changes before VM creation
+  ansible.builtin.meta: flush_handlers
+
+- name: Build list of new bridge names
+  ansible.builtin.set_fact:
+    new_bridge_names: >-
+      {{ range(max_vmbr_index | int + 1,
+               max_vmbr_index | int + 1 + (unbridged_nics | length))
+         | map('string')
+         | map('regex_replace', '^', 'vmbr')
+         | list }}
+
+- name: Export complete bridge list (physical-NIC-backed only)
+  ansible.builtin.set_fact:
+    proxmox_all_bridges: >-
+      {{ (existing_physical_bridges + new_bridge_names) | sort }}
+    cacheable: true
+
+- name: Fail if fewer than two bridges are available
+  ansible.builtin.fail:
+    msg: >-
+      Only {{ proxmox_all_bridges | length }} bridge(s) found.
+      An OpenWrt router needs at least 2 physical NICs (WAN + LAN).
+  when: proxmox_all_bridges | length < 2

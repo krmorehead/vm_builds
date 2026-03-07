@@ -1,0 +1,13 @@
+# Managed by Ansible — do not edit manually
+{% for nic in unbridged_nics %}
+{% set bridge_num = max_vmbr_index | int + loop.index %}
+
+auto {{ nic }}
+iface {{ nic }} inet manual
+
+auto vmbr{{ bridge_num }}
+iface vmbr{{ bridge_num }} inet manual
+    bridge-ports {{ nic }}
+    bridge-stp off
+    bridge-fd 0
+{% endfor %}

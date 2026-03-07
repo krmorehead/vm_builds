@@ -1,0 +1,234 @@
+---
+# ── Detect WiFi PCIe devices ──────────────────────────────────
+
+- name: Find network interfaces with wireless capability
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      for iface in /sys/class/net/*/wireless; do
+        [ -e "$iface" ] && basename "$(dirname "$iface")"
+      done
+    executable: /bin/bash
+  register: wifi_ifaces_raw
+  changed_when: false
+  failed_when: false
+
+- name: Set WiFi interface list
+  ansible.builtin.set_fact:
+    wifi_ifaces: "{{ wifi_ifaces_raw.stdout_lines | default([]) }}"
+
+- name: Resolve PCI address for each WiFi interface
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      readlink -f /sys/class/net/{{ item }}/device | grep -oP '[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]' | tail -1
+    executable: /bin/bash
+  loop: "{{ wifi_ifaces }}"
+  register: wifi_pci_raw
+  changed_when: false
+  when: wifi_ifaces | length > 0
+
+- name: Build WiFi PCI device list
+  ansible.builtin.set_fact:
+    wifi_pci_devices: >-
+      {{ wifi_pci_raw.results | default([])
+         | selectattr('stdout', 'defined')
+         | map(attribute='stdout')
+         | map('trim')
+         | select('match', '.+')
+         | list }}
+
+- name: Detect WiFi kernel driver for each device
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      basename "$(readlink -f /sys/class/net/{{ item }}/device/driver)"
+    executable: /bin/bash
+  loop: "{{ wifi_ifaces }}"
+  register: wifi_driver_raw
+  changed_when: false
+  when: wifi_ifaces | length > 0
+
+- name: Build auto-detected driver blacklist
+  ansible.builtin.set_fact:
+    _auto_driver_blacklist: >-
+      {{ wifi_driver_raw.results | default([])
+         | selectattr('stdout', 'defined')
+         | map(attribute='stdout')
+         | map('trim')
+         | select('match', '.+')
+         | unique | list }}
+  when: wifi_driver_blacklist | length == 0
+
+- name: Set effective driver blacklist
+  ansible.builtin.set_fact:
+    _effective_blacklist: >-
+      {{ wifi_driver_blacklist if wifi_driver_blacklist | length > 0
+         else _auto_driver_blacklist | default([]) }}
+
+- name: Skip remaining tasks when no WiFi devices found
+  ansible.builtin.debug:
+    msg: "No WiFi PCIe devices detected on this host. Skipping PCI passthrough."
+  when: wifi_pci_devices | length == 0
+
+# ── IOMMU setup ───────────────────────────────────────────────
+
+- name: Check if IOMMU is active
+  ansible.builtin.shell:
+    cmd: dmesg | grep -i -c 'IOMMU enabled\|DMAR.*IOMMU\|Adding to iommu group'
+    executable: /bin/bash
+  register: iommu_check
+  changed_when: false
+  failed_when: false
+  when: wifi_pci_devices | length > 0
+
+- name: Set IOMMU status fact
+  ansible.builtin.set_fact:
+    iommu_active: "{{ (iommu_check.stdout | default('0') | int) > 0 }}"
+  when: wifi_pci_devices | length > 0
+
+- name: Detect CPU vendor for IOMMU parameter
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      grep -m1 'vendor_id' /proc/cpuinfo | awk '{print $3}'
+    executable: /bin/bash
+  register: cpu_vendor
+  changed_when: false
+  when:
+    - wifi_pci_devices | length > 0
+    - not iommu_active | bool
+
+- name: Set IOMMU kernel parameter
+  ansible.builtin.set_fact:
+    _iommu_param: "{{ 'intel_iommu=on' if 'Intel' in cpu_vendor.stdout | default('') else 'amd_iommu=on' }}"
+  when:
+    - wifi_pci_devices | length > 0
+    - not iommu_active | bool
+
+- name: Add IOMMU to GRUB cmdline
+  ansible.builtin.lineinfile:
+    path: /etc/default/grub
+    regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
+    line: 'GRUB_CMDLINE_LINUX_DEFAULT="quiet {{ _iommu_param }} iommu=pt"'
+    backup: true
+  when:
+    - wifi_pci_devices | length > 0
+    - not iommu_active | bool
+  notify: Update grub
+
+- name: Ensure VFIO modules are loaded at boot
+  ansible.builtin.lineinfile:
+    path: /etc/modules
+    line: "{{ item }}"
+    state: present
+  loop:
+    - vfio
+    - vfio_iommu_type1
+    - vfio_pci
+  when:
+    - wifi_pci_devices | length > 0
+    - not iommu_active | bool
+  notify: Update initramfs
+
+- name: Flush handlers before potential reboot
+  ansible.builtin.meta: flush_handlers
+  when:
+    - wifi_pci_devices | length > 0
+    - not iommu_active | bool
+
+- name: Fail if reboot is needed but not allowed
+  ansible.builtin.fail:
+    msg: >-
+      IOMMU is not active and a reboot is required to enable it.
+      Re-run with -e pci_passthrough_allow_reboot=true or reboot
+      the Proxmox node manually and re-run.
+  when:
+    - wifi_pci_devices | length > 0
+    - not iommu_active | bool
+    - not pci_passthrough_allow_reboot | bool
+
+- name: Reboot Proxmox to activate IOMMU
+  ansible.builtin.reboot:
+    reboot_timeout: 300
+  when:
+    - wifi_pci_devices | length > 0
+    - not iommu_active | bool
+    - pci_passthrough_allow_reboot | bool
+
+# ── IOMMU group isolation check ───────────────────────────────
+
+- name: Read IOMMU group for each WiFi device
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      basename "$(readlink -f /sys/bus/pci/devices/0000:{{ item }}/iommu_group)"
+    executable: /bin/bash
+  loop: "{{ wifi_pci_devices }}"
+  register: wifi_iommu_groups
+  changed_when: false
+  when: wifi_pci_devices | length > 0
+
+- name: Count devices in each IOMMU group
+  ansible.builtin.shell:
+    cmd: ls -1 /sys/kernel/iommu_groups/{{ item.stdout | trim }}/devices/ | wc -l
+  loop: "{{ wifi_iommu_groups.results | default([]) }}"
+  register: iommu_group_sizes
+  changed_when: false
+  when: wifi_pci_devices | length > 0
+
+- name: Fail if any WiFi device shares an IOMMU group with other devices
+  ansible.builtin.fail:
+    msg: >-
+      WiFi device {{ item.item.item }} is in IOMMU group
+      {{ item.item.stdout | trim }} which contains
+      {{ item.stdout | trim }} device(s). PCI passthrough requires
+      the WiFi card to be in its own IOMMU group. Check BIOS settings
+      or try adding pcie_acs_override=downstream,multifunction to
+      GRUB_CMDLINE_LINUX_DEFAULT.
+  loop: "{{ iommu_group_sizes.results | default([]) }}"
+  when:
+    - wifi_pci_devices | length > 0
+    - (item.stdout | default('0') | trim | int) > 1
+
+# ── Bind vfio-pci ─────────────────────────────────────────────
+
+- name: Blacklist WiFi drivers on the host
+  ansible.builtin.template:
+    src: blacklist-wifi.conf.j2
+    dest: /etc/modprobe.d/blacklist-wifi.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when: wifi_pci_devices | length > 0
+  notify: Update initramfs
+
+- name: Get vendor and device IDs for WiFi cards
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      lspci -n -s {{ item }} | awk '{print $3}'
+    executable: /bin/bash
+  loop: "{{ wifi_pci_devices }}"
+  register: wifi_vd_ids
+  changed_when: false
+  when: wifi_pci_devices | length > 0
+
+- name: Configure vfio-pci device binding
+  ansible.builtin.template:
+    src: vfio-pci.conf.j2
+    dest: /etc/modprobe.d/vfio-pci.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when: wifi_pci_devices | length > 0
+  notify: Update initramfs
+
+- name: Flush handlers after vfio configuration
+  ansible.builtin.meta: flush_handlers
+  when: wifi_pci_devices | length > 0
+
+- name: Export WiFi PCI devices as cacheable fact
+  ansible.builtin.set_fact:
+    wifi_pci_devices: "{{ wifi_pci_devices }}"
+    cacheable: true

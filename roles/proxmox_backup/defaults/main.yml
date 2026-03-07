@@ -1,0 +1,6 @@
+---
+backup_dir: /var/lib/ansible-backup
+backup_storage: ""
+backup_vms: true
+vzdump_mode: snapshot
+vzdump_compress: zstd

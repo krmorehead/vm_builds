@@ -1,0 +1,34 @@
+---
+description: Ansible coding conventions for the vm_builds project
+globs: "**/*.yml"
+alwaysApply: false
+---
+
+# Ansible Conventions
+
+## OpenWrt Configuration
+- OpenWrt has no Python. Use `ansible.builtin.raw` for all commands, not shell/command modules.
+- Do NOT use third-party OpenWrt Ansible roles (e.g., gekmihesg.openwrt). They rely on fragile monkeypatching that breaks across Ansible versions.
+- Use UCI commands (`uci set`, `uci commit`) for all OpenWrt configuration.
+
+## Module Usage
+- Use `community.proxmox.proxmox_kvm` (not `community.general.proxmox_kvm`, which is deprecated).
+- Proxmox API calls need `delegate_to: localhost` since `proxmoxer` runs on the control node.
+- Always include the `node` parameter in `proxmox_kvm` calls.
+
+## Variable Naming
+- Role variables should use descriptive names but do NOT need role-name prefixes (we skip `var-naming[no-role-prefix]`).
+- Environment-driven secrets use `lookup('env', 'VAR_NAME')`, never vault files.
+
+## Handler Names
+- Handler names must be capitalized (e.g., "Reload networking", not "reload networking").
+- Always match the exact handler name in `notify:` directives.
+
+## Cross-role variable access
+- NEVER reference another role's `defaults/main.yml` variables directly. They are only in scope while that role is executing.
+- If role B needs a value from role A, either: set it as a `set_fact` in role A, define it in `group_vars`, or pass it via the playbook's `vars`.
+
+## Idempotency
+- Guard creation tasks with existence checks (e.g., `when: not vm_exists | bool`).
+- Use `changed_when: false` for read-only shell commands.
+- Use `failed_when: false` only when the command legitimately can fail (e.g., checking if a VM exists).

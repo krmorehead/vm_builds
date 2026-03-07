@@ -1,0 +1,133 @@
+---
+- name: Restore Proxmox host from backup
+  hosts: proxmox
+  gather_facts: false
+  vars:
+    backup_dir: /var/lib/ansible-backup
+
+  tasks:
+    # ── Shared: verify backup exists ──────────────────────────────
+    - name: Check for backup manifest
+      ansible.builtin.stat:
+        path: "{{ backup_dir }}/manifest.json"
+      register: manifest_stat
+      tags: [restore, full-restore, clean]
+
+    - name: Fail if no backup exists
+      ansible.builtin.fail:
+        msg: >-
+          No backup found at {{ backup_dir }}/manifest.json.
+          Run the playbook first to create a backup.
+      when: not manifest_stat.stat.exists
+      tags: [restore, full-restore, clean]
+
+    - name: Read backup manifest
+      ansible.builtin.slurp:
+        src: "{{ backup_dir }}/manifest.json"
+      register: manifest_raw
+      tags: [restore, full-restore, clean]
+
+    - name: Parse manifest
+      ansible.builtin.set_fact:
+        manifest: "{{ manifest_raw.content | b64decode | from_json }}"
+      tags: [restore, full-restore, clean]
+
+    # ── Destroy VMs (full-restore and clean) ──────────────────────
+    - name: List all current VMs
+      ansible.builtin.shell:
+        cmd: qm list 2>/dev/null | awk 'NR>1 {print $1}'
+        executable: /bin/bash
+      register: current_vms
+      changed_when: false
+      tags: [full-restore, clean, never]
+
+    - name: Stop all VMs
+      ansible.builtin.command:
+        cmd: qm stop {{ item }}
+      loop: "{{ current_vms.stdout_lines | default([]) }}"
+      failed_when: false
+      tags: [full-restore, clean, never]
+
+    - name: Wait for VMs to stop
+      ansible.builtin.pause:
+        seconds: 5
+      when: current_vms.stdout_lines | default([]) | length > 0
+      tags: [full-restore, clean, never]
+
+    - name: Destroy all VMs
+      ansible.builtin.command:
+        cmd: qm destroy {{ item }} --purge
+      loop: "{{ current_vms.stdout_lines | default([]) }}"
+      failed_when: false
+      tags: [full-restore, clean, never]
+
+    # ── Restore VMs from vzdump (full-restore only) ───────────────
+    - name: Restore backed-up VMs
+      ansible.builtin.command:
+        cmd: qmrestore {{ item }} {{ vm_id }} --force true
+      loop: "{{ manifest.vms | default([]) }}"
+      loop_control:
+        index_var: _idx
+      vars:
+        vm_id: "{{ manifest.vm_ids[_idx] }}"
+      when: manifest.vms | default([]) | length > 0
+      tags: [full-restore, never]
+
+    - name: Start restored VMs
+      ansible.builtin.command:
+        cmd: qm start {{ item }}
+      loop: "{{ manifest.vm_ids | default([]) }}"
+      failed_when: false
+      when: manifest.vm_ids | default([]) | length > 0
+      tags: [full-restore, never]
+
+    # ── Restore host config (all modes) ───────────────────────────
+    - name: Remove ansible-managed config files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/network/interfaces.d/ansible-bridges.conf
+        - /etc/modprobe.d/blacklist-wifi.conf
+        - /etc/modprobe.d/vfio-pci.conf
+      tags: [restore, full-restore, clean]
+
+    - name: Tear down stale bridges
+      ansible.builtin.shell:
+        cmd: |
+          for br in $(ip -o link show type bridge | awk -F': ' '{print $2}'); do
+            grep -q "auto $br" /etc/network/interfaces 2>/dev/null && continue
+            ip link set "$br" down 2>/dev/null || true
+            ip link delete "$br" 2>/dev/null || true
+          done
+        executable: /bin/bash
+      changed_when: true
+      tags: [restore, full-restore, clean]
+
+    - name: Restore host configuration from backup
+      ansible.builtin.unarchive:
+        src: "{{ manifest.host_config }}"
+        dest: /
+        remote_src: true
+      tags: [restore, full-restore, clean]
+
+    - name: Update initramfs
+      ansible.builtin.command:
+        cmd: update-initramfs -u -k all
+      changed_when: true
+      tags: [restore, full-restore, clean]
+
+    - name: Bring up interfaces from restored config
+      ansible.builtin.command:
+        cmd: ifup --all --force
+      changed_when: true
+      failed_when: false
+      tags: [restore, full-restore, clean]
+
+    - name: Report restore result
+      ansible.builtin.debug:
+        msg: >-
+          Restore complete.
+          Host config: restored from {{ manifest.host_config }}.
+          VMs backed up: {{ manifest.vm_ids | default([]) | join(', ') | default('none') }}.
+      tags: [restore, full-restore, clean]

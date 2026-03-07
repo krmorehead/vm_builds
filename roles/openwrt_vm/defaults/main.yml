@@ -1,0 +1,8 @@
+---
+openwrt_tmp_image: /tmp/openwrt.img
+openwrt_clone_wan_mac: true
+
+openwrt_bootstrap_gw: 192.168.1.1
+openwrt_bootstrap_ip: 192.168.1.2
+openwrt_bootstrap_cidr: 24
+openwrt_bootstrap_bridge: ""
