@@ -1,0 +1,14 @@
+---
+dependencies: []
+
+galaxy_info:
+  author: Kyle
+  license: proprietary
+  role_name: proxmox_backup
+  description: Back up Proxmox host config and existing VMs before changes
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - bullseye
+        - bookworm

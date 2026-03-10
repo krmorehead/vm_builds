@@ -146,6 +146,49 @@
           found {{ mesh_iface_count.stdout | trim }}
       when: (radio_count.stdout | trim | int) > 0
 
+    # ── Deployment tracking ─────────────────────────────────────
+
+    - name: Check deploy_stamp fact file exists
+      ansible.builtin.stat:
+        path: /etc/ansible/facts.d/vm_builds.fact
+      register: stamp_file
+
+    - name: Assert deploy_stamp was written
+      ansible.builtin.assert:
+        that: stamp_file.stat.exists
+        fail_msg: "/etc/ansible/facts.d/vm_builds.fact not found"
+
+    - name: Read deploy_stamp fact file
+      ansible.builtin.slurp:
+        src: /etc/ansible/facts.d/vm_builds.fact
+      register: stamp_raw
+
+    - name: Parse deploy_stamp
+      ansible.builtin.set_fact:
+        stamp: "{{ stamp_raw.content | b64decode | from_json }}"
+
+    - name: Assert stamp contains project_version
+      ansible.builtin.assert:
+        that: stamp.project_version is defined
+        fail_msg: "deploy_stamp missing project_version"
+
+    - name: Assert stamp recorded expected plays
+      ansible.builtin.assert:
+        that:
+          - "'backup' in stamp.plays"
+          - "'infrastructure' in stamp.plays"
+          - "'openwrt_vm' in stamp.plays"
+        fail_msg: "deploy_stamp missing expected play entries: {{ stamp.plays.keys() | list }}"
+
+    - name: Report deploy_stamp contents
+      ansible.builtin.debug:
+        msg: >-
+          deploy_stamp: version={{ stamp.project_version }},
+          plays={{ stamp.plays.keys() | list | join(', ') }},
+          last_run={{ stamp.last_run }}
+
+    # ── Cleanup ──────────────────────────────────────────────────
+
     - name: Remove temporary verify IP
       ansible.builtin.shell:
         cmd: >-

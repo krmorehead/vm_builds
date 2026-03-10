@@ -1,24 +1,25 @@
 # Environment (production secrets)
 .env
+
+# Python virtual environment
 .venv/
-# Disk images
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+
+# VM disk images
+images/
 *.img
 *.qcow2
 *.raw
 
-# Ansible retry files
+# Ansible
 *.retry
-
-# Python bytecode
-__pycache__/
-*.pyc
-*.pyo
+collections/
 
 # Logs
 *.log
-
-# Galaxy-installed dependencies
-collections/
 
 # IDE
 .idea/

@@ -16,25 +16,31 @@ Ansible project for provisioning and configuring VMs on Proxmox VE. Currently de
       └──────▶ (local to project root)                mesh
 ```
 
-**Play 0 -- Backup** (targets Proxmox host):
+**Play 0 -- Backup** (targets all Proxmox hosts, tag: `backup`):
 Back up host config (`/etc/network`, `/etc/modprobe.d`, GRUB, `/etc/pve`)
 and snapshot existing VMs with `vzdump` before making any changes.
 
-**Play 1 -- Provision** (targets Proxmox host via API + SSH):
+**Play 1 -- Infrastructure** (targets all Proxmox hosts):
 Discover physical NICs, create one virtual bridge per NIC, detect WiFi
-PCIe devices and configure IOMMU/vfio-pci passthrough, upload the
-OpenWrt disk image, create and boot the VM, then establish a temporary
-bootstrap connection to the VM's LAN side.
+PCIe devices and configure IOMMU/vfio-pci passthrough.
 
-**Play 2 -- Configure** (targets OpenWrt VM via SSH through Proxmox):
+**Play 2 -- Provision** (targets `router_nodes` via API + SSH):
+Upload the OpenWrt disk image, create and boot the VM, then establish
+a temporary bootstrap connection to the VM's LAN side.
+
+**Play 3 -- Configure** (targets OpenWrt VM via SSH through Proxmox):
 Two-phase configuration. Phase 1: set WAN (eth0) to DHCP, assign
 remaining interfaces to a LAN bridge, restart networking, migrate
 bootstrap IP to the LAN bridge. Phase 2: install WiFi driver packages,
 configure 802.11s mesh on detected radios, apply collision-free LAN
 subnet, configure firewall zones and DHCP, final network restart.
 
-**Play 3 -- Cleanup** (targets Proxmox host):
+**Play 4 -- Cleanup** (targets all Proxmox hosts):
 Remove the temporary bootstrap IP from the Proxmox bridge.
+
+Each Proxmox-targeted play records its run in `/etc/ansible/facts.d/`
+via the `deploy_stamp` role. On subsequent runs, `ansible_local.vm_builds`
+shows the version and timestamp of each play that has been applied.
 
 ---
 
@@ -222,6 +228,7 @@ molecule test        # full pipeline: cleanup -> syntax -> converge -> verify ->
 
 | Variable | Default | Description |
 |---|---|---|
+| `project_version` | `1.0.0` | Project version stamped on managed hosts after each run |
 | `openwrt_image_path` | `images/openwrt.img` | Path to the OpenWrt disk image (relative to project root, or absolute) |
 | `openwrt_vm_id` | `100` | Proxmox VM ID |
 | `openwrt_vm_name` | `openwrt-router` | VM display name |
@@ -328,31 +335,39 @@ homeassistant_image_path: images/haos.qcow2
 
 VMID convention: 100-series for network VMs, 200-series for services.
 
-3. **Add the dynamic group** to `inventory/hosts.yml`:
+3. **Add the dynamic group and flavor group** to `inventory/hosts.yml`:
 
 ```yaml
 all:
   children:
     proxmox:
-      hosts:
-        home: {}
+      children:
+        router_nodes:
+          hosts:
+            home: {}
+        service_nodes:         # new flavor group
+          hosts:
+            home: {}           # this host gets both router + service VMs
     openwrt:
       hosts: {}
-    homeassistant:    # empty -- populated by add_host at runtime
+    homeassistant:             # empty -- populated by add_host at runtime
       hosts: {}
 ```
 
 4. **Wire into `playbooks/site.yml`:**
 
 ```yaml
-# After existing VM provisions in the infrastructure play:
+# New provision play targeting the flavor group:
 - name: Provision HomeAssistant VM
-  hosts: proxmox
+  hosts: service_nodes
   gather_facts: false
   roles:
     - homeassistant_vm
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: homeassistant_vm
 
-# New play for configuration (after all VM provisions):
+# New configure play targeting the dynamic group:
 - name: Configure HomeAssistant
   hosts: homeassistant
   gather_facts: false
@@ -360,11 +375,22 @@ all:
     - homeassistant_configure
 ```
 
-5. **Extend tests:**
+5. **Add the flavor group to Molecule** in `molecule/default/molecule.yml`:
+
+```yaml
+platforms:
+  - name: home
+    groups:
+      - proxmox
+      - router_nodes
+      - service_nodes    # add new flavor group
+```
+
+6. **Extend tests:**
    - Add assertions to `molecule/default/verify.yml`.
    - Cleanup already iterates `qm list` to destroy all VMs, so no changes needed unless the VM needs custom teardown.
 
-6. **Place the image** in `images/` and add a doc at `docs/architecture/<type>-build.md`.
+7. **Place the image** in `images/`, add a doc at `docs/architecture/<type>-build.md`, and add a CHANGELOG entry.
 
 ### Key patterns to follow
 
@@ -390,9 +416,9 @@ vm_builds/
 ├── .yamllint.yml
 ├── .venv/                             # Python venv (created by setup.sh, gitignored)
 ├── inventory/
-│   ├── hosts.yml
+│   ├── hosts.yml                          # Host inventory + flavor groups + dynamic groups
 │   ├── group_vars/
-│   │   ├── all.yml                    # VM parameters (IDs, image paths)
+│   │   ├── all.yml                    # Project version, VM parameters
 │   │   └── proxmox.yml               # API auth, SSH settings
 │   └── host_vars/
 │       └── home.yml                   # Per-host overrides
@@ -413,6 +439,7 @@ vm_builds/
 │       └── roadmap.md                 # Future plans
 ├── images/                            # VM disk images (gitignored)
 └── roles/
+    ├── deploy_stamp/                  # Record deployment state as local facts
     ├── proxmox_backup/                # Host config + VM backup
     ├── proxmox_bridges/               # NIC discovery, bridge creation
     ├── proxmox_pci_passthrough/       # WiFi IOMMU/vfio setup

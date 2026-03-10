@@ -33,6 +33,7 @@ There is NO `lint` phase in the Molecule config. Run `ansible-lint` and `yamllin
 
 - **Driver**: `delegated` (real Proxmox hardware, not Docker)
 - **Platform**: test machine IP from `PROXMOX_HOST` env var
+- **Platform groups**: `proxmox` + all flavor groups (e.g., `router_nodes`)
 - **Provisioner**: `playbooks/site.yml`
 - **Cleanup**: `playbooks/cleanup.yml --tags clean`
 - **Config**: `molecule/default/molecule.yml`
@@ -43,6 +44,23 @@ There is NO `lint` phase in the Molecule config. Run `ansible-lint` and `yamllin
 2. Verify SSH: `ssh root@$PROXMOX_HOST hostname`
 3. Verify OpenWrt image exists: `ls images/openwrt.img`
 4. If previous run left host in bad state, power-cycle the machine
+
+## Molecule platform groups
+
+The molecule platform config MUST include all flavor groups that any play in
+`site.yml` targets. When a new flavor group is added to `inventory/hosts.yml`,
+it MUST also be added to `molecule/default/molecule.yml`:
+
+```yaml
+platforms:
+  - name: home
+    groups:
+      - proxmox
+      - router_nodes       # targets OpenWrt provision plays
+      # - service_nodes    # add when service VM types are created
+```
+
+Without this, provision plays targeting flavor groups will skip the test host.
 
 ## Cleanup requirements for repeatable runs
 

@@ -1,0 +1,8 @@
+ansible==13.4.0
+ansible-lint==26.3.0
+molecule==26.3.0
+molecule-plugins==25.8.12
+proxmoxer==2.3.0
+pytest-testinfra==10.2.2
+requests==2.32.5
+yamllint==1.38.0

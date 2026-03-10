@@ -1,4 +1,6 @@
 ---
+project_version: "1.0.0"
+
 openwrt_image_path: images/openwrt.img
 
 openwrt_vm_id: 100

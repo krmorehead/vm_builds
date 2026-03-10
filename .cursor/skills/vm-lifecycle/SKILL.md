@@ -19,6 +19,39 @@ This project manages multiple VM types on Proxmox. Each VM follows a two-role pa
 6. The `<type>_vm` role adds the VM to dynamic inventory via `add_host`. The `<type>_configure` role runs in a separate play targeting that group.
 7. NEVER hardcode bridge names. Consume `proxmox_all_bridges` and select by index.
 8. NEVER reference another role's defaults. Use `set_fact` with `cacheable: true` or `add_host` variables to pass data.
+9. Every provision play targeting Proxmox hosts MUST include `deploy_stamp` as its last role to record the deployment in `/etc/ansible/facts.d/vm_builds.fact`.
+10. Every new role MUST have `meta/main.yml` with `author`, `license: proprietary`, `role_name`, `description`, `min_ansible_version`, and `platforms`.
+11. Provision plays target **flavor groups** (e.g., `router_nodes`, `service_nodes`), NOT `proxmox` directly. Shared infra targets `proxmox`.
+
+## Playbook execution order (site.yml)
+
+```
+Play 0: proxmox_backup             (targets: proxmox, tag: backup)
+         deploy_stamp: backup
+Play 1: proxmox_bridges            (targets: proxmox — shared infra)
+         proxmox_pci_passthrough
+         deploy_stamp: infrastructure
+Play 2: openwrt_vm                 (targets: router_nodes — VM provision)
+         deploy_stamp: openwrt_vm
+Play 3: openwrt_configure          (targets: openwrt — dynamic group)
+Play 4: Bootstrap cleanup          (targets: proxmox — remove temp IPs)
+```
+
+## Device flavors (inventory groups)
+
+Hosts belong to child groups under `proxmox` that control which VMs they receive:
+
+```yaml
+proxmox:
+  children:
+    router_nodes:     # hosts that get OpenWrt
+      hosts:
+        home: {}
+    service_nodes:    # hosts that get service VMs (future)
+      hosts: {}
+```
+
+A host can belong to multiple flavor groups. Shared infra targets `proxmox` (runs on all). VM-specific plays target the flavor group.
 
 ## Step-by-step: adding a new VM type
 
@@ -29,7 +62,26 @@ Using `homeassistant` as the example:
 ```
 roles/homeassistant_vm/
 ├── defaults/main.yml
+├── meta/main.yml
 └── tasks/main.yml
+```
+
+`meta/main.yml`:
+```yaml
+---
+dependencies: []
+
+galaxy_info:
+  author: Kyle
+  license: proprietary
+  role_name: homeassistant_vm
+  description: Provision a Home Assistant VM on Proxmox
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - bullseye
+        - bookworm
 ```
 
 `defaults/main.yml`:
@@ -70,6 +122,7 @@ homeassistant_bootstrap_bridge: ""
 ```
 roles/homeassistant_configure/
 ├── defaults/main.yml
+├── meta/main.yml
 └── tasks/main.yml
 ```
 
@@ -85,32 +138,40 @@ homeassistant_vm_disk_size: 32G
 homeassistant_image_path: images/haos.qcow2
 ```
 
-### 4. Add dynamic group to inventory
+### 4. Add dynamic group and flavor group to inventory
 
 `inventory/hosts.yml`:
 ```yaml
 all:
   children:
     proxmox:
-      hosts:
-        home: {}
+      children:
+        router_nodes:
+          hosts:
+            home: {}
+        service_nodes:        # new flavor group
+          hosts:
+            home: {}
     openwrt:
       hosts: {}
-    homeassistant:    # <-- new
+    homeassistant:            # dynamic group, populated by add_host
       hosts: {}
 ```
 
 ### 5. Extend site.yml
 
 ```yaml
-# After existing openwrt_vm in Play 1:
+# New provision play (targets flavor group, includes deploy_stamp):
 - name: Provision HomeAssistant VM
-  hosts: proxmox
+  hosts: service_nodes
   gather_facts: false
   roles:
     - homeassistant_vm
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: homeassistant_vm
 
-# New play after openwrt_configure:
+# New configure play (targets dynamic group):
 - name: Configure HomeAssistant
   hosts: homeassistant
   gather_facts: false
@@ -118,15 +179,25 @@ all:
     - homeassistant_configure
 ```
 
-### 6. Extend molecule verify and cleanup
+### 6. Update Molecule
 
-`molecule/default/verify.yml` — add assertions for the new VM (check running, SSH, services).
+Add the flavor group to `molecule/default/molecule.yml`:
+```yaml
+platforms:
+  - name: home
+    groups:
+      - proxmox
+      - router_nodes
+      - service_nodes    # add new flavor group
+```
 
-`molecule/default/cleanup.yml` — already iterates `qm list` to destroy all VMs; no changes needed unless VM-specific cleanup is required.
+Add assertions to `molecule/default/verify.yml`.
 
-### 7. Add architecture doc
+### 7. Documentation and versioning
 
-Create `docs/architecture/homeassistant-build.md` following the pattern of `openwrt-build.md`.
+1. Create `docs/architecture/homeassistant-build.md`
+2. Add entry to `CHANGELOG.md` under `[Unreleased]`
+3. Bump `project_version` in `group_vars/all.yml` when releasing
 
 ## Bridge allocation
 
@@ -146,6 +217,26 @@ If the configure role needs to download packages (like OpenWrt does):
 1. The VM must have a NIC on a bridge with upstream connectivity.
 2. Use the two-phase restart pattern if you also need to change the VM's IP.
 3. For VMs behind the OpenWrt router, WAN access comes through the LAN bridge — no special handling needed.
+
+## Deployment tracking
+
+The `deploy_stamp` role writes `/etc/ansible/facts.d/vm_builds.fact` on Proxmox hosts after each play. On subsequent runs with `gather_facts: true`, the data is available as `ansible_local.vm_builds`:
+
+```json
+{
+  "project_version": "1.0.0",
+  "last_run": "2026-03-09T20:00:00Z",
+  "plays": {
+    "backup": { "version": "1.0.0", "timestamp": "..." },
+    "infrastructure": { "version": "1.0.0", "timestamp": "..." },
+    "openwrt_vm": { "version": "1.0.0", "timestamp": "..." },
+    "homeassistant_vm": { "version": "1.1.0", "timestamp": "..." }
+  }
+}
+```
+
+Each play appends its entry without overwriting others. Query a host:
+`ansible -m setup -a 'filter=ansible_local' <hostname>`
 
 ## Test strategy
 

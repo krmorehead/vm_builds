@@ -13,6 +13,7 @@ platforms:
   - name: home
     groups:
       - proxmox
+      - router_nodes
 
 provisioner:
   name: ansible

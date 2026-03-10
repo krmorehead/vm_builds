@@ -1,0 +1,14 @@
+---
+dependencies: []
+
+galaxy_info:
+  author: Kyle
+  license: proprietary
+  role_name: deploy_stamp
+  description: Record deployment state as Ansible local facts on managed hosts
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - bullseye
+        - bookworm

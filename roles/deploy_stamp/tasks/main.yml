@@ -1,0 +1,47 @@
+---
+- name: Ensure Ansible local facts directory exists
+  ansible.builtin.file:
+    path: /etc/ansible/facts.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Capture deployment timestamp
+  ansible.builtin.set_fact:
+    _deploy_ts: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+
+- name: Check for existing deployment record
+  ansible.builtin.stat:
+    path: /etc/ansible/facts.d/vm_builds.fact
+  register: _stamp_file
+
+- name: Read existing deployment record
+  ansible.builtin.slurp:
+    src: /etc/ansible/facts.d/vm_builds.fact
+  register: _stamp_raw
+  when: _stamp_file.stat.exists
+
+- name: Write updated deployment record
+  ansible.builtin.copy:
+    content: "{{ _updated | to_nice_json }}\n"
+    dest: /etc/ansible/facts.d/vm_builds.fact
+    owner: root
+    group: root
+    mode: "0644"
+  vars:
+    _existing: >-
+      {{ (_stamp_raw.content | b64decode | from_json)
+         if (_stamp_file.stat.exists | default(false))
+         else {} }}
+    _updated: >-
+      {{ _existing | combine({
+           'project_version': project_version,
+           'last_run': _deploy_ts,
+           'plays': (_existing.plays | default({})) | combine({
+             deploy_stamp_play: {
+               'version': project_version,
+               'timestamp': _deploy_ts
+             }
+           })
+         }) }}

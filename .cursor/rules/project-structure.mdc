@@ -20,14 +20,33 @@ Shared infrastructure roles run once per host before any VM roles:
 
 ## Playbook execution order (site.yml)
 ```
-Play 0: proxmox_backup             (backup host config + VMs)
-Play 1: proxmox_bridges            (shared infra)
-         proxmox_pci_passthrough   (shared infra)
-         openwrt_vm                (VM-specific provision)
-Play 2: openwrt_configure          (VM-specific configure, targets dynamic group)
-Play 3: Bootstrap cleanup          (remove temp IPs)
+Play 0: proxmox_backup             (targets: proxmox, tag: backup)
+         deploy_stamp: backup
+Play 1: proxmox_bridges            (targets: proxmox — shared infra)
+         proxmox_pci_passthrough
+         deploy_stamp: infrastructure
+Play 2: openwrt_vm                 (targets: router_nodes — VM provision)
+         deploy_stamp: openwrt_vm
+Play 3: openwrt_configure          (targets: openwrt — dynamic group)
+Play 4: Bootstrap cleanup          (targets: proxmox — remove temp IPs)
 ```
-When adding a new VM, insert its `<type>_vm` role after shared infra in Play 1, add a new play for `<type>_configure` targeting its dynamic group, and extend cleanup.
+When adding a new VM type, add a new provision play targeting the appropriate
+flavor group, add a configure play targeting the dynamic group, and include
+`deploy_stamp` in the provision play.
+
+## Device flavors (inventory groups)
+Hosts belong to child groups under `proxmox` that determine which VMs they receive.
+Shared infrastructure (backup, bridges, PCI) targets `proxmox` and runs on every host.
+VM-specific provision plays target flavor groups (e.g., `router_nodes`).
+- `router_nodes` — hosts that get an OpenWrt router VM
+- Future: `service_nodes`, `monitor_nodes`, etc.
+A host can belong to multiple flavor groups.
+
+## Deployment tracking
+The `deploy_stamp` role writes `/etc/ansible/facts.d/vm_builds.fact` on each
+Proxmox host after each play. On subsequent runs, `ansible_local.vm_builds`
+contains the project version, last run timestamp, and per-play history.
+Bump `project_version` in `group_vars/all.yml` when cutting a release.
 
 ## VMID allocation
 - 100-series: network VMs (openwrt_vm_id: 100)
@@ -56,12 +75,17 @@ Define all VMIDs in `group_vars/all.yml`.
 1. Create `roles/<type>_vm/defaults/main.yml` and `roles/<type>_vm/tasks/main.yml`
 2. Create `roles/<type>_configure/defaults/main.yml` and `roles/<type>_configure/tasks/main.yml`
 3. Add VMID to `group_vars/all.yml` (e.g., `homeassistant_vm_id: 200`)
-4. Add `<type>_vm` role to Play 1 in `playbooks/site.yml`
-5. Add new play for `<type>_configure` targeting the dynamic group
-6. Add `<type>` group to `inventory/hosts.yml` (empty hosts, populated by `add_host`)
-7. Extend `molecule/default/verify.yml` with assertions for the new VM
-8. Extend `molecule/default/cleanup.yml` (cleanup already iterates `qm list`, so VM destruction is automatic)
-9. Update `docs/architecture/` with a `<type>-build.md`
+4. Add a new provision play in `playbooks/site.yml` targeting the appropriate flavor group
+5. Include `deploy_stamp` as the last role in the provision play
+6. Add a new configure play targeting the dynamic group
+7. Add `<type>` group to `inventory/hosts.yml` (empty hosts, populated by `add_host`)
+8. Add the flavor group (e.g., `service_nodes`) to `inventory/hosts.yml` if it doesn't exist
+9. Add the flavor group to `molecule/default/molecule.yml` platform groups
+10. Extend `molecule/default/verify.yml` with assertions for the new VM
+11. Extend `molecule/default/cleanup.yml` if custom teardown is needed (VM destruction is automatic)
+12. Update `docs/architecture/` with a `<type>-build.md`
+13. Add a CHANGELOG entry under `[Unreleased]`
+14. Bump `project_version` in `group_vars/all.yml` when releasing
 
 ## Image management
 - VM images stored in `images/` directory (gitignored)

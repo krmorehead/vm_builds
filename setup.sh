@@ -13,9 +13,7 @@ source .venv/bin/activate
 
 echo "Installing Python dependencies..."
 pip install --upgrade pip --quiet
-pip install ansible proxmoxer requests \
-    molecule molecule-plugins testinfra \
-    ansible-lint yamllint --quiet
+pip install -r requirements.txt --quiet
 
 echo "Installing Ansible Galaxy dependencies..."
 ansible-galaxy install -r requirements.yml --force

@@ -1,2 +1,13 @@
 ---
 dependencies: []
+
+galaxy_info:
+  author: Kyle
+  license: proprietary
+  role_name: openwrt_configure
+  description: Configure OpenWrt VM networking, WiFi mesh, DHCP, and firewall via UCI
+  min_ansible_version: "2.15"
+  platforms:
+    - name: OpenWrt
+      versions:
+        - all

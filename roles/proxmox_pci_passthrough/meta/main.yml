@@ -1,0 +1,14 @@
+---
+dependencies: []
+
+galaxy_info:
+  author: Kyle
+  license: proprietary
+  role_name: proxmox_pci_passthrough
+  description: Configure WiFi PCIe passthrough with IOMMU and vfio-pci on Proxmox
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - bullseye
+        - bookworm

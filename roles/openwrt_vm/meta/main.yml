@@ -1,0 +1,14 @@
+---
+dependencies: []
+
+galaxy_info:
+  author: Kyle
+  license: proprietary
+  role_name: openwrt_vm
+  description: Provision an OpenWrt VM on Proxmox with disk import and bootstrap SSH
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - bullseye
+        - bookworm

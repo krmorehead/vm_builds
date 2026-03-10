@@ -2,26 +2,45 @@
 - name: Back up current Proxmox state
   hosts: proxmox
   gather_facts: true
+  tags: [backup]
   roles:
     - proxmox_backup
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: backup
 
-- name: Provision OpenWrt VM on Proxmox
+- name: Configure shared Proxmox infrastructure
   hosts: proxmox
   gather_facts: true
+  tags: [infra]
   roles:
     - proxmox_bridges
     - proxmox_pci_passthrough
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: infrastructure
+
+- name: Provision OpenWrt VM
+  hosts: router_nodes
+  gather_facts: false
+  tags: [openwrt]
+  roles:
     - openwrt_vm
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: openwrt_vm
 
 - name: Configure OpenWrt
   hosts: openwrt
   gather_facts: false
+  tags: [openwrt]
   roles:
     - openwrt_configure
 
 - name: Clean up bootstrap networking
   hosts: proxmox
   gather_facts: false
+  tags: [cleanup]
   vars:
     openwrt_bootstrap_ip: 192.168.1.2
     openwrt_bootstrap_cidr: 24

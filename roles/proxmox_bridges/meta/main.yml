@@ -1,0 +1,14 @@
+---
+dependencies: []
+
+galaxy_info:
+  author: Kyle
+  license: proprietary
+  role_name: proxmox_bridges
+  description: Discover physical NICs and create per-port virtual bridges on Proxmox
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - bullseye
+        - bookworm
