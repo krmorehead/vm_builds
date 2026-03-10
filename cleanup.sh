@@ -38,15 +38,15 @@ set -a; source "$ENV_FILE"; set +a
 case "$COMMAND" in
     restore)
         echo "Restoring host config on ${PROXMOX_HOST}..."
-        ansible-playbook playbooks/cleanup.yml --tags restore
+        python3 build.py --playbook cleanup --tags restore --env "$ENV_FILE"
         ;;
     full-restore)
         echo "Full restore (VMs + config) on ${PROXMOX_HOST}..."
-        ansible-playbook playbooks/cleanup.yml --tags full-restore
+        python3 build.py --playbook cleanup --tags full-restore --env "$ENV_FILE"
         ;;
     clean)
         echo "Clean reset (destroy VMs + restore config) on ${PROXMOX_HOST}..."
-        ansible-playbook playbooks/cleanup.yml --tags clean
+        python3 build.py --playbook cleanup --tags clean --env "$ENV_FILE"
         ;;
     *)
         usage

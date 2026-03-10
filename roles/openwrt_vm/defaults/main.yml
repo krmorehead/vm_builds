@@ -9,3 +9,13 @@ openwrt_bootstrap_bridge: ""
 # Override to force a specific WAN bridge (e.g., "vmbr1").
 # Empty string = auto-detect from proxmox_wan_bridge fact.
 openwrt_wan_bridge: ""
+
+# Clone a MAC address onto the WAN NIC (net0) so the ISP sees the
+# same MAC as the old router.  Avoids DHCP lease / DNS cert issues
+# when swapping routers.  Empty string = use Proxmox auto-generated MAC.
+# Set via WAN_MAC env variable in .env.
+openwrt_wan_mac: "{{ lookup('env', 'WAN_MAC') | default('', true) }}"
+
+# Proxmox auto-start: boot priority (lower = earlier).
+# OpenWrt is the network gateway so it must start first.
+openwrt_vm_startup_order: 1

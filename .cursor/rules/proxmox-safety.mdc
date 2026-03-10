@@ -22,6 +22,16 @@ alwaysApply: true
 - `openwrt_vm` orders bridges so the WAN bridge is always `net0`/`eth0`. All other bridges become LAN.
 - Override with `openwrt_wan_bridge` in `host_vars` if auto-detection picks the wrong bridge.
 
+## WAN MAC address cloning
+- When replacing an existing router, set `WAN_MAC` in `.env` to clone the old router's MAC onto net0. ISPs tie DHCP leases to the MAC — without cloning, the WAN gets no IP.
+- The MAC is set at the Proxmox VM NIC level (`qm set --net0 virtio,...,macaddr=XX:XX:XX:XX:XX:XX`), not inside OpenWrt.
+- `WAN_MAC` is optional. Omit it entirely for auto-generated MACs (the common case).
+
+## VM auto-start on boot
+- ALWAYS set `--onboot 1 --startup order=N` on VMs that should survive host reboots.
+- Previous bug: OpenWrt VM was created without `onboot`, so it didn't restart after Proxmox reboot — entire network went down.
+- The `qm set` task runs unconditionally (not guarded by `vm_exists`) to self-heal.
+
 ## Proxmox LAN management IP
 - After OpenWrt configures the LAN subnet, `openwrt_configure` adds a static IP on the LAN bridge for Proxmox (default: `.2` in the LAN subnet).
 - This ensures the Proxmox GUI is reachable from leaf nodes regardless of which physical port connects upstream.
@@ -64,6 +74,16 @@ alwaysApply: true
 - Current ansible-managed host files: `ansible-bridges.conf`, `ansible-proxmox-lan.conf`, `blacklist-wifi.conf`, `vfio-pci.conf`.
 - Local state files (`.state/addresses.json`) must also be cleaned via `delegate_to: localhost`.
 - Previous bug: `ansible-proxmox-lan.conf` was deployed but not cleaned up, leaving stale IPs across test runs.
+
+## Shell pipeline safety
+- ALWAYS use `set -o pipefail` in any `ansible.builtin.shell` task that contains a pipeline (`|`). Without it, failures in earlier commands are silently swallowed.
+- ALWAYS set `executable: /bin/bash` on these tasks. The default shell may be `/bin/sh`, which doesn't support `pipefail`.
+- Previous bug: `ip route show default | awk | head` in `openwrt_vm` was missing `set -o pipefail`. If `ip route` failed, the variable silently got an empty string.
+
+## Entry point conventions
+- ALL shell scripts (`run.sh`, `cleanup.sh`) MUST delegate to `build.py`. NEVER call `ansible-playbook` directly.
+- `build.py` handles host probing, env validation with quote stripping, and state file fallback. Bypassing it loses all of these.
+- Previous bug: `run.sh` called `ansible-playbook` directly. After cable swaps, the stale `PROXMOX_HOST` was unreachable but the script didn't try fallback IPs.
 
 ## Ansible module conventions
 - NEVER use `local_action`. It is deprecated. ALWAYS use `delegate_to: localhost` instead.

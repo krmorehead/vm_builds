@@ -128,13 +128,15 @@ Edit `.env`:
 PROXMOX_API_TOKEN_SECRET=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 PROXMOX_HOST=192.168.1.100
 MESH_KEY=your-secure-mesh-passphrase
+# WAN_MAC=AA:BB:CC:DD:EE:FF
 ```
 
-| Variable | Description |
-|---|---|
-| `PROXMOX_API_TOKEN_SECRET` | API token secret from step 5 |
-| `PROXMOX_HOST` | IP address of your Proxmox node |
-| `MESH_KEY` | WPA3-SAE passphrase for the 802.11s mesh network |
+| Variable | Required | Description |
+|---|---|---|
+| `PROXMOX_API_TOKEN_SECRET` | Yes | API token secret from step 5 |
+| `PROXMOX_HOST` | Yes | IP address of your Proxmox node |
+| `MESH_KEY` | Yes | WPA3-SAE passphrase for the 802.11s mesh network |
+| `WAN_MAC` | No | Clone this MAC onto the WAN NIC to match your old router (avoids ISP DHCP issues) |
 
 If your Proxmox **node name** (shown in the PVE UI sidebar) differs
 from `home`, rename `inventory/host_vars/home.yml` to match and update
@@ -239,11 +241,12 @@ molecule test        # full pipeline: cleanup -> syntax -> converge -> verify ->
 
 ### Environment variables (`.env`)
 
-| Variable | Description |
-|---|---|
-| `PROXMOX_API_TOKEN_SECRET` | API token secret value |
-| `PROXMOX_HOST` | IP address of the target Proxmox node |
-| `MESH_KEY` | WPA3-SAE passphrase for 802.11s mesh |
+| Variable | Required | Description |
+|---|---|---|
+| `PROXMOX_API_TOKEN_SECRET` | Yes | API token secret value |
+| `PROXMOX_HOST` | Yes | IP address of the target Proxmox node |
+| `MESH_KEY` | Yes | WPA3-SAE passphrase for 802.11s mesh |
+| `WAN_MAC` | No | Clone old router's MAC onto OpenWrt WAN NIC for ISP compatibility |
 
 ### Bridge role (`roles/proxmox_bridges/defaults/main.yml`)
 
@@ -267,6 +270,8 @@ molecule test        # full pipeline: cleanup -> syntax -> converge -> verify ->
 | `openwrt_bootstrap_ip` | `192.168.1.2` | Temp IP assigned to a Proxmox bridge for bootstrap |
 | `openwrt_bootstrap_cidr` | `24` | Netmask for the bootstrap subnet |
 | `openwrt_bootstrap_bridge` | *(auto)* | Override which bridge is used for bootstrapping |
+| `openwrt_wan_mac` | *(from WAN_MAC env)* | Clone this MAC onto the WAN NIC (net0) for ISP compatibility |
+| `openwrt_vm_startup_order` | `1` | Proxmox boot order priority (lower = earlier) |
 
 ### OpenWrt configure role (`roles/openwrt_configure/defaults/main.yml`)
 
@@ -545,7 +550,9 @@ To re-provision, destroy the VM first (`qm destroy <vmid>`) and re-run.
 | `PROXMOX_API_TOKEN_SECRET` empty | `.env` not sourced | `set -a; source .env; set +a` or use `./run.sh` |
 | `node ... does not exist` | `proxmox_node` doesn't match PVE hostname | Set `proxmox_node` in host_vars |
 | SSH timeout on bootstrap | Proxmox bridge not reaching OpenWrt LAN | Check `openwrt_bootstrap_bridge` |
-| WAN route timeout | No upstream DHCP on the WAN bridge | Verify `vmbr0` has a physical NIC with upstream connectivity; the uplink cable must be on the port behind `vmbr0` |
+| WAN route timeout | No upstream DHCP on the WAN bridge | Verify the WAN bridge has a physical NIC with upstream connectivity |
+| No internet after router swap | ISP DHCP tied to old MAC | Set `WAN_MAC=<old-router-mac>` in `.env` and re-run |
+| VM gone after Proxmox reboot | VM not set to auto-start | Re-run the playbook (auto-start is set unconditionally) |
 | Play ends with unreachable host | Expected when LAN IP changes | Check debug output for the new LAN address |
 | IOMMU reboot required | First-time WiFi passthrough | Re-run with `-e pci_passthrough_allow_reboot=true` |
 | WiFi IOMMU group shared | Onboard WiFi shares group with NIC | Check BIOS ACS settings or add `pcie_acs_override` to GRUB |

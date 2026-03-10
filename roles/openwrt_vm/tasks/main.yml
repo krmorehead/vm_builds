@@ -99,12 +99,24 @@
   ansible.builtin.command:
     cmd: >-
       qm set {{ openwrt_vm_id }}
-      --net{{ idx }} virtio,bridge={{ bridge }}
+      --net{{ idx }}
+      virtio,bridge={{ bridge }}{{ ',macaddr=' + openwrt_wan_mac
+      if (idx == 0 and openwrt_wan_mac | default('') | length > 0)
+      else '' }}
   loop: "{{ _ordered_bridges }}"
   loop_control:
     index_var: idx
     loop_var: bridge
   when: not vm_exists | bool
+
+# ── Auto-start on Proxmox boot ──────────────────────────────────
+
+- name: Configure VM to start on boot
+  ansible.builtin.command:
+    cmd: >-
+      qm set {{ openwrt_vm_id }}
+      --onboot 1
+      --startup order={{ openwrt_vm_startup_order }}
 
 # ── WiFi PCIe passthrough ──────────────────────────────────────
 
@@ -171,7 +183,9 @@
 
 - name: Detect upstream gateway IP for LAN subnet selection
   ansible.builtin.shell:
-    cmd: ip route show default | awk '{print $3}' | head -1
+    cmd: |
+      set -o pipefail
+      ip route show default | awk '{print $3}' | head -1
     executable: /bin/bash
   register: _gw_for_prefix
   changed_when: false

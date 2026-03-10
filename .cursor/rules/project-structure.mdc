@@ -54,7 +54,8 @@ Bump `project_version` in `group_vars/all.yml` when cutting a release.
 Define all VMIDs in `group_vars/all.yml`.
 
 ## Variable scoping
-- **Secrets**: `.env` file → `lookup('env', 'VAR_NAME')` in `group_vars/proxmox.yml`
+- **Required secrets**: `.env` file → `lookup('env', 'VAR_NAME')` in `group_vars/proxmox.yml`
+- **Optional env vars**: `.env` file → `lookup('env', 'VAR_NAME') | default('', true)` in role `defaults/main.yml` (e.g., `WAN_MAC`)
 - **Shared VM params**: `group_vars/all.yml` (VMID, image path, storage)
 - **Proxmox connection**: `group_vars/proxmox.yml` (API auth, SSH settings)
 - **Per-host overrides**: `host_vars/<hostname>.yml` (IP, reboot policy)
@@ -64,10 +65,10 @@ Define all VMIDs in `group_vars/all.yml`.
 ## Key files
 | File | Purpose |
 |------|---------|
-| `build.py` | Python entry point: env validation, host probing, playbook runner |
+| `build.py` | Single entry point: env validation, host probing, playbook runner |
 | `setup.sh` | Bootstrap .venv + pip + ansible-galaxy |
-| `run.sh` | Source .env, run `ansible-playbook playbooks/site.yml` |
-| `cleanup.sh` | Restore / full-restore / clean subcommands |
+| `run.sh` | Convenience wrapper — delegates to `build.py` |
+| `cleanup.sh` | Restore / full-restore / clean — delegates to `build.py` |
 | `test.env` | Test machine config (committed, IP: 192.168.86.201) |
 | `.env` | Production secrets (gitignored) |
 | `.state/addresses.json` | Cached host IPs for cross-run discovery (gitignored) |
@@ -97,6 +98,14 @@ Define all VMIDs in `group_vars/all.yml`.
 ## Testing requirements
 - ALWAYS run `molecule test` after changing roles, playbooks, or molecule config
 - ALWAYS update `molecule/default/verify.yml` with assertions for new/changed behavior
+- Verify completeness: every configured feature needs an assertion ("VM is running" is NOT sufficient — also check DHCP, NIC topology, auto-start, services, backup manifest, state files)
 - NEVER consider a task complete until `molecule test` passes with exit code 0
+- ALWAYS run `pytest tests/ -v` after modifying `build.py` — every public function and error path needs coverage
 - Run `ansible-lint && yamllint .` before deploying to hardware
 - See `.cursor/skills/ansible-testing/SKILL.md` for full details
+
+## Entry point convention
+- `build.py` is the SINGLE entry point for running Ansible. ALL shell scripts MUST delegate to it.
+- NEVER call `ansible-playbook` directly from `run.sh` or `cleanup.sh`.
+- `build.py` handles: env file parsing (with quote stripping), required var validation, host probing with state file fallback, and playbook resolution. Bypassing it loses all of these.
+- See `.cursor/skills/build-conventions/SKILL.md` for patterns and test requirements.

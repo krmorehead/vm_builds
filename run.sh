@@ -7,4 +7,4 @@ cd "$SCRIPT_DIR"
 source .venv/bin/activate
 set -a; source .env; set +a
 
-ansible-playbook playbooks/site.yml "$@"
+python3 build.py "$@"

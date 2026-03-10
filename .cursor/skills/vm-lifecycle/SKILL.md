@@ -24,6 +24,11 @@ This project manages multiple VM types on Proxmox. Each VM follows a two-role pa
 11. Provision plays target **flavor groups** (e.g., `router_nodes`, `service_nodes`), NOT `proxmox` directly. Shared infra targets `proxmox`.
 12. NEVER use `local_action`. ALWAYS use `delegate_to: localhost` instead.
 13. When a role deploys files to the host, ALWAYS add them to both cleanup playbooks (`molecule/default/cleanup.yml` and `playbooks/cleanup.yml`).
+14. Every VM MUST configure `--onboot 1 --startup order=N` via `qm set`. This task runs unconditionally (not guarded by `vm_exists`) so it self-heals if the setting was manually changed. Define `<type>_vm_startup_order` in role defaults.
+15. Optional env variables (e.g., `WAN_MAC`) go in role `defaults/main.yml` via `lookup('env', ...) | default('', true)`. NEVER add optional vars to `REQUIRED_ENV` in `build.py`.
+16. ALL shell scripts (`run.sh`, `cleanup.sh`) MUST delegate to `build.py`. NEVER call `ansible-playbook` directly from a shell script. `build.py` provides host probing, env validation, and state file fallback that raw `ansible-playbook` calls don't have. Previous bug: `run.sh` called `ansible-playbook` directly, bypassing host auto-detection — after cable swaps it silently failed.
+17. ALWAYS use `set -o pipefail` and `executable: /bin/bash` on any `ansible.builtin.shell` task containing a pipeline (`|`). Without it, earlier pipeline failures are silently swallowed. Previous bug: gateway detection returned empty string instead of failing.
+18. Every configured feature MUST have a corresponding assertion in `molecule/default/verify.yml`. "VM is running" is NOT sufficient — verify services (DHCP config, firewall), network topology (WAN/LAN bridge assignment), auto-start settings, backup manifest, and state files. Previous bug: DHCP was configured but never verified.
 
 ## Playbook execution order (site.yml)
 
@@ -109,6 +114,14 @@ homeassistant_bootstrap_bridge: ""
 
 # Upload image, create VM, import disk, attach NICs, start VM
 # All creation tasks guarded with: when: not vm_exists | bool
+
+# Auto-start (runs unconditionally to self-heal):
+- name: Configure VM to start on boot
+  ansible.builtin.command:
+    cmd: >-
+      qm set {{ homeassistant_vm_id }}
+      --onboot 1
+      --startup order={{ homeassistant_vm_startup_order }}
 
 # Bootstrap SSH (if needed) and add to dynamic inventory:
 - name: Add HomeAssistant VM to dynamic inventory

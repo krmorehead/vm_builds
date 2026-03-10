@@ -47,6 +47,26 @@ class TestLoadEnv:
         f.write_text("NOEQUALS\nFOO=bar\n")
         assert build.load_env(f) == {"FOO": "bar"}
 
+    def test_double_quoted_values_stripped(self, tmp_path):
+        f = tmp_path / ".env"
+        f.write_text('FOO="bar"\nBAZ="hello world"\n')
+        assert build.load_env(f) == {"FOO": "bar", "BAZ": "hello world"}
+
+    def test_single_quoted_values_stripped(self, tmp_path):
+        f = tmp_path / ".env"
+        f.write_text("FOO='bar'\n")
+        assert build.load_env(f) == {"FOO": "bar"}
+
+    def test_mismatched_quotes_kept(self, tmp_path):
+        f = tmp_path / ".env"
+        f.write_text("FOO=\"bar'\n")
+        assert build.load_env(f) == {"FOO": "\"bar'"}
+
+    def test_single_char_value_not_stripped(self, tmp_path):
+        f = tmp_path / ".env"
+        f.write_text('FOO=""\n')
+        assert build.load_env(f) == {"FOO": ""}
+
 
 # ── validate_env ──────────────────────────────────────────────────────
 
@@ -191,6 +211,28 @@ class TestBuildCommand:
         assert cmd[skip_idx + 1] == "cleanup"
 
 
+# ── find_ansible_playbook ────────────────────────────────────────────
+
+
+class TestFindAnsiblePlaybook:
+    def test_finds_venv_binary(self, monkeypatch, tmp_path):
+        venv_bin = tmp_path / "bin" / "ansible-playbook"
+        venv_bin.parent.mkdir(parents=True)
+        venv_bin.write_text("#!/bin/sh\n")
+        monkeypatch.setattr(build, "VENV_DIR", tmp_path)
+        assert build.find_ansible_playbook() == str(venv_bin)
+
+    def test_falls_back_to_system(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(build, "VENV_DIR", tmp_path / "empty")
+        monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/ansible-playbook")
+        assert build.find_ansible_playbook() == "/usr/bin/ansible-playbook"
+
+    def test_returns_none_when_missing(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(build, "VENV_DIR", tmp_path / "empty")
+        monkeypatch.setattr("shutil.which", lambda _: None)
+        assert build.find_ansible_playbook() is None
+
+
 # ── probe_host / resolve_proxmox_host ───────────────────────────────
 
 
@@ -222,6 +264,30 @@ class TestResolveProxmoxHost:
         env = {"PROXMOX_HOST": "10.0.0.1"}
         assert build.resolve_proxmox_host(env) == ""
 
+    def test_corrupt_state_file_handled(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(build, "probe_host", lambda *a, **kw: False)
+        monkeypatch.setattr(build, "STATE_DIR", tmp_path)
+        state_file = tmp_path / "addresses.json"
+        state_file.write_text("NOT-JSON{{{")
+        env = {"PROXMOX_HOST": "10.0.0.1"}
+        assert build.resolve_proxmox_host(env) == ""
+
+    def test_skips_primary_in_fallback(self, tmp_path, monkeypatch):
+        probed = []
+
+        def fake_probe(ip, **kw):
+            probed.append(ip)
+            return ip == "10.0.0.1"
+
+        monkeypatch.setattr(build, "probe_host", fake_probe)
+        monkeypatch.setattr(build, "STATE_DIR", tmp_path)
+        state_file = tmp_path / "addresses.json"
+        state_file.write_text('{"ips":["10.0.0.1","10.10.10.2"]}')
+        env = {"PROXMOX_HOST": "10.0.0.1"}
+        result = build.resolve_proxmox_host(env)
+        assert result == "10.0.0.1"
+        assert probed == ["10.0.0.1"]
+
 
 # ── main (integration-style) ────────────────────────────────────────
 
@@ -247,3 +313,51 @@ class TestMain:
             "PROXMOX_API_TOKEN_SECRET=x\nPROXMOX_HOST=1.2.3.4\nMESH_KEY=k\n"
         )
         assert build.main(["--env", ".env", "--playbook", "nope"]) == 1
+
+    def test_unreachable_host_returns_1(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(build, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(build, "STATE_DIR", tmp_path / "state")
+        monkeypatch.setattr(build, "probe_host", lambda *a, **kw: False)
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "PROXMOX_API_TOKEN_SECRET=x\nPROXMOX_HOST=1.2.3.4\nMESH_KEY=k\n"
+        )
+        assert build.main(["--env", ".env"]) == 1
+
+    def test_missing_ansible_binary_returns_1(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(build, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(build, "probe_host", lambda *a, **kw: True)
+        monkeypatch.setattr(build, "find_ansible_playbook", lambda: None)
+        playbooks_dir = tmp_path / "playbooks"
+        playbooks_dir.mkdir()
+        (playbooks_dir / "site.yml").write_text("---\n")
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "PROXMOX_API_TOKEN_SECRET=x\nPROXMOX_HOST=1.2.3.4\nMESH_KEY=k\n"
+        )
+        assert build.main(["--env", ".env"]) == 1
+
+    def test_happy_path_runs_subprocess(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(build, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(build, "probe_host", lambda *a, **kw: True)
+        monkeypatch.setattr(build, "find_ansible_playbook", lambda: "/usr/bin/ansible-playbook")
+        playbooks_dir = tmp_path / "playbooks"
+        playbooks_dir.mkdir()
+        (playbooks_dir / "site.yml").write_text("---\n")
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "PROXMOX_API_TOKEN_SECRET=x\nPROXMOX_HOST=1.2.3.4\nMESH_KEY=k\n"
+        )
+        captured_cmd = []
+
+        class FakeResult:
+            returncode = 0
+
+        def fake_run(cmd, **kw):
+            captured_cmd.extend(cmd)
+            return FakeResult()
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+        assert build.main(["--env", ".env"]) == 0
+        assert captured_cmd[0] == "/usr/bin/ansible-playbook"
+        assert str(playbooks_dir / "site.yml") in captured_cmd[1]

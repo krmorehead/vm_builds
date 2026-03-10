@@ -13,6 +13,9 @@ in testable functions; see tests/test_build.py.
     PROXMOX_HOST=192.168.1.100
     MESH_KEY=your-secure-mesh-passphrase
 
+    # Optional
+    WAN_MAC=AA:BB:CC:DD:EE:FF
+
     # PROXMOX_API_TOKEN_SECRET
     #   The Proxmox API token secret. Create one in the PVE web UI at
     #   Datacenter > Permissions > API Tokens. Use user root@pam,
@@ -25,6 +28,11 @@ in testable functions; see tests/test_build.py.
     # MESH_KEY
     #   WPA3-SAE passphrase for 802.11s mesh networking. Must match
     #   across all mesh nodes. Ignored if no WiFi hardware is detected.
+    #
+    # WAN_MAC (optional)
+    #   Clone this MAC address onto the OpenWrt WAN interface (net0).
+    #   Use the old router's MAC to avoid ISP DHCP lease / DNS cert
+    #   issues when swapping routers. Omit to use auto-generated MAC.
 
 Available tags (site.yml plays):
     backup      Back up Proxmox host config and VMs before changes
@@ -72,7 +80,11 @@ REQUIRED_ENV = [
 
 
 def load_env(env_path: Path) -> dict[str, str]:
-    """Parse a KEY=VALUE env file, skipping comments and blank lines."""
+    """Parse a KEY=VALUE env file, skipping comments and blank lines.
+
+    Surrounding single or double quotes on values are stripped so that
+    both ``FOO=bar`` and ``FOO="bar"`` produce the same result.
+    """
     env = {}
     with open(env_path) as f:
         for line in f:
@@ -81,7 +93,10 @@ def load_env(env_path: Path) -> dict[str, str]:
                 continue
             key, sep, value = line.partition("=")
             if key and sep:
-                env[key.strip()] = value.strip()
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                    value = value[1:-1]
+                env[key.strip()] = value
     return env
 
 
@@ -158,7 +173,7 @@ def resolve_playbook(name: str) -> Path:
     return direct
 
 
-def find_ansible_playbook() -> str:
+def find_ansible_playbook() -> str | None:
     """Locate the ansible-playbook binary, preferring the project venv."""
     venv_bin = VENV_DIR / "bin" / "ansible-playbook"
     if venv_bin.exists():
@@ -168,9 +183,7 @@ def find_ansible_playbook() -> str:
     if system_bin:
         return system_bin
 
-    print("ERROR: ansible-playbook not found.", file=sys.stderr)
-    print("  Run ./setup.sh to create the virtual environment.", file=sys.stderr)
-    sys.exit(1)
+    return None
 
 
 def build_command(
@@ -312,6 +325,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     ansible_bin = find_ansible_playbook()
+    if ansible_bin is None:
+        print("ERROR: ansible-playbook not found.", file=sys.stderr)
+        print("  Run ./setup.sh to create the virtual environment.", file=sys.stderr)
+        return 1
 
     cmd = build_command(
         ansible_bin,

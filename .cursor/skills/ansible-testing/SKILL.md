@@ -83,9 +83,34 @@ The cleanup playbook MUST restore the host to a clean state:
 
 Steps 2-5 are critical. Without them, the next run cannot detect WiFi hardware.
 
+## Verify completeness requirements
+
+Every configured feature MUST have a corresponding assertion in `verify.yml`.
+"Is it running?" is not enough. A router VM that is running but has no DHCP or
+has a colliding subnet is a production outage.
+
+Minimum assertion categories per VM type:
+
+| Category | Example assertions |
+|---|---|
+| VM state | Running, correct VMID |
+| VM auto-start | `onboot=1`, `startup order=N` |
+| NIC topology | `net0` on correct bridge (WAN vs LAN) |
+| Network config | WAN has IP, LAN subnet doesn't collide with WAN |
+| Services | DHCP start/limit/leasetime configured, firewall running |
+| Optional features | MAC cloning (when `WAN_MAC` set), mesh (when WiFi present) |
+| Backup | Manifest exists, has required fields, archive file on disk |
+| Deploy tracking | `vm_builds.fact` exists, contains expected plays |
+| State files | `.state/addresses.json` exists, contains host + IPs |
+
+Previous bug: DHCP was configured but never verified. A broken DHCP config
+would pass all tests and only be caught when clients couldn't get addresses.
+
 ## Extending verify for new VM types
 
-Add a new play to `molecule/default/verify.yml` per VM type:
+Add assertions to `molecule/default/verify.yml` per VM type. Verify from the
+Proxmox host using `qm`, `sshpass`, or SSH ProxyJump. Avoid running Ansible
+directly against VMs in verify — use raw commands instead.
 
 ```yaml
 - name: Verify HomeAssistant VM
@@ -103,8 +128,6 @@ Add a new play to `molecule/default/verify.yml` per VM type:
         that: "'running' in ha_status.stdout"
         fail_msg: "HomeAssistant VM is not running"
 ```
-
-Pattern: verify from the Proxmox host using `qm`, `sshpass`, or SSH ProxyJump. Avoid running Ansible directly against VMs in verify — use raw commands instead.
 
 ## Cleanup completeness
 
@@ -128,6 +151,35 @@ Previous bug: `ansible-proxmox-lan.conf` was deployed by `openwrt_configure` but
 | `opkg update` fails | HTTPS not supported | Ensure `sed -i 's\|https://\|http://\|g'` runs before `opkg update` |
 | `deprecated-local-action` lint error | Used `local_action` syntax | Replace with `delegate_to: localhost` (see below) |
 | Stale LAN IP after cleanup | Missing config file in cleanup list | Add the file to both cleanup playbooks |
+
+## Shell task safety
+
+ALWAYS use `set -o pipefail` in any shell task that contains a pipeline
+(`|`). Without it, only the exit code of the LAST command in the pipeline
+is checked — failures in earlier commands are silently swallowed.
+
+ALWAYS set `executable: /bin/bash` on shell tasks that use bash-specific
+features (`set -o pipefail`, `{print $3}`, process substitution). The
+default shell may be `/bin/sh` which doesn't support `pipefail`.
+
+```yaml
+# BAD — if `ip route` fails, awk sees empty stdin, returns success
+- name: Get gateway
+  ansible.builtin.shell:
+    cmd: ip route show default | awk '{print $3}' | head -1
+
+# GOOD — pipeline failure propagates correctly
+- name: Get gateway
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      ip route show default | awk '{print $3}' | head -1
+    executable: /bin/bash
+```
+
+Previous bug: a gateway detection pipeline in `openwrt_vm` was missing
+`set -o pipefail`. If `ip route` failed, the variable silently got an
+empty string instead of raising an error.
 
 ## Deprecated Ansible patterns
 

@@ -292,6 +292,15 @@ from leaf nodes regardless of which physical port connects upstream.
 The IP is persisted to `/etc/network/interfaces.d/ansible-proxmox-lan.conf`
 so it survives reboots.
 
+### WAN MAC Address Cloning
+
+When replacing an existing router, the ISP may tie its DHCP lease to the
+old router's MAC address. Set `WAN_MAC` in `.env` to clone the old MAC
+onto OpenWrt's WAN NIC (`net0`). This is applied at the Proxmox VM level
+so the cloned MAC appears on the wire — no OpenWrt configuration needed.
+
+Omit `WAN_MAC` entirely to use the auto-generated virtio MAC (default).
+
 ### Bridge Mapping (dynamic)
 
 | Bridge | Role | OpenWrt interface |
@@ -499,10 +508,11 @@ All VMIDs are defined in `inventory/group_vars/all.yml`.
 
 ```
 Variable Locations
-├── Secrets
+├── Secrets & Environment
 │   ├── Source: .env file (gitignored)
-│   ├── Access: lookup('env', 'VAR_NAME') in group_vars/proxmox.yml
-│   └── Contains: API tokens, passphrases, service passwords
+│   ├── Required vars: lookup('env', 'VAR_NAME') in group_vars/proxmox.yml
+│   ├── Optional vars: lookup('env', 'VAR_NAME') in role defaults with fallback
+│   └── Contains: API tokens, passphrases, WAN MAC, service passwords
 │
 ├── Shared Parameters
 │   ├── Source: inventory/group_vars/all.yml
