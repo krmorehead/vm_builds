@@ -290,6 +290,46 @@
           plays={{ stamp.plays.keys() | list | join(', ') }},
           last_run={{ stamp.last_run }}
 
+    # ── Host address state file ───────────────────────────────────
+
+    - name: Check state file exists on controller
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../../.state/addresses.json"
+      register: state_file
+      delegate_to: localhost
+
+    - name: Assert state file was written
+      ansible.builtin.assert:
+        that: state_file.stat.exists
+        fail_msg: ".state/addresses.json not found on controller"
+
+    - name: Read state file
+      ansible.builtin.slurp:
+        src: "{{ playbook_dir }}/../../.state/addresses.json"
+      register: state_raw
+      delegate_to: localhost
+
+    - name: Parse state file
+      ansible.builtin.set_fact:
+        state_data: "{{ state_raw.content | b64decode | from_json }}"
+
+    - name: Assert state file contains host and IPs
+      ansible.builtin.assert:
+        that:
+          - state_data.host is defined
+          - state_data.ips is defined
+          - state_data.ips | length >= 2
+          - proxmox_lan_ip in state_data.ips
+        fail_msg: >-
+          State file malformed or missing LAN IP.
+          Contents: {{ state_data }}
+
+    - name: Report state file contents
+      ansible.builtin.debug:
+        msg: >-
+          State file: host={{ state_data.host }},
+          IPs={{ state_data.ips | join(', ') }}
+
     # ── Final report ──────────────────────────────────────────────
 
     - name: Report verification results

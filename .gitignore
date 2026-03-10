@@ -18,6 +18,9 @@ images/
 *.retry
 collections/
 
+# Runtime state (auto-detected host IPs)
+.state/
+
 # Logs
 *.log
 

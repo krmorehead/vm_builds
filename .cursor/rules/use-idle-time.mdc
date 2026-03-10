@@ -1,0 +1,32 @@
+---
+description: Use wait time during test runs and long commands for documentation and code review
+alwaysApply: true
+---
+
+# Use idle time productively
+
+When a long-running command is backgrounded (e.g., `molecule test`, `molecule converge`),
+ALWAYS use the wait time for productive work instead of just polling.
+
+## Priority order during idle time
+
+1. **Review and update architecture docs** (`docs/architecture/`) — verify they
+   match the current code. Fix stale diagrams, outdated variable names, or
+   missing sections.
+2. **Review and update skills** (`.cursor/skills/`) — check for outdated
+   patterns, missing lessons from the current session, or stale examples.
+3. **Review and update rules** (`.cursor/rules/`) — same as skills.
+4. **Code review against original intent** — if working from a project plan
+   (`docs/projects/`), re-read the plan and diff against the current
+   implementation. Flag drift, incomplete items, or cleanup opportunities.
+5. **General code cleanliness** — scan recently changed files for dead code,
+   unclear naming, missing error handling, or inconsistent style.
+
+## Constraints
+
+- NEVER block on polling alone. Start productive work immediately after
+  backgrounding the command, then interleave status checks.
+- ALWAYS tell the user what you're reviewing while waiting, so they have
+  context on the parallel work.
+- If the test run fails, prioritize fixing the failure over finishing the
+  review work.

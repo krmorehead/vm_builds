@@ -72,7 +72,22 @@ Previous bug: hardcoded `vmbr0 = WAN` made Proxmox GUI unreachable when the mode
 - Set `pci_passthrough_allow_reboot: true` in host vars to allow automated reboots.
 - After reboot, wait for SSH to come back with `wait_for_connection`.
 
-### 5. Test machine protocol
+### 5. Cleanup completeness
+
+When ANY role deploys a file to the Proxmox host, ALWAYS add it to the removal list in BOTH cleanup playbooks (`molecule/default/cleanup.yml` AND `playbooks/cleanup.yml`).
+
+Current ansible-managed files that must be cleaned:
+- `/etc/network/interfaces.d/ansible-bridges.conf` (bridge config)
+- `/etc/network/interfaces.d/ansible-proxmox-lan.conf` (LAN management IP)
+- `/etc/modprobe.d/blacklist-wifi.conf` (WiFi driver blacklist)
+- `/etc/modprobe.d/vfio-pci.conf` (PCI passthrough config)
+
+Local state files that must be cleaned (via `delegate_to: localhost`):
+- `.state/addresses.json` (cached host IPs)
+
+Previous bug: `ansible-proxmox-lan.conf` was deployed but not cleaned up, leaving stale LAN management IPs across test runs.
+
+### 6. Test machine protocol
 
 Before running destructive operations (cleanup, VM destroy):
 1. Confirm the target is the **test machine** (check `PROXMOX_HOST` env var).

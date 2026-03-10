@@ -318,6 +318,57 @@
     mode: "0644"
   delegate_to: "{{ _proxmox_host }}"
 
+# ── Host address state file (for build.py auto-detection) ──────
+# Records both the original management IP and the LAN IP so the
+# next run can find the Proxmox host regardless of cable topology.
+
+- name: Ensure local .state directory exists
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/../.state"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+
+- name: Write host addresses to local state file
+  ansible.builtin.copy:
+    content: >-
+      {{ {"host": _proxmox_host,
+          "ips": [hostvars[_proxmox_host].ansible_host, _proxmox_lan_ip]}
+         | to_nice_json }}
+    dest: "{{ playbook_dir }}/../.state/addresses.json"
+    mode: "0644"
+  delegate_to: localhost
+
+# ── Mid-run connection update ───────────────────────────────────
+# If the original management IP is no longer reachable from the
+# controller (primary router topology), switch to the LAN IP so
+# Play 4 (cleanup) can still connect.
+
+- name: Probe original Proxmox management IP from controller
+  ansible.builtin.wait_for:
+    host: "{{ hostvars[_proxmox_host].ansible_host }}"
+    port: 22
+    timeout: 5
+  register: _mgmt_probe
+  failed_when: false
+  delegate_to: localhost
+
+- name: Update Proxmox connection to LAN IP if management unreachable
+  ansible.builtin.add_host:
+    name: "{{ _proxmox_host }}"
+    groups: proxmox
+    ansible_host: "{{ _proxmox_lan_ip }}"
+    ansible_user: root
+    ansible_python_interpreter: /usr/bin/python3
+  when: _mgmt_probe is failed
+
+- name: Report connection update
+  ansible.builtin.debug:
+    msg: >-
+      Proxmox connection switched to LAN IP {{ _proxmox_lan_ip }}
+      (original {{ hostvars[_proxmox_host].ansible_host }} unreachable)
+  when: _mgmt_probe is failed
+
 # ── Final report ────────────────────────────────────────────────
 
 - name: Report final configuration

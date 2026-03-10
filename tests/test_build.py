@@ -191,6 +191,38 @@ class TestBuildCommand:
         assert cmd[skip_idx + 1] == "cleanup"
 
 
+# ── probe_host / resolve_proxmox_host ───────────────────────────────
+
+
+class TestResolveProxmoxHost:
+    def test_returns_primary_when_reachable(self, monkeypatch):
+        monkeypatch.setattr(build, "probe_host", lambda *a, **kw: True)
+        env = {"PROXMOX_HOST": "10.0.0.1"}
+        assert build.resolve_proxmox_host(env) == "10.0.0.1"
+
+    def test_falls_back_to_cached_ip(self, tmp_path, monkeypatch):
+        probed = []
+
+        def fake_probe(ip, **kw):
+            probed.append(ip)
+            return ip == "10.10.10.2"
+
+        monkeypatch.setattr(build, "probe_host", fake_probe)
+        monkeypatch.setattr(build, "STATE_DIR", tmp_path)
+        state_file = tmp_path / "addresses.json"
+        state_file.write_text('{"host":"home","ips":["10.0.0.1","10.10.10.2"]}')
+        env = {"PROXMOX_HOST": "10.0.0.1"}
+        result = build.resolve_proxmox_host(env)
+        assert result == "10.10.10.2"
+        assert probed == ["10.0.0.1", "10.10.10.2"]
+
+    def test_returns_empty_when_all_unreachable(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(build, "probe_host", lambda *a, **kw: False)
+        monkeypatch.setattr(build, "STATE_DIR", tmp_path)
+        env = {"PROXMOX_HOST": "10.0.0.1"}
+        assert build.resolve_proxmox_host(env) == ""
+
+
 # ── main (integration-style) ────────────────────────────────────────
 
 
@@ -207,6 +239,7 @@ class TestMain:
 
     def test_nonexistent_playbook_returns_1(self, tmp_path, monkeypatch):
         monkeypatch.setattr(build, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(build, "probe_host", lambda *a, **kw: True)
         playbooks_dir = tmp_path / "playbooks"
         playbooks_dir.mkdir()
         env_file = tmp_path / ".env"

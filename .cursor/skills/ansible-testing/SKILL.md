@@ -106,6 +106,16 @@ Add a new play to `molecule/default/verify.yml` per VM type:
 
 Pattern: verify from the Proxmox host using `qm`, `sshpass`, or SSH ProxyJump. Avoid running Ansible directly against VMs in verify — use raw commands instead.
 
+## Cleanup completeness
+
+When a role writes a new file to the Proxmox host, ALWAYS add it to the removal list in BOTH:
+- `molecule/default/cleanup.yml` (test cleanup)
+- `playbooks/cleanup.yml` (production cleanup)
+
+When a role writes a local state file (e.g., `.state/addresses.json`), ALWAYS add a `delegate_to: localhost` cleanup task to remove it.
+
+Previous bug: `ansible-proxmox-lan.conf` was deployed by `openwrt_configure` but not removed by cleanup, causing stale LAN management IPs on subsequent test runs.
+
 ## Common failures
 
 | Symptom | Cause | Fix |
@@ -116,6 +126,30 @@ Pattern: verify from the Proxmox host using `qm`, `sshpass`, or SSH ProxyJump. A
 | WiFi radios=0 after converge | PCI passthrough not cleaned up | Ensure cleanup unbinds vfio-pci, reloads modules, rescans PCI |
 | `Timeout waiting for SSH` | Network restart dropped connection | Verify SSH args include `ConnectTimeout=10`, `ServerAliveInterval=15` |
 | `opkg update` fails | HTTPS not supported | Ensure `sed -i 's\|https://\|http://\|g'` runs before `opkg update` |
+| `deprecated-local-action` lint error | Used `local_action` syntax | Replace with `delegate_to: localhost` (see below) |
+| Stale LAN IP after cleanup | Missing config file in cleanup list | Add the file to both cleanup playbooks |
+
+## Deprecated Ansible patterns
+
+NEVER use `local_action`. It was deprecated in Ansible and trips `deprecated-local-action` lint errors.
+
+```yaml
+# BAD — deprecated
+- name: Do something locally
+  local_action:
+    module: ansible.builtin.file
+    path: /tmp/foo
+    state: directory
+
+# GOOD — modern equivalent
+- name: Do something locally
+  ansible.builtin.file:
+    path: /tmp/foo
+    state: directory
+  delegate_to: localhost
+```
+
+NEVER use short module names (e.g., `command`). ALWAYS use FQCNs (e.g., `ansible.builtin.command`).
 
 ## Lint configuration
 

@@ -52,8 +52,10 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -86,6 +88,50 @@ def load_env(env_path: Path) -> dict[str, str]:
 def validate_env(env: dict[str, str]) -> list[str]:
     """Return list of missing or empty required variables."""
     return [var for var in REQUIRED_ENV if not env.get(var)]
+
+
+STATE_DIR = PROJECT_ROOT / ".state"
+
+
+def probe_host(ip: str, port: int = 22, timeout: float = 5.0) -> bool:
+    """Check if a host is reachable via TCP connect to the given port."""
+    try:
+        with socket.create_connection((ip, port), timeout=timeout):
+            return True
+    except (OSError, TimeoutError):
+        return False
+
+
+def resolve_proxmox_host(env: dict[str, str]) -> str:
+    """Return a reachable IP for the Proxmox host.
+
+    Tries the configured PROXMOX_HOST first.  If unreachable, falls back to
+    cached IPs from a previous run stored in .state/addresses.json.
+    Returns an empty string if no IP is reachable.
+    """
+    primary = env["PROXMOX_HOST"]
+    print(f"Probing {primary} ...", end=" ", flush=True)
+    if probe_host(primary):
+        print("reachable")
+        return primary
+    print("unreachable")
+
+    state_file = STATE_DIR / "addresses.json"
+    if state_file.exists():
+        try:
+            addresses = json.loads(state_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            addresses = {}
+        for ip in addresses.get("ips", []):
+            if ip == primary:
+                continue
+            print(f"Probing {ip} (cached) ...", end=" ", flush=True)
+            if probe_host(ip):
+                print("reachable")
+                return ip
+            print("unreachable")
+
+    return ""
 
 
 def resolve_playbook(name: str) -> Path:
@@ -234,6 +280,28 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {var}", file=sys.stderr)
         return 1
 
+    # Pre-flight: find a reachable IP for the Proxmox host
+    host = resolve_proxmox_host(env)
+    if not host:
+        print(
+            "ERROR: Proxmox host unreachable at all known IPs.",
+            file=sys.stderr,
+        )
+        print(
+            f"  Configured: {env['PROXMOX_HOST']}",
+            file=sys.stderr,
+        )
+        state_file = STATE_DIR / "addresses.json"
+        if state_file.exists():
+            print(f"  Cached:     {state_file}", file=sys.stderr)
+        else:
+            print("  No cached addresses found (.state/addresses.json)", file=sys.stderr)
+        print("  Update PROXMOX_HOST or check network connectivity.", file=sys.stderr)
+        return 1
+    if host != env["PROXMOX_HOST"]:
+        print(f"  Using cached IP {host} (original {env['PROXMOX_HOST']} unreachable)")
+    env["PROXMOX_HOST"] = host
+
     # Resolve playbook
     playbook = resolve_playbook(args.playbook)
     if not playbook.exists():
@@ -257,8 +325,6 @@ def main(argv: list[str] | None = None) -> int:
         extra_args=extra,
     )
 
-    # Print summary before executing
-    host = env.get("PROXMOX_HOST", "unknown")
     rel_playbook = playbook.relative_to(PROJECT_ROOT) if playbook.is_relative_to(PROJECT_ROOT) else playbook
     print(f"Target:   {host}")
     print(f"Env file: {args.env}")

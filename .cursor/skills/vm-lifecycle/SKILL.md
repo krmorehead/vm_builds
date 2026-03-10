@@ -17,11 +17,13 @@ This project manages multiple VM types on Proxmox. Each VM follows a two-role pa
 4. Each `<type>_vm` role MUST check for existing VM before creating (`qm status <vmid>`). Guard ALL creation tasks with `when: not vm_exists | bool`.
 5. VMIDs: 100-series for network VMs, 200-series for service VMs. Define in `group_vars/all.yml`.
 6. The `<type>_vm` role adds the VM to dynamic inventory via `add_host`. The `<type>_configure` role runs in a separate play targeting that group.
-7. NEVER hardcode bridge names. Consume `proxmox_all_bridges` and select by index.
+7. NEVER hardcode bridge names or roles (e.g., `vmbr0 = WAN`). The WAN bridge is detected at runtime via `proxmox_wan_bridge` (set by `proxmox_bridges` from the host's default route). Order bridges dynamically: WAN first, then LAN sorted.
 8. NEVER reference another role's defaults. Use `set_fact` with `cacheable: true` or `add_host` variables to pass data.
 9. Every provision play targeting Proxmox hosts MUST include `deploy_stamp` as its last role to record the deployment in `/etc/ansible/facts.d/vm_builds.fact`.
 10. Every new role MUST have `meta/main.yml` with `author`, `license: proprietary`, `role_name`, `description`, `min_ansible_version`, and `platforms`.
 11. Provision plays target **flavor groups** (e.g., `router_nodes`, `service_nodes`), NOT `proxmox` directly. Shared infra targets `proxmox`.
+12. NEVER use `local_action`. ALWAYS use `delegate_to: localhost` instead.
+13. When a role deploys files to the host, ALWAYS add them to both cleanup playbooks (`molecule/default/cleanup.yml` and `playbooks/cleanup.yml`).
 
 ## Playbook execution order (site.yml)
 
@@ -198,6 +200,36 @@ Add assertions to `molecule/default/verify.yml`.
 1. Create `docs/architecture/homeassistant-build.md`
 2. Add entry to `CHANGELOG.md` under `[Unreleased]`
 3. Bump `project_version` in `group_vars/all.yml` when releasing
+
+## WAN bridge detection and NIC ordering
+
+`proxmox_bridges` detects the WAN bridge by checking which bridge carries the host's default route. This fact (`proxmox_wan_bridge`) is consumed by VM roles.
+
+`openwrt_vm` orders bridges so the WAN bridge maps to `net0`/`eth0`:
+
+```yaml
+_ordered_bridges: [_wan_bridge] + (proxmox_all_bridges | difference([_wan_bridge]) | sort)
+```
+
+Override with `openwrt_wan_bridge` in `host_vars` if auto-detection picks wrong.
+
+Previous bug: alphabetical bridge sorting made `vmbr0` always WAN. When the modem was on `vmbr0`, the Proxmox GUI became unreachable from LAN nodes.
+
+## Proxmox LAN management IP
+
+When a VM becomes the primary router, the Proxmox host needs a static IP on the LAN bridge so the GUI is reachable from LAN clients. Pattern:
+
+1. Compute LAN IP from the router's LAN subnet + offset (default `.2`)
+2. Add IP to LAN bridge via `ip addr add` (immediate)
+3. Deploy persistent config to `/etc/network/interfaces.d/ansible-proxmox-lan.conf` (survives reboot)
+4. Write `.state/addresses.json` locally with both the original management IP and the new LAN IP
+5. Probe original management IP — if unreachable (topology changed), update `ansible_host` via `add_host` so subsequent plays can connect
+
+## State file for cross-run IP discovery
+
+`build.py` probes `PROXMOX_HOST` before running Ansible. If unreachable, it reads `.state/addresses.json` for cached alternative IPs. This handles cable-swap scenarios where the original management IP is no longer routable.
+
+The state file is written by `openwrt_configure` and cleaned by both cleanup playbooks. It is gitignored.
 
 ## Bridge allocation
 

@@ -27,6 +27,13 @@ alwaysApply: true
 - This ensures the Proxmox GUI is reachable from leaf nodes regardless of which physical port connects upstream.
 - The config is persisted to `/etc/network/interfaces.d/ansible-proxmox-lan.conf` so it survives reboots.
 
+## Host IP auto-detection
+- `build.py` probes `PROXMOX_HOST` via TCP port 22 before running Ansible. If unreachable, it falls back to cached IPs from `.state/addresses.json`.
+- The state file is written by `openwrt_configure` after the Proxmox LAN IP is confirmed. It records both the original management IP and the LAN IP.
+- NEVER assume `PROXMOX_HOST` is the only way to reach the host. After cable swaps the original management IP may be unreachable; the LAN IP (`.2` on the OpenWrt LAN subnet) is the fallback.
+- Mid-run: after LAN IP deployment, `openwrt_configure` probes the original management IP. If unreachable, it updates `ansible_host` via `add_host` so subsequent plays (cleanup) can still connect.
+- `.state/` is gitignored — it contains runtime-detected, environment-specific data.
+
 ## Bootstrap bridge selection
 - OpenWrt's default LAN is on eth0, which maps to the WAN bridge (auto-detected).
 - The bootstrap IP can safely coexist on the WAN bridge if it's on a different subnet than the management IP.
@@ -51,6 +58,16 @@ alwaysApply: true
 ## SSH keepalives through ProxyJump
 - SSH via ProxyJump drops during sequences of local Ansible tasks (set_fact, debug) that don't send traffic.
 - ALWAYS add `-o ServerAliveInterval=15 -o ServerAliveCountMax=4` to `ansible_ssh_common_args`.
+
+## Cleanup completeness
+- When ANY role deploys a file to the host, ALWAYS add it to the removal list in BOTH `molecule/default/cleanup.yml` AND `playbooks/cleanup.yml`.
+- Current ansible-managed host files: `ansible-bridges.conf`, `ansible-proxmox-lan.conf`, `blacklist-wifi.conf`, `vfio-pci.conf`.
+- Local state files (`.state/addresses.json`) must also be cleaned via `delegate_to: localhost`.
+- Previous bug: `ansible-proxmox-lan.conf` was deployed but not cleaned up, leaving stale IPs across test runs.
+
+## Ansible module conventions
+- NEVER use `local_action`. It is deprecated. ALWAYS use `delegate_to: localhost` instead.
+- ALWAYS use FQCNs (e.g., `ansible.builtin.command`, not `command`).
 
 ## Backup before changes
 - Every playbook run should back up host config and existing VMs first (Play 0: `proxmox_backup`).

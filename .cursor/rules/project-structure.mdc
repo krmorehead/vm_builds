@@ -64,11 +64,13 @@ Define all VMIDs in `group_vars/all.yml`.
 ## Key files
 | File | Purpose |
 |------|---------|
+| `build.py` | Python entry point: env validation, host probing, playbook runner |
 | `setup.sh` | Bootstrap .venv + pip + ansible-galaxy |
 | `run.sh` | Source .env, run `ansible-playbook playbooks/site.yml` |
 | `cleanup.sh` | Restore / full-restore / clean subcommands |
 | `test.env` | Test machine config (committed, IP: 192.168.86.201) |
 | `.env` | Production secrets (gitignored) |
+| `.state/addresses.json` | Cached host IPs for cross-run discovery (gitignored) |
 | `molecule/default/` | Integration tests against test machine |
 
 ## Adding a new VM type — checklist

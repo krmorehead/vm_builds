@@ -101,6 +101,7 @@
         state: absent
       loop:
         - /etc/network/interfaces.d/ansible-bridges.conf
+        - /etc/network/interfaces.d/ansible-proxmox-lan.conf
         - /etc/modprobe.d/blacklist-wifi.conf
         - /etc/modprobe.d/vfio-pci.conf
       tags: [restore, full-restore, clean]
@@ -153,6 +154,13 @@
         cmd: ifup --all --force
       changed_when: true
       failed_when: false
+      tags: [restore, full-restore, clean]
+
+    - name: Remove local state file from controller
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../.state/addresses.json"
+        state: absent
+      delegate_to: localhost
       tags: [restore, full-restore, clean]
 
     - name: Report restore result
