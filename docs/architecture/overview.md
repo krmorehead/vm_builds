@@ -2,158 +2,583 @@
 
 ## Purpose
 
-**vm_builds** is an Ansible project that automates the provisioning and configuration of virtual machines on Proxmox VE. The primary target is an OpenWrt router VM that replaces a physical consumer router, giving full software-defined control over the home network. The project is designed to expand to additional VM types (Home Assistant, Pi-hole, NAS, etc.) using consistent patterns.
+**vm_builds** is an Ansible project that automates the provisioning and
+configuration of virtual machines and LXC containers on Proxmox VE. The
+primary target is a "home entertainment box" -- a single small-form-factor
+PC that replaces multiple consumer devices (router, NAS, media server, smart
+home hub, desktop) with a fully software-defined stack.
 
-The project is designed around a key principle: **a single command should take a bare Proxmox host and produce fully functional, production-ready VMs** -- no manual Proxmox UI interaction, no SSH-and-paste workflows, no guesswork.
+**A single command should take a bare Proxmox host and produce fully
+functional, production-ready VMs and containers** -- no manual Proxmox UI
+interaction, no SSH-and-paste workflows, no guesswork.
 
 ## Design Philosophy
 
-- **Idempotent and repeatable.** Every run should converge to the same state regardless of starting conditions. A cleanup + re-run cycle should always produce a working result.
-- **Hardware-agnostic.** The playbook discovers physical NICs, WiFi cards, and PCI topology at runtime. It does not hardcode interface names, bridge numbers, or PCI addresses. It should work on any small-form-factor PC with 2+ ethernet ports.
-- **Environment-driven secrets.** No credentials live in the repository. API tokens and passphrases are injected via `.env` files, making it safe to commit everything else.
-- **No third-party monkeypatching.** OpenWrt has no Python runtime, so all configuration is done via `ansible.builtin.raw` with UCI commands. This avoids fragile compatibility shims that break across Ansible versions.
-- **Backup before change.** Every playbook run begins by backing up the host configuration (tar) and existing VMs (`vzdump`). Three restore modes are available: config-only, full rollback (VMs + config), and clean reset (destroy all + restore config). This works in both production and test scenarios.
-- **Test-friendly.** A dedicated test Proxmox node can be provisioned and torn down programmatically using `./cleanup.sh clean`, which destroys all VMs and restores the host to the state captured before the last playbook run.
-- **Extensible.** The two-role-per-VM pattern (`<type>_vm` + `<type>_configure`) and shared infrastructure roles ensure new VM types integrate cleanly without architectural drift.
+- **Idempotent and repeatable.** Every run converges to the same state.
+  A cleanup + re-run cycle always produces a working result.
+- **Hardware-agnostic.** NICs, WiFi cards, and PCI topology are discovered
+  at runtime. No hardcoded interface names or PCI addresses.
+- **Environment-driven secrets.** Credentials injected via `.env` files.
+  Everything else is safe to commit.
+- **Backup before change.** Every run starts with host config tar + VM
+  `vzdump`. Three restore modes: config-only, full rollback, clean reset.
+- **Decomposed roles.** Each concern gets its own role. Provisioning is
+  separate from configuration. iGPU detection is separate from WiFi
+  passthrough. Roles never cross-reference each other's defaults.
+- **Extensible.** Two-role-per-service pattern (`<type>_lxc` + `<type>_configure`
+  or `<type>_vm` + `<type>_configure`) and shared infrastructure roles keep
+  new service types consistent.
 
-## High-Level Architecture
+---
+
+## Target Architecture
+
+### Home Entertainment Box (Primary Build)
+
+Small-form-factor PC, Intel CPU (iGPU for Quick Sync), 8 GB RAM, 2+ ethernet
+ports. All containers and VMs run directly on the Proxmox host as siblings.
 
 ```
- Linux Mint (Control Node)
- ┌─────────────────────────┐
- │  .venv/                 │
- │  ansible-playbook       │
- │  proxmoxer (API client) │
- └──────┬──────────────────┘
-        │
-        │  Proxmox API (token auth)
-        │  SSH (key auth)
-        │
- ┌──────▼──────────────────────────────────────────────┐
- │  Proxmox VE Host                                    │
- │                                                     │
- │  Physical NICs ──► Virtual Bridges (vmbr0..N)       │
- │  WiFi PCIe     ──► vfio-pci ──► hostpci passthrough │
- │                                                     │
- │  ┌────────────────────────────────┐                 │
- │  │  OpenWrt VM (VMID 100)        │                 │
- │  │                               │                 │
- │  │  eth0 (WAN) ◄── vmbr0        │                 │
- │  │  eth1 (LAN) ◄── vmbr1        │                 │
- │  │  eth2 (LAN) ◄── vmbr2        │                 │
- │  │  wlan0      ◄── PCIe pass    │                 │
- │  │         └── 802.11s mesh      │                 │
- │  └────────────────────────────────┘                 │
- │                                                     │
- │  ┌────────────────────────────────┐                 │
- │  │  Future VM (VMID 200)         │  ◄── future    │
- │  │  eth0 ◄── vmbr1 (LAN bridge)  │                 │
- │  └────────────────────────────────┘                 │
- └─────────────────────────────────────────────────────┘
+Proxmox Host (Debian)
+├── Network Tier
+│   ├── OpenWrt Router         VM   VMID 100   cores=2  RAM=512MB     auto-start priority 1
+│   ├── WireGuard VPN Client   LXC  VMID 101   cores=1  RAM=128MB     auto-start priority 2
+│   ├── Pi-hole                LXC  VMID 102   cores=1  RAM=256MB     auto-start priority 3
+│   └── Mesh WiFi Controller   LXC  VMID 103   cores=1  RAM=512MB     auto-start priority 4
+│
+├── Observability Tier
+│   ├── Netdata Agent          LXC  VMID 500   cores=1  RAM=128MB     auto-start priority 3
+│   └── rsyslog Collector      LXC  VMID 501   cores=1  RAM=64MB      auto-start priority 3
+│
+├── Service Tier
+│   └── Home Assistant         LXC  VMID 200   cores=2  RAM=1024MB    auto-start priority 5
+│
+├── Media Tier
+│   ├── Jellyfin               LXC  VMID 300   cores=2  RAM=2048MB    auto-start priority 5   iGPU: transcode
+│   ├── Kodi                   LXC  VMID 301   cores=2  RAM=1024MB    on-demand               iGPU: display
+│   └── Moonlight Client       LXC  VMID 302   cores=1  RAM=512MB     on-demand               iGPU: display
+│
+└── Desktop Tier
+    ├── Debian Desktop         VM   VMID 400   cores=2  RAM=1024MB    on-demand               iGPU: exclusive
+    └── Custom UX Kiosk        LXC  VMID 401   cores=1  RAM=512MB     auto-start priority 6   iGPU: display (default)
 ```
 
-## Execution Flow
+### Gaming Rig (Separate Build)
 
-The playbook (`playbooks/site.yml`) runs plays in sequence:
+Separate physical machine dedicated to gaming and game streaming.
 
-### Play 0: Backup (targets Proxmox host)
+```
+Proxmox Host (gaming hardware)
+├── Gaming VM              VM   VMID 600   cores=4-8  RAM=8-16GB  auto-start   discrete GPU
+├── Netdata Agent          LXC  VMID 500   cores=1  RAM=128MB     auto-start
+└── rsyslog Collector      LXC  VMID 501   cores=1  RAM=64MB      auto-start
+```
 
-0. **State backup** (`proxmox_backup`) -- Tars up host config directories (`/etc/network/`, `/etc/modprobe.d/`, `/etc/pve/`, etc.) and runs `vzdump` on every existing VM. Writes a manifest to `/var/lib/ansible-backup/` so the cleanup playbook knows what to restore.
+### Minimal Router (Lightweight Build)
 
-### Play 1: Provision (targets Proxmox host)
+Nodes that only need routing and monitoring.
 
-1. **Bridge creation** (`proxmox_bridges`) -- Discovers every physical NIC, checks which already have bridges, and creates new `vmbr` interfaces for any unbridged NICs. Ensures at least 2 bridges exist (WAN + LAN minimum). Exports `proxmox_all_bridges` fact.
-2. **PCI passthrough** (`proxmox_pci_passthrough`) -- Detects WiFi PCIe devices, enables IOMMU if needed (with optional reboot), validates IOMMU group isolation, blacklists host WiFi drivers, and binds devices to `vfio-pci`. Exports `wifi_pci_devices` fact.
-3. **VM creation** (`openwrt_vm`) -- Uploads the OpenWrt disk image, creates the VM shell via Proxmox API, imports the disk, attaches virtual NICs to bridges, passes through WiFi PCIe devices, boots the VM, and establishes a temporary bootstrap SSH connection through the Proxmox host.
+```
+Proxmox Host
+├── OpenWrt Router         VM   VMID 100   auto-start priority 1
+├── WireGuard VPN Client   LXC  VMID 101   auto-start priority 2
+├── Pi-hole                LXC  VMID 102   auto-start priority 3
+├── Netdata Agent          LXC  VMID 500   auto-start priority 3
+└── rsyslog Collector      LXC  VMID 501   auto-start priority 3
+```
 
-*Future VM provision roles (`homeassistant_vm`, etc.) insert here.*
+---
 
-### Play 2+: Configure (targets VM dynamic groups)
+## Build Profiles
 
-4. **OpenWrt configuration** (`openwrt_configure`) -- Uses a two-phase restart pattern. Phase 1 configures WAN (eth0) and LAN bridge ports, restarts networking while keeping LAN at the factory-default IP, then migrates the bootstrap IP from the WAN bridge to the LAN bridge. Phase 2 installs WiFi driver packages (switching opkg feeds to HTTP for BusyBox compatibility), loads kernel modules, configures 802.11s mesh on detected radios, applies the auto-selected collision-free LAN IP and DHCP settings, and performs a final network restart.
+A host composes its build by belonging to one or more **flavor groups** in the
+inventory. Shared infrastructure (`proxmox_backup`, `proxmox_bridges`,
+`proxmox_pci_passthrough`, `proxmox_igpu`) runs on every host in `proxmox`.
 
-*Future VM configure plays (`homeassistant_configure`, etc.) follow as separate plays.*
+```
+Build Profiles
+├── Home Entertainment Box
+│   ├── router_nodes       → OpenWrt
+│   ├── vpn_nodes          → WireGuard
+│   ├── dns_nodes          → Pi-hole
+│   ├── wifi_nodes         → Mesh WiFi Controller
+│   ├── monitoring_nodes   → Netdata, rsyslog
+│   ├── service_nodes      → Home Assistant
+│   ├── media_nodes        → Jellyfin, Kodi, Moonlight
+│   └── desktop_nodes      → Debian Desktop, UX Kiosk
+│
+├── Minimal Router
+│   ├── router_nodes       → OpenWrt
+│   ├── vpn_nodes          → WireGuard
+│   ├── dns_nodes          → Pi-hole
+│   └── monitoring_nodes   → Netdata, rsyslog
+│
+└── Gaming Rig
+    ├── gaming_nodes       → Gaming VM
+    └── monitoring_nodes   → Netdata, rsyslog
+```
 
-### Final Play: Cleanup (targets Proxmox host)
+---
 
-5. **Bootstrap cleanup** -- Removes the temporary IP address that was added to a LAN bridge for initial SSH access.
+## Boot Order
 
-## Multi-VM Expansion
+Proxmox `onboot` and `startup` settings control which services start
+automatically when the host reboots. Dependencies flow top-to-bottom:
+network must be up before DNS, DNS before application services, etc.
 
-### Two-role pattern
+```
+Boot Sequence (Home Entertainment Box)
+├── Priority 1 ── Network
+│   └── OpenWrt Router (VMID 100)             All other services depend on this
+│
+├── Priority 2 ── VPN
+│   └── WireGuard VPN (VMID 101)              Tunnel to home server for remote management
+│
+├── Priority 3 ── Core Infrastructure         Start simultaneously
+│   ├── Pi-hole (VMID 102)                    DNS filtering
+│   ├── rsyslog (VMID 501)                    Log collection
+│   └── Netdata (VMID 500)                    Monitoring
+│
+├── Priority 4 ── WiFi Management
+│   └── Mesh WiFi Controller (VMID 103)       Needs OpenWrt mesh established first
+│
+├── Priority 5 ── Application Services        Start simultaneously
+│   ├── Home Assistant (VMID 200)             Home automation
+│   └── Jellyfin (VMID 300)                   Media server (iGPU transcode, no display)
+│
+├── Priority 6 ── Default Display
+│   └── Custom UX Kiosk (VMID 401)            Dashboard shown when idle
+│
+└── On-Demand ── Manual Start Only
+    ├── Kodi (VMID 301)                       Stops Kiosk on start, restarts Kiosk on stop
+    ├── Moonlight Client (VMID 302)           Stops Kiosk on start, restarts Kiosk on stop
+    └── Debian Desktop (VMID 400)             Stops Kiosk + takes exclusive iGPU
+```
 
-Every VM type consists of:
-- `<type>_vm` — provisions the VM on Proxmox (image upload, API create, disk import, NIC attach, start, `add_host`)
-- `<type>_configure` — configures the running VM (packages, services, settings)
+---
 
-These are always separate roles in separate plays. The provision role targets `proxmox` hosts. The configure role targets the dynamic group created by `add_host`.
+## Display Output & iGPU Sharing
 
-### Shared infrastructure
+The Intel iGPU serves two distinct purposes on the home entertainment box:
 
-These roles run **once per host**, regardless of how many VMs exist:
-- `proxmox_backup` — host config + VM backups
-- `proxmox_bridges` — NIC discovery, bridge creation → exports `proxmox_all_bridges`
-- `proxmox_pci_passthrough` — IOMMU/vfio-pci → exports `wifi_pci_devices`
+```
+iGPU Usage
+├── Transcoding (no display)
+│   └── Jellyfin
+│       ├── Uses /dev/dri/renderD128 only (VA-API encode/decode)
+│       ├── Does NOT drive a physical display
+│       └── Runs alongside any display service (shared access)
+│
+└── Display Output (physical screen)
+    ├── Custom UX Kiosk (default)
+    │   └── Cage + Chromium, shared iGPU via bind mount
+    ├── Kodi (on-demand)
+    │   └── kodi-standalone GBM/DRM, shared iGPU via bind mount
+    ├── Moonlight Client (on-demand)
+    │   └── moonlight-embedded DRM/KMS, shared iGPU via bind mount
+    └── Debian Desktop (on-demand, most disruptive)
+        └── Full iGPU passthrough via hostpci (exclusive access)
+```
 
-### VMID allocation
+### Sharing Rules
 
-| Range | Purpose | Current |
-|-------|---------|---------|
-| 100-199 | Network VMs | 100 = OpenWrt |
-| 200-299 | Service VMs | *(reserved)* |
+```
+iGPU Access Model
+├── LXC Containers (Kiosk, Kodi, Moonlight, Jellyfin)
+│   ├── Access via /dev/dri/* device bind mount
+│   ├── Host keeps i915 driver loaded
+│   ├── Multiple containers share renderD128 simultaneously (transcode)
+│   └── Only one container drives the physical display at a time
+│
+└── Desktop VM
+    ├── Access via hostpci (vfio-pci exclusive passthrough)
+    ├── Host LOSES /dev/dri/* while VM is running
+    ├── All LXC iGPU bind mounts break
+    └── Jellyfin falls back to software transcoding
+```
+
+### Display Transitions
+
+```
+Display-Exclusive State Machine
+├── Idle State (default)
+│   └── Kiosk running, Kodi/Moonlight/Desktop stopped
+│
+├── Start Kodi or Moonlight
+│   ├── 1. Stop Kiosk
+│   ├── 2. Start requested service
+│   └── 3. On stop → restart Kiosk
+│
+└── Start Desktop VM
+    ├── 1. Stop Kiosk, Kodi, Moonlight
+    ├── 2. iGPU unbound from i915, bound to vfio-pci
+    ├── 3. Desktop VM gets exclusive GPU
+    ├── 4. Jellyfin switches to software transcoding
+    └── 5. On stop → iGPU returns to i915, Kiosk restarts
+```
+
+Managed by Proxmox hookscripts on the host, with Ansible pre-tasks
+as enforcement during playbook runs.
+
+### iGPU vs PCI Passthrough -- Role Decomposition
+
+```
+PCI Device Handling (separate roles)
+├── proxmox_pci_passthrough
+│   ├── Purpose: Exclusive device passthrough (WiFi, discrete GPU)
+│   ├── Method: Unbind from host driver, bind to vfio-pci
+│   ├── Exports: wifi_pci_devices, gpu_pci_devices
+│   └── Consumer: openwrt_vm (WiFi), gaming_vm (discrete GPU)
+│
+└── proxmox_igpu
+    ├── Purpose: iGPU detection and fact export for containers and VMs
+    ├── Method: Keep host i915 driver loaded, export device paths and PCI address
+    ├── Exports: igpu_render_device, igpu_card_device, igpu_render_gid, igpu_pci_address
+    ├── LXC consumers (shared bind mount): jellyfin_lxc, kodi_lxc, moonlight_lxc, kiosk_lxc
+    └── VM consumer (exclusive hostpci): desktop_vm (takes GPU from host when running)
+```
+
+---
+
+## Network Topology
+
+```
+Internet
+└── Upstream ISP Router
+    └── WAN (DHCP)
+        └── OpenWrt VM (VMID 100)
+            ├── eth0 ← vmbr0 (WAN bridge)
+            ├── eth1..N ← vmbr1+ (LAN bridges)
+            ├── wlan0 ← PCIe passthrough (802.11s mesh)
+            │
+            └── LAN Network (all other services connect here)
+                ├── WireGuard VPN (VMID 101)
+                │   └── wg0 tunnel → home server
+                │       ├── rsyslog forwards logs through tunnel
+                │       ├── Netdata streams metrics through tunnel
+                │       └── Remote management access
+                │
+                ├── Pi-hole (VMID 102) ← OpenWrt forwards DNS here
+                ├── Mesh WiFi Controller (VMID 103)
+                ├── Home Assistant (VMID 200)
+                ├── Jellyfin (VMID 300)
+                ├── Kodi (VMID 301)
+                ├── Moonlight Client (VMID 302)
+                ├── Debian Desktop (VMID 400)
+                ├── Custom UX Kiosk (VMID 401)
+                ├── Netdata (VMID 500)
+                └── rsyslog (VMID 501)
+```
+
+All LXC containers and VMs (except OpenWrt) attach to a LAN bridge.
+OpenWrt's WAN is on the first bridge (vmbr0); remaining bridges are LAN ports.
+
+---
+
+## Playbook Execution Order
+
+The playbook (`playbooks/site.yml`) runs plays in sequence. Plays targeting
+flavor groups the host doesn't belong to are automatically skipped.
+
+### Current (v1.0)
+
+```
+site.yml (current)
+├── Play 0:  proxmox        [backup]     proxmox_backup, deploy_stamp
+├── Play 1:  proxmox        [infra]      proxmox_bridges, proxmox_pci_passthrough, deploy_stamp
+├── Play 2:  router_nodes   [openwrt]    openwrt_vm, deploy_stamp
+├── Play 3:  openwrt        [openwrt]    openwrt_configure
+└── Play 4:  proxmox        [cleanup]    Remove bootstrap IP
+```
+
+### Target (Full Build)
+
+```
+site.yml (target)
+│
+├── Phase: Backup
+│   └── Play 0:  proxmox          [backup]      proxmox_backup, deploy_stamp
+│
+├── Phase: Infrastructure
+│   └── Play 1:  proxmox          [infra]       proxmox_bridges, proxmox_pci_passthrough, proxmox_igpu, deploy_stamp
+│
+├── Phase: Network Tier
+│   ├── Play 2:  router_nodes     [openwrt]     openwrt_vm, deploy_stamp
+│   ├── Play 3:  openwrt          [openwrt]     openwrt_configure
+│   ├── Play 4:  vpn_nodes        [wireguard]   wireguard_lxc, deploy_stamp
+│   ├── Play 5:  wireguard        [wireguard]   wireguard_configure
+│   ├── Play 6:  dns_nodes        [pihole]      pihole_lxc, deploy_stamp
+│   └── Play 7:  pihole           [pihole]      pihole_configure
+│
+├── Phase: Observability Tier
+│   ├── Play 8:  monitoring_nodes [monitoring]  rsyslog_lxc, netdata_lxc, deploy_stamp
+│   ├── Play 9:  rsyslog          [monitoring]  rsyslog_configure
+│   └── Play 10: netdata          [monitoring]  netdata_configure
+│
+├── Phase: WiFi Management
+│   ├── Play 11: wifi_nodes       [wifi]        meshwifi_lxc, deploy_stamp
+│   └── Play 12: meshwifi         [wifi]        meshwifi_configure
+│
+├── Phase: Services
+│   ├── Play 13: service_nodes    [services]    homeassistant_lxc, deploy_stamp
+│   └── Play 14: homeassistant    [services]    homeassistant_configure
+│
+├── Phase: Media
+│   ├── Play 15: media_nodes      [media]       jellyfin_lxc, kodi_lxc, moonlight_lxc, deploy_stamp
+│   ├── Play 16: jellyfin         [media]       jellyfin_configure
+│   ├── Play 17: kodi             [media]       kodi_configure
+│   └── Play 18: moonlight        [media]       moonlight_configure
+│
+├── Phase: Desktop
+│   ├── Play 19: desktop_nodes    [desktop]     desktop_vm, kiosk_lxc, deploy_stamp
+│   ├── Play 20: desktop          [desktop]     desktop_configure
+│   └── Play 21: kiosk            [desktop]     kiosk_configure
+│
+├── Phase: Gaming
+│   ├── Play 22: gaming_nodes     [gaming]      gaming_vm, deploy_stamp
+│   └── Play 23: gaming           [gaming]      gaming_configure
+│
+└── Phase: Cleanup
+    └── Play 24: proxmox          [cleanup]     Remove bootstrap IPs, set startup order
+```
+
+Provision plays for services in the same tier targeting the same flavor group
+are combined (e.g., `rsyslog_lxc` + `netdata_lxc` both on `monitoring_nodes`).
+Configure plays stay separate because they target different dynamic groups.
+
+---
+
+## Two-Role Pattern
+
+Every service has exactly two roles:
+
+```
+Service Role Pattern
+├── <type>_vm (for VMs) or <type>_lxc (for containers)
+│   ├── Targets: flavor group (e.g., router_nodes, media_nodes)
+│   ├── VM roles: qm create, disk import, NIC attach, start, add_host
+│   ├── LXC roles: include proxmox_lxc helper, then add_host
+│   └── Always paired with deploy_stamp
+│
+└── <type>_configure
+    ├── Targets: dynamic group (populated by add_host during provisioning)
+    ├── LXC: configured via pct exec (no SSH, no bootstrap IP needed)
+    └── VM: configured via SSH through ProxyJump
+```
+
+### Shared Infrastructure Roles
+
+```
+Shared Roles (run once per host, before any service roles)
+├── proxmox_backup
+│   ├── Runs on: proxmox (all hosts)
+│   ├── Purpose: Tar host config + vzdump all VMs
+│   └── Exports: backup manifest
+│
+├── proxmox_bridges
+│   ├── Runs on: proxmox
+│   ├── Purpose: Discover physical NICs, create virtual bridges
+│   └── Exports: proxmox_all_bridges
+│
+├── proxmox_pci_passthrough
+│   ├── Runs on: proxmox
+│   ├── Purpose: vfio-pci binding for exclusive devices (WiFi, discrete GPU)
+│   └── Exports: wifi_pci_devices, gpu_pci_devices
+│
+├── proxmox_igpu
+│   ├── Runs on: proxmox
+│   ├── Purpose: Detect Intel iGPU, verify Quick Sync, export device info
+│   └── Exports: igpu_render_device, igpu_render_gid, igpu_available
+│
+├── proxmox_lxc (helper -- included by other roles, not a standalone play)
+│   ├── Purpose: Template download, pct create, networking, start, add_host
+│   ├── Parameterized: ct_id, ct_memory, ct_cores, ct_disk, ct_bridge, etc.
+│   └── Consumed by: every <type>_lxc role via include_role
+│
+└── deploy_stamp
+    ├── Runs on: proxmox
+    ├── Purpose: Write project version + play history to /etc/ansible/facts.d/
+    └── Exports: ansible_local.vm_builds
+```
+
+### Service Roles
+
+```
+Service Roles
+├── Network Tier
+│   ├── openwrt_vm / openwrt_configure           VM   VMID 100   router_nodes   → openwrt
+│   ├── wireguard_lxc / wireguard_configure       LXC  VMID 101   vpn_nodes      → wireguard
+│   ├── pihole_lxc / pihole_configure             LXC  VMID 102   dns_nodes      → pihole
+│   └── meshwifi_lxc / meshwifi_configure         LXC  VMID 103   wifi_nodes     → meshwifi
+│
+├── Observability Tier
+│   ├── netdata_lxc / netdata_configure           LXC  VMID 500   monitoring_nodes → netdata
+│   └── rsyslog_lxc / rsyslog_configure           LXC  VMID 501   monitoring_nodes → rsyslog
+│
+├── Service Tier
+│   └── homeassistant_lxc / homeassistant_configure  LXC  VMID 200  service_nodes → homeassistant
+│
+├── Media Tier
+│   ├── jellyfin_lxc / jellyfin_configure         LXC  VMID 300   media_nodes    → jellyfin
+│   ├── kodi_lxc / kodi_configure                 LXC  VMID 301   media_nodes    → kodi
+│   └── moonlight_lxc / moonlight_configure       LXC  VMID 302   media_nodes    → moonlight
+│
+├── Desktop Tier
+│   ├── desktop_vm / desktop_configure            VM   VMID 400   desktop_nodes  → desktop
+│   └── kiosk_lxc / kiosk_configure               LXC  VMID 401   desktop_nodes  → kiosk
+│
+└── Gaming
+    └── gaming_vm / gaming_configure              VM   VMID 600   gaming_nodes   → gaming
+```
+
+---
+
+## VMID Allocation
+
+```
+VMID Ranges
+├── 100-199  Network
+│   ├── 100  OpenWrt Router
+│   ├── 101  WireGuard VPN
+│   ├── 102  Pi-hole
+│   └── 103  Mesh WiFi Controller
+│
+├── 200-299  Core Services
+│   └── 200  Home Assistant
+│
+├── 300-399  Media
+│   ├── 300  Jellyfin
+│   ├── 301  Kodi
+│   └── 302  Moonlight Client
+│
+├── 400-499  Desktop / UI
+│   ├── 400  Debian Desktop
+│   └── 401  Custom UX Kiosk
+│
+├── 500-599  Observability
+│   ├── 500  Netdata
+│   └── 501  rsyslog
+│
+└── 600-699  Gaming
+    └── 600  Gaming VM
+```
 
 All VMIDs are defined in `inventory/group_vars/all.yml`.
 
-### Variable isolation
+---
 
-- Role defaults are prefixed with the VM type: `openwrt_vm_id`, `homeassistant_vm_id`.
-- Shared params (storage pool, etc.) live in `group_vars/all.yml`.
-- Cross-role data passes through `set_fact` or `add_host`, never direct default references.
+## Variable Scoping
 
-### Bridge allocation
+```
+Variable Locations
+├── Secrets
+│   ├── Source: .env file (gitignored)
+│   ├── Access: lookup('env', 'VAR_NAME') in group_vars/proxmox.yml
+│   └── Contains: API tokens, passphrases, service passwords
+│
+├── Shared Parameters
+│   ├── Source: inventory/group_vars/all.yml
+│   └── Contains: VMIDs, image paths, LXC template name, storage pool
+│
+├── Proxmox Connection
+│   ├── Source: inventory/group_vars/proxmox.yml
+│   └── Contains: API auth, SSH settings, connection parameters
+│
+├── Per-Host Overrides
+│   ├── Source: inventory/host_vars/<hostname>.yml
+│   └── Contains: host IP, reboot policy, hardware-specific settings
+│
+├── Role Defaults
+│   ├── Source: roles/<role>/defaults/main.yml
+│   ├── Contains: role-specific parameters (VMID, memory, cores, disk)
+│   └── Rule: NEVER cross-reference another role's defaults
+│
+└── Cross-Role Data
+    ├── Method: set_fact (cacheable) or add_host
+    └── Contains: runtime facts, dynamic group membership
+```
 
-OpenWrt is the router — it consumes ALL bridges. Service VMs behind the router need only one bridge (the LAN bridge, typically `proxmox_all_bridges[1]`).
+---
 
 ## Project Structure
 
 ```
 vm_builds/
-├── ansible.cfg              # Ansible configuration
-├── requirements.yml         # Galaxy collections
-├── setup.sh                 # One-time environment bootstrap
-├── run.sh                   # Run playbook with .env
-├── cleanup.sh               # Restore / full-restore / clean (tar + vzdump)
-├── test.env                 # Test environment variables (committed)
-├── .env                     # Production secrets (gitignored)
+├── ansible.cfg
+├── build.py                      Python entry point (env validation, playbook runner)
+├── setup.sh                      Bootstrap .venv + pip + ansible-galaxy
+├── run.sh                        Source .env, run ansible-playbook
+├── cleanup.sh                    Restore / full-restore / clean subcommands
+├── test.env                      Test machine config (committed)
+├── .env                          Production secrets (gitignored)
 │
 ├── inventory/
-│   ├── hosts.yml            # Host inventory + empty dynamic groups
+│   ├── hosts.yml                 Hosts + flavor groups + empty dynamic groups
 │   ├── group_vars/
-│   │   ├── all.yml          # VM parameters (IDs, image paths, storage)
-│   │   └── proxmox.yml      # API auth, SSH settings
+│   │   ├── all.yml               VMIDs, image paths, LXC templates, storage
+│   │   └── proxmox.yml           API auth, SSH settings
 │   └── host_vars/
-│       └── home.yml         # Per-host overrides (IP, reboot policy)
+│       └── home.yml              Per-host overrides
 │
 ├── playbooks/
-│   ├── site.yml             # Main orchestration playbook
-│   └── cleanup.yml          # Tag-driven restore playbook
+│   ├── site.yml                  Main orchestration playbook
+│   └── cleanup.yml               Tag-driven restore playbook
 │
 ├── roles/
-│   ├── proxmox_backup/      # Shared: host config + VM backup (tar + vzdump)
-│   ├── proxmox_bridges/     # Shared: NIC discovery and bridge creation
-│   ├── proxmox_pci_passthrough/  # Shared: WiFi IOMMU/vfio setup
-│   ├── openwrt_vm/          # OpenWrt: VM lifecycle management
-│   └── openwrt_configure/   # OpenWrt: UCI configuration
+│   ├── Shared Infrastructure
+│   │   ├── proxmox_backup/
+│   │   ├── proxmox_bridges/
+│   │   ├── proxmox_pci_passthrough/
+│   │   ├── proxmox_igpu/
+│   │   ├── proxmox_lxc/          Shared LXC provisioning helper
+│   │   └── deploy_stamp/
+│   │
+│   ├── Network Tier
+│   │   ├── openwrt_vm/
+│   │   ├── openwrt_configure/
+│   │   ├── wireguard_lxc/
+│   │   ├── wireguard_configure/
+│   │   ├── pihole_lxc/
+│   │   ├── pihole_configure/
+│   │   ├── meshwifi_lxc/
+│   │   └── meshwifi_configure/
+│   │
+│   ├── Observability Tier
+│   │   ├── rsyslog_lxc/
+│   │   ├── rsyslog_configure/
+│   │   ├── netdata_lxc/
+│   │   └── netdata_configure/
+│   │
+│   ├── Service Tier
+│   │   ├── homeassistant_lxc/
+│   │   └── homeassistant_configure/
+│   │
+│   ├── Media Tier
+│   │   ├── jellyfin_lxc/
+│   │   ├── jellyfin_configure/
+│   │   ├── kodi_lxc/
+│   │   ├── kodi_configure/
+│   │   ├── moonlight_lxc/
+│   │   └── moonlight_configure/
+│   │
+│   ├── Desktop Tier
+│   │   ├── desktop_vm/
+│   │   ├── desktop_configure/
+│   │   ├── kiosk_lxc/
+│   │   └── kiosk_configure/
+│   │
+│   └── Gaming
+│       ├── gaming_vm/
+│       └── gaming_configure/
 │
-├── molecule/
-│   └── default/             # Integration test scenario
-│
-├── images/                  # VM disk images (gitignored)
+├── molecule/default/              Integration tests
+├── images/                        VM disk images (gitignored)
 │
 ├── docs/
-│   └── architecture/        # Design documentation
+│   ├── architecture/              Design documentation
+│   └── projects/                  Per-service project plans
 │
 └── .cursor/
-    ├── rules/               # Always-on coding conventions (for LLM sessions)
-    └── skills/              # On-demand knowledge (for LLM sessions)
+    ├── rules/                     Always-on coding conventions
+    └── skills/                    On-demand knowledge for LLM sessions
 ```
