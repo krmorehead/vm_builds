@@ -19,3 +19,13 @@ Trigger: any of these happened during the session:
 - A variable was undefined at runtime
 - A test failed for a non-obvious reason
 - Something that worked locally broke on the real host
+
+# Mandatory testing
+
+ALWAYS run the full test suite after making code changes. NEVER consider a
+task complete until tests pass.
+
+1. **Lint first.** Run `ansible-lint && yamllint .` to catch syntax/style issues before deploying to hardware.
+2. **Run molecule test.** After every code change to roles, playbooks, or molecule config, run `molecule test` against the test machine. See the `ansible-testing` skill for details.
+3. **Update verify.yml.** When adding or changing behavior, ALWAYS add or update corresponding assertions in `molecule/default/verify.yml`.
+4. **No untested merges.** Do not commit or present changes as complete until `molecule test` passes with exit code 0.

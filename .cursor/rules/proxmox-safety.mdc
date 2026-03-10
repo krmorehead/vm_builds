@@ -16,9 +16,20 @@ alwaysApply: true
 - To reload after config changes: use `ifreload -a` or restart specific interfaces.
 - To tear down ansible-created bridges: iterate and skip bridges defined in `/etc/network/interfaces` (the management bridge).
 
+## WAN bridge detection and ordering
+- NEVER hardcode a specific bridge (e.g., vmbr0) as WAN. The WAN bridge is detected at runtime by `proxmox_bridges` via the host's default route device.
+- Previous bug: hardcoded `vmbr0 = WAN` made the Proxmox GUI unreachable when the modem was on vmbr0, because leaf nodes on the LAN bridge couldn't reach the management IP on the WAN bridge.
+- `openwrt_vm` orders bridges so the WAN bridge is always `net0`/`eth0`. All other bridges become LAN.
+- Override with `openwrt_wan_bridge` in `host_vars` if auto-detection picks the wrong bridge.
+
+## Proxmox LAN management IP
+- After OpenWrt configures the LAN subnet, `openwrt_configure` adds a static IP on the LAN bridge for Proxmox (default: `.2` in the LAN subnet).
+- This ensures the Proxmox GUI is reachable from leaf nodes regardless of which physical port connects upstream.
+- The config is persisted to `/etc/network/interfaces.d/ansible-proxmox-lan.conf` so it survives reboots.
+
 ## Bootstrap bridge selection
-- OpenWrt's default LAN is on eth0, which maps to the FIRST bridge (typically vmbr0).
-- The bootstrap IP can safely coexist on vmbr0 if it's on a different subnet than the management IP.
+- OpenWrt's default LAN is on eth0, which maps to the WAN bridge (auto-detected).
+- The bootstrap IP can safely coexist on the WAN bridge if it's on a different subnet than the management IP.
 - Previous bug: we excluded vmbr0 and tried to connect through vmbr1 (which has no IP in OpenWrt).
 
 ## PCI passthrough prerequisites
@@ -32,9 +43,9 @@ alwaysApply: true
 - Without this, subsequent runs cannot detect WiFi hardware.
 
 ## Bootstrap bridge IP migration
-- Initial bootstrap adds an IP to vmbr0 (WAN bridge) to reach OpenWrt at 192.168.1.1.
-- After WAN is configured and network restarts, OpenWrt's LAN moves to vmbr1+ bridges.
-- MUST remove the bootstrap IP from vmbr0 and add it to the actual LAN bridge (vmbr1) or SSH will route to the wrong device.
+- Initial bootstrap adds an IP to the WAN bridge (auto-detected) to reach OpenWrt at 192.168.1.1.
+- After WAN is configured and network restarts, OpenWrt's LAN moves to the non-WAN bridges.
+- MUST remove the bootstrap IP from the WAN bridge and add it to the actual LAN bridge or SSH will route to the wrong device.
 - The upstream router may also have 192.168.1.1, causing routing ambiguity if the IP exists on multiple bridges.
 
 ## SSH keepalives through ProxyJump

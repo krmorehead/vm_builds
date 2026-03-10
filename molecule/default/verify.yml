@@ -4,15 +4,10 @@
   gather_facts: false
   vars:
     openwrt_vm_id: 100
-    openwrt_lan_ip: "10.10.10.1"
-    verify_ip: "10.10.10.2"
-    verify_bridge: vmbr1
-    openwrt_ssh: >-
-      sshpass -p '' ssh
-      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-      -o PubkeyAuthentication=no -o ConnectTimeout=10
-      root@{{ openwrt_lan_ip }}
+    proxmox_lan_mgmt_ip_offset: 2
   tasks:
+    # ── Bridge discovery ──────────────────────────────────────────
+
     - name: List physical-NIC-backed bridges
       ansible.builtin.shell:
         cmd: |
@@ -37,6 +32,44 @@
           Expected at least 2 physical-NIC bridges, found
           {{ bridge_list.stdout_lines | length }}
 
+    # ── WAN bridge detection ──────────────────────────────────────
+
+    - name: Detect WAN bridge from default route
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ip -o route show default | awk '{print $5}' | head -1
+        executable: /bin/bash
+      register: wan_bridge_raw
+      changed_when: false
+
+    - name: Set WAN and LAN bridge facts
+      ansible.builtin.set_fact:
+        wan_bridge: "{{ wan_bridge_raw.stdout | trim }}"
+        lan_bridges: >-
+          {{ bridge_list.stdout_lines
+             | difference([wan_bridge_raw.stdout | trim])
+             | sort }}
+
+    - name: Assert WAN bridge is a known physical bridge
+      ansible.builtin.assert:
+        that: wan_bridge in bridge_list.stdout_lines
+        fail_msg: >-
+          WAN bridge {{ wan_bridge }} not found in physical bridges
+          {{ bridge_list.stdout_lines | join(', ') }}
+
+    - name: Set primary LAN bridge
+      ansible.builtin.set_fact:
+        lan_bridge: "{{ lan_bridges | first }}"
+
+    - name: Report detected topology
+      ansible.builtin.debug:
+        msg: >-
+          WAN={{ wan_bridge }}, LAN={{ lan_bridges | join(', ') }},
+          primary LAN={{ lan_bridge }}
+
+    # ── VM state ──────────────────────────────────────────────────
+
     - name: Check OpenWrt VM is running
       ansible.builtin.command:
         cmd: qm status {{ openwrt_vm_id }}
@@ -47,6 +80,73 @@
       ansible.builtin.assert:
         that: "'running' in vm_running.stdout"
         fail_msg: "VM {{ openwrt_vm_id }} is not running: {{ vm_running.stdout }}"
+
+    # ── VM NIC ordering ───────────────────────────────────────────
+
+    - name: Get VM net0 bridge assignment
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          qm config {{ openwrt_vm_id }} | grep '^net0:' | grep -oP 'bridge=\K[^,]+'
+        executable: /bin/bash
+      register: vm_net0_bridge
+      changed_when: false
+
+    - name: Assert net0 is the WAN bridge
+      ansible.builtin.assert:
+        that: (vm_net0_bridge.stdout | trim) == wan_bridge
+        fail_msg: >-
+          VM net0 is on {{ vm_net0_bridge.stdout | trim }},
+          expected WAN bridge {{ wan_bridge }}
+
+    # ── Proxmox LAN management IP ────────────────────────────────
+
+    - name: Check Proxmox LAN management IP on LAN bridge
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ip -o -4 addr show dev {{ lan_bridge }} \
+            | awk '{print $4}' | cut -d/ -f1
+        executable: /bin/bash
+      register: lan_bridge_ips
+      changed_when: false
+
+    - name: Assert Proxmox has at least one IP on LAN bridge
+      ansible.builtin.assert:
+        that: lan_bridge_ips.stdout_lines | length > 0
+        fail_msg: >-
+          No IPv4 address found on LAN bridge {{ lan_bridge }}.
+          Proxmox LAN management IP was not configured.
+
+    - name: Set Proxmox LAN IP fact
+      ansible.builtin.set_fact:
+        proxmox_lan_ip: "{{ lan_bridge_ips.stdout_lines | first }}"
+
+    - name: Compute expected OpenWrt LAN IP from Proxmox LAN IP
+      ansible.builtin.set_fact:
+        openwrt_lan_ip: >-
+          {{ proxmox_lan_ip.split('.')[0:3] | join('.') }}.1
+
+    - name: Check persistent LAN management config exists
+      ansible.builtin.stat:
+        path: /etc/network/interfaces.d/ansible-proxmox-lan.conf
+      register: lan_mgmt_conf
+
+    - name: Assert persistent LAN management config exists
+      ansible.builtin.assert:
+        that: lan_mgmt_conf.stat.exists
+        fail_msg: >-
+          /etc/network/interfaces.d/ansible-proxmox-lan.conf not found.
+          Proxmox LAN IP is not persistent across reboots.
+
+    - name: Report Proxmox LAN management
+      ansible.builtin.debug:
+        msg: >-
+          Proxmox LAN IP={{ proxmox_lan_ip }} on {{ lan_bridge }},
+          persistent config={{ lan_mgmt_conf.stat.exists }},
+          OpenWrt LAN IP={{ openwrt_lan_ip }}
+
+    # ── IOMMU ─────────────────────────────────────────────────────
 
     - name: Check IOMMU status
       ansible.builtin.shell:
@@ -63,12 +163,15 @@
           IOMMU {{ 'active' if (iommu_verify.stdout | int) > 0
           else 'not active (no WiFi passthrough)' }}
 
-    - name: Add temporary IP to reach OpenWrt LAN
-      ansible.builtin.shell:
-        cmd: >-
-          ip addr show dev {{ verify_bridge }} | grep -q '{{ verify_ip }}'
-          || ip addr add {{ verify_ip }}/24 dev {{ verify_bridge }}
-      changed_when: false
+    # ── OpenWrt connectivity and configuration ────────────────────
+
+    - name: Set OpenWrt SSH command
+      ansible.builtin.set_fact:
+        openwrt_ssh: >-
+          sshpass -p '' ssh
+          -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+          -o PubkeyAuthentication=no -o ConnectTimeout=10
+          root@{{ openwrt_lan_ip }}
 
     - name: Wait for OpenWrt SSH on LAN
       ansible.builtin.wait_for:
@@ -187,19 +290,15 @@
           plays={{ stamp.plays.keys() | list | join(', ') }},
           last_run={{ stamp.last_run }}
 
-    # ── Cleanup ──────────────────────────────────────────────────
-
-    - name: Remove temporary verify IP
-      ansible.builtin.shell:
-        cmd: >-
-          ip addr del {{ verify_ip }}/24 dev {{ verify_bridge }} 2>/dev/null
-          || true
-      changed_when: false
+    # ── Final report ──────────────────────────────────────────────
 
     - name: Report verification results
       ansible.builtin.debug:
         msg: >-
           Verification passed:
+          WAN bridge={{ wan_bridge }}, LAN bridge={{ lan_bridge }},
+          VM net0={{ vm_net0_bridge.stdout | trim }},
+          Proxmox LAN IP={{ proxmox_lan_ip }},
           WAN={{ wan_info.stdout | trim }},
           LAN={{ lan_ip.stdout | trim }},
           WiFi radios={{ radio_count.stdout | trim }},

@@ -18,6 +18,23 @@ openwrt_dhcp_start: 100
 openwrt_dhcp_limit: 150
 openwrt_dhcp_leasetime: 12h
 
+# Proxmox LAN management: host-offset within the LAN subnet so the
+# Proxmox GUI is reachable from LAN clients (e.g., .2 → 10.10.10.2).
+# Must be below openwrt_dhcp_start to avoid DHCP conflicts.
+proxmox_lan_mgmt_ip_offset: 2
+
+# Netmask-to-CIDR lookup (avoids ansible.utils / netaddr dependency)
+_netmask_cidr_map:
+  "255.0.0.0": "8"
+  "255.255.0.0": "16"
+  "255.255.255.0": "24"
+  "255.255.255.128": "25"
+  "255.255.255.192": "26"
+  "255.255.255.224": "27"
+  "255.255.255.240": "28"
+  "255.255.255.248": "29"
+  "255.255.255.252": "30"
+
 openwrt_wifi_driver_packages:
   - kmod-iwlwifi
   - iwlwifi-firmware-iwl8265

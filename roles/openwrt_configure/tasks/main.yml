@@ -277,6 +277,47 @@
   failed_when: false
   changed_when: true
 
+# ── Proxmox LAN management IP ──────────────────────────────────
+# Give the Proxmox host a static IP on the LAN bridge so the GUI
+# is reachable from leaf nodes regardless of WAN topology.
+
+- name: Compute Proxmox LAN management IP
+  ansible.builtin.set_fact:
+    _proxmox_lan_ip: >-
+      {{ openwrt_lan_ip.split('.')[0:3] | join('.') }}.{{ proxmox_lan_mgmt_ip_offset }}
+    _proxmox_lan_cidr: "{{ _netmask_cidr_map[openwrt_lan_netmask] | default('24') }}"
+
+- name: Check if Proxmox LAN IP is already present
+  ansible.builtin.command:
+    cmd: ip addr show dev {{ _lan_bridge }}
+  register: _lan_bridge_addr
+  delegate_to: "{{ _proxmox_host }}"
+  changed_when: false
+
+- name: Add Proxmox management IP to LAN bridge
+  ansible.builtin.command:
+    cmd: >-
+      ip addr add {{ _proxmox_lan_ip }}/{{ _proxmox_lan_cidr }}
+      dev {{ _lan_bridge }}
+  delegate_to: "{{ _proxmox_host }}"
+  when: _proxmox_lan_ip not in _lan_bridge_addr.stdout
+
+- name: Ensure interfaces.d is sourced on Proxmox host
+  ansible.builtin.lineinfile:
+    path: /etc/network/interfaces
+    line: "source /etc/network/interfaces.d/*"
+    state: present
+  delegate_to: "{{ _proxmox_host }}"
+
+- name: Deploy persistent LAN management config on Proxmox host
+  ansible.builtin.template:
+    src: proxmox-lan-mgmt.conf.j2
+    dest: /etc/network/interfaces.d/ansible-proxmox-lan.conf
+    owner: root
+    group: root
+    mode: "0644"
+  delegate_to: "{{ _proxmox_host }}"
+
 # ── Final report ────────────────────────────────────────────────
 
 - name: Report final configuration
@@ -285,5 +326,6 @@
       OpenWrt LAN configured at {{ openwrt_lan_ip }}/{{ openwrt_lan_netmask }}
       (WAN on {{ wan_device }}, prefix {{ _wan_prefix | default('unknown') }}).
       WiFi radios={{ wifi_radios | default([]) | length }}.
+      Proxmox GUI reachable at {{ _proxmox_lan_ip }} from LAN.
       Connect to {{ openwrt_lan_ip }} to reach the router.
   ignore_unreachable: true

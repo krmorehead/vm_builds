@@ -73,6 +73,26 @@
       scsi0 {{ openwrt_vm_disk_size }}
   when: not vm_exists | bool
 
+# ── Bridge ordering (WAN first) ─────────────────────────────────
+
+- name: Resolve WAN bridge
+  ansible.builtin.set_fact:
+    _wan_bridge: >-
+      {{ openwrt_wan_bridge
+         | default(proxmox_wan_bridge | default(''), true)
+         | default(proxmox_all_bridges | first, true) }}
+
+- name: Build ordered bridge list (WAN first, then LAN)
+  ansible.builtin.set_fact:
+    _ordered_bridges: >-
+      {{ [_wan_bridge] + (proxmox_all_bridges | difference([_wan_bridge]) | sort) }}
+
+- name: Report bridge ordering
+  ansible.builtin.debug:
+    msg: >-
+      WAN bridge={{ _wan_bridge }} (net0/eth0),
+      ordered={{ _ordered_bridges | join(', ') }}
+
 # ── NIC attachment ───────────────────────────────────────────────
 
 - name: Attach NIC to each bridge
@@ -80,7 +100,7 @@
     cmd: >-
       qm set {{ openwrt_vm_id }}
       --net{{ idx }} virtio,bridge={{ bridge }}
-  loop: "{{ proxmox_all_bridges }}"
+  loop: "{{ _ordered_bridges }}"
   loop_control:
     index_var: idx
     loop_var: bridge
@@ -125,7 +145,7 @@
   ansible.builtin.set_fact:
     _bootstrap_bridge: >-
       {{ openwrt_bootstrap_bridge
-         | default(proxmox_all_bridges | first, true) }}
+         | default(_wan_bridge, true) }}
     cacheable: true
 
 - name: Check if bootstrap IP is already present
@@ -179,6 +199,8 @@
     openwrt_wan_device: eth0
     upstream_wan_prefix: "{{ _upstream_prefix }}"
     _proxmox_host: "{{ inventory_hostname }}"
-    _lan_bridge: "{{ proxmox_all_bridges[1] | default(proxmox_all_bridges[0]) }}"
+    _wan_bridge: "{{ _wan_bridge }}"
+    _lan_bridge: "{{ _ordered_bridges[1] | default(_ordered_bridges[0]) }}"
+    _lan_bridges: "{{ _ordered_bridges[1:] }}"
     _bootstrap_ip: "{{ openwrt_bootstrap_ip }}"
     _bootstrap_cidr: "{{ openwrt_bootstrap_cidr }}"

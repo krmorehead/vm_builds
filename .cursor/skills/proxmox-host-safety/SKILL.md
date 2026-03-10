@@ -38,7 +38,7 @@ These commands will sever SSH and make the host unreachable:
 ### 2. Bridge teardown safety
 
 When removing bridges during cleanup:
-- Get the management bridge (usually `vmbr0`, check `/etc/network/interfaces`).
+- Get the management bridge from the host's default route device (do NOT assume `vmbr0`).
 - NEVER tear down the management bridge.
 - Iterate over stale bridges and skip the management one:
 
@@ -46,13 +46,20 @@ When removing bridges during cleanup:
 - name: Tear down stale bridges (skip management)
   ansible.builtin.shell:
     cmd: |
+      mgmt_br=$(ip -o route show default | awk '{print $5}' | head -1)
       for br in $(ip -br link show type bridge | awk '{print $1}'); do
-        case "$br" in vmbr0) continue ;; esac
+        [ "$br" = "$mgmt_br" ] && continue
         ip link set "$br" down
         ip link delete "$br"
       done
   changed_when: true
 ```
+
+### 2b. WAN bridge ordering
+
+NEVER hardcode bridge-to-role mappings (e.g., `vmbr0 = WAN`). The WAN bridge is detected at runtime via the host's default route. `openwrt_vm` orders bridges so the WAN bridge maps to `net0`/`eth0`; all others become LAN. Override with `openwrt_wan_bridge` in `host_vars` if needed.
+
+Previous bug: hardcoded `vmbr0 = WAN` made Proxmox GUI unreachable when the modem was plugged into the NIC behind `vmbr0`, because leaf nodes on the LAN bridge had no route to the management IP on the WAN bridge.
 
 ### 3. LVM operations on root volumes
 

@@ -5,6 +5,13 @@ description: Run and validate Ansible project tests using Molecule, ansible-lint
 
 # Ansible Testing
 
+## MANDATORY: Test after every code change
+
+ALWAYS run `molecule test` after modifying roles, playbooks, or molecule
+config. NEVER consider a task complete until the full test suite passes.
+When adding or changing behavior, ALWAYS update `molecule/default/verify.yml`
+with corresponding assertions before running the test.
+
 ## Quick start
 
 ```bash

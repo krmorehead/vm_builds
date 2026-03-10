@@ -121,3 +121,35 @@
       Only {{ proxmox_all_bridges | length }} bridge(s) found.
       An OpenWrt router needs at least 2 physical NICs (WAN + LAN).
   when: proxmox_all_bridges | length < 2
+
+# ── WAN bridge detection ────────────────────────────────────────
+# The bridge carrying the default route connects to the upstream
+# network.  This detection runs before any VM exists, so the host's
+# default gateway reliably identifies the WAN-side NIC/bridge.
+
+- name: Detect bridge with default route (WAN candidate)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      ip -o route show default | awk '{print $5}' | head -1
+    executable: /bin/bash
+  register: _default_route_dev
+  changed_when: false
+
+- name: Export WAN bridge fact
+  ansible.builtin.set_fact:
+    proxmox_wan_bridge: "{{ _default_route_dev.stdout | trim }}"
+    cacheable: true
+  when: (_default_route_dev.stdout | default('') | trim) in proxmox_all_bridges
+
+- name: Fallback WAN bridge to first bridge when detection fails
+  ansible.builtin.set_fact:
+    proxmox_wan_bridge: "{{ proxmox_all_bridges | first }}"
+    cacheable: true
+  when: proxmox_wan_bridge is not defined
+
+- name: Report detected WAN bridge
+  ansible.builtin.debug:
+    msg: >-
+      WAN bridge={{ proxmox_wan_bridge }},
+      all bridges={{ proxmox_all_bridges | join(', ') }}

@@ -1,0 +1,7 @@
+# Ansible-managed: Proxmox LAN management IP
+# Allows access to the Proxmox GUI from the OpenWrt LAN subnet.
+# Do not edit manually; re-run the playbook to regenerate.
+
+iface {{ _lan_bridge }} inet static
+    address {{ _proxmox_lan_ip }}
+    netmask {{ openwrt_lan_netmask }}

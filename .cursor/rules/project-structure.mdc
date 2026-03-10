@@ -91,3 +91,10 @@ Define all VMIDs in `group_vars/all.yml`.
 - VM images stored in `images/` directory (gitignored)
 - Each VM type defines its image path in role defaults (e.g., `openwrt_image_path: images/openwrt.img`)
 - Images are uploaded to Proxmox `/tmp/`, imported via `qm importdisk`, then deleted
+
+## Testing requirements
+- ALWAYS run `molecule test` after changing roles, playbooks, or molecule config
+- ALWAYS update `molecule/default/verify.yml` with assertions for new/changed behavior
+- NEVER consider a task complete until `molecule test` passes with exit code 0
+- Run `ansible-lint && yamllint .` before deploying to hardware
+- See `.cursor/skills/ansible-testing/SKILL.md` for full details

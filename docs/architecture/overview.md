@@ -41,10 +41,10 @@ ports. All containers and VMs run directly on the Proxmox host as siblings.
 ```
 Proxmox Host (Debian)
 ├── Network Tier
-│   ├── OpenWrt Router         VM   VMID 100   cores=2  RAM=512MB     auto-start priority 1
-│   ├── WireGuard VPN Client   LXC  VMID 101   cores=1  RAM=128MB     auto-start priority 2
-│   ├── Pi-hole                LXC  VMID 102   cores=1  RAM=256MB     auto-start priority 3
-│   └── Mesh WiFi Controller   LXC  VMID 103   cores=1  RAM=512MB     auto-start priority 4
+│   └── OpenWrt Router         VM   VMID 100   cores=2  RAM=512MB     auto-start priority 1
+│       ├── WireGuard VPN Client   LXC  VMID 101   cores=1  RAM=128MB     auto-start priority 2
+│       ├── Pi-hole                LXC  VMID 102   cores=1  RAM=256MB     auto-start priority 3
+│       └── Mesh WiFi Controller   LXC  VMID 103   cores=1  RAM=512MB     auto-start priority 4
 │
 ├── Observability Tier
 │   ├── Netdata Agent          LXC  VMID 500   cores=1  RAM=128MB     auto-start priority 3
@@ -247,11 +247,12 @@ Internet
 └── Upstream ISP Router
     └── WAN (DHCP)
         └── OpenWrt VM (VMID 100)
-            ├── eth0 ← vmbr0 (WAN bridge)
-            ├── eth1..N ← vmbr1+ (LAN bridges)
+            ├── eth0 ← auto-detected WAN bridge (bridge with default route)
+            ├── eth1..N ← remaining bridges (LAN)
             ├── wlan0 ← PCIe passthrough (802.11s mesh)
             │
             └── LAN Network (all other services connect here)
+                ├── Proxmox Host (LAN management IP on LAN bridge)
                 ├── WireGuard VPN (VMID 101)
                 │   └── wg0 tunnel → home server
                 │       ├── rsyslog forwards logs through tunnel
@@ -270,8 +271,35 @@ Internet
                 └── rsyslog (VMID 501)
 ```
 
+### WAN Bridge Detection
+
+The WAN bridge is detected automatically at runtime by `proxmox_bridges`:
+the bridge carrying the Proxmox host's default route is the one connected
+to the upstream network. The `openwrt_vm` role then orders NICs so the
+WAN bridge always maps to `net0`/`eth0`, with remaining bridges becoming
+LAN ports (`net1+`/`eth1+`).
+
+Override auto-detection by setting `openwrt_wan_bridge` in `host_vars`
+(e.g., `openwrt_wan_bridge: vmbr1`).
+
+### Proxmox LAN Management IP
+
+After OpenWrt configures the LAN subnet, the `openwrt_configure` role adds
+a static IP to the LAN bridge on the Proxmox host (default: `.2` in the
+LAN subnet, e.g., `10.10.10.2`). This ensures the Proxmox GUI is reachable
+from leaf nodes regardless of which physical port connects upstream.
+
+The IP is persisted to `/etc/network/interfaces.d/ansible-proxmox-lan.conf`
+so it survives reboots.
+
+### Bridge Mapping (dynamic)
+
+| Bridge | Role | OpenWrt interface |
+|--------|------|-------------------|
+| `proxmox_wan_bridge` (auto-detected) | WAN | `eth0` |
+| All other bridges | LAN | `eth1..N` |
+
 All LXC containers and VMs (except OpenWrt) attach to a LAN bridge.
-OpenWrt's WAN is on the first bridge (vmbr0); remaining bridges are LAN ports.
 
 ---
 
