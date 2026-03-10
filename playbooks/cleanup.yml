@@ -82,6 +82,19 @@
       tags: [full-restore, never]
 
     # ── Restore host config (all modes) ───────────────────────────
+    - name: Unbind devices from vfio-pci
+      ansible.builtin.shell:
+        cmd: |
+          for dev in /sys/bus/pci/drivers/vfio-pci/0000:*/; do
+            [ -d "$dev" ] || continue
+            addr=$(basename "$dev")
+            echo "$addr" > /sys/bus/pci/drivers/vfio-pci/unbind 2>/dev/null || true
+          done
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+      tags: [restore, full-restore, clean]
+
     - name: Remove ansible-managed config files
       ansible.builtin.file:
         path: "{{ item }}"
@@ -115,6 +128,24 @@
       ansible.builtin.command:
         cmd: update-initramfs -u -k all
       changed_when: true
+      tags: [restore, full-restore, clean]
+
+    - name: Reload WiFi kernel modules
+      ansible.builtin.shell:
+        cmd: |
+          modprobe -r iwlmvm iwlwifi 2>/dev/null || true
+          modprobe iwlwifi 2>/dev/null || true
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+      tags: [restore, full-restore, clean]
+
+    - name: Rescan PCI bus to restore original drivers
+      ansible.builtin.shell:
+        cmd: echo 1 > /sys/bus/pci/rescan
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
       tags: [restore, full-restore, clean]
 
     - name: Bring up interfaces from restored config

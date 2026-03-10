@@ -18,6 +18,10 @@ openwrt_dhcp_start: 100
 openwrt_dhcp_limit: 150
 openwrt_dhcp_leasetime: 12h
 
+openwrt_wifi_driver_packages:
+  - kmod-iwlwifi
+  - iwlwifi-firmware-iwl8265
+
 openwrt_mesh_enabled: true
 openwrt_mesh_id: "vm-builds-mesh"
 openwrt_mesh_key: "{{ lookup('env', 'MESH_KEY') | default('changeme', true) }}"

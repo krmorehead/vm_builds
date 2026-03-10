@@ -1,6 +1,6 @@
 # vm_builds
 
-Ansible project for provisioning and configuring VMs on Proxmox VE. Deploys an **OpenWrt** router VM with full NIC bridge passthrough, WiFi PCIe passthrough with 802.11s mesh, upstream MAC cloning, WAN auto-detection, collision-free LAN subnet selection, and baseline firewall/DHCP.
+Ansible project for provisioning and configuring VMs on Proxmox VE. Currently deploys an **OpenWrt** router VM with full NIC bridge passthrough, WiFi PCIe passthrough with 802.11s mesh, collision-free LAN subnet selection, and baseline firewall/DHCP. Designed to expand to additional VM types using a consistent two-role architecture.
 
 ## Architecture
 
@@ -17,24 +17,24 @@ Ansible project for provisioning and configuring VMs on Proxmox VE. Deploys an *
 ```
 
 **Play 0 -- Backup** (targets Proxmox host):
-back up host config (`/etc/network`, `/etc/modprobe.d`, GRUB, `/etc/pve`)
+Back up host config (`/etc/network`, `/etc/modprobe.d`, GRUB, `/etc/pve`)
 and snapshot existing VMs with `vzdump` before making any changes.
 
 **Play 1 -- Provision** (targets Proxmox host via API + SSH):
-discover physical NICs, create one virtual bridge per NIC, detect WiFi
-PCIe devices and configure IOMMU/vfio-pci passthrough, clone the
-upstream router's MAC address, upload the OpenWrt disk image, create and
-boot the VM, then establish a temporary bootstrap connection to the VM's
-LAN side.
+Discover physical NICs, create one virtual bridge per NIC, detect WiFi
+PCIe devices and configure IOMMU/vfio-pci passthrough, upload the
+OpenWrt disk image, create and boot the VM, then establish a temporary
+bootstrap connection to the VM's LAN side.
 
 **Play 2 -- Configure** (targets OpenWrt VM via SSH through Proxmox):
-wait for WAN DHCP, detect the WAN interface, auto-select a LAN subnet
-that does not collide with the WAN network, assign remaining interfaces
-to a LAN bridge, install mesh-capable WiFi packages, configure 802.11s
-mesh on all detected radios, configure firewall zones and DHCP.
+Two-phase configuration. Phase 1: set WAN (eth0) to DHCP, assign
+remaining interfaces to a LAN bridge, restart networking, migrate
+bootstrap IP to the LAN bridge. Phase 2: install WiFi driver packages,
+configure 802.11s mesh on detected radios, apply collision-free LAN
+subnet, configure firewall zones and DHCP, final network restart.
 
 **Play 3 -- Cleanup** (targets Proxmox host):
-remove the temporary bootstrap IP from the Proxmox bridge.
+Remove the temporary bootstrap IP from the Proxmox bridge.
 
 ---
 
@@ -185,8 +185,9 @@ ansible-playbook playbooks/site.yml --syntax-check
 
 ### Full test pipeline (Molecule)
 
-Runs lint, converge (full playbook), verify (assertions), and cleanup
-(destroy the test VM) against the test machine:
+Runs cleanup (reset host), syntax check, converge (full playbook),
+verify (assertions), and cleanup (destroy the test VM) against the
+test machine:
 
 ```bash
 source .venv/bin/activate
@@ -200,7 +201,7 @@ Useful Molecule commands during development:
 molecule converge    # run the playbook only (no verify/cleanup)
 molecule verify      # re-run verification without re-converging
 molecule destroy     # tear down the test VM
-molecule test        # full pipeline: lint -> converge -> verify -> cleanup
+molecule test        # full pipeline: cleanup -> syntax -> converge -> verify -> cleanup
 ```
 
 ### What the verify step checks
@@ -255,7 +256,6 @@ molecule test        # full pipeline: lint -> converge -> verify -> cleanup
 | Variable | Default | Description |
 |---|---|---|
 | `openwrt_tmp_image` | `/tmp/openwrt.img` | Temp upload path on the Proxmox node |
-| `openwrt_clone_wan_mac` | `true` | Clone the upstream router's MAC onto the VM's WAN NIC |
 | `openwrt_bootstrap_gw` | `192.168.1.1` | OpenWrt factory-default LAN IP (used for initial SSH) |
 | `openwrt_bootstrap_ip` | `192.168.1.2` | Temp IP assigned to a Proxmox bridge for bootstrap |
 | `openwrt_bootstrap_cidr` | `24` | Netmask for the bootstrap subnet |
@@ -272,6 +272,7 @@ molecule test        # full pipeline: lint -> converge -> verify -> cleanup
 | `openwrt_dhcp_start` | `100` | DHCP pool start offset |
 | `openwrt_dhcp_limit` | `150` | DHCP pool size |
 | `openwrt_dhcp_leasetime` | `12h` | DHCP lease duration |
+| `openwrt_wifi_driver_packages` | `[kmod-iwlwifi, ...]` | WiFi kernel modules and firmware packages to install |
 | `openwrt_mesh_enabled` | `true` | Enable 802.11s mesh on detected WiFi radios |
 | `openwrt_mesh_id` | `vm-builds-mesh` | Mesh network identifier (must match across nodes) |
 | `openwrt_mesh_key` | *(from MESH_KEY env)* | WPA3-SAE passphrase for mesh encryption |
@@ -290,29 +291,113 @@ molecule test        # full pipeline: lint -> converge -> verify -> cleanup
 
 ---
 
+## Adding a New VM Type
+
+The project is named `vm_builds` (plural) because it's designed to manage multiple VM types. Every VM follows a two-role pattern:
+
+- **`<type>_vm`** -- provision role (create VM, import disk, attach NICs, start, bootstrap)
+- **`<type>_configure`** -- configure role (packages, services, settings inside the VM)
+
+Shared infrastructure roles (`proxmox_backup`, `proxmox_bridges`, `proxmox_pci_passthrough`) run once per host before any VM-specific roles.
+
+### Step-by-step
+
+Using Home Assistant as an example:
+
+1. **Create the roles:**
+
+```
+roles/homeassistant_vm/
+├── defaults/main.yml      # homeassistant_vm_id, image path, etc.
+└── tasks/main.yml         # check exists → upload image → create VM → start → add_host
+
+roles/homeassistant_configure/
+├── defaults/main.yml      # service-specific config
+└── tasks/main.yml         # install packages, configure services
+```
+
+2. **Register the VMID** in `inventory/group_vars/all.yml`:
+
+```yaml
+homeassistant_vm_id: 200
+homeassistant_vm_name: homeassistant
+homeassistant_vm_memory: 2048
+homeassistant_vm_cores: 2
+homeassistant_image_path: images/haos.qcow2
+```
+
+VMID convention: 100-series for network VMs, 200-series for services.
+
+3. **Add the dynamic group** to `inventory/hosts.yml`:
+
+```yaml
+all:
+  children:
+    proxmox:
+      hosts:
+        home: {}
+    openwrt:
+      hosts: {}
+    homeassistant:    # empty -- populated by add_host at runtime
+      hosts: {}
+```
+
+4. **Wire into `playbooks/site.yml`:**
+
+```yaml
+# After existing VM provisions in the infrastructure play:
+- name: Provision HomeAssistant VM
+  hosts: proxmox
+  gather_facts: false
+  roles:
+    - homeassistant_vm
+
+# New play for configuration (after all VM provisions):
+- name: Configure HomeAssistant
+  hosts: homeassistant
+  gather_facts: false
+  roles:
+    - homeassistant_configure
+```
+
+5. **Extend tests:**
+   - Add assertions to `molecule/default/verify.yml`.
+   - Cleanup already iterates `qm list` to destroy all VMs, so no changes needed unless the VM needs custom teardown.
+
+6. **Place the image** in `images/` and add a doc at `docs/architecture/<type>-build.md`.
+
+### Key patterns to follow
+
+- **Idempotency**: Always check `qm status <vmid>` before creating. Guard creation tasks with `when: not vm_exists | bool`.
+- **Bridge selection**: Consume `proxmox_all_bridges` from the bridges role. Most service VMs only need one LAN bridge: `proxmox_all_bridges[1]`.
+- **Dynamic inventory**: The `<type>_vm` role uses `add_host` to register the VM. The `<type>_configure` play targets that group.
+- **Variable isolation**: Prefix all role defaults with the VM type name (`homeassistant_vm_id`, not `vm_id`). Never cross-reference another role's defaults.
+
+---
+
 ## Project Structure
 
 ```
 vm_builds/
 ├── setup.sh                           # Bootstrap venv + all deps
 ├── run.sh                             # Source .env and run playbook
+├── cleanup.sh                         # Restore / full-restore / clean
 ├── test.env                           # Test machine env (committed)
 ├── ansible.cfg
 ├── requirements.yml
 ├── .gitignore
 ├── .ansible-lint
 ├── .yamllint.yml
-├── .venv/                             # Python venv (committed)
+├── .venv/                             # Python venv (created by setup.sh, gitignored)
 ├── inventory/
 │   ├── hosts.yml
 │   ├── group_vars/
-│   │   ├── all.yml
-│   │   └── proxmox.yml
+│   │   ├── all.yml                    # VM parameters (IDs, image paths)
+│   │   └── proxmox.yml               # API auth, SSH settings
 │   └── host_vars/
-│       └── home.yml
-├── cleanup.sh                         # Restore / full-restore / clean
+│       └── home.yml                   # Per-host overrides
 ├── playbooks/
-│   ├── site.yml
+│   ├── site.yml                       # Main orchestration playbook
 │   └── cleanup.yml                    # Tag-driven restore playbook
 ├── molecule/
 │   └── default/
@@ -322,45 +407,41 @@ vm_builds/
 │       └── cleanup.yml
 ├── docs/
 │   └── architecture/
-│       ├── overview.md
-│       ├── openwrt-build.md
-│       ├── roles.md
-│       └── roadmap.md
+│       ├── overview.md                # High-level architecture
+│       ├── openwrt-build.md           # OpenWrt-specific design
+│       ├── roles.md                   # Role reference
+│       └── roadmap.md                 # Future plans
+├── images/                            # VM disk images (gitignored)
 └── roles/
-    ├── proxmox_backup/
-    │   ├── defaults/main.yml
-    │   └── tasks/main.yml
-    ├── proxmox_bridges/
-    │   ├── defaults/main.yml
-    │   ├── tasks/main.yml
-    │   ├── templates/bridges.conf.j2
-    │   └── handlers/main.yml
-    ├── proxmox_pci_passthrough/
-    │   ├── defaults/main.yml
-    │   ├── tasks/main.yml
-    │   ├── templates/
-    │   │   ├── blacklist-wifi.conf.j2
-    │   │   └── vfio-pci.conf.j2
-    │   └── handlers/main.yml
-    ├── openwrt_vm/
-    │   ├── defaults/main.yml
-    │   └── tasks/main.yml
-    └── openwrt_configure/
-        ├── defaults/main.yml
-        ├── meta/main.yml
-        └── tasks/main.yml
+    ├── proxmox_backup/                # Host config + VM backup
+    ├── proxmox_bridges/               # NIC discovery, bridge creation
+    ├── proxmox_pci_passthrough/       # WiFi IOMMU/vfio setup
+    ├── openwrt_vm/                    # VM lifecycle management
+    └── openwrt_configure/             # OpenWrt UCI configuration
 ```
 
 ---
 
 ## How It Works
 
-### MAC Cloning
+### Router Swap Workflow
 
-The VM's WAN NIC gets the MAC address of the current upstream gateway
-(detected via ARP on the Proxmox host). When you physically swap the
-old router for this VM, the ISP sees the same MAC and existing DHCP
-leases carry over. Set `openwrt_clone_wan_mac: false` to disable.
+To replace an existing router with the OpenWrt VM:
+
+1. **Stage**: Plug the OpenWrt host behind the current router. Run the
+   playbook. The VM boots, gets a WAN IP from the existing router, and
+   configures a non-colliding LAN subnet.
+2. **Swap**: Move the ISP uplink cable from the old router to the
+   OpenWrt host's WAN port. The VM picks up a new DHCP lease from the
+   ISP. The LAN side continues serving the same subnet.
+3. **Downstream** (optional): Plug the old router into a LAN port on
+   the OpenWrt host. Disable DHCP on the old router. It becomes a
+   switch/access point on a sub-network, and existing devices connected
+   to it continue working.
+
+No MAC cloning is needed. Most ISPs and upstream devices will issue a
+new DHCP lease to a new MAC within seconds. The LAN-side IP and DHCP
+pool are independent of the WAN MAC address.
 
 ### WiFi PCIe Passthrough
 
@@ -408,7 +489,7 @@ the network restart.
 
 ### Backup & Restore
 
-Every playbook run creates a backup (Play 0) in `/var/backups/ansible/`
+Every playbook run creates a backup (Play 0) in `/var/lib/ansible-backup/`
 on the Proxmox host containing host config and VM snapshots. Use
 `cleanup.sh` to restore:
 
@@ -437,7 +518,37 @@ To re-provision, destroy the VM first (`qm destroy <vmid>`) and re-run.
 | `PROXMOX_API_TOKEN_SECRET` empty | `.env` not sourced | `set -a; source .env; set +a` or use `./run.sh` |
 | `node ... does not exist` | `proxmox_node` doesn't match PVE hostname | Set `proxmox_node` in host_vars |
 | SSH timeout on bootstrap | Proxmox bridge not reaching OpenWrt LAN | Check `openwrt_bootstrap_bridge` |
-| WAN detection timeout | No upstream DHCP on the WAN bridge | Verify `vmbr0` has a physical NIC with upstream connectivity |
+| WAN route timeout | No upstream DHCP on the WAN bridge | Verify `vmbr0` has a physical NIC with upstream connectivity; the uplink cable must be on the port behind `vmbr0` |
 | Play ends with unreachable host | Expected when LAN IP changes | Check debug output for the new LAN address |
 | IOMMU reboot required | First-time WiFi passthrough | Re-run with `-e pci_passthrough_allow_reboot=true` |
 | WiFi IOMMU group shared | Onboard WiFi shares group with NIC | Check BIOS ACS settings or add `pcie_acs_override` to GRUB |
+
+---
+
+## For AI / LLM Assistants
+
+This project includes `.cursor/rules/` and `.cursor/skills/` files designed to prevent common mistakes and maintain architectural consistency across sessions. Key resources:
+
+| Resource | Purpose |
+|---|---|
+| `.cursor/rules/project-structure.mdc` | **Start here.** Always-on context: architecture, variable scoping, VMID allocation, new-VM checklist |
+| `.cursor/rules/ansible-conventions.mdc` | Coding patterns: FQCN, BusyBox constraints, two-phase restart, detached restart scripts |
+| `.cursor/rules/proxmox-safety.mdc` | Hard safety rules: commands that kill SSH, bridge teardown, PCI cleanup, backup protocol |
+| `.cursor/rules/learn-from-mistakes.mdc` | Workflow: update skills/rules when issues occur |
+| `.cursor/skills/vm-lifecycle/SKILL.md` | Step-by-step for adding new VM types with code templates |
+| `.cursor/skills/ansible-testing/SKILL.md` | Molecule pipeline, cleanup requirements, extending verify for new VMs |
+| `.cursor/skills/proxmox-host-safety/SKILL.md` | Decision tree for validating commands against remote Proxmox hosts |
+| `.cursor/skills/writing-skills/SKILL.md` | How to write new skills optimized for LLM consumption |
+
+When starting work on this project, the `project-structure.mdc` rule loads automatically and provides the full architectural context. If adding a new VM type, read `vm-lifecycle/SKILL.md` first.
+
+---
+
+## Documentation
+
+Detailed architecture documentation lives in `docs/architecture/`:
+
+- **[overview.md](docs/architecture/overview.md)** -- Design philosophy, execution flow, project structure
+- **[openwrt-build.md](docs/architecture/openwrt-build.md)** -- OpenWrt VM requirements and design decisions
+- **[roles.md](docs/architecture/roles.md)** -- Detailed reference for each Ansible role
+- **[roadmap.md](docs/architecture/roadmap.md)** -- Current state and future plans (hardening, VLANs, multi-VM, CI/CD)

@@ -26,6 +26,21 @@ alwaysApply: true
 - IOMMU group isolation is mandatory. Always verify before binding to vfio-pci.
 - WiFi NICs must be excluded from bridge creation (they're passed through via PCIe, not bridged).
 
+## PCI device cleanup after passthrough
+- After destroying VMs or running cleanup, devices remain bound to `vfio-pci`. They do NOT auto-revert.
+- ALWAYS unbind from vfio-pci, remove modprobe blacklist files, reload original kernel modules (`modprobe -r && modprobe`), and rescan PCI bus (`echo 1 > /sys/bus/pci/rescan`).
+- Without this, subsequent runs cannot detect WiFi hardware.
+
+## Bootstrap bridge IP migration
+- Initial bootstrap adds an IP to vmbr0 (WAN bridge) to reach OpenWrt at 192.168.1.1.
+- After WAN is configured and network restarts, OpenWrt's LAN moves to vmbr1+ bridges.
+- MUST remove the bootstrap IP from vmbr0 and add it to the actual LAN bridge (vmbr1) or SSH will route to the wrong device.
+- The upstream router may also have 192.168.1.1, causing routing ambiguity if the IP exists on multiple bridges.
+
+## SSH keepalives through ProxyJump
+- SSH via ProxyJump drops during sequences of local Ansible tasks (set_fact, debug) that don't send traffic.
+- ALWAYS add `-o ServerAliveInterval=15 -o ServerAliveCountMax=4` to `ansible_ssh_common_args`.
+
 ## Backup before changes
 - Every playbook run should back up host config and existing VMs first (Play 0: `proxmox_backup`).
 - Use `vzdump` for VM backups, tar for host config.

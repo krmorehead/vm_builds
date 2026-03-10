@@ -73,55 +73,13 @@
       scsi0 {{ openwrt_vm_disk_size }}
   when: not vm_exists | bool
 
-# ── Upstream MAC cloning ─────────────────────────────────────────
-
-- name: Detect default gateway IP
-  ansible.builtin.shell:
-    cmd: ip route show default | awk '{print $3}' | head -1
-    executable: /bin/bash
-  register: gw_ip_result
-  changed_when: false
-  when: openwrt_clone_wan_mac | bool
-
-- name: Ping gateway to populate neighbour table
-  ansible.builtin.command:
-    cmd: ping -c 1 -W 2 {{ gw_ip_result.stdout | trim }}
-  changed_when: false
-  failed_when: false
-  when:
-    - openwrt_clone_wan_mac | bool
-    - gw_ip_result.stdout | trim | length > 0
-
-- name: Read upstream gateway MAC from neighbour table
-  ansible.builtin.command:
-    cmd: ip neigh show {{ gw_ip_result.stdout | trim }}
-  register: gw_neigh_result
-  changed_when: false
-  when:
-    - openwrt_clone_wan_mac | bool
-    - gw_ip_result.stdout | trim | length > 0
-
-- name: Set upstream MAC fact
-  ansible.builtin.set_fact:
-    upstream_mac: >-
-      {{ gw_neigh_result.stdout
-         | regex_search('([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})')
-         | default('') }}
-  when:
-    - openwrt_clone_wan_mac | bool
-    - gw_neigh_result is defined
-    - gw_neigh_result.stdout | default('') | length > 0
-
 # ── NIC attachment ───────────────────────────────────────────────
 
 - name: Attach NIC to each bridge
   ansible.builtin.command:
     cmd: >-
       qm set {{ openwrt_vm_id }}
-      --net{{ idx }}
-      {{ ('virtio=' + upstream_mac + ',bridge=' + bridge)
-         if (idx == 0 and upstream_mac | default('') | length > 0)
-         else ('virtio,bridge=' + bridge) }}
+      --net{{ idx }} virtio,bridge={{ bridge }}
   loop: "{{ proxmox_all_bridges }}"
   loop_control:
     index_var: idx
@@ -191,6 +149,18 @@
     delay: 15
     timeout: 180
 
+- name: Detect upstream gateway IP for LAN subnet selection
+  ansible.builtin.shell:
+    cmd: ip route show default | awk '{print $3}' | head -1
+    executable: /bin/bash
+  register: _gw_for_prefix
+  changed_when: false
+
+- name: Compute upstream network prefix from gateway IP
+  ansible.builtin.set_fact:
+    _upstream_prefix: "{{ (_gw_for_prefix.stdout | default('') | trim).split('.')[0:3] | join('.') }}"
+  when: (_gw_for_prefix.stdout | default('') | trim) | length > 0
+
 - name: Add OpenWrt VM to dynamic inventory
   ansible.builtin.add_host:
     name: "{{ openwrt_vm_name }}"
@@ -204,3 +174,11 @@
       -o UserKnownHostsFile=/dev/null
       -o PubkeyAuthentication=no
       -o ConnectTimeout=10
+      -o ServerAliveInterval=15
+      -o ServerAliveCountMax=4
+    openwrt_wan_device: eth0
+    upstream_wan_prefix: "{{ _upstream_prefix }}"
+    _proxmox_host: "{{ inventory_hostname }}"
+    _lan_bridge: "{{ proxmox_all_bridges[1] | default(proxmox_all_bridges[0]) }}"
+    _bootstrap_ip: "{{ openwrt_bootstrap_ip }}"
+    _bootstrap_cidr: "{{ openwrt_bootstrap_cidr }}"

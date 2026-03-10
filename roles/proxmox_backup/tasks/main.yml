@@ -69,7 +69,7 @@
     mode: "0600"
   vars:
     _manifest:
-      timestamp: "{{ ansible_date_time.iso8601 | default(lookup('pipe', 'date -Iseconds')) }}"
+      timestamp: "{{ ansible_facts['date_time']['iso8601'] | default(lookup('pipe', 'date -Iseconds')) }}"
       host: "{{ inventory_hostname }}"
       host_config: "{{ backup_dir }}/host-config.tar.gz"
       vms: >-

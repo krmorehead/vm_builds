@@ -6,29 +6,55 @@ alwaysApply: false
 
 # Ansible Conventions
 
-## OpenWrt Configuration
-- OpenWrt has no Python. Use `ansible.builtin.raw` for all commands, not shell/command modules.
-- Do NOT use third-party OpenWrt Ansible roles (e.g., gekmihesg.openwrt). They rely on fragile monkeypatching that breaks across Ansible versions.
-- Use UCI commands (`uci set`, `uci commit`) for all OpenWrt configuration.
+## Task structure
+- Use fully qualified collection names (`ansible.builtin.command`, not `command`).
+- Every `command`/`shell` task MUST have `changed_when` or `failed_when` where appropriate.
+- Read-only commands: `changed_when: false`.
+- Legitimately-can-fail commands: `failed_when: false`.
+- Guard creation tasks with `when: not vm_exists | bool` (or equivalent).
+- Use section-header comments (`# ── Section name ──`) to organize long task files. No inline narration comments.
 
-## Module Usage
-- Use `community.proxmox.proxmox_kvm` (not `community.general.proxmox_kvm`, which is deprecated).
-- Proxmox API calls need `delegate_to: localhost` since `proxmoxer` runs on the control node.
-- Always include the `node` parameter in `proxmox_kvm` calls.
+## Module usage
+- Proxmox API: `community.proxmox.proxmox_kvm` (NOT `community.general.proxmox_kvm`).
+- Proxmox API calls: `delegate_to: localhost` (proxmoxer runs on the control node).
+- ALWAYS include `node` in `proxmox_kvm` calls.
+- OpenWrt commands: `ansible.builtin.raw` ONLY (no Python on OpenWrt).
+- Proxmox host commands: `ansible.builtin.command` or `ansible.builtin.shell` (Python is available).
 
-## Variable Naming
-- Role variables should use descriptive names but do NOT need role-name prefixes (we skip `var-naming[no-role-prefix]`).
-- Environment-driven secrets use `lookup('env', 'VAR_NAME')`, never vault files.
+## Variable conventions
+- Role variables do NOT need role-name prefixes (we skip `var-naming[no-role-prefix]`).
+- But DO prefix with the type name for clarity across multi-VM roles (e.g., `openwrt_vm_id`, `homeassistant_vm_id`).
+- Secrets: `lookup('env', 'VAR_NAME')`. NEVER use vault files.
+- Cross-role data: `set_fact` with `cacheable: true`, or pass via `add_host` variables.
+- NEVER reference another role's `defaults/main.yml` directly — those are only in scope while the role runs.
 
-## Handler Names
-- Handler names must be capitalized (e.g., "Reload networking", not "reload networking").
-- Always match the exact handler name in `notify:` directives.
+## Handler names
+- Capitalize first word: `Reload networking`, `Update grub`.
+- `notify:` must match the handler name exactly.
 
-## Cross-role variable access
-- NEVER reference another role's `defaults/main.yml` variables directly. They are only in scope while that role is executing.
-- If role B needs a value from role A, either: set it as a `set_fact` in role A, define it in `group_vars`, or pass it via the playbook's `vars`.
+## OpenWrt / BusyBox constraints
+- No `grep -P`. Use `sed -n 's/pattern/\1/p'`.
+- Heredocs in YAML `|` blocks get indented, breaking `#!/bin/sh`. Use `printf '#!/bin/sh\n...\n' > /tmp/script.sh`.
+- Default OpenWrt image has no SSL. Switch opkg to HTTP: `sed -i 's|https://|http://|g' /etc/opkg/distfeeds.conf`.
+- `opkg install kmod-*` does NOT auto-load modules. Run `modprobe <module>` explicitly after install.
+- Network restart kills dropbear (SSH). Restart scripts MUST include `/etc/init.d/dropbear restart` after `/etc/init.d/network restart`.
 
-## Idempotency
-- Guard creation tasks with existence checks (e.g., `when: not vm_exists | bool`).
-- Use `changed_when: false` for read-only shell commands.
-- Use `failed_when: false` only when the command legitimately can fail (e.g., checking if a VM exists).
+## Two-phase network restart pattern
+When a configure role needs both WAN internet (for package install) AND a LAN IP change:
+1. Phase 1: Configure WAN + LAN ports, keep LAN at default IP (192.168.1.1). Commit, restart. Migrate bootstrap IP to LAN bridge.
+2. Phase 2: Install packages, configure services, set final LAN IP. Commit, restart.
+NEVER install packages before WAN is configured and restarted.
+
+## Detached restart pattern for OpenWrt
+```yaml
+# GOOD: printf + start-stop-daemon (shebang not indented)
+- ansible.builtin.raw: >-
+    printf '#!/bin/sh\nsleep 3\n/etc/init.d/network restart\nsleep 5\n/etc/init.d/dropbear restart\nrm -f /tmp/_restart_net.sh\n'
+    > /tmp/_restart_net.sh &&
+    chmod +x /tmp/_restart_net.sh &&
+    start-stop-daemon -S -b -x /tmp/_restart_net.sh
+  ignore_unreachable: true
+
+# BAD: nohup (unreliable on BusyBox, often doesn't detach properly)
+# BAD: heredoc in YAML | block (indentation breaks shebang)
+```

@@ -5,13 +5,15 @@
 A single playbook that provisions and configures an OpenWrt router VM on Proxmox with:
 
 - Dynamic NIC discovery and bridge-per-port passthrough.
-- WiFi PCIe passthrough with IOMMU setup.
+- WiFi PCIe passthrough with IOMMU setup and in-VM driver installation.
 - 802.11s mesh networking on all detected radios.
-- Automatic WAN detection and collision-free LAN subnet selection.
-- Upstream MAC cloning for seamless router swaps.
+- First-bridge WAN assignment with collision-free LAN subnet selection.
+- Router replacement workflow (stage/swap/downstream).
 - Baseline firewall, DHCP, and DNS (dnsmasq).
 - Environment-driven secrets (`.env`).
+- Backup/restore with `vzdump` and host config tar archives.
 - Integration test framework (Molecule) against a dedicated test node.
+- LLM-optimized rules and skills for AI-assisted development continuity.
 
 ## Short-Term Goals
 
@@ -42,8 +44,11 @@ A single playbook that provisions and configures an OpenWrt router VM on Proxmox
 
 ### Additional VM Types
 - The project name is `vm_builds` (plural) -- the architecture supports multiple VM roles beyond OpenWrt.
-- Potential candidates: NAS/file server, Pi-hole, Home Assistant, media server, development environments.
+- Potential candidates: Home Assistant, Pi-hole, NAS/file server, media server, development environments.
 - Each VM type gets its own role pair: `<type>_vm` (provisioning) and `<type>_configure` (setup).
+- VMID ranges are pre-allocated: 100-series for network, 200-series for services.
+- Shared infrastructure roles (`proxmox_bridges`, `proxmox_backup`) already run once per host and export facts for all VMs.
+- See `docs/architecture/overview.md` for the expansion pattern and `.cursor/skills/vm-lifecycle/SKILL.md` for step-by-step guidance.
 
 ### Backup and Recovery
 - Automated VM snapshots before configuration changes.

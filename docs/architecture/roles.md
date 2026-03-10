@@ -105,13 +105,12 @@ Restore is handled by `playbooks/cleanup.yml` with tag selection:
 3. Creates a VM shell via the Proxmox API (no disk yet) -- uses `q35` machine type when WiFi passthrough is active.
 4. Imports the disk with `qm importdisk`, parses the resulting volume name, attaches it as `scsi0`, and sets boot order.
 5. Resizes the disk to `openwrt_vm_disk_size`.
-6. If MAC cloning is enabled, detects the upstream gateway's MAC and applies it to `net0`.
-7. Attaches one `virtio` NIC per bridge from `proxmox_all_bridges`.
-8. Attaches WiFi PCIe devices from `wifi_pci_devices` via `hostpci`.
-9. Cleans up the temporary image file.
-10. Starts the VM via the Proxmox API.
-11. Adds a temporary IP to a LAN bridge and waits for OpenWrt SSH.
-12. Adds the VM to Ansible's in-memory inventory with ProxyJump SSH config.
+6. Attaches one `virtio` NIC per bridge from `proxmox_all_bridges`.
+7. Attaches WiFi PCIe devices from `wifi_pci_devices` via `hostpci`.
+8. Cleans up the temporary image file.
+9. Starts the VM via the Proxmox API.
+10. Adds a temporary IP to a LAN bridge and waits for OpenWrt SSH.
+11. Adds the VM to Ansible's in-memory inventory with ProxyJump SSH config.
 
 ### Key Variables
 
@@ -123,7 +122,6 @@ Restore is handled by `playbooks/cleanup.yml` with tag selection:
 | `openwrt_vm_memory` | `512` | RAM in MB |
 | `openwrt_vm_cores` | `2` | CPU cores |
 | `openwrt_vm_disk_size` | `512M` | Boot disk size |
-| `openwrt_clone_wan_mac` | `true` | Clone upstream router MAC |
 | `openwrt_bootstrap_gw` | `192.168.1.1` | OpenWrt default LAN IP |
 | `openwrt_bootstrap_ip` | `192.168.1.2` | Temporary IP for Proxmox bridge |
 | `openwrt_bootstrap_cidr` | `24` | Bootstrap subnet prefix length |
@@ -137,17 +135,23 @@ Restore is handled by `playbooks/cleanup.yml` with tag selection:
 
 ### How It Works
 
-All configuration is done with `ansible.builtin.raw` since OpenWrt has no Python. Commands are UCI set/commit operations.
+All configuration is done with `ansible.builtin.raw` since OpenWrt has no Python. Commands are UCI set/commit operations. The role uses a **two-phase restart** pattern to maintain SSH connectivity and internet access throughout.
 
-1. Waits for a default route (WAN DHCP) with retries.
-2. Identifies the WAN device and sets remaining `ethN` interfaces as LAN ports.
-3. If auto-subnet is enabled, reads the WAN IP prefix and selects a non-colliding LAN subnet from the candidate list.
-4. Configures WAN (DHCP) and WAN6 (DHCPv6).
-5. Sets LAN IP, netmask, and bridge ports.
-6. Configures DHCP pool parameters.
-7. If mesh is enabled and WiFi radios are detected: removes default `wpad`, installs `wpad-mesh-openssl`, enables radios, and creates 802.11s mesh interfaces with WPA3-SAE.
-8. Commits all UCI changes and restarts network/firewall/dnsmasq in the background.
-9. Verifies connectivity after restart.
+**Phase 1 (WAN + LAN ports):**
+
+1. Identifies the WAN device (passed from `openwrt_vm`) and sets remaining `ethN` interfaces as LAN ports.
+2. If auto-subnet is enabled, computes the target LAN subnet but does NOT apply it yet (LAN stays at factory default `192.168.1.1`).
+3. Configures WAN (DHCP) and WAN6 (DHCPv6), sets LAN bridge ports.
+4. Commits and restarts firewall/DHCP synchronously, then restarts networking via detached script (preserves SSH).
+5. Migrates the Proxmox bootstrap IP from the WAN bridge to the LAN bridge.
+6. Waits for SSH to reconnect and WAN default route to appear.
+
+**Phase 2 (packages + final LAN IP):**
+
+7. Switches opkg feeds to HTTP (BusyBox `wget` lacks SSL), installs WiFi driver packages, loads kernel modules.
+8. If WiFi radios are detected: removes default `wpad`, installs `wpad-mesh-openssl`, configures 802.11s mesh interfaces with WPA3-SAE.
+9. Applies the auto-selected LAN IP and DHCP settings.
+10. Commits and does a final detached network restart.
 
 ### Key Variables
 
@@ -160,6 +164,7 @@ All configuration is done with `ansible.builtin.raw` since OpenWrt has no Python
 | `openwrt_dhcp_start` | `100` | DHCP range start offset |
 | `openwrt_dhcp_limit` | `150` | DHCP pool size |
 | `openwrt_dhcp_leasetime` | `12h` | DHCP lease duration |
+| `openwrt_wifi_driver_packages` | `[kmod-iwlwifi, iwlwifi-firmware-iwl8265]` | Kernel modules/firmware for WiFi |
 | `openwrt_mesh_enabled` | `true` | Enable 802.11s mesh |
 | `openwrt_mesh_id` | `vm-builds-mesh` | Mesh network SSID |
 | `openwrt_mesh_key` | From `MESH_KEY` env | WPA3-SAE passphrase |

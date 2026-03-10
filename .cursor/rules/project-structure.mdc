@@ -3,28 +3,67 @@ description: Project structure and architecture context for vm_builds
 alwaysApply: true
 ---
 
-# Project Structure
+# vm_builds Project Context
 
-## Playbook execution order
-Play 0: `proxmox_backup` (back up host config + VMs)
-Play 1: `proxmox_bridges`, `proxmox_pci_passthrough`, `openwrt_vm` (provision)
-Play 2: `openwrt_configure` (configure OpenWrt via raw SSH)
-Play 3: Bootstrap cleanup (remove temp IP)
+## What this project is
+An Ansible project that automates VM provisioning and configuration on Proxmox VE. Currently deploys an OpenWrt router VM. Designed to expand to multiple VM types (Home Assistant, Pi-hole, NAS, etc.) using the patterns below.
+
+## Architecture pattern: two-role per VM
+Every VM type has exactly two roles:
+- `<type>_vm` — provision the VM on Proxmox (create, disk import, NIC attach, start, bootstrap SSH)
+- `<type>_configure` — configure the running VM (packages, services, networking)
+
+Shared infrastructure roles run once per host before any VM roles:
+- `proxmox_backup` — tar host config + vzdump existing VMs
+- `proxmox_bridges` — discover NICs, create virtual bridges, export `proxmox_all_bridges` fact
+- `proxmox_pci_passthrough` — IOMMU/vfio-pci for WiFi, export `wifi_pci_devices` fact
+
+## Playbook execution order (site.yml)
+```
+Play 0: proxmox_backup             (backup host config + VMs)
+Play 1: proxmox_bridges            (shared infra)
+         proxmox_pci_passthrough   (shared infra)
+         openwrt_vm                (VM-specific provision)
+Play 2: openwrt_configure          (VM-specific configure, targets dynamic group)
+Play 3: Bootstrap cleanup          (remove temp IPs)
+```
+When adding a new VM, insert its `<type>_vm` role after shared infra in Play 1, add a new play for `<type>_configure` targeting its dynamic group, and extend cleanup.
+
+## VMID allocation
+- 100-series: network VMs (openwrt_vm_id: 100)
+- 200-series: service VMs (future)
+Define all VMIDs in `group_vars/all.yml`.
+
+## Variable scoping
+- **Secrets**: `.env` file → `lookup('env', 'VAR_NAME')` in `group_vars/proxmox.yml`
+- **Shared VM params**: `group_vars/all.yml` (VMID, image path, storage)
+- **Proxmox connection**: `group_vars/proxmox.yml` (API auth, SSH settings)
+- **Per-host overrides**: `host_vars/<hostname>.yml` (IP, reboot policy)
+- **Role defaults**: `roles/<role>/defaults/main.yml` (never cross-reference between roles)
+- **Cross-role facts**: `set_fact` with `cacheable: true` or `add_host` variables
 
 ## Key files
-- `setup.sh` -- bootstrap venv + deps
-- `run.sh` -- source .env + run playbook
-- `cleanup.sh` -- restore/full-restore/clean subcommands
-- `test.env` -- test machine config (committed)
-- `.env` -- production secrets (gitignored)
+| File | Purpose |
+|------|---------|
+| `setup.sh` | Bootstrap .venv + pip + ansible-galaxy |
+| `run.sh` | Source .env, run `ansible-playbook playbooks/site.yml` |
+| `cleanup.sh` | Restore / full-restore / clean subcommands |
+| `test.env` | Test machine config (committed, IP: 192.168.86.201) |
+| `.env` | Production secrets (gitignored) |
+| `molecule/default/` | Integration tests against test machine |
 
-## Test machine
-- IP: configured via `PROXMOX_HOST` env var (test default: `192.168.86.201`)
-- Node name in Proxmox: `home`
-- Inventory host: `home` (in `inventory/hosts.yml`)
-- Host vars: `inventory/host_vars/home.yml`
+## Adding a new VM type — checklist
+1. Create `roles/<type>_vm/defaults/main.yml` and `roles/<type>_vm/tasks/main.yml`
+2. Create `roles/<type>_configure/defaults/main.yml` and `roles/<type>_configure/tasks/main.yml`
+3. Add VMID to `group_vars/all.yml` (e.g., `homeassistant_vm_id: 200`)
+4. Add `<type>_vm` role to Play 1 in `playbooks/site.yml`
+5. Add new play for `<type>_configure` targeting the dynamic group
+6. Add `<type>` group to `inventory/hosts.yml` (empty hosts, populated by `add_host`)
+7. Extend `molecule/default/verify.yml` with assertions for the new VM
+8. Extend `molecule/default/cleanup.yml` (cleanup already iterates `qm list`, so VM destruction is automatic)
+9. Update `docs/architecture/` with a `<type>-build.md`
 
 ## Image management
-- OpenWrt `.img` stored in `images/` directory (gitignored)
-- `openwrt_image_path` defaults to `images/openwrt.img` (relative to project root)
-- Absolute paths are also supported
+- VM images stored in `images/` directory (gitignored)
+- Each VM type defines its image path in role defaults (e.g., `openwrt_image_path: images/openwrt.img`)
+- Images are uploaded to Proxmox `/tmp/`, imported via `qm importdisk`, then deleted

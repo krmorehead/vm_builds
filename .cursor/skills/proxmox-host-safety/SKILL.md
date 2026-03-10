@@ -1,6 +1,6 @@
 ---
 name: proxmox-host-safety
-description: Validates Ansible tasks and shell commands for safety before executing them against remote Proxmox hosts. Use when writing or reviewing Ansible playbooks, roles, or shell commands that target Proxmox hosts, or when running cleanup/restore operations on remote machines.
+description: Validates Ansible tasks and shell commands for safety before executing them against remote Proxmox hosts. Use when writing or reviewing Ansible playbooks, roles, or shell commands that target Proxmox hosts, when running cleanup/restore operations, when modifying network interfaces or bridges, when working with PCI passthrough, or when SSH connectivity to a remote host might be affected.
 ---
 
 # Proxmox Host Safety Validation
@@ -72,9 +72,48 @@ Before running destructive operations (cleanup, VM destroy):
 2. Verify a backup exists (check for `manifest.json` in backup dir).
 3. Use the `cleanup.sh` wrapper which enforces env file sourcing.
 
-## SSH timeout on OpenWrt after reconfiguration
+## SSH stability for OpenWrt connections
 
-After OpenWrt network restart, the LAN IP changes (e.g., `192.168.1.1` → `10.10.10.1`). The bootstrap SSH connection will hang forever unless `ConnectTimeout` is set. ALWAYS include `-o ConnectTimeout=10` in `ansible_ssh_common_args` for OpenWrt connections. NEVER retry SSH to the old bootstrap address after LAN reconfiguration -- it will never come back.
+After OpenWrt network restart, the LAN IP changes (e.g., `192.168.1.1` → `10.10.10.1`). The bootstrap SSH connection will hang forever unless `ConnectTimeout` is set.
+
+Required SSH args for ALL OpenWrt connections:
+```yaml
+ansible_ssh_common_args: >-
+  -o ProxyJump=root@{{ ansible_host }}
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o PubkeyAuthentication=no
+  -o ConnectTimeout=10
+  -o ServerAliveInterval=15
+  -o ServerAliveCountMax=4
+```
+
+- `ConnectTimeout=10`: Prevents infinite hang when LAN IP changes.
+- `ServerAliveInterval=15`: Prevents connection drop during local Ansible tasks (set_fact sequences) that don't generate SSH traffic.
+- NEVER retry SSH to the old bootstrap address after LAN reconfiguration.
+
+## PCI device cleanup after VM destruction
+
+Devices bound to `vfio-pci` do NOT auto-revert when the VM is destroyed. Without cleanup, the next run can't detect WiFi hardware:
+
+```bash
+# 1. Unbind all vfio-pci devices
+for dev in /sys/bus/pci/drivers/vfio-pci/0000:*/; do
+  addr=$(basename "$dev")
+  echo "$addr" > /sys/bus/pci/drivers/vfio-pci/unbind
+done
+
+# 2. Remove blacklist and vfio config files
+rm -f /etc/modprobe.d/blacklist-wifi.conf /etc/modprobe.d/vfio-pci.conf
+
+# 3. Reload original WiFi drivers
+modprobe -r iwlmvm iwlwifi 2>/dev/null; modprobe iwlwifi
+
+# 4. Rescan PCI bus
+echo 1 > /sys/bus/pci/rescan
+```
+
+All four steps are required. Step 3 is critical -- `echo 1 > /sys/bus/pci/rescan` alone is insufficient because the kernel won't auto-bind drivers that were explicitly unbound.
 
 ## Decision tree
 

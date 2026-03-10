@@ -22,6 +22,9 @@
 - name: Clean up bootstrap networking
   hosts: proxmox
   gather_facts: false
+  vars:
+    openwrt_bootstrap_ip: 192.168.1.2
+    openwrt_bootstrap_cidr: 24
   tasks:
     - name: Remove temporary bootstrap IP from LAN bridge
       ansible.builtin.command:

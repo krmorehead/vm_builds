@@ -1,17 +1,9 @@
 ---
-# ── Wait for WAN DHCP and detect WAN interface ──────────────────
+# ── WAN and LAN interface detection ────────────────────────────
 
-- name: Wait for a default route to appear (WAN DHCP)
-  ansible.builtin.raw: ip -o route show default 2>/dev/null | awk '{print $5}' | head -1
-  register: detected_wan
-  changed_when: false
-  retries: 30
-  delay: 3
-  until: detected_wan.stdout | default('') | trim | length > 0
-
-- name: Set WAN device fact
+- name: Set WAN device from inventory
   ansible.builtin.set_fact:
-    wan_device: "{{ detected_wan.stdout | trim }}"
+    wan_device: "{{ openwrt_wan_device | default('eth0') }}"
 
 - name: List all ethernet interfaces
   ansible.builtin.raw: ls -1 /sys/class/net/ | grep '^eth'
@@ -22,21 +14,23 @@
   ansible.builtin.set_fact:
     lan_devices: "{{ all_eth.stdout_lines | difference([wan_device]) | sort }}"
 
+- name: Fail if no LAN devices found
+  ansible.builtin.fail:
+    msg: "No LAN devices found after excluding WAN ({{ wan_device }})"
+  when: lan_devices | length == 0
+
+- name: Report detected network layout
+  ansible.builtin.debug:
+    msg: "WAN={{ wan_device }}, LAN={{ lan_devices | join(', ') }}"
+
 # ── Auto-detect a non-colliding LAN subnet ───────────────────────
 
-- name: Read WAN IP address
-  ansible.builtin.raw: ip -o -4 addr show dev {{ wan_device }} 2>/dev/null | awk '{print $4}' | head -1
-  register: wan_addr_raw
-  changed_when: false
-  when: openwrt_lan_auto_subnet | bool
-
-- name: Parse WAN network prefix (first three octets)
+- name: Set upstream WAN prefix from inventory
   ansible.builtin.set_fact:
-    _wan_prefix: >-
-      {{ (wan_addr_raw.stdout | trim).split('/')[0].split('.')[0:3] | join('.') }}
+    _wan_prefix: "{{ upstream_wan_prefix }}"
   when:
     - openwrt_lan_auto_subnet | bool
-    - wan_addr_raw.stdout | trim | length > 0
+    - upstream_wan_prefix | default('') | length > 0
 
 - name: Select first LAN subnet that does not collide with WAN
   ansible.builtin.set_fact:
@@ -54,7 +48,8 @@
     openwrt_lan_netmask: "{{ _selected_lan.netmask }}"
   when: _selected_lan is defined
 
-# ── Configure WAN ────────────────────────────────────────────────
+# ── Phase 1: Configure WAN and LAN ports, restart for connectivity ──
+# Keep LAN at default 192.168.1.1 so SSH stays alive through restart
 
 - name: Set WAN interface device
   ansible.builtin.raw: uci set network.wan.device='{{ wan_device }}'
@@ -68,14 +63,6 @@
 - name: Set WAN6 protocol
   ansible.builtin.raw: uci set network.wan6.proto='dhcpv6'
 
-# ── Configure LAN ────────────────────────────────────────────────
-
-- name: Set LAN IP address
-  ansible.builtin.raw: uci set network.lan.ipaddr='{{ openwrt_lan_ip }}'
-
-- name: Set LAN netmask
-  ansible.builtin.raw: uci set network.lan.netmask='{{ openwrt_lan_netmask }}'
-
 - name: Clear existing LAN bridge port list
   ansible.builtin.raw: uci delete network.@device[0].ports 2>/dev/null; true
   changed_when: false
@@ -84,16 +71,97 @@
   ansible.builtin.raw: uci add_list network.@device[0].ports='{{ item }}'
   loop: "{{ lan_devices }}"
 
-# ── Configure DHCP ───────────────────────────────────────────────
+- name: Commit network changes (keeping LAN IP at default)
+  ansible.builtin.raw: uci commit
 
-- name: Set DHCP start address offset
-  ansible.builtin.raw: uci set dhcp.lan.start='{{ openwrt_dhcp_start }}'
+- name: Restart firewall and DHCP synchronously
+  ansible.builtin.raw: >-
+    /etc/init.d/firewall restart;
+    /etc/init.d/dnsmasq restart
+  changed_when: true
 
-- name: Set DHCP address pool size
-  ansible.builtin.raw: uci set dhcp.lan.limit='{{ openwrt_dhcp_limit }}'
+- name: Schedule Phase 1 network restart via detached script
+  ansible.builtin.raw: >-
+    printf '#!/bin/sh\nsleep 3\n/etc/init.d/network restart\nsleep 5\n/etc/init.d/dropbear restart\nrm -f /tmp/_restart_net.sh\n'
+    > /tmp/_restart_net.sh &&
+    chmod +x /tmp/_restart_net.sh &&
+    start-stop-daemon -S -b -x /tmp/_restart_net.sh
+  ignore_unreachable: true
+  changed_when: true
 
-- name: Set DHCP lease time
-  ansible.builtin.raw: uci set dhcp.lan.leasetime='{{ openwrt_dhcp_leasetime }}'
+- name: Pause for network and SSH to stabilize
+  ansible.builtin.pause:
+    seconds: 25
+
+- name: Remove bootstrap IP from WAN bridge on Proxmox
+  ansible.builtin.shell:
+    cmd: >-
+      for br in $(ip -o addr show to {{ _bootstrap_ip }}/{{ _bootstrap_cidr }}
+      | awk '{print $2}'); do
+      ip addr del {{ _bootstrap_ip }}/{{ _bootstrap_cidr }} dev "$br" 2>/dev/null || true;
+      done
+    executable: /bin/bash
+  delegate_to: "{{ _proxmox_host }}"
+  failed_when: false
+  changed_when: true
+
+- name: Add bootstrap IP to LAN bridge on Proxmox
+  ansible.builtin.command:
+    cmd: >-
+      ip addr add {{ _bootstrap_ip }}/{{ _bootstrap_cidr }}
+      dev {{ _lan_bridge }}
+  delegate_to: "{{ _proxmox_host }}"
+  failed_when: false
+  changed_when: true
+
+- name: Wait for OpenWrt SSH on LAN bridge
+  ansible.builtin.wait_for:
+    host: "{{ ansible_host }}"
+    port: 22
+    delay: 5
+    timeout: 120
+  delegate_to: "{{ _proxmox_host }}"
+
+- name: Wait for WAN default route
+  ansible.builtin.raw: ip -o route show default 2>/dev/null | head -1
+  register: _wan_route
+  changed_when: false
+  retries: 30
+  delay: 3
+  until: _wan_route.stdout | default('') | trim | length > 0
+
+# ── WiFi driver installation (needs WAN internet) ──────────────
+
+- name: Switch opkg feeds to HTTP for SSL-less images
+  ansible.builtin.raw: >-
+    sed -i 's|https://|http://|g' /etc/opkg/distfeeds.conf
+  changed_when: true
+  when:
+    - openwrt_mesh_enabled | bool
+    - openwrt_wifi_driver_packages | default([]) | length > 0
+
+- name: Update opkg package lists
+  ansible.builtin.raw: opkg update
+  changed_when: false
+  when:
+    - openwrt_mesh_enabled | bool
+    - openwrt_wifi_driver_packages | default([]) | length > 0
+
+- name: Install WiFi driver packages
+  ansible.builtin.raw: opkg install {{ item }}
+  loop: "{{ openwrt_wifi_driver_packages | default([]) }}"
+  when:
+    - openwrt_mesh_enabled | bool
+    - openwrt_wifi_driver_packages | default([]) | length > 0
+
+- name: Load WiFi kernel modules
+  ansible.builtin.raw: >-
+    for mod in iwlwifi ath9k ath10k_pci mt76; do
+    modprobe "$mod" 2>/dev/null; done; sleep 3
+  changed_when: true
+  when:
+    - openwrt_mesh_enabled | bool
+    - openwrt_wifi_driver_packages | default([]) | length > 0
 
 # ── 802.11s Mesh networking ────────────────────────────────────
 
@@ -112,13 +180,6 @@
 - name: Remove default wpad packages
   ansible.builtin.raw: >-
     opkg list-installed | grep -q wpad-basic && opkg remove wpad-basic-wolfssl wpad-basic-openssl wpad-basic-mbedtls wpad-basic wpad-mini 2>/dev/null; true
-  changed_when: false
-  when:
-    - openwrt_mesh_enabled | bool
-    - wifi_radios | default([]) | length > 0
-
-- name: Update package lists
-  ansible.builtin.raw: opkg update
   changed_when: false
   when:
     - openwrt_mesh_enabled | bool
@@ -168,24 +229,61 @@
     - openwrt_mesh_enabled | bool
     - wifi_radios | default([]) | length > 0
 
-# ── Commit and apply ─────────────────────────────────────────────
+# ── Phase 2: Apply final LAN settings and restart ───────────────
 
-- name: Commit all UCI changes
+- name: Set LAN IP address
+  ansible.builtin.raw: uci set network.lan.ipaddr='{{ openwrt_lan_ip }}'
+
+- name: Set LAN netmask
+  ansible.builtin.raw: uci set network.lan.netmask='{{ openwrt_lan_netmask }}'
+
+- name: Set DHCP start address offset
+  ansible.builtin.raw: uci set dhcp.lan.start='{{ openwrt_dhcp_start }}'
+
+- name: Set DHCP address pool size
+  ansible.builtin.raw: uci set dhcp.lan.limit='{{ openwrt_dhcp_limit }}'
+
+- name: Set DHCP lease time
+  ansible.builtin.raw: uci set dhcp.lan.leasetime='{{ openwrt_dhcp_leasetime }}'
+
+- name: Commit all final changes
   ansible.builtin.raw: uci commit
 
-- name: Restart all services in background
-  ansible.builtin.raw: |
-    nohup sh -c 'sleep 2; /etc/init.d/network restart; /etc/init.d/firewall restart; /etc/init.d/dnsmasq restart' >/dev/null 2>&1 &
+- name: Restart firewall and DHCP
+  ansible.builtin.raw: >-
+    /etc/init.d/firewall restart;
+    /etc/init.d/dnsmasq restart
+  changed_when: true
+
+- name: Schedule final network restart via detached script
+  ansible.builtin.raw: >-
+    printf '#!/bin/sh\nsleep 3\n/etc/init.d/network restart\nsleep 5\n/etc/init.d/dropbear restart\nrm -f /tmp/_restart_net.sh\n'
+    > /tmp/_restart_net.sh &&
+    chmod +x /tmp/_restart_net.sh &&
+    start-stop-daemon -S -b -x /tmp/_restart_net.sh
   ignore_unreachable: true
+  changed_when: true
 
-- name: Pause for services to restart
+- name: Pause for network to restart
   ansible.builtin.pause:
-    seconds: 15
+    seconds: 20
 
-- name: Report final LAN address
+- name: Clean up bootstrap IP from LAN bridge
+  ansible.builtin.command:
+    cmd: >-
+      ip addr del {{ _bootstrap_ip }}/{{ _bootstrap_cidr }}
+      dev {{ _lan_bridge }}
+  delegate_to: "{{ _proxmox_host }}"
+  failed_when: false
+  changed_when: true
+
+# ── Final report ────────────────────────────────────────────────
+
+- name: Report final configuration
   ansible.builtin.debug:
     msg: >-
       OpenWrt LAN configured at {{ openwrt_lan_ip }}/{{ openwrt_lan_netmask }}
       (WAN on {{ wan_device }}, prefix {{ _wan_prefix | default('unknown') }}).
+      WiFi radios={{ wifi_radios | default([]) | length }}.
       Connect to {{ openwrt_lan_ip }} to reach the router.
   ignore_unreachable: true

@@ -2,9 +2,9 @@
 
 ## Purpose
 
-**vm_builds** is an Ansible project that automates the provisioning and configuration of virtual machines on Proxmox VE. The primary target is an OpenWrt router VM that replaces a physical consumer router, giving full software-defined control over the home network.
+**vm_builds** is an Ansible project that automates the provisioning and configuration of virtual machines on Proxmox VE. The primary target is an OpenWrt router VM that replaces a physical consumer router, giving full software-defined control over the home network. The project is designed to expand to additional VM types (Home Assistant, Pi-hole, NAS, etc.) using consistent patterns.
 
-The project is designed around a key principle: **a single command should take a bare Proxmox host and produce a fully functional, production-ready router VM** -- no manual Proxmox UI interaction, no SSH-and-paste workflows, no guesswork.
+The project is designed around a key principle: **a single command should take a bare Proxmox host and produce fully functional, production-ready VMs** -- no manual Proxmox UI interaction, no SSH-and-paste workflows, no guesswork.
 
 ## Design Philosophy
 
@@ -14,6 +14,7 @@ The project is designed around a key principle: **a single command should take a
 - **No third-party monkeypatching.** OpenWrt has no Python runtime, so all configuration is done via `ansible.builtin.raw` with UCI commands. This avoids fragile compatibility shims that break across Ansible versions.
 - **Backup before change.** Every playbook run begins by backing up the host configuration (tar) and existing VMs (`vzdump`). Three restore modes are available: config-only, full rollback (VMs + config), and clean reset (destroy all + restore config). This works in both production and test scenarios.
 - **Test-friendly.** A dedicated test Proxmox node can be provisioned and torn down programmatically using `./cleanup.sh clean`, which destroys all VMs and restores the host to the state captured before the last playbook run.
+- **Extensible.** The two-role-per-VM pattern (`<type>_vm` + `<type>_configure`) and shared infrastructure roles ensure new VM types integrate cleanly without architectural drift.
 
 ## High-Level Architecture
 
@@ -43,12 +44,17 @@ The project is designed around a key principle: **a single command should take a
  │  │  wlan0      ◄── PCIe pass    │                 │
  │  │         └── 802.11s mesh      │                 │
  │  └────────────────────────────────┘                 │
+ │                                                     │
+ │  ┌────────────────────────────────┐                 │
+ │  │  Future VM (VMID 200)         │  ◄── future    │
+ │  │  eth0 ◄── vmbr1 (LAN bridge)  │                 │
+ │  └────────────────────────────────┘                 │
  └─────────────────────────────────────────────────────┘
 ```
 
 ## Execution Flow
 
-The playbook (`playbooks/site.yml`) runs four plays in sequence:
+The playbook (`playbooks/site.yml`) runs plays in sequence:
 
 ### Play 0: Backup (targets Proxmox host)
 
@@ -56,17 +62,57 @@ The playbook (`playbooks/site.yml`) runs four plays in sequence:
 
 ### Play 1: Provision (targets Proxmox host)
 
-1. **Bridge creation** (`proxmox_bridges`) -- Discovers every physical NIC, checks which already have bridges, and creates new `vmbr` interfaces for any unbridged NICs. Ensures at least 2 bridges exist (WAN + LAN minimum).
-2. **PCI passthrough** (`proxmox_pci_passthrough`) -- Detects WiFi PCIe devices, enables IOMMU if needed (with optional reboot), validates IOMMU group isolation, blacklists host WiFi drivers, and binds devices to `vfio-pci`.
-3. **VM creation** (`openwrt_vm`) -- Uploads the OpenWrt disk image, creates the VM shell via Proxmox API, imports the disk, attaches virtual NICs to bridges, passes through WiFi PCIe devices, optionally clones the upstream router's MAC address onto the WAN interface, boots the VM, and establishes a temporary bootstrap SSH connection through the Proxmox host.
+1. **Bridge creation** (`proxmox_bridges`) -- Discovers every physical NIC, checks which already have bridges, and creates new `vmbr` interfaces for any unbridged NICs. Ensures at least 2 bridges exist (WAN + LAN minimum). Exports `proxmox_all_bridges` fact.
+2. **PCI passthrough** (`proxmox_pci_passthrough`) -- Detects WiFi PCIe devices, enables IOMMU if needed (with optional reboot), validates IOMMU group isolation, blacklists host WiFi drivers, and binds devices to `vfio-pci`. Exports `wifi_pci_devices` fact.
+3. **VM creation** (`openwrt_vm`) -- Uploads the OpenWrt disk image, creates the VM shell via Proxmox API, imports the disk, attaches virtual NICs to bridges, passes through WiFi PCIe devices, boots the VM, and establishes a temporary bootstrap SSH connection through the Proxmox host.
 
-### Play 2: Configure (targets OpenWrt VM)
+*Future VM provision roles (`homeassistant_vm`, etc.) insert here.*
 
-4. **OpenWrt configuration** (`openwrt_configure`) -- Waits for WAN DHCP, detects the WAN interface, auto-selects a LAN subnet that avoids collisions with the WAN network, assigns LAN ports to a bridge, configures DHCP, sets up firewall zones, installs mesh WiFi packages, and configures 802.11s mesh on all detected radios.
+### Play 2+: Configure (targets VM dynamic groups)
 
-### Play 3: Cleanup (targets Proxmox host)
+4. **OpenWrt configuration** (`openwrt_configure`) -- Uses a two-phase restart pattern. Phase 1 configures WAN (eth0) and LAN bridge ports, restarts networking while keeping LAN at the factory-default IP, then migrates the bootstrap IP from the WAN bridge to the LAN bridge. Phase 2 installs WiFi driver packages (switching opkg feeds to HTTP for BusyBox compatibility), loads kernel modules, configures 802.11s mesh on detected radios, applies the auto-selected collision-free LAN IP and DHCP settings, and performs a final network restart.
+
+*Future VM configure plays (`homeassistant_configure`, etc.) follow as separate plays.*
+
+### Final Play: Cleanup (targets Proxmox host)
 
 5. **Bootstrap cleanup** -- Removes the temporary IP address that was added to a LAN bridge for initial SSH access.
+
+## Multi-VM Expansion
+
+### Two-role pattern
+
+Every VM type consists of:
+- `<type>_vm` — provisions the VM on Proxmox (image upload, API create, disk import, NIC attach, start, `add_host`)
+- `<type>_configure` — configures the running VM (packages, services, settings)
+
+These are always separate roles in separate plays. The provision role targets `proxmox` hosts. The configure role targets the dynamic group created by `add_host`.
+
+### Shared infrastructure
+
+These roles run **once per host**, regardless of how many VMs exist:
+- `proxmox_backup` — host config + VM backups
+- `proxmox_bridges` — NIC discovery, bridge creation → exports `proxmox_all_bridges`
+- `proxmox_pci_passthrough` — IOMMU/vfio-pci → exports `wifi_pci_devices`
+
+### VMID allocation
+
+| Range | Purpose | Current |
+|-------|---------|---------|
+| 100-199 | Network VMs | 100 = OpenWrt |
+| 200-299 | Service VMs | *(reserved)* |
+
+All VMIDs are defined in `inventory/group_vars/all.yml`.
+
+### Variable isolation
+
+- Role defaults are prefixed with the VM type: `openwrt_vm_id`, `homeassistant_vm_id`.
+- Shared params (storage pool, etc.) live in `group_vars/all.yml`.
+- Cross-role data passes through `set_fact` or `add_host`, never direct default references.
+
+### Bridge allocation
+
+OpenWrt is the router — it consumes ALL bridges. Service VMs behind the router need only one bridge (the LAN bridge, typically `proxmox_all_bridges[1]`).
 
 ## Project Structure
 
@@ -76,33 +122,38 @@ vm_builds/
 ├── requirements.yml         # Galaxy collections
 ├── setup.sh                 # One-time environment bootstrap
 ├── run.sh                   # Run playbook with .env
-├── cleanup.sh               # LVM snapshot save/restore for test resets
+├── cleanup.sh               # Restore / full-restore / clean (tar + vzdump)
 ├── test.env                 # Test environment variables (committed)
 ├── .env                     # Production secrets (gitignored)
 │
 ├── inventory/
-│   ├── hosts.yml            # Host inventory
+│   ├── hosts.yml            # Host inventory + empty dynamic groups
 │   ├── group_vars/
-│   │   ├── all.yml          # VM parameters (ID, memory, image path)
+│   │   ├── all.yml          # VM parameters (IDs, image paths, storage)
 │   │   └── proxmox.yml      # API auth, SSH settings
 │   └── host_vars/
 │       └── home.yml         # Per-host overrides (IP, reboot policy)
 │
 ├── playbooks/
-│   └── site.yml             # Main orchestration playbook
+│   ├── site.yml             # Main orchestration playbook
+│   └── cleanup.yml          # Tag-driven restore playbook
 │
 ├── roles/
-│   ├── proxmox_bridges/     # NIC discovery and bridge creation
-│   ├── proxmox_pci_passthrough/  # WiFi IOMMU/vfio setup
-│   ├── openwrt_vm/          # VM lifecycle management
-│   └── openwrt_configure/   # OpenWrt UCI configuration
+│   ├── proxmox_backup/      # Shared: host config + VM backup (tar + vzdump)
+│   ├── proxmox_bridges/     # Shared: NIC discovery and bridge creation
+│   ├── proxmox_pci_passthrough/  # Shared: WiFi IOMMU/vfio setup
+│   ├── openwrt_vm/          # OpenWrt: VM lifecycle management
+│   └── openwrt_configure/   # OpenWrt: UCI configuration
 │
 ├── molecule/
 │   └── default/             # Integration test scenario
 │
-├── images/
-│   └── openwrt.img          # OpenWrt disk image (gitignored)
+├── images/                  # VM disk images (gitignored)
 │
-└── docs/
-    └── architecture/        # This documentation
+├── docs/
+│   └── architecture/        # Design documentation
+│
+└── .cursor/
+    ├── rules/               # Always-on coding conventions (for LLM sessions)
+    └── skills/              # On-demand knowledge (for LLM sessions)
 ```

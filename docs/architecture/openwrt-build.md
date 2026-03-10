@@ -21,16 +21,13 @@ Every physical ethernet port on the Proxmox host gets its own dedicated virtual 
 - Proxmox retains management access to each bridge for monitoring and diagnostics.
 - OpenWrt controls all Layer 2/3 decisions -- bridging, VLANs, firewall zones -- exactly as it would on physical hardware.
 
-### 2. Automatic WAN Detection
+### 2. WAN Assignment
 
-The playbook does not assume which port is WAN. Instead:
+The first bridge in `proxmox_all_bridges` (typically `vmbr0`) maps to `eth0` inside the VM, which is designated WAN. All other `ethN` interfaces become LAN ports on a bridge.
 
-1. OpenWrt boots with all interfaces available.
-2. The configure role waits for a DHCP lease to appear on any interface (up to 90 seconds).
-3. Whichever interface gets a default route is designated WAN.
-4. All other ethernet interfaces are assigned to a LAN bridge.
+The configure role waits up to 90 seconds for a DHCP default route to appear on the WAN interface, confirming upstream connectivity. If no route appears, the play fails with a clear error.
 
-This means you can plug the uplink into any port and the system self-configures.
+**Practical implication:** plug the upstream (ISP/router) cable into the physical NIC that corresponds to `vmbr0`. On multi-port mini-PCs, this is typically the first ethernet port. You can check bridge-to-NIC mappings on the Proxmox host with `brctl show`.
 
 ### 3. Collision-Free LAN Subnet
 
@@ -45,16 +42,15 @@ The WAN subnet is detected at runtime. The LAN subnet is selected from a priorit
 
 If WAN is on `192.168.2.x`, candidate 2 is skipped and `10.10.10.0/24` is used. This avoids the classic mistake of setting the LAN to `192.168.1.1` when the upstream is also on `192.168.1.0/24`.
 
-### 4. Upstream MAC Cloning
+### 4. Router Swap Workflow
 
-When `openwrt_clone_wan_mac` is enabled (default: `true`), the playbook:
+The playbook is designed for a three-step router replacement:
 
-1. Reads the default gateway IP from the Proxmox host's routing table.
-2. Pings the gateway to populate the ARP neighbor table.
-3. Extracts the gateway's MAC address.
-4. Assigns that MAC to the OpenWrt VM's WAN interface (`net0`).
+1. **Stage** -- Deploy behind the existing router. OpenWrt gets a WAN IP via DHCP from the old router and auto-selects a non-colliding LAN subnet.
+2. **Swap** -- Move the ISP uplink from the old router to the OpenWrt host's WAN port. OpenWrt picks up a new DHCP lease from the ISP.
+3. **Downstream** (optional) -- Plug the old router into a LAN port. Disable its DHCP. It becomes a switch/AP on a sub-network.
 
-This allows a seamless swap from a physical router to the OpenWrt VM -- the ISP/upstream device sees the same MAC address and continues to serve the same DHCP lease, avoiding re-authentication or lease expiry delays.
+No MAC cloning is needed. ISPs issue new DHCP leases to new MAC addresses within seconds.
 
 ### 5. WiFi PCIe Passthrough and 802.11s Mesh
 
@@ -67,11 +63,13 @@ WiFi cards cannot be virtualized effectively -- they need direct hardware access
 5. Blacklisting the host WiFi driver and binding the device to `vfio-pci`.
 6. Attaching the device to the VM with `qm set --hostpciN`.
 
-Once inside OpenWrt, the `openwrt_configure` role:
+Once inside OpenWrt, the `openwrt_configure` role (Phase 2, after WAN is up):
 
-1. Detects WiFi radios via `/sys/class/ieee80211/`.
-2. Replaces the default `wpad-basic` with `wpad-mesh-openssl`.
-3. Configures each radio as an 802.11s mesh point with WPA3-SAE encryption.
+1. Switches opkg feeds to HTTP (BusyBox `wget` lacks SSL support).
+2. Installs WiFi driver packages (`kmod-iwlwifi`, firmware) via opkg.
+3. Explicitly loads kernel modules with `modprobe` (opkg does not auto-load them).
+4. Detects WiFi radios via `/sys/class/ieee80211/`.
+5. If radios are found: replaces `wpad-basic` with `wpad-mesh-openssl`, enables each radio, and configures 802.11s mesh with WPA3-SAE encryption.
 
 ### 6. Firewall and DHCP Baseline
 
@@ -92,8 +90,8 @@ The image source is configurable via `openwrt_image_path` in `inventory/group_va
 
 Fresh OpenWrt has no password on root and runs Dropbear SSH. The playbook establishes initial connectivity by:
 
-1. Selecting a LAN-side bridge on the Proxmox host.
-2. Adding a temporary IP (`192.168.1.2/24`) to that bridge.
-3. Waiting for OpenWrt's default LAN IP (`192.168.1.1`) to respond on port 22.
-4. Using `ProxyJump` through the Proxmox host for SSH, with `sshpass` for empty-password auth.
-5. After configuration completes, the temporary IP is removed in Play 3.
+1. Adding a temporary IP (`192.168.1.2/24`) to the first bridge (`vmbr0`). OpenWrt's factory default puts LAN on `eth0`, so initially both WAN and the bootstrap IP share `vmbr0`.
+2. Waiting for OpenWrt's default LAN IP (`192.168.1.1`) to respond on port 22.
+3. Using `ProxyJump` through the Proxmox host for SSH, with `sshpass` for empty-password auth and SSH keepalives (`ServerAliveInterval=15`).
+4. During Phase 1 of configuration, the bootstrap IP is migrated from `vmbr0` (WAN bridge) to `vmbr1` (LAN bridge) after networking restarts.
+5. After configuration completes, the temporary IP is removed.
