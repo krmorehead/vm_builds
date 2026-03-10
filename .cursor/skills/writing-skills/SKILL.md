@@ -70,6 +70,29 @@ management network and requires physical console access to recover."
 - Then `ifup --all --force` to restore from config
 ```
 
+## Skill architecture: general vs specific
+
+When a project manages multiple components of the same kind (VMs, services, microservices), split skills into layers:
+
+- **General skill** — patterns that apply to ALL components of that kind. Contains the skeleton, checklist, shared conventions, and architectural constraints.
+- **Component-specific skill** — patterns particular to ONE component. Contains its package manager, service model, restart sequences, firewall behavior, network topology, and bug history.
+
+```
+# GOOD: layered skills
+.cursor/skills/vm-lifecycle/SKILL.md      # general: two-role pattern, VMID allocation, deploy_stamp
+.cursor/skills/openwrt-build/SKILL.md     # specific: UCI, firewall zones, two-phase restart, opkg
+.cursor/skills/homeassistant-build/SKILL.md  # specific: HAOS API, add-on management
+
+# BAD: everything in one file
+.cursor/skills/vm-lifecycle/SKILL.md      # general + OpenWrt firewall zones + HAOS API + ...
+```
+
+**Litmus test**: If a pattern mentions a specific component's name, package manager, init system, or network topology, it belongs in the component-specific skill, not the general one.
+
+**Why this matters**: An LLM working on a new VM type gets only the general patterns without noise from other VMs. An LLM working on OpenWrt gets both general + OpenWrt-specific. Without separation, OpenWrt-specific lessons (like firewall zone rebinding) pollute the context for every other VM type.
+
+Previous bug: firewall zone rebinding after network restarts, UCI commands, opkg feed switching, and bootstrap IP migration were all stored in `vm-lifecycle`. An LLM adding a Home Assistant VM would see all that noise and might incorrectly apply OpenWrt patterns to a different VM type.
+
 ## Decision: skill vs rule
 
 | Use a **skill** when | Use a **rule** when |

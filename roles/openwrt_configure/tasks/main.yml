@@ -82,7 +82,7 @@
 
 - name: Schedule Phase 1 network restart via detached script
   ansible.builtin.raw: >-
-    printf '#!/bin/sh\nsleep 3\n/etc/init.d/network restart\nsleep 5\n/etc/init.d/dropbear restart\nrm -f /tmp/_restart_net.sh\n'
+    printf '#!/bin/sh\nsleep 3\n/etc/init.d/network restart\nsleep 5\n/etc/init.d/firewall restart\n/etc/init.d/dropbear restart\nrm -f /tmp/_restart_net.sh\n'
     > /tmp/_restart_net.sh &&
     chmod +x /tmp/_restart_net.sh &&
     start-stop-daemon -S -b -x /tmp/_restart_net.sh
@@ -130,6 +130,10 @@
   delay: 3
   until: _wan_route.stdout | default('') | trim | length > 0
 
+- name: Restart firewall after network topology change
+  ansible.builtin.raw: /etc/init.d/firewall restart
+  changed_when: true
+
 # ── WiFi driver installation (needs WAN internet) ──────────────
 
 - name: Switch opkg feeds to HTTP for SSL-less images
@@ -142,7 +146,11 @@
 
 - name: Update opkg package lists
   ansible.builtin.raw: opkg update
+  register: _opkg_update
   changed_when: false
+  retries: 3
+  delay: 5
+  until: _opkg_update.rc == 0
   when:
     - openwrt_mesh_enabled | bool
     - openwrt_wifi_driver_packages | default([]) | length > 0
@@ -257,7 +265,7 @@
 
 - name: Schedule final network restart via detached script
   ansible.builtin.raw: >-
-    printf '#!/bin/sh\nsleep 3\n/etc/init.d/network restart\nsleep 5\n/etc/init.d/dropbear restart\nrm -f /tmp/_restart_net.sh\n'
+    printf '#!/bin/sh\nsleep 3\n/etc/init.d/network restart\nsleep 5\n/etc/init.d/firewall restart\n/etc/init.d/dropbear restart\nrm -f /tmp/_restart_net.sh\n'
     > /tmp/_restart_net.sh &&
     chmod +x /tmp/_restart_net.sh &&
     start-stop-daemon -S -b -x /tmp/_restart_net.sh

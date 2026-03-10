@@ -148,7 +148,8 @@ Previous bug: `ansible-proxmox-lan.conf` was deployed by `openwrt_configure` but
 | Bridge numbers keep incrementing | Cleanup didn't remove bridges | `./cleanup.sh clean test.env` |
 | WiFi radios=0 after converge | PCI passthrough not cleaned up | Ensure cleanup unbinds vfio-pci, reloads modules, rescans PCI |
 | `Timeout waiting for SSH` | Network restart dropped connection | Verify SSH args include `ConnectTimeout=10`, `ServerAliveInterval=15` |
-| `opkg update` fails | HTTPS not supported | Ensure `sed -i 's\|https://\|http://\|g'` runs before `opkg update` |
+| `opkg update` fails with HTTPS error | HTTPS not supported | Ensure `sed -i 's\|https://\|http://\|g'` runs before `opkg update` |
+| `opkg update` fails with "Operation not permitted" | Firewall zones stale after network restart | Restart firewall after network topology change, before outbound connections |
 | `deprecated-local-action` lint error | Used `local_action` syntax | Replace with `delegate_to: localhost` (see below) |
 | Stale LAN IP after cleanup | Missing config file in cleanup list | Add the file to both cleanup playbooks |
 

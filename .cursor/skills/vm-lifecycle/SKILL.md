@@ -1,13 +1,13 @@
 ---
 name: vm-lifecycle
-description: Patterns and step-by-step guide for adding new VM types to the vm_builds project. Use when creating new VM roles, extending the playbook for additional VMs, modifying site.yml, or designing shared infrastructure for multi-VM Proxmox hosts.
+description: General patterns for adding new VM types to the vm_builds project. Use when creating new VM roles, extending site.yml, modifying shared infrastructure, or designing inventory groups. For OpenWrt-specific patterns, see openwrt-build skill instead.
 ---
 
 # VM Lifecycle Patterns
 
 ## Context
 
-This project manages multiple VM types on Proxmox. Each VM follows a two-role pattern. Shared infrastructure (bridges, backups, PCI passthrough) runs once per host. This skill prevents architectural drift as new VM types are added.
+This project manages multiple VM types on Proxmox. Each VM follows a two-role pattern. Shared infrastructure runs once per host. This skill covers the GENERAL patterns that apply to ALL VM types. VM-specific patterns (OpenWrt networking, Home Assistant setup, etc.) belong in their own skills.
 
 ## Rules
 
@@ -17,18 +17,14 @@ This project manages multiple VM types on Proxmox. Each VM follows a two-role pa
 4. Each `<type>_vm` role MUST check for existing VM before creating (`qm status <vmid>`). Guard ALL creation tasks with `when: not vm_exists | bool`.
 5. VMIDs: 100-series for network VMs, 200-series for service VMs. Define in `group_vars/all.yml`.
 6. The `<type>_vm` role adds the VM to dynamic inventory via `add_host`. The `<type>_configure` role runs in a separate play targeting that group.
-7. NEVER hardcode bridge names or roles (e.g., `vmbr0 = WAN`). The WAN bridge is detected at runtime via `proxmox_wan_bridge` (set by `proxmox_bridges` from the host's default route). Order bridges dynamically: WAN first, then LAN sorted.
-8. NEVER reference another role's defaults. Use `set_fact` with `cacheable: true` or `add_host` variables to pass data.
-9. Every provision play targeting Proxmox hosts MUST include `deploy_stamp` as its last role to record the deployment in `/etc/ansible/facts.d/vm_builds.fact`.
-10. Every new role MUST have `meta/main.yml` with `author`, `license: proprietary`, `role_name`, `description`, `min_ansible_version`, and `platforms`.
-11. Provision plays target **flavor groups** (e.g., `router_nodes`, `service_nodes`), NOT `proxmox` directly. Shared infra targets `proxmox`.
-12. NEVER use `local_action`. ALWAYS use `delegate_to: localhost` instead.
-13. When a role deploys files to the host, ALWAYS add them to both cleanup playbooks (`molecule/default/cleanup.yml` and `playbooks/cleanup.yml`).
-14. Every VM MUST configure `--onboot 1 --startup order=N` via `qm set`. This task runs unconditionally (not guarded by `vm_exists`) so it self-heals if the setting was manually changed. Define `<type>_vm_startup_order` in role defaults.
-15. Optional env variables (e.g., `WAN_MAC`) go in role `defaults/main.yml` via `lookup('env', ...) | default('', true)`. NEVER add optional vars to `REQUIRED_ENV` in `build.py`.
-16. ALL shell scripts (`run.sh`, `cleanup.sh`) MUST delegate to `build.py`. NEVER call `ansible-playbook` directly from a shell script. `build.py` provides host probing, env validation, and state file fallback that raw `ansible-playbook` calls don't have. Previous bug: `run.sh` called `ansible-playbook` directly, bypassing host auto-detection — after cable swaps it silently failed.
-17. ALWAYS use `set -o pipefail` and `executable: /bin/bash` on any `ansible.builtin.shell` task containing a pipeline (`|`). Without it, earlier pipeline failures are silently swallowed. Previous bug: gateway detection returned empty string instead of failing.
-18. Every configured feature MUST have a corresponding assertion in `molecule/default/verify.yml`. "VM is running" is NOT sufficient — verify services (DHCP config, firewall), network topology (WAN/LAN bridge assignment), auto-start settings, backup manifest, and state files. Previous bug: DHCP was configured but never verified.
+7. NEVER reference another role's defaults. Use `set_fact` with `cacheable: true` or `add_host` variables to pass data.
+8. Every provision play targeting Proxmox hosts MUST include `deploy_stamp` as its last role.
+9. Every new role MUST have `meta/main.yml` with `author`, `license: proprietary`, `role_name`, `description`, `min_ansible_version`, and `platforms`.
+10. Provision plays target **flavor groups** (e.g., `router_nodes`, `service_nodes`), NOT `proxmox` directly. Shared infra targets `proxmox`.
+11. Every VM MUST configure `--onboot 1 --startup order=N` via `qm set`. This task runs unconditionally to self-heal. Define `<type>_vm_startup_order` in role defaults.
+12. When a role deploys files to the host, ALWAYS add them to both cleanup playbooks.
+13. Optional env variables go in role `defaults/main.yml` via `lookup('env', ...) | default('', true)`. NEVER add optional vars to `REQUIRED_ENV` in `build.py`.
+14. Every configured feature MUST have a corresponding assertion in `verify.yml`. "VM is running" is NOT sufficient — verify services, network topology, auto-start, and state files.
 
 ## Playbook execution order (site.yml)
 
@@ -38,10 +34,10 @@ Play 0: proxmox_backup             (targets: proxmox, tag: backup)
 Play 1: proxmox_bridges            (targets: proxmox — shared infra)
          proxmox_pci_passthrough
          deploy_stamp: infrastructure
-Play 2: openwrt_vm                 (targets: router_nodes — VM provision)
-         deploy_stamp: openwrt_vm
-Play 3: openwrt_configure          (targets: openwrt — dynamic group)
-Play 4: Bootstrap cleanup          (targets: proxmox — remove temp IPs)
+Play 2: <type>_vm                  (targets: <flavor_group> — VM provision)
+         deploy_stamp: <type>_vm
+Play 3: <type>_configure           (targets: <type> — dynamic group)
+Play N: Bootstrap cleanup          (targets: proxmox — remove temp networking)
 ```
 
 ## Device flavors (inventory groups)
@@ -58,7 +54,7 @@ proxmox:
       hosts: {}
 ```
 
-A host can belong to multiple flavor groups. Shared infra targets `proxmox` (runs on all). VM-specific plays target the flavor group.
+A host can belong to multiple flavor groups.
 
 ## Step-by-step: adding a new VM type
 
@@ -71,31 +67,6 @@ roles/homeassistant_vm/
 ├── defaults/main.yml
 ├── meta/main.yml
 └── tasks/main.yml
-```
-
-`meta/main.yml`:
-```yaml
----
-dependencies: []
-
-galaxy_info:
-  author: Kyle
-  license: proprietary
-  role_name: homeassistant_vm
-  description: Provision a Home Assistant VM on Proxmox
-  min_ansible_version: "2.15"
-  platforms:
-    - name: Debian
-      versions:
-        - bullseye
-        - bookworm
-```
-
-`defaults/main.yml`:
-```yaml
----
-homeassistant_tmp_image: /tmp/haos.qcow2
-homeassistant_bootstrap_bridge: ""
 ```
 
 `tasks/main.yml` must follow this skeleton:
@@ -123,13 +94,12 @@ homeassistant_bootstrap_bridge: ""
       --onboot 1
       --startup order={{ homeassistant_vm_startup_order }}
 
-# Bootstrap SSH (if needed) and add to dynamic inventory:
+# Add to dynamic inventory:
 - name: Add HomeAssistant VM to dynamic inventory
   ansible.builtin.add_host:
     name: "{{ homeassistant_vm_name }}"
     groups: homeassistant
     ansible_host: "<bootstrap_ip>"
-    # ... SSH args ...
 ```
 
 ### 2. Create the configure role
@@ -143,8 +113,8 @@ roles/homeassistant_configure/
 
 ### 3. Add VMID to group_vars
 
-`inventory/group_vars/all.yml`:
 ```yaml
+# inventory/group_vars/all.yml
 homeassistant_vm_id: 200
 homeassistant_vm_name: homeassistant
 homeassistant_vm_memory: 2048
@@ -155,137 +125,35 @@ homeassistant_image_path: images/haos.qcow2
 
 ### 4. Add dynamic group and flavor group to inventory
 
-`inventory/hosts.yml`:
-```yaml
-all:
-  children:
-    proxmox:
-      children:
-        router_nodes:
-          hosts:
-            home: {}
-        service_nodes:        # new flavor group
-          hosts:
-            home: {}
-    openwrt:
-      hosts: {}
-    homeassistant:            # dynamic group, populated by add_host
-      hosts: {}
-```
+### 5. Extend site.yml with provision + configure plays
 
-### 5. Extend site.yml
+### 6. Update Molecule (add flavor group to platforms, add verify assertions)
 
-```yaml
-# New provision play (targets flavor group, includes deploy_stamp):
-- name: Provision HomeAssistant VM
-  hosts: service_nodes
-  gather_facts: false
-  roles:
-    - homeassistant_vm
-    - role: deploy_stamp
-      vars:
-        deploy_stamp_play: homeassistant_vm
-
-# New configure play (targets dynamic group):
-- name: Configure HomeAssistant
-  hosts: homeassistant
-  gather_facts: false
-  roles:
-    - homeassistant_configure
-```
-
-### 6. Update Molecule
-
-Add the flavor group to `molecule/default/molecule.yml`:
-```yaml
-platforms:
-  - name: home
-    groups:
-      - proxmox
-      - router_nodes
-      - service_nodes    # add new flavor group
-```
-
-Add assertions to `molecule/default/verify.yml`.
-
-### 7. Documentation and versioning
-
-1. Create `docs/architecture/homeassistant-build.md`
-2. Add entry to `CHANGELOG.md` under `[Unreleased]`
-3. Bump `project_version` in `group_vars/all.yml` when releasing
-
-## WAN bridge detection and NIC ordering
-
-`proxmox_bridges` detects the WAN bridge by checking which bridge carries the host's default route. This fact (`proxmox_wan_bridge`) is consumed by VM roles.
-
-`openwrt_vm` orders bridges so the WAN bridge maps to `net0`/`eth0`:
-
-```yaml
-_ordered_bridges: [_wan_bridge] + (proxmox_all_bridges | difference([_wan_bridge]) | sort)
-```
-
-Override with `openwrt_wan_bridge` in `host_vars` if auto-detection picks wrong.
-
-Previous bug: alphabetical bridge sorting made `vmbr0` always WAN. When the modem was on `vmbr0`, the Proxmox GUI became unreachable from LAN nodes.
-
-## Proxmox LAN management IP
-
-When a VM becomes the primary router, the Proxmox host needs a static IP on the LAN bridge so the GUI is reachable from LAN clients. Pattern:
-
-1. Compute LAN IP from the router's LAN subnet + offset (default `.2`)
-2. Add IP to LAN bridge via `ip addr add` (immediate)
-3. Deploy persistent config to `/etc/network/interfaces.d/ansible-proxmox-lan.conf` (survives reboot)
-4. Write `.state/addresses.json` locally with both the original management IP and the new LAN IP
-5. Probe original management IP — if unreachable (topology changed), update `ansible_host` via `add_host` so subsequent plays can connect
-
-## State file for cross-run IP discovery
-
-`build.py` probes `PROXMOX_HOST` before running Ansible. If unreachable, it reads `.state/addresses.json` for cached alternative IPs. This handles cable-swap scenarios where the original management IP is no longer routable.
-
-The state file is written by `openwrt_configure` and cleaned by both cleanup playbooks. It is gitignored.
+### 7. Create VM-specific skill in `.cursor/skills/<type>-build/SKILL.md`
 
 ## Bridge allocation
 
-```yaml
-# OpenWrt: ALL bridges (WAN + all LAN ports)
-proxmox_all_bridges → [vmbr0, vmbr1, vmbr2]
+The WAN bridge is auto-detected by `proxmox_bridges` via the host's default route (`proxmox_wan_bridge` fact). All physical-NIC-backed bridges are exported as `proxmox_all_bridges`.
 
-# Service VM: typically only needs ONE LAN bridge
-_service_bridge: "{{ proxmox_all_bridges[1] | default(proxmox_all_bridges[0]) }}"
-```
-
-OpenWrt is special — it consumes all bridges because it IS the router. Most other VMs need a single bridge for LAN connectivity, typically the first LAN bridge (index 1, since index 0 is WAN).
+Different VM types consume bridges differently:
+- **Router VMs** (OpenWrt): ALL bridges — WAN on `net0`, remaining as LAN ports
+- **Service VMs**: typically ONE LAN bridge — `proxmox_all_bridges[1]` (first non-WAN)
+- **Isolated VMs**: a dedicated bridge if network isolation is required
 
 ## VMs that need internet during configure
 
-If the configure role needs to download packages (like OpenWrt does):
+If the configure role needs to download packages:
 1. The VM must have a NIC on a bridge with upstream connectivity.
-2. Use the two-phase restart pattern if you also need to change the VM's IP.
-3. For VMs behind the OpenWrt router, WAN access comes through the LAN bridge — no special handling needed.
+2. If the VM changes its own network topology mid-configure, use a multi-phase restart pattern (see VM-specific skill for details).
+3. For VMs behind a router VM, WAN access comes through the LAN bridge — no special handling needed.
 
 ## Deployment tracking
 
-The `deploy_stamp` role writes `/etc/ansible/facts.d/vm_builds.fact` on Proxmox hosts after each play. On subsequent runs with `gather_facts: true`, the data is available as `ansible_local.vm_builds`:
-
-```json
-{
-  "project_version": "1.0.0",
-  "last_run": "2026-03-09T20:00:00Z",
-  "plays": {
-    "backup": { "version": "1.0.0", "timestamp": "..." },
-    "infrastructure": { "version": "1.0.0", "timestamp": "..." },
-    "openwrt_vm": { "version": "1.0.0", "timestamp": "..." },
-    "homeassistant_vm": { "version": "1.1.0", "timestamp": "..." }
-  }
-}
-```
-
-Each play appends its entry without overwriting others. Query a host:
-`ansible -m setup -a 'filter=ansible_local' <hostname>`
+The `deploy_stamp` role writes `/etc/ansible/facts.d/vm_builds.fact` on Proxmox hosts after each play. On subsequent runs with `gather_facts: true`, the data is available as `ansible_local.vm_builds`. Each play appends its entry without overwriting others.
 
 ## Test strategy
 
 - Molecule converge provisions ALL VMs in sequence (site.yml runs everything).
 - Molecule verify checks each VM type with independent assertions.
 - Cleanup destroys ALL VMs via `qm list` iteration — not hardcoded VMIDs.
-- For VM-specific test scenarios, add separate Molecule scenarios: `molecule/homeassistant/`.
+- For VM-specific test scenarios, add separate Molecule scenarios: `molecule/<type>/`.

@@ -44,6 +44,11 @@ alwaysApply: true
 - Mid-run: after LAN IP deployment, `openwrt_configure` probes the original management IP. If unreachable, it updates `ansible_host` via `add_host` so subsequent plays (cleanup) can still connect.
 - `.state/` is gitignored — it contains runtime-detected, environment-specific data.
 
+## Firewall restart after network topology changes
+- After ANY network restart that changes WAN/LAN interface assignments, ALWAYS restart the firewall. Firewall zone bindings go stale when interfaces change.
+- Detached restart scripts MUST restart in order: network → firewall → dropbear.
+- Previous bug: Phase 1 restart omitted `firewall restart`. The WAN interface changed but the firewall didn't rebind zones. `opkg update` got EPERM ("Operation not permitted") because outbound traffic wasn't recognized as belonging to the WAN zone.
+
 ## Bootstrap bridge selection
 - OpenWrt's default LAN is on eth0, which maps to the WAN bridge (auto-detected).
 - The bootstrap IP can safely coexist on the WAN bridge if it's on a different subnet than the management IP.
