@@ -1,0 +1,146 @@
+---
+# Security hardening for OpenWrt (Milestone 1)
+#
+# Ordering is critical: key deployment MUST succeed before password auth
+# is disabled, or the VM becomes unreachable and requires a full rebuild.
+
+# ── Root password ────────────────────────────────────────────────
+
+- name: Set root password
+  ansible.builtin.raw: >-
+    echo -e '{{ openwrt_root_password }}\n{{ openwrt_root_password }}' | passwd root
+  when: openwrt_root_password | length > 0
+  no_log: true
+
+# ── SSH key deployment ───────────────────────────────────────────
+
+- name: Read SSH public key content
+  ansible.builtin.set_fact:
+    _ssh_pubkey_content: >-
+      {{ lookup('file', openwrt_ssh_pubkey)
+         if (openwrt_ssh_pubkey | length > 0 and not openwrt_ssh_pubkey.startswith('ssh-'))
+         else openwrt_ssh_pubkey }}
+  when: openwrt_ssh_pubkey | length > 0
+  delegate_to: localhost
+
+- name: Deploy SSH public key to OpenWrt
+  ansible.builtin.raw: |
+    mkdir -p /etc/dropbear
+    echo '{{ _ssh_pubkey_content | trim }}' > /etc/dropbear/authorized_keys
+    chmod 600 /etc/dropbear/authorized_keys
+  when: openwrt_ssh_pubkey | length > 0
+
+- name: Verify key-based SSH works before lockdown
+  ansible.builtin.raw: echo 'key_auth_ok'
+  register: _key_test
+  delegate_to: "{{ _proxmox_host }}"
+  vars:
+    ansible_host: "{{ hostvars[inventory_hostname].ansible_host }}"
+    ansible_user: root
+    ansible_ssh_common_args: >-
+      -o ProxyJump=root@{{ _proxmox_host }}
+      -o StrictHostKeyChecking=no
+      -o UserKnownHostsFile=/dev/null
+      -o ConnectTimeout=10
+      -o ServerAliveInterval=15
+      -o ServerAliveCountMax=4
+      -i {{ openwrt_ssh_private_key }}
+  changed_when: false
+  failed_when: "'key_auth_ok' not in (_key_test.stdout | default(''))"
+  when:
+    - openwrt_ssh_pubkey | length > 0
+    - openwrt_ssh_private_key | length > 0
+
+- name: Disable password auth in dropbear
+  ansible.builtin.raw: |
+    uci set dropbear.@dropbear[0].PasswordAuth='off'
+    uci set dropbear.@dropbear[0].RootPasswordAuth='off'
+    uci commit dropbear
+    /etc/init.d/dropbear restart
+  when:
+    - openwrt_ssh_pubkey | length > 0
+    - openwrt_ssh_private_key | length > 0
+
+# ── Restrict SSH to LAN zone ────────────────────────────────────
+
+- name: Check for WAN SSH firewall rule
+  ansible.builtin.raw: >-
+    uci show firewall 2>/dev/null | grep -n "name='Allow-SSH'" | head -1 || echo ''
+  register: _wan_ssh_rule
+  changed_when: false
+
+- name: Remove WAN SSH access rule if present
+  ansible.builtin.raw: |
+    for section in $(uci show firewall 2>/dev/null | grep "name='Allow-SSH'" | cut -d. -f1-2); do
+      src=$(uci get "${section}.src" 2>/dev/null)
+      if [ "$src" = "wan" ]; then
+        uci delete "$section" 2>/dev/null
+      fi
+    done
+    uci commit firewall
+  when: "'Allow-SSH' in (_wan_ssh_rule.stdout | default(''))"
+
+# ── Intrusion prevention (banIP) ────────────────────────────────
+
+- name: Update opkg package lists for security packages
+  ansible.builtin.raw: opkg update
+  register: _opkg_update_sec
+  changed_when: false
+  retries: 3
+  delay: 5
+  until: _opkg_update_sec.rc == 0
+
+- name: Install banIP
+  ansible.builtin.raw: opkg install banip
+  register: _banip_install
+  retries: 3
+  delay: 5
+  until: _banip_install.rc == 0
+
+- name: Configure banIP blocklist sources
+  ansible.builtin.raw: >-
+    uci set banip.global.ban_enabled='1'
+  changed_when: true
+
+- name: Enable and start banIP service
+  ansible.builtin.raw: |
+    uci commit banip
+    /etc/init.d/banip enable
+    /etc/init.d/banip start
+  changed_when: true
+
+# ── Firewall hardening ──────────────────────────────────────────
+
+- name: Enable SYN flood protection
+  ansible.builtin.raw: uci set firewall.@defaults[0].syn_flood='1'
+
+- name: Enable invalid packet dropping
+  ansible.builtin.raw: uci set firewall.@defaults[0].drop_invalid='1'
+
+- name: Commit firewall changes and restart
+  ansible.builtin.raw: |
+    uci commit firewall
+    /etc/init.d/firewall restart
+
+# ── Re-register host with updated SSH args ──────────────────────
+
+- name: Re-register openwrt host with key-based SSH
+  ansible.builtin.add_host:
+    name: "{{ inventory_hostname }}"
+    groups: openwrt
+    ansible_host: "{{ ansible_host }}"
+    ansible_user: root
+    ansible_ssh_common_args: >-
+      -o ProxyJump=root@{{ _proxmox_host }}
+      -o StrictHostKeyChecking=no
+      -o UserKnownHostsFile=/dev/null
+      -o ConnectTimeout=10
+      -o ServerAliveInterval=15
+      -o ServerAliveCountMax=4
+      -i {{ openwrt_ssh_private_key }}
+    _proxmox_host: "{{ _proxmox_host }}"
+    _wan_bridge: "{{ _wan_bridge }}"
+    _lan_bridge: "{{ _lan_bridge }}"
+  when:
+    - openwrt_ssh_pubkey | length > 0
+    - openwrt_ssh_private_key | length > 0

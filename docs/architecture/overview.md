@@ -342,16 +342,32 @@ All LXC containers and VMs (except OpenWrt) attach to a LAN bridge.
 The playbook (`playbooks/site.yml`) runs plays in sequence. Plays targeting
 flavor groups the host doesn't belong to are automatically skipped.
 
-### Current (v1.0)
+### Current (v1.2)
 
 ```
 site.yml (current)
-├── Play 0:  proxmox        [backup]     proxmox_backup, deploy_stamp
-├── Play 1:  proxmox        [infra]      proxmox_bridges, proxmox_pci_passthrough, deploy_stamp
-├── Play 2:  router_nodes   [openwrt]    openwrt_vm, deploy_stamp
-├── Play 3:  openwrt        [openwrt]    openwrt_configure
-└── Play 4:  proxmox        [cleanup]    Remove bootstrap IP
+├── Play 0:  proxmox        [backup]               proxmox_backup, deploy_stamp
+├── Play 1:  proxmox        [infra]                proxmox_bridges, proxmox_pci_passthrough, proxmox_igpu, deploy_stamp
+├── Play 2:  router_nodes   [openwrt]              openwrt_vm, deploy_stamp
+├── Play 3:  openwrt        [openwrt]              openwrt_configure
+│
+├── Per-feature plays (opt-in via --tags <name>, tagged with [never]):
+│   ├── Play 4:  openwrt        [openwrt-security]   include_role: openwrt_configure/security.yml
+│   ├── Play 5:  router_nodes   [openwrt-security]   deploy_stamp (openwrt_security)
+│   ├── Play 6:  openwrt        [openwrt-vlans]      include_role: openwrt_configure/vlans.yml
+│   ├── Play 7:  router_nodes   [openwrt-vlans]      deploy_stamp (openwrt_vlans)
+│   ├── Play 8:  openwrt        [openwrt-dns]        include_role: openwrt_configure/dns.yml
+│   ├── Play 9:  router_nodes   [openwrt-dns]        deploy_stamp (openwrt_dns)
+│   ├── Play 10: openwrt        [openwrt-mesh]       include_role: openwrt_configure/mesh.yml
+│   └── Play 11: router_nodes   [openwrt-mesh]       deploy_stamp (openwrt_mesh)
+│
+└── Play 12: proxmox        [cleanup]              Remove bootstrap IP
 ```
+
+Future integration plays (added by downstream projects when implemented):
+- `openwrt-pihole-dns` — added by Pi-hole LXC project
+- `openwrt-syslog` — added by rsyslog LXC project
+- `openwrt-monitoring` — added by monitoring project
 
 ### Target (Full Build)
 
@@ -635,7 +651,16 @@ vm_builds/
 │       ├── gaming_vm/
 │       └── gaming_configure/
 │
-├── molecule/default/              Integration tests
+├── tasks/
+│   └── reconstruct_openwrt_group.yml   Reusable dynamic group reconstruction
+│
+├── molecule/
+│   ├── default/                   Full integration tests
+│   ├── openwrt-security/          Per-feature: security hardening
+│   ├── openwrt-vlans/             Per-feature: VLAN segmentation
+│   ├── openwrt-dns/               Per-feature: encrypted DNS
+│   └── openwrt-mesh/              Per-feature: mesh enhancements
+│
 ├── images/                        VM disk images (gitignored)
 │
 ├── docs/

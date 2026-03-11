@@ -1,0 +1,4 @@
+---
+- name: Rollback encrypted DNS configuration
+  ansible.builtin.import_playbook: ../../playbooks/cleanup.yml
+  tags: [openwrt-dns-rollback]

@@ -1,5 +1,5 @@
 ---
-project_version: "1.1.0"
+project_version: "1.2.0"
 
 # ── Storage ───────────────────────────────────────────────────────
 proxmox_storage: local-lvm

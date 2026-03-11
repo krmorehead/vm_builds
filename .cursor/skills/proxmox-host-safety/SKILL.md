@@ -77,10 +77,16 @@ Previous bug: hardcoded `vmbr0 = WAN` made Proxmox GUI unreachable when the mode
 When ANY role deploys a file to the Proxmox host, ALWAYS add it to the removal list in BOTH cleanup playbooks (`molecule/default/cleanup.yml` AND `playbooks/cleanup.yml`).
 
 Current ansible-managed files that must be cleaned:
-- `/etc/network/interfaces.d/ansible-bridges.conf` (bridge config)
-- `/etc/network/interfaces.d/ansible-proxmox-lan.conf` (LAN management IP)
+- `/etc/network/interfaces.d/ansible-bridges.conf` (bridge config, may be modified to `inet dhcp`)
+- `/etc/network/interfaces.d/ansible-proxmox-lan.conf` (legacy LAN management IP, superseded)
+- `/etc/network/interfaces.d/ansible-temp-lan.conf` (test workaround, cleaned up)
 - `/etc/modprobe.d/blacklist-wifi.conf` (WiFi driver blacklist)
 - `/etc/modprobe.d/vfio-pci.conf` (PCI passthrough config)
+- `/etc/ansible/facts.d/vm_builds.fact` (deploy stamp tracking)
+- `/etc/apt/sources.list.d/pve-no-subscription.sources` (added by `proxmox_igpu`)
+- `/tmp/openwrt.img` (left behind if build fails mid-upload)
+- `/var/lib/vz/template/cache/debian-*.tar.zst` (LXC templates)
+- Enterprise repos: restore `pve-enterprise.sources.disabled` → `.sources` and `ceph.sources.disabled` → `.sources`
 
 Local state files that must be cleaned (via `delegate_to: localhost`):
 - `.state/addresses.json` (cached host IPs)
@@ -98,7 +104,7 @@ Before running destructive operations (cleanup, VM destroy):
 
 After OpenWrt network restart, the LAN IP changes (e.g., `192.168.1.1` → `10.10.10.1`). The bootstrap SSH connection will hang forever unless `ConnectTimeout` is set.
 
-Required SSH args for ALL OpenWrt connections:
+Required SSH args for baseline (password auth) OpenWrt connections:
 ```yaml
 ansible_ssh_common_args: >-
   -o ProxyJump=root@{{ ansible_host }}
@@ -109,6 +115,23 @@ ansible_ssh_common_args: >-
   -o ServerAliveInterval=15
   -o ServerAliveCountMax=4
 ```
+
+After security hardening (M1), SSH switches to key auth. Replace
+`PubkeyAuthentication=no` with `-i <key_path>` and remove `sshpass`:
+```yaml
+ansible_ssh_common_args: >-
+  -o ProxyJump=root@{{ ansible_host }}
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o ConnectTimeout=10
+  -o ServerAliveInterval=15
+  -o ServerAliveCountMax=4
+  -i {{ lookup('env', 'OPENWRT_SSH_PRIVATE_KEY') }}
+```
+
+The group reconstruction task file (`tasks/reconstruct_openwrt_group.yml`)
+auto-detects which auth method is active by checking `deploy_stamp` state
+and the `OPENWRT_SSH_PRIVATE_KEY` env var.
 
 - `ConnectTimeout=10`: Prevents infinite hang when LAN IP changes.
 - `ServerAliveInterval=15`: Prevents connection drop during local Ansible tasks (set_fact sequences) that don't generate SSH traffic.

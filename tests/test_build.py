@@ -337,6 +337,42 @@ class TestMain:
         )
         assert build.main(["--env", ".env"]) == 1
 
+    def test_rollback_tags_pass_through(self, tmp_path, monkeypatch):
+        """Rollback tags (e.g., openwrt-security-rollback) pass through to ansible-playbook."""
+        monkeypatch.setattr(build, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(build, "probe_host", lambda *a, **kw: True)
+        monkeypatch.setattr(build, "find_ansible_playbook", lambda: "/usr/bin/ansible-playbook")
+        playbooks_dir = tmp_path / "playbooks"
+        playbooks_dir.mkdir()
+        (playbooks_dir / "cleanup.yml").write_text("---\n")
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "PROXMOX_API_TOKEN_SECRET=x\nPROXMOX_HOST=1.2.3.4\nMESH_KEY=k\n"
+        )
+        captured_cmd = []
+
+        class FakeResult:
+            returncode = 0
+
+        def fake_run(cmd, **kw):
+            captured_cmd.extend(cmd)
+            return FakeResult()
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+        assert build.main(["--env", ".env", "--playbook", "cleanup", "--tags", "openwrt-security-rollback"]) == 0
+        assert "--tags" in captured_cmd
+        tags_idx = captured_cmd.index("--tags")
+        assert captured_cmd[tags_idx + 1] == "openwrt-security-rollback"
+
+    def test_rollback_tag_naming_convention(self):
+        """Verify rollback tag naming follows the openwrt-<feature>-rollback pattern."""
+        features = ["security", "vlans", "dns", "mesh"]
+        for feature in features:
+            tag = f"openwrt-{feature}-rollback"
+            cmd = build.build_command("/usr/bin/ansible-playbook", "cleanup.yml", tags=tag)
+            assert "--tags" in cmd
+            assert tag in cmd
+
     def test_happy_path_runs_subprocess(self, tmp_path, monkeypatch):
         monkeypatch.setattr(build, "PROJECT_ROOT", tmp_path)
         monkeypatch.setattr(build, "probe_host", lambda *a, **kw: True)

@@ -38,6 +38,84 @@
   roles:
     - openwrt_configure
 
+# ── Per-feature plays (opt-in via tags + never) ─────────────────
+
+- name: Harden OpenWrt security
+  hosts: openwrt
+  gather_facts: false
+  tags: [openwrt-security, never]
+  tasks:
+    - name: Apply security hardening
+      ansible.builtin.include_role:
+        name: openwrt_configure
+        tasks_from: security.yml
+
+- name: Record security hardening
+  hosts: router_nodes
+  gather_facts: false
+  tags: [openwrt-security, never]
+  roles:
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: openwrt_security
+
+- name: Configure OpenWrt VLANs
+  hosts: openwrt
+  gather_facts: false
+  tags: [openwrt-vlans, never]
+  tasks:
+    - name: Apply VLAN configuration
+      ansible.builtin.include_role:
+        name: openwrt_configure
+        tasks_from: vlans.yml
+
+- name: Record VLAN configuration
+  hosts: router_nodes
+  gather_facts: false
+  tags: [openwrt-vlans, never]
+  roles:
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: openwrt_vlans
+
+- name: Configure OpenWrt encrypted DNS
+  hosts: openwrt
+  gather_facts: false
+  tags: [openwrt-dns, never]
+  tasks:
+    - name: Apply encrypted DNS
+      ansible.builtin.include_role:
+        name: openwrt_configure
+        tasks_from: dns.yml
+
+- name: Record encrypted DNS
+  hosts: router_nodes
+  gather_facts: false
+  tags: [openwrt-dns, never]
+  roles:
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: openwrt_dns
+
+- name: Configure OpenWrt mesh enhancements
+  hosts: openwrt
+  gather_facts: false
+  tags: [openwrt-mesh, never]
+  tasks:
+    - name: Apply mesh enhancements
+      ansible.builtin.include_role:
+        name: openwrt_configure
+        tasks_from: mesh.yml
+
+- name: Record mesh enhancements
+  hosts: router_nodes
+  gather_facts: false
+  tags: [openwrt-mesh, never]
+  roles:
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: openwrt_mesh
+
 - name: Clean up bootstrap networking
   hosts: proxmox
   gather_facts: false

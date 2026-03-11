@@ -621,6 +621,7 @@
       ansible.builtin.assert:
         that:
           - backup_data.timestamp is defined
+          - backup_data.project_version is defined
           - backup_data.host is defined
           - backup_data.host_config is defined
         fail_msg: >-

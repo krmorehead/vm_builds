@@ -1,0 +1,60 @@
+---
+- name: Reconstruct openwrt dynamic group
+  hosts: router_nodes
+  gather_facts: true
+  tasks:
+    - name: Include reusable group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_openwrt_group.yml
+
+- name: Verify mesh enhancements
+  hosts: openwrt
+  gather_facts: false
+  tasks:
+    - name: Check for WiFi radios
+      ansible.builtin.raw: ls -1 /sys/class/ieee80211/ 2>/dev/null | wc -l
+      register: _radio_count
+      changed_when: false
+
+    - name: Check Dawn is installed (when WiFi present)
+      ansible.builtin.raw: opkg list-installed 2>/dev/null | grep -c dawn || echo 0
+      register: _dawn_installed
+      changed_when: false
+      when: (_radio_count.stdout | trim | int) > 0
+
+    - name: Assert Dawn is installed (when WiFi present)
+      ansible.builtin.assert:
+        that: (_dawn_installed.stdout | trim | int) > 0
+        fail_msg: "Dawn package not installed despite WiFi radios present"
+      when: (_radio_count.stdout | trim | int) > 0
+
+    - name: Check Dawn service (when WiFi present)
+      ansible.builtin.raw: /etc/init.d/dawn status 2>&1 || true
+      register: _dawn_status
+      changed_when: false
+      when: (_radio_count.stdout | trim | int) > 0
+
+    - name: Report mesh status
+      ansible.builtin.debug:
+        msg: >-
+          WiFi radios={{ _radio_count.stdout | trim }},
+          Dawn={{ 'installed' if (_radio_count.stdout | trim | int) > 0
+          and (_dawn_installed.stdout | default('0') | trim | int) > 0
+          else 'skipped (no WiFi)' }}
+
+- name: Verify deploy_stamp on Proxmox host
+  hosts: router_nodes
+  gather_facts: false
+  tasks:
+    - name: Read deploy_stamp
+      ansible.builtin.slurp:
+        src: /etc/ansible/facts.d/vm_builds.fact
+      register: _stamp_raw
+
+    - name: Parse deploy_stamp
+      ansible.builtin.set_fact:
+        _stamp: "{{ _stamp_raw.content | b64decode | from_json }}"
+
+    - name: Assert openwrt_mesh play recorded
+      ansible.builtin.assert:
+        that: "'openwrt_mesh' in _stamp.plays"
+        fail_msg: "deploy_stamp missing openwrt_mesh entry: {{ _stamp.plays.keys() | list }}"

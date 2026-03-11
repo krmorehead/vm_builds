@@ -37,8 +37,7 @@ roles/openwrt_configure/tasks/
 ├── security.yml      # M1: SSH hardening, banIP
 ├── vlans.yml         # M2: VLAN segmentation
 ├── dns.yml           # M3: Encrypted DNS (https-dns-proxy)
-├── mesh.yml          # M4: 802.11s mesh + Dawn steering
-└── pihole_dns.yml    # M5: Pi-hole forwarding chain
+└── mesh.yml          # M4: 802.11s mesh + Dawn steering
 ```
 
 Each feature gets TWO plays in `site.yml`:

@@ -1,0 +1,4 @@
+---
+- name: Rollback security hardening
+  ansible.builtin.import_playbook: ../../playbooks/cleanup.yml
+  tags: [openwrt-security-rollback]

@@ -1,0 +1,70 @@
+---
+# Encrypted DNS via https-dns-proxy (Milestone 3)
+#
+# Installs https-dns-proxy for DNS-over-HTTPS upstream resolution.
+# The package auto-configures dnsmasq on install; UCI commands below
+# make the config explicit for idempotency and customization.
+
+# ── Install https-dns-proxy ─────────────────────────────────────
+
+- name: Update opkg package lists for DNS packages
+  ansible.builtin.raw: opkg update
+  register: _opkg_update_dns
+  changed_when: false
+  retries: 3
+  delay: 5
+  until: _opkg_update_dns.rc == 0
+
+- name: Install https-dns-proxy
+  ansible.builtin.raw: opkg install https-dns-proxy
+  register: _hdp_install
+  retries: 3
+  delay: 5
+  until: _hdp_install.rc == 0
+
+# ── Configure dnsmasq to forward to https-dns-proxy ─────────────
+
+- name: Set dnsmasq noresolv (ignore ISP DNS)
+  ansible.builtin.raw: uci set dhcp.@dnsmasq[0].noresolv='1'
+
+- name: Clear existing dnsmasq server entries
+  ansible.builtin.raw: |
+    while uci -q delete dhcp.@dnsmasq[0].server 2>/dev/null; do true; done
+  changed_when: false
+
+- name: Add https-dns-proxy as dnsmasq upstream
+  ansible.builtin.raw: uci add_list dhcp.@dnsmasq[0].server='127.0.0.1#5053'
+
+# ── DNS rebinding protection ────────────────────────────────────
+
+- name: Enable DNS rebinding protection
+  ansible.builtin.raw: uci set dhcp.@dnsmasq[0].rebind_protection='1'
+
+- name: Enable rebinding localhost
+  ansible.builtin.raw: uci set dhcp.@dnsmasq[0].rebind_localhost='1'
+
+# ── Commit and restart ──────────────────────────────────────────
+
+- name: Commit DNS changes
+  ansible.builtin.raw: |
+    uci commit dhcp
+    /etc/init.d/dnsmasq restart
+
+- name: Enable and start https-dns-proxy
+  ansible.builtin.raw: |
+    /etc/init.d/https-dns-proxy enable
+    /etc/init.d/https-dns-proxy start
+
+- name: Wait for DNS to stabilize
+  ansible.builtin.pause:
+    seconds: 5
+
+- name: Verify DNS resolution works
+  ansible.builtin.raw: nslookup example.com 127.0.0.1 2>&1 | head -5
+  register: _dns_verify
+  changed_when: false
+  failed_when: false
+
+- name: Report DNS status
+  ansible.builtin.debug:
+    msg: "DNS test: {{ _dns_verify.stdout_lines | default(['no output']) | join(' ') }}"

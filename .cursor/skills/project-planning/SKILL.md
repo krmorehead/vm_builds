@@ -132,6 +132,19 @@ Blocked milestones appear after all self-contained milestones. Within
 each group, order by logical dependency (security before VLANs before
 DNS, since VLANs may affect DNS zone config).
 
+When implementing a project, blocked milestones SHOULD be moved to
+their downstream projects rather than kept as stubs. Stubs in
+`site.yml`, `cleanup.yml`, and task files create dead code that
+confuses future maintainers. Instead, document the integration point
+in the architecture docs (e.g., "Pi-hole DNS forwarding play will be
+added by the Pi-hole LXC project"). The downstream project owns both
+its own infrastructure AND the OpenWrt integration plays.
+
+Previous bug: M5-M7 stubs (pihole_dns, syslog, monitoring) were
+implemented as task files + site.yml plays + cleanup.yml rollback
+plays, then had to be removed entirely because they belonged in their
+respective downstream projects.
+
 ## Milestone sizing
 
 Each milestone should be completable in a single focused session

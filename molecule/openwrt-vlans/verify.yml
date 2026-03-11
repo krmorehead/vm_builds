@@ -1,0 +1,64 @@
+---
+- name: Reconstruct openwrt dynamic group
+  hosts: router_nodes
+  gather_facts: true
+  tasks:
+    - name: Include reusable group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_openwrt_group.yml
+
+- name: Verify VLAN configuration
+  hosts: openwrt
+  gather_facts: false
+  tasks:
+    - name: Check VLAN interfaces exist
+      ansible.builtin.raw: ip link show 2>/dev/null | grep -c 'vlan' || echo 0
+      register: _vlan_count
+      changed_when: false
+
+    - name: Check IoT firewall zone
+      ansible.builtin.raw: uci show firewall 2>/dev/null | grep -c 'vlan_iot' || echo 0
+      register: _iot_zone
+      changed_when: false
+
+    - name: Assert IoT zone configured
+      ansible.builtin.assert:
+        that: (_iot_zone.stdout | trim | int) > 0
+        fail_msg: "IoT firewall zone (vlan_iot) not found"
+
+    - name: Check Guest firewall zone
+      ansible.builtin.raw: uci show firewall 2>/dev/null | grep -c 'vlan_guest' || echo 0
+      register: _guest_zone
+      changed_when: false
+
+    - name: Assert Guest zone configured
+      ansible.builtin.assert:
+        that: (_guest_zone.stdout | trim | int) > 0
+        fail_msg: "Guest firewall zone (vlan_guest) not found"
+
+    - name: Check DHCP pools for VLANs
+      ansible.builtin.raw: uci show dhcp 2>/dev/null | grep -c 'vlan_iot\|vlan_guest' || echo 0
+      register: _vlan_dhcp
+      changed_when: false
+
+    - name: Assert VLAN DHCP pools exist
+      ansible.builtin.assert:
+        that: (_vlan_dhcp.stdout | trim | int) > 0
+        fail_msg: "No DHCP pools found for VLAN interfaces"
+
+- name: Verify deploy_stamp on Proxmox host
+  hosts: router_nodes
+  gather_facts: false
+  tasks:
+    - name: Read deploy_stamp
+      ansible.builtin.slurp:
+        src: /etc/ansible/facts.d/vm_builds.fact
+      register: _stamp_raw
+
+    - name: Parse deploy_stamp
+      ansible.builtin.set_fact:
+        _stamp: "{{ _stamp_raw.content | b64decode | from_json }}"
+
+    - name: Assert openwrt_vlans play recorded
+      ansible.builtin.assert:
+        that: "'openwrt_vlans' in _stamp.plays"
+        fail_msg: "deploy_stamp missing openwrt_vlans entry: {{ _stamp.plays.keys() | list }}"

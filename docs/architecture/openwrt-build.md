@@ -95,3 +95,60 @@ Fresh OpenWrt has no password on root and runs Dropbear SSH. The playbook establ
 3. Using `ProxyJump` through the Proxmox host for SSH, with `sshpass` for empty-password auth and SSH keepalives (`ServerAliveInterval=15`).
 4. During Phase 1 of configuration, the bootstrap IP is migrated from the WAN bridge to the LAN bridge after networking restarts.
 5. After configuration completes, the temporary IP is removed.
+
+## Post-Baseline Features
+
+Post-baseline features are added as separate task files in `openwrt_configure/tasks/`.
+Each feature gets a pair of plays in `site.yml` (configure + deploy_stamp), both
+tagged with `never` so they only run when explicitly requested via `--tags`.
+
+```
+roles/openwrt_configure/tasks/
+├── main.yml          Baseline configuration (WAN, LAN, DHCP, firewall)
+├── security.yml      M1: Root password, SSH key lockdown, banIP, firewall hardening
+├── vlans.yml         M2: IoT (VLAN 10) and Guest (VLAN 20) segmentation
+├── dns.yml           M3: Encrypted DNS via https-dns-proxy (DoH)
+└── mesh.yml          M4: Dawn client steering, mesh peer monitoring
+```
+
+### Per-Feature Rollback
+
+Each feature can be rolled back independently via:
+
+```bash
+./cleanup.sh rollback <feature>          # e.g., ./cleanup.sh rollback security
+```
+
+Rollback tags in `cleanup.yml` follow the convention `openwrt-<feature>-rollback`.
+Each rollback play reverts UCI changes, removes installed packages, and restarts
+affected services. A group reconstruction play runs first to discover the
+OpenWrt VM and establish SSH connectivity.
+
+### Security Hardening (M1)
+
+- Sets root password (when `OPENWRT_ROOT_PASSWORD` is set)
+- Deploys SSH public key and disables password auth (when `OPENWRT_SSH_PUBKEY` and
+  `OPENWRT_SSH_PRIVATE_KEY` are set)
+- Installs banIP for intrusion prevention
+- Enables SYN flood protection and invalid packet dropping
+- Restricts SSH to LAN zone only
+
+### VLAN Segmentation (M2)
+
+- IoT VLAN (ID 10, subnet 10.10.20.0/24): internet access, no LAN access
+- Guest VLAN (ID 20, subnet 10.10.30.0/24): internet only, fully isolated
+- Management stays on untagged LAN (existing `lan` zone)
+- Uses 802.1Q VLAN devices on br-lan (not DSA/swconfig)
+
+### Encrypted DNS (M3)
+
+- Installs `https-dns-proxy` for DNS-over-HTTPS
+- Configures dnsmasq to forward to local DoH proxy (127.0.0.1#5053)
+- Enables DNS rebinding protection
+
+### Mesh Enhancements (M4)
+
+- Installs Dawn for 802.11k/v/r client steering
+- Configures RSSI threshold and steering mode
+- Adds mesh peer monitoring via cron
+- All tasks conditional on WiFi hardware presence

@@ -1,0 +1,77 @@
+---
+# Multi-node mesh enhancements with Dawn (Milestone 4)
+#
+# All tasks are conditional on WiFi hardware being present.
+# The molecule test machine may lack WiFi — the scenario verifies
+# graceful skip behavior rather than full Dawn functionality.
+
+# ── WiFi hardware detection ─────────────────────────────────────
+
+- name: Detect WiFi radios
+  ansible.builtin.raw: ls -1 /sys/class/ieee80211/ 2>/dev/null | wc -l
+  register: _mesh_radio_count
+  changed_when: false
+
+- name: Set WiFi presence fact
+  ansible.builtin.set_fact:
+    _wifi_present: "{{ (_mesh_radio_count.stdout | trim | int) > 0 }}"
+
+- name: Report WiFi status
+  ansible.builtin.debug:
+    msg: >-
+      WiFi radios detected: {{ _mesh_radio_count.stdout | trim }}.
+      {{ 'Proceeding with mesh enhancements.' if _wifi_present | bool
+         else 'Skipping mesh enhancements (no WiFi hardware).' }}
+
+# ── Install Dawn for 802.11k/v/r steering ──────────────────────
+
+- name: Update opkg package lists for mesh packages
+  ansible.builtin.raw: opkg update
+  register: _opkg_update_mesh
+  changed_when: false
+  retries: 3
+  delay: 5
+  until: _opkg_update_mesh.rc == 0
+  when: _wifi_present | bool
+
+- name: Install Dawn
+  ansible.builtin.raw: opkg install dawn
+  register: _dawn_install
+  retries: 3
+  delay: 5
+  until: _dawn_install.rc == 0
+  when: _wifi_present | bool
+
+# ── Configure Dawn via UCI ──────────────────────────────────────
+
+- name: Configure Dawn RSSI threshold
+  ansible.builtin.raw: >-
+    uci set dawn.@metric[0].rssi_val='{{ openwrt_dawn_rssi_threshold }}'
+  when: _wifi_present | bool
+
+- name: Configure Dawn steering mode
+  ansible.builtin.raw: >-
+    uci set dawn.@metric[0].steering='{{ openwrt_dawn_steering_mode }}'
+  when: _wifi_present | bool
+
+- name: Commit Dawn configuration
+  ansible.builtin.raw: uci commit dawn
+  when: _wifi_present | bool
+
+# ── Enable and start Dawn service ───────────────────────────────
+
+- name: Enable and start Dawn
+  ansible.builtin.raw: |
+    /etc/init.d/dawn enable
+    /etc/init.d/dawn start
+  when: _wifi_present | bool
+
+# ── Mesh peer monitoring ────────────────────────────────────────
+
+- name: Add mesh peer monitoring cron job
+  ansible.builtin.raw: |
+    if ! crontab -l 2>/dev/null | grep -q 'mesh_peer'; then
+      (crontab -l 2>/dev/null; echo '*/5 * * * * count=$(iw dev 2>/dev/null | grep -c "mesh point"); logger -t mesh_peer "peer_count=$count"') | crontab -
+    fi
+  changed_when: true
+  when: _wifi_present | bool

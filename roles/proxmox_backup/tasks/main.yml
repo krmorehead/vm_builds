@@ -72,6 +72,7 @@
   vars:
     _manifest:
       timestamp: "{{ ansible_facts['date_time']['iso8601'] | default(lookup('pipe', 'date -Iseconds')) }}"
+      project_version: "{{ project_version | default('unknown') }}"
       host: "{{ inventory_hostname }}"
       host_config: "{{ backup_dir }}/host-config.tar.gz"
       vms: >-

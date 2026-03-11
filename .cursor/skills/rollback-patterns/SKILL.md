@@ -90,7 +90,7 @@ ALL rollback tags so it runs whenever any rollback is invoked:
 # In playbooks/cleanup.yml — BEFORE any rollback plays
 - name: Reconstruct openwrt dynamic group
   hosts: router_nodes
-  tags: [openwrt-security-rollback, openwrt-vlans-rollback, openwrt-dns-rollback, never]
+  tags: [openwrt-security-rollback, openwrt-vlans-rollback, openwrt-dns-rollback, openwrt-mesh-rollback, never]
   gather_facts: true
   tasks:
     - name: Include group reconstruction
@@ -180,11 +180,17 @@ No separate migration playbook needed.
 ## Tag naming conventions
 
 ```
-Feature Tags
+Feature Tags (current)
 ├── Apply: openwrt-security, openwrt-vlans, openwrt-dns, openwrt-mesh
-├── Rollback: openwrt-security-rollback, openwrt-vlans-rollback, ...
-└── Future LXC: pihole, pihole-rollback, wireguard, wireguard-rollback, ...
+└── Rollback: openwrt-security-rollback, openwrt-vlans-rollback, ...
+
+Future (added by downstream projects when implemented)
+└── pihole, pihole-rollback, wireguard, wireguard-rollback, ...
 ```
 
 Apply tags go in `site.yml` plays. Rollback tags go in `cleanup.yml` plays.
 Both use the `never` meta-tag so they don't run unless explicitly requested.
+
+NEVER add stub plays/rollback for features that depend on unimplemented
+projects. Integration plays are owned by the downstream project that
+creates the dependency. Keep `site.yml` and `cleanup.yml` free of dead code.

@@ -1,0 +1,86 @@
+---
+- name: Reconstruct openwrt dynamic group
+  hosts: router_nodes
+  gather_facts: true
+  tasks:
+    - name: Include reusable group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_openwrt_group.yml
+
+- name: Verify security hardening
+  hosts: openwrt
+  gather_facts: false
+  tasks:
+    - name: Check banIP is installed
+      ansible.builtin.raw: opkg list-installed 2>/dev/null | grep -c banip || echo 0
+      register: _banip_installed
+      changed_when: false
+
+    - name: Assert banIP is installed
+      ansible.builtin.assert:
+        that: (_banip_installed.stdout | trim | int) > 0
+        fail_msg: "banIP package is not installed"
+
+    - name: Check banIP service is running
+      ansible.builtin.raw: /etc/init.d/banip status 2>&1 || true
+      register: _banip_status
+      changed_when: false
+
+    - name: Check SYN flood protection
+      ansible.builtin.raw: uci get firewall.@defaults[0].syn_flood
+      register: _syn_flood
+      changed_when: false
+
+    - name: Assert SYN flood protection enabled
+      ansible.builtin.assert:
+        that: (_syn_flood.stdout | trim) == '1'
+        fail_msg: "SYN flood protection not enabled: {{ _syn_flood.stdout | trim }}"
+
+    - name: Check invalid packet drop
+      ansible.builtin.raw: uci get firewall.@defaults[0].drop_invalid
+      register: _drop_invalid
+      changed_when: false
+
+    - name: Assert invalid packet drop enabled
+      ansible.builtin.assert:
+        that: (_drop_invalid.stdout | trim) == '1'
+        fail_msg: "Invalid packet drop not enabled: {{ _drop_invalid.stdout | trim }}"
+
+    - name: Check dropbear password auth setting
+      ansible.builtin.raw: uci get dropbear.@dropbear[0].PasswordAuth 2>/dev/null || echo 'on'
+      register: _pw_auth
+      changed_when: false
+
+    - name: Check for SSH pubkey
+      ansible.builtin.raw: test -s /etc/dropbear/authorized_keys && echo present || echo absent
+      register: _ssh_key
+      changed_when: false
+
+    - name: Assert SSH key deployed when OPENWRT_SSH_PUBKEY is set
+      ansible.builtin.assert:
+        that: (_ssh_key.stdout | trim) == 'present'
+        fail_msg: "SSH public key not deployed to /etc/dropbear/authorized_keys"
+      when: lookup('env', 'OPENWRT_SSH_PUBKEY') | length > 0
+
+    - name: Assert password auth disabled when key auth configured
+      ansible.builtin.assert:
+        that: (_pw_auth.stdout | trim) == 'off'
+        fail_msg: "Password auth still enabled after SSH key deployment"
+      when: lookup('env', 'OPENWRT_SSH_PUBKEY') | length > 0
+
+- name: Verify deploy_stamp on Proxmox host
+  hosts: router_nodes
+  gather_facts: false
+  tasks:
+    - name: Read deploy_stamp
+      ansible.builtin.slurp:
+        src: /etc/ansible/facts.d/vm_builds.fact
+      register: _stamp_raw
+
+    - name: Parse deploy_stamp
+      ansible.builtin.set_fact:
+        _stamp: "{{ _stamp_raw.content | b64decode | from_json }}"
+
+    - name: Assert openwrt_security play recorded
+      ansible.builtin.assert:
+        that: "'openwrt_security' in _stamp.plays"
+        fail_msg: "deploy_stamp missing openwrt_security entry: {{ _stamp.plays.keys() | list }}"

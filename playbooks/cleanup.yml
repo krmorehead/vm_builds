@@ -1,4 +1,121 @@
 ---
+# ── Per-feature rollback: reconstruct openwrt dynamic group ──────
+# This play discovers the running VM's LAN IP and registers the
+# openwrt host so rollback plays can target it.  Tagged with ALL
+# rollback tags so it runs before any rollback play.
+
+- name: Reconstruct openwrt dynamic group for rollback
+  hosts: router_nodes
+  gather_facts: true
+  tags:
+    - openwrt-security-rollback
+    - openwrt-vlans-rollback
+    - openwrt-dns-rollback
+    - openwrt-mesh-rollback
+    - never
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: ../tasks/reconstruct_openwrt_group.yml
+
+# ── Per-feature rollback: security hardening ─────────────────────
+
+- name: Rollback security hardening
+  hosts: openwrt
+  gather_facts: false
+  tags: [openwrt-security-rollback, never]
+  tasks:
+    - name: Remove banIP package
+      ansible.builtin.raw: opkg remove banip 2>/dev/null; true
+      changed_when: true
+
+    - name: Re-enable password auth in dropbear
+      ansible.builtin.raw: |
+        uci delete dropbear.@dropbear[0].PasswordAuth 2>/dev/null
+        uci delete dropbear.@dropbear[0].RootPasswordAuth 2>/dev/null
+        uci commit dropbear
+        /etc/init.d/dropbear restart
+      changed_when: true
+
+    - name: Remove SSH authorized keys
+      ansible.builtin.raw: rm -f /etc/dropbear/authorized_keys
+      changed_when: true
+
+    - name: Clear root password (restore empty-password baseline)
+      ansible.builtin.raw: sed -i 's/^root:[^:]*:/root::/' /etc/shadow
+      changed_when: true
+
+    - name: Revert firewall hardening
+      ansible.builtin.raw: |
+        uci delete firewall.@defaults[0].syn_flood 2>/dev/null
+        uci delete firewall.@defaults[0].drop_invalid 2>/dev/null
+        uci commit firewall
+        /etc/init.d/firewall restart
+      changed_when: true
+
+# ── Per-feature rollback: VLAN support ───────────────────────────
+
+- name: Rollback VLAN configuration
+  hosts: openwrt
+  gather_facts: false
+  tags: [openwrt-vlans-rollback, never]
+  tasks:
+    - name: Delete VLAN interfaces and firewall zones
+      ansible.builtin.raw: |
+        uci delete network.vlan_iot 2>/dev/null
+        uci delete network.vlan_guest 2>/dev/null
+        uci delete network.vlan_iot_dev 2>/dev/null
+        uci delete network.vlan_guest_dev 2>/dev/null
+        for section in $(uci show firewall 2>/dev/null | grep -E "firewall\.\w+\.name='vlan_(iot|guest)'" | cut -d. -f1-2); do
+          uci delete "$section" 2>/dev/null
+        done
+        for section in $(uci show firewall 2>/dev/null | grep -E "firewall\.\w+\.src='vlan_(iot|guest)'" | cut -d. -f1-2); do
+          uci delete "$section" 2>/dev/null
+        done
+        for section in $(uci show dhcp 2>/dev/null | grep -E "dhcp\.\w+\.interface='vlan_(iot|guest)'" | cut -d. -f1-2); do
+          uci delete "$section" 2>/dev/null
+        done
+        uci commit
+        /etc/init.d/network restart
+        /etc/init.d/firewall restart
+      changed_when: true
+
+# ── Per-feature rollback: encrypted DNS ──────────────────────────
+
+- name: Rollback encrypted DNS
+  hosts: openwrt
+  gather_facts: false
+  tags: [openwrt-dns-rollback, never]
+  tasks:
+    - name: Remove https-dns-proxy and revert dnsmasq
+      ansible.builtin.raw: |
+        opkg remove https-dns-proxy 2>/dev/null
+        uci delete dhcp.@dnsmasq[0].noresolv 2>/dev/null
+        uci delete dhcp.@dnsmasq[0].rebind_protection 2>/dev/null
+        uci delete dhcp.@dnsmasq[0].rebind_localhost 2>/dev/null
+        uci -q show dhcp | grep 'server=' | while read line; do
+          section=$(echo "$line" | cut -d= -f1)
+          uci delete "$section" 2>/dev/null
+        done
+        uci commit dhcp
+        /etc/init.d/dnsmasq restart
+      changed_when: true
+
+# ── Per-feature rollback: mesh enhancements ──────────────────────
+
+- name: Rollback mesh enhancements
+  hosts: openwrt
+  gather_facts: false
+  tags: [openwrt-mesh-rollback, never]
+  tasks:
+    - name: Remove Dawn and mesh monitoring
+      ansible.builtin.raw: |
+        opkg remove dawn 2>/dev/null
+        crontab -l 2>/dev/null | grep -v 'mesh_peer' | crontab - 2>/dev/null
+        uci commit
+      changed_when: true
+
+# ── Full host restore (existing) ────────────────────────────────
+
 - name: Restore Proxmox host from backup
   hosts: proxmox
   gather_facts: false

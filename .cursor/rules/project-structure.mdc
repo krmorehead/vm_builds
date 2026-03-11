@@ -93,11 +93,13 @@ All VMIDs defined in `group_vars/all.yml`.
 | `build.py` | Single entry point: env validation, host probing, playbook runner |
 | `setup.sh` | Bootstrap .venv + pip + ansible-galaxy |
 | `run.sh` | Convenience wrapper — delegates to `build.py` |
-| `cleanup.sh` | Restore / full-restore / clean — delegates to `build.py` |
+| `cleanup.sh` | Restore / full-restore / clean / rollback — delegates to `build.py` |
 | `test.env` | Test machine config (committed, IP: 192.168.86.201) |
 | `.env` | Production secrets (gitignored) |
 | `.state/addresses.json` | Cached host IPs for cross-run discovery (gitignored) |
+| `tasks/reconstruct_openwrt_group.yml` | Reusable dynamic group reconstruction for per-feature scenarios and rollback |
 | `molecule/default/` | Integration tests against test machine |
+| `molecule/openwrt-*/` | Per-feature scenarios (security, vlans, dns, mesh) |
 
 ## Adding a new LXC service — checklist
 1. Create `roles/<type>_lxc/tasks/main.yml` that uses `include_role: proxmox_lxc` with service-specific vars

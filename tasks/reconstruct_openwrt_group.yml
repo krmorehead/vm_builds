@@ -1,0 +1,139 @@
+---
+# Reusable task file: reconstruct the openwrt dynamic group.
+#
+# Consumed by:
+#   - Per-feature molecule converge.yml
+#   - Per-feature molecule verify.yml
+#   - playbooks/cleanup.yml (rollback plays)
+#
+# Must run on a host in the router_nodes/proxmox group that has
+# access to qm, bridge state, and deploy_stamp local facts.
+# Requires gather_facts: true on the calling play.
+
+- name: Verify VM 100 is running
+  ansible.builtin.command:
+    cmd: qm status {{ openwrt_vm_id | default(100) }}
+  register: _vm_status
+  changed_when: false
+  failed_when: "'running' not in _vm_status.stdout"
+
+- name: Detect WAN bridge from default route
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      ip -o route show default | awk '{print $5}' | head -1
+    executable: /bin/bash
+  register: _wan_bridge_raw
+  changed_when: false
+
+- name: Discover LAN bridge with an IP
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      wan_br="{{ _wan_bridge_raw.stdout | trim }}"
+      for br in /sys/class/net/vmbr*/; do
+        brname=$(basename "$br")
+        [ "$brname" = "$wan_br" ] && continue
+        ip_addr=$(ip -o -4 addr show dev "$brname" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+        if [ -n "$ip_addr" ]; then
+          echo "$ip_addr"
+          exit 0
+        fi
+      done
+    executable: /bin/bash
+  register: _proxmox_lan_ip_raw
+  changed_when: false
+
+- name: Fail if no LAN IP found on any non-WAN bridge
+  ansible.builtin.fail:
+    msg: >-
+      No IPv4 address found on any non-WAN bridge. The baseline may not
+      be fully converged. Run 'molecule converge' (default scenario) first.
+  when: (_proxmox_lan_ip_raw.stdout | trim) | length == 0
+
+- name: Compute OpenWrt LAN IP from Proxmox LAN IP
+  ansible.builtin.set_fact:
+    _openwrt_ip: "{{ (_proxmox_lan_ip_raw.stdout | trim).split('.')[0:3] | join('.') }}.1"
+
+- name: Detect SSH auth method
+  ansible.builtin.set_fact:
+    _use_key_auth: >-
+      {{ (lookup('env', 'OPENWRT_SSH_PRIVATE_KEY') | length > 0) and
+         (ansible_local.vm_builds.plays.openwrt_security is defined
+          | default(false)) }}
+
+- name: Build SSH args for password auth
+  ansible.builtin.set_fact:
+    _openwrt_ssh_pass: ""
+    _openwrt_ssh_common_args: >-
+      -o ProxyJump=root@{{ ansible_host }}
+      -o StrictHostKeyChecking=no
+      -o UserKnownHostsFile=/dev/null
+      -o PubkeyAuthentication=no
+      -o ConnectTimeout=10
+      -o ServerAliveInterval=15
+      -o ServerAliveCountMax=4
+  when: not (_use_key_auth | bool)
+
+- name: Build SSH args for key auth
+  ansible.builtin.set_fact:
+    _openwrt_ssh_common_args: >-
+      -o ProxyJump=root@{{ ansible_host }}
+      -o StrictHostKeyChecking=no
+      -o UserKnownHostsFile=/dev/null
+      -o ConnectTimeout=10
+      -o ServerAliveInterval=15
+      -o ServerAliveCountMax=4
+      -i {{ lookup('env', 'OPENWRT_SSH_PRIVATE_KEY') }}
+  when: _use_key_auth | bool
+
+- name: Detect LAN bridge name
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      wan_br="{{ _wan_bridge_raw.stdout | trim }}"
+      for br in /sys/class/net/vmbr*/; do
+        brname=$(basename "$br")
+        [ "$brname" = "$wan_br" ] && continue
+        ip_addr=$(ip -o -4 addr show dev "$brname" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+        if [ -n "$ip_addr" ]; then
+          echo "$brname"
+          exit 0
+        fi
+      done
+    executable: /bin/bash
+  register: _lan_bridge_raw
+  changed_when: false
+
+- name: Add OpenWrt to dynamic group (password auth)
+  ansible.builtin.add_host:
+    name: openwrt-router
+    groups: openwrt
+    ansible_host: "{{ _openwrt_ip }}"
+    ansible_user: root
+    ansible_ssh_pass: "{{ _openwrt_ssh_pass }}"
+    ansible_ssh_common_args: "{{ _openwrt_ssh_common_args }}"
+    _proxmox_host: "{{ inventory_hostname }}"
+    _wan_bridge: "{{ _wan_bridge_raw.stdout | trim }}"
+    _lan_bridge: "{{ _lan_bridge_raw.stdout | trim }}"
+  when: not (_use_key_auth | bool)
+
+- name: Add OpenWrt to dynamic group (key auth)
+  ansible.builtin.add_host:
+    name: openwrt-router
+    groups: openwrt
+    ansible_host: "{{ _openwrt_ip }}"
+    ansible_user: root
+    ansible_ssh_common_args: "{{ _openwrt_ssh_common_args }}"
+    _proxmox_host: "{{ inventory_hostname }}"
+    _wan_bridge: "{{ _wan_bridge_raw.stdout | trim }}"
+    _lan_bridge: "{{ _lan_bridge_raw.stdout | trim }}"
+  when: _use_key_auth | bool
+
+- name: Report reconstructed group
+  ansible.builtin.debug:
+    msg: >-
+      Reconstructed openwrt group: host={{ _openwrt_ip }},
+      auth={{ 'key' if (_use_key_auth | bool) else 'password' }},
+      proxy={{ ansible_host }},
+      lan_bridge={{ _lan_bridge_raw.stdout | trim }}

@@ -44,3 +44,37 @@ openwrt_mesh_id: "vm-builds-mesh"
 openwrt_mesh_key: "{{ lookup('env', 'MESH_KEY') | default('changeme', true) }}"
 openwrt_mesh_channel: auto
 openwrt_mesh_encryption: sae
+
+# ── Security hardening (M1) ──────────────────────────────────────
+openwrt_root_password: "{{ lookup('env', 'OPENWRT_ROOT_PASSWORD') | default('', true) }}"
+openwrt_ssh_pubkey: "{{ lookup('env', 'OPENWRT_SSH_PUBKEY') | default('', true) }}"
+openwrt_ssh_private_key: "{{ lookup('env', 'OPENWRT_SSH_PRIVATE_KEY') | default('', true) }}"
+
+openwrt_banip_sources:
+  - voipbl
+  - doh
+
+# ── VLAN segmentation (M2) ───────────────────────────────────────
+openwrt_vlan_iot_id: 10
+openwrt_vlan_iot_subnet: "10.10.20.0/24"
+openwrt_vlan_iot_ip: "10.10.20.1"
+openwrt_vlan_iot_netmask: "255.255.255.0"
+openwrt_vlan_iot_dhcp_start: 100
+openwrt_vlan_iot_dhcp_limit: 150
+
+openwrt_vlan_guest_id: 20
+openwrt_vlan_guest_subnet: "10.10.30.0/24"
+openwrt_vlan_guest_ip: "10.10.30.1"
+openwrt_vlan_guest_netmask: "255.255.255.0"
+openwrt_vlan_guest_dhcp_start: 100
+openwrt_vlan_guest_dhcp_limit: 150
+
+# ── Encrypted DNS (M3) ───────────────────────────────────────────
+openwrt_dns_doh_primary: "1.1.1.1"
+openwrt_dns_doh_secondary: "1.0.0.1"
+openwrt_dns_doh_fallback_1: "8.8.8.8"
+openwrt_dns_doh_fallback_2: "8.8.4.4"
+
+# ── Mesh enhancements (M4) ───────────────────────────────────────
+openwrt_dawn_rssi_threshold: -80
+openwrt_dawn_steering_mode: "load"

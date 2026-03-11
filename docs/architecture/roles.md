@@ -171,6 +171,19 @@ All configuration is done with `ansible.builtin.raw` since OpenWrt has no Python
 | `openwrt_mesh_channel` | `auto` | WiFi channel |
 | `openwrt_mesh_encryption` | `sae` | Encryption method |
 
+### Post-Baseline Task Files
+
+`openwrt_configure` includes additional task files for features that build
+on top of the baseline configuration. Each is invoked via `include_role`
+with `tasks_from:` in a dedicated `site.yml` play.
+
+| Task file | Milestone | Tag | Key variables |
+|-----------|-----------|-----|---------------|
+| `security.yml` | M1 | `openwrt-security` | `openwrt_root_password`, `openwrt_ssh_pubkey`, `openwrt_ssh_private_key` |
+| `vlans.yml` | M2 | `openwrt-vlans` | `openwrt_vlan_iot_id`, `openwrt_vlan_guest_id`, subnet/IP defaults |
+| `dns.yml` | M3 | `openwrt-dns` | `openwrt_dns_doh_primary`, `openwrt_dns_doh_secondary` |
+| `mesh.yml` | M4 | `openwrt-mesh` | `openwrt_dawn_rssi_threshold`, `openwrt_dawn_steering_mode` |
+
 ---
 
 ## proxmox_lxc

@@ -1,0 +1,4 @@
+---
+- name: Rollback VLAN configuration
+  ansible.builtin.import_playbook: ../../playbooks/cleanup.yml
+  tags: [openwrt-vlans-rollback]

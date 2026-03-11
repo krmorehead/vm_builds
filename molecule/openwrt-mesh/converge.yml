@@ -1,0 +1,16 @@
+---
+- name: Reconstruct openwrt dynamic group from baseline
+  hosts: router_nodes
+  gather_facts: true
+  tasks:
+    - name: Include reusable group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_openwrt_group.yml
+
+- name: Apply mesh enhancements
+  hosts: openwrt
+  gather_facts: false
+  tasks:
+    - name: Include mesh tasks
+      ansible.builtin.include_role:
+        name: openwrt_configure
+        tasks_from: mesh.yml

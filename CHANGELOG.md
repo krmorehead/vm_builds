@@ -8,6 +8,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **OpenWrt security hardening** (M1) -- root password, SSH key-only auth,
+  banIP intrusion prevention, SYN flood protection, invalid packet drop,
+  LAN-only SSH access. All configurable via env vars (`OPENWRT_ROOT_PASSWORD`,
+  `OPENWRT_SSH_PUBKEY`, `OPENWRT_SSH_PRIVATE_KEY`).
+- **VLAN segmentation** (M2) -- IoT (VLAN 10, 10.10.20.0/24) and Guest
+  (VLAN 20, 10.10.30.0/24) networks with per-VLAN firewall zones and DHCP
+  pools. Uses 802.1Q on br-lan (virtual environment, not DSA/swconfig).
+- **Encrypted DNS** (M3) -- `https-dns-proxy` for DNS-over-HTTPS upstream
+  resolution. dnsmasq forwards to local DoH proxy. Rebinding protection
+  enabled.
+- **Mesh enhancements** (M4) -- Dawn 802.11k/v/r client steering with
+  configurable RSSI threshold and steering mode. Mesh peer monitoring via
+  cron. All conditional on WiFi hardware presence.
+- **Per-feature rollback infrastructure** (M0) -- each feature has a
+  dedicated rollback tag in `cleanup.yml` (`openwrt-<feature>-rollback`).
+  `cleanup.sh rollback <feature>` subcommand for easy one-command revert.
+- **Per-feature molecule scenarios** -- `openwrt-security`, `openwrt-vlans`,
+  `openwrt-dns`, `openwrt-mesh` for fast (~30-60s) per-feature testing
+  against the existing baseline.
+- **Reusable group reconstruction** -- `tasks/reconstruct_openwrt_group.yml`
+  discovers the OpenWrt VM's LAN IP, detects SSH auth method (key vs
+  password), and registers the dynamic group. Used by all per-feature
+  scenarios and rollback plays.
+- **Baseline documentation** -- `docs/architecture/baseline.md` defines the
+  reusable baseline state, invariants, and assertion coverage.
+- **Backup manifest version** -- `project_version` field added to the
+  backup manifest for version-aware restore decisions.
+- **Pytest coverage** for rollback tag naming convention and pass-through.
+
 - **`proxmox_lxc` role** -- reusable LXC container provisioning with
   parameterized resources, networking, features, mount entries, auto-start,
   and dynamic group registration via `community.proxmox.proxmox_pct_remote`.

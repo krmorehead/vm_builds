@@ -1,0 +1,70 @@
+---
+- name: Reconstruct openwrt dynamic group
+  hosts: router_nodes
+  gather_facts: true
+  tasks:
+    - name: Include reusable group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_openwrt_group.yml
+
+- name: Verify encrypted DNS configuration
+  hosts: openwrt
+  gather_facts: false
+  tasks:
+    - name: Check https-dns-proxy is installed
+      ansible.builtin.raw: opkg list-installed 2>/dev/null | grep -c https-dns-proxy || echo 0
+      register: _hdp_installed
+      changed_when: false
+
+    - name: Assert https-dns-proxy is installed
+      ansible.builtin.assert:
+        that: (_hdp_installed.stdout | trim | int) > 0
+        fail_msg: "https-dns-proxy package is not installed"
+
+    - name: Check https-dns-proxy service
+      ansible.builtin.raw: /etc/init.d/https-dns-proxy status 2>&1 || true
+      register: _hdp_status
+      changed_when: false
+
+    - name: Check DNS resolution works
+      ansible.builtin.raw: nslookup example.com 127.0.0.1 2>&1 | head -5
+      register: _dns_test
+      changed_when: false
+      failed_when: false
+
+    - name: Check dnsmasq noresolv setting
+      ansible.builtin.raw: uci get dhcp.@dnsmasq[0].noresolv 2>/dev/null || echo 'unset'
+      register: _noresolv
+      changed_when: false
+
+    - name: Assert dnsmasq noresolv is set
+      ansible.builtin.assert:
+        that: (_noresolv.stdout | trim) == '1'
+        fail_msg: "dnsmasq noresolv not set: {{ _noresolv.stdout | trim }}"
+
+    - name: Check rebinding protection
+      ansible.builtin.raw: uci get dhcp.@dnsmasq[0].rebind_protection 2>/dev/null || echo 'unset'
+      register: _rebind
+      changed_when: false
+
+    - name: Assert rebinding protection enabled
+      ansible.builtin.assert:
+        that: (_rebind.stdout | trim) == '1'
+        fail_msg: "DNS rebinding protection not enabled: {{ _rebind.stdout | trim }}"
+
+- name: Verify deploy_stamp on Proxmox host
+  hosts: router_nodes
+  gather_facts: false
+  tasks:
+    - name: Read deploy_stamp
+      ansible.builtin.slurp:
+        src: /etc/ansible/facts.d/vm_builds.fact
+      register: _stamp_raw
+
+    - name: Parse deploy_stamp
+      ansible.builtin.set_fact:
+        _stamp: "{{ _stamp_raw.content | b64decode | from_json }}"
+
+    - name: Assert openwrt_dns play recorded
+      ansible.builtin.assert:
+        that: "'openwrt_dns' in _stamp.plays"
+        fail_msg: "deploy_stamp missing openwrt_dns entry: {{ _stamp.plays.keys() | list }}"
