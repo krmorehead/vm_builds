@@ -40,6 +40,21 @@ Blocked milestones (waiting on LXC projects):
 - Syslog forwarding to rsyslog collector
 - Prometheus metrics export
 
+### `2026-03-11-00` Multi-Node Test Infrastructure ✓
+
+Adds a second Proxmox test node (`mesh1`) behind the OpenWrt router's LAN,
+establishes reusable SSH ProxyJump patterns, and validates shared infrastructure
+roles on different hardware.
+
+Delivered:
+- `lan_hosts` inventory group with ProxyJump through primary host
+- `tasks/bootstrap_lan_host.yml` for DHCP lease + API token provisioning
+- `molecule/mesh1-infra/` scenario (converge, verify, cleanup)
+- Scalable env var convention: `<HOSTNAME>_API_TOKEN` with dynamic lookup
+- `proxmox_bridges` single-NIC tolerance for non-router hosts
+- `proxmox_pci_passthrough` IOMMU group validation and graceful degradation
+- `multi-node-ssh` skill documenting LAN host patterns
+
 ### `2026-03-09-00` Shared Infrastructure ✓
 
 Framework for LXC container provisioning, iGPU detection, VMID allocation,

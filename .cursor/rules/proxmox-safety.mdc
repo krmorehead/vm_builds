@@ -45,9 +45,9 @@ alwaysApply: true
 - NEVER add IPs to non-LAN bridges (e.g., vmbr0) in the same subnet as the LAN bridge. Two routes for the same /24 on different bridges causes the kernel to prefer the wrong interface, silently breaking all LAN VM connectivity even though ARP resolves correctly. The playbook MUST clean stale LAN-subnet IPs from non-LAN bridges before adding the LAN management IP.
 
 ## Host IP auto-detection
-- `build.py` probes `PROXMOX_HOST` via TCP port 22 before running Ansible. If unreachable, it falls back to cached IPs from `.state/addresses.json`.
+- `build.py` probes `PRIMARY_HOST` via TCP port 22 before running Ansible. If unreachable, it falls back to cached IPs from `.state/addresses.json`.
 - The state file is written by `openwrt_configure` after the Proxmox LAN IP is confirmed. It records both the original management IP and the LAN IP.
-- NEVER assume `PROXMOX_HOST` is the only way to reach the host. After cable swaps the original management IP may be unreachable; the LAN IP (`.2` on the OpenWrt LAN subnet) is the fallback.
+- NEVER assume `PRIMARY_HOST` is the only way to reach the host. After cable swaps the original management IP may be unreachable; the LAN IP (`.2` on the OpenWrt LAN subnet) is the fallback.
 - Mid-run: after LAN IP deployment, `openwrt_configure` probes the original management IP. If unreachable, it updates `ansible_host` via `add_host` so subsequent plays (cleanup) can still connect.
 - `.state/` is gitignored — it contains runtime-detected, environment-specific data.
 
@@ -90,6 +90,15 @@ alwaysApply: true
 - Local state files (`.state/addresses.json`) must also be cleaned via `delegate_to: localhost`.
 - Previous bug: stale `ansible-temp-lan.conf` with a LAN-subnet IP on vmbr0 created a duplicate route that broke LAN connectivity for multiple test runs. The temp file was created manually during debugging and not cleaned by the playbook.
 
+## CRITICAL: Cleanup must NEVER destroy access credentials
+- **SEVERITY: CATASTROPHIC.** Removing access credentials from a remote host can permanently lock out the operator. A node 3000 miles away with no SSH keys and no API token requires physical console access to recover.
+- NEVER remove `/root/.ssh/authorized_keys` from any Proxmox host. SSH keys are operator prerequisites set up manually (via Proxmox GUI shell or ssh-copy-id). They are NOT playbook artifacts.
+- NEVER remove Proxmox API tokens (`pveum user token remove`) in cleanup. API tokens are created by the operator, stored in `.env` / `test.env`, and referenced by inventory. Removing them silently breaks all subsequent Ansible runs.
+- NEVER remove any file or credential that the operator created manually. If you didn't deploy it, you don't clean it.
+- Cleanup ONLY removes files and state that the playbook itself deploys: bridge configs (`ansible-bridges.conf`), modprobe configs (`blacklist-wifi.conf`, `vfio-pci.conf`), facts files (`vm_builds.fact`), repo overrides (`pve-no-subscription.sources`), vfio-pci bindings, DHCP leases on OpenWrt.
+- When writing a new cleanup playbook, apply this test to EVERY task: "Did the converge/playbook create this? If no, do not touch it."
+- Previous bug: mesh1-infra cleanup removed `/root/.ssh/authorized_keys` AND the API token from mesh1, permanently locking out both SSH and API access. Required the operator to physically access the Proxmox GUI to restore both credentials.
+
 ## Shell pipeline safety
 - ALWAYS use `set -o pipefail` in any `ansible.builtin.shell` task that contains a pipeline (`|`). Without it, failures in earlier commands are silently swallowed.
 - ALWAYS set `executable: /bin/bash` on these tasks. The default shell may be `/bin/sh`, which doesn't support `pipefail`.
@@ -101,7 +110,7 @@ alwaysApply: true
 ## Entry point conventions
 - ALL shell scripts (`run.sh`, `cleanup.sh`) MUST delegate to `build.py`. NEVER call `ansible-playbook` directly.
 - `build.py` handles host probing, env validation with quote stripping, and state file fallback. Bypassing it loses all of these.
-- Previous bug: `run.sh` called `ansible-playbook` directly. After cable swaps, the stale `PROXMOX_HOST` was unreachable but the script didn't try fallback IPs.
+- Previous bug: `run.sh` called `ansible-playbook` directly. After cable swaps, the stale `PRIMARY_HOST` was unreachable but the script didn't try fallback IPs.
 
 ## Ansible module conventions
 - NEVER use `local_action`. It is deprecated. ALWAYS use `delegate_to: localhost` instead.
@@ -145,6 +154,12 @@ alwaysApply: true
 - Every playbook run should back up host config and existing VMs first (Play 0: `proxmox_backup`).
 - Use `vzdump` for VM backups, tar for host config.
 - Never destroy VMs without a backup manifest confirming they were backed up.
+
+## Cleanup must never destroy access credentials
+- NEVER remove SSH authorized_keys from a Proxmox host during cleanup. SSH keys are operator prerequisites set up manually (via GUI or ssh-copy-id), not playbook artifacts.
+- NEVER remove Proxmox API tokens (`pveum user token remove`) during cleanup. API tokens are created by the operator and referenced in .env files.
+- Cleanup ONLY removes files and state that the playbook itself deploys: bridge configs, modprobe configs, facts files, repo overrides, vfio-pci bindings, DHCP leases.
+- Previous bug: mesh1-infra cleanup removed `/root/.ssh/authorized_keys` and the API token from mesh1, permanently locking out SSH and API access. Required the operator to manually restore both via the Proxmox GUI.
 
 ## Documentation accuracy
 - When changing a role's exported facts, bridge names, device paths, or connection patterns, ALWAYS update `docs/architecture/` in the same commit.

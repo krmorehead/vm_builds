@@ -1,0 +1,134 @@
+---
+- name: Clean up mesh1 from primary host
+  hosts: router_nodes
+  gather_facts: false
+  vars:
+    _lan_host_ip: 10.10.10.210
+  tasks:
+    - name: Check if key auth works to mesh1
+      ansible.builtin.command:
+        cmd: >-
+          ssh -o ConnectTimeout=5
+          -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+          -o BatchMode=yes -o PasswordAuthentication=no
+          root@{{ _lan_host_ip }} hostname
+      register: _key_check
+      failed_when: false
+      changed_when: false
+
+    - name: Set reachability fact
+      ansible.builtin.set_fact:
+        _mesh1_reachable: "{{ _key_check.rc == 0 }}"
+        _cleanup_ssh: >-
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+          -o ConnectTimeout=10 root@{{ _lan_host_ip }}
+
+    - name: Skip cleanup if mesh1 is unreachable
+      ansible.builtin.debug:
+        msg: "mesh1 is unreachable -- skipping cleanup (nothing to clean)"
+      when: not (_mesh1_reachable | bool)
+
+    # NOTE: API tokens and SSH keys are NOT removed -- they are operator
+    # prerequisites, not playbook artifacts. Cleanup only touches files
+    # and state that the playbook itself deploys.
+
+    - name: Remove ansible-managed files on mesh1  # noqa command-instead-of-shell
+      ansible.builtin.shell:
+        cmd: >-
+          {{ _cleanup_ssh }} "rm -f
+          /etc/network/interfaces.d/ansible-bridges.conf
+          /etc/network/interfaces.d/ansible-proxmox-lan.conf
+          /etc/network/interfaces.d/ansible-temp-lan.conf
+          /etc/modprobe.d/blacklist-wifi.conf
+          /etc/modprobe.d/vfio-pci.conf
+          /etc/ansible/facts.d/vm_builds.fact
+          /etc/apt/sources.list.d/pve-no-subscription.sources"
+      when: _mesh1_reachable | bool
+      changed_when: true
+      failed_when: false
+
+    - name: Unbind vfio-pci devices on mesh1  # noqa command-instead-of-shell
+      ansible.builtin.shell:
+        cmd: >-
+          {{ _cleanup_ssh }} "
+          for dev in /sys/bus/pci/drivers/vfio-pci/0000:*/; do
+            [ -d \"\$dev\" ] || continue;
+            addr=\$(basename \"\$dev\");
+            echo \"\$addr\" > /sys/bus/pci/drivers/vfio-pci/unbind 2>/dev/null || true;
+          done"
+      when: _mesh1_reachable | bool
+      changed_when: true
+      failed_when: false
+
+    - name: Re-enable enterprise repos on mesh1  # noqa command-instead-of-shell
+      ansible.builtin.shell:
+        cmd: >-
+          {{ _cleanup_ssh }} "
+          for f in /etc/apt/sources.list.d/pve-enterprise.sources.disabled
+                   /etc/apt/sources.list.d/ceph.sources.disabled; do
+            [ -f \"\$f\" ] && mv \"\$f\" \"\${f%.disabled}\";
+          done; true"
+      when: _mesh1_reachable | bool
+      changed_when: true
+      failed_when: false
+
+    - name: Tear down stale bridges on mesh1  # noqa command-instead-of-shell
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          {{ _cleanup_ssh }} "
+          for br in \$(ip -o link show type bridge | awk -F': ' '{print \$2}'); do
+            grep -q \"auto \$br\" /etc/network/interfaces 2>/dev/null && continue;
+            ip link set \"\$br\" down 2>/dev/null || true;
+            ip link delete \"\$br\" 2>/dev/null || true;
+          done"
+        executable: /bin/bash
+      when: _mesh1_reachable | bool
+      changed_when: true
+      failed_when: false
+
+    - name: Reload kernel modules and rescan PCI on mesh1  # noqa command-instead-of-shell
+      ansible.builtin.shell:
+        cmd: >-
+          {{ _cleanup_ssh }} "
+          modprobe -r iwlmvm iwlwifi 2>/dev/null || true;
+          modprobe iwlwifi 2>/dev/null || true;
+          echo 1 > /sys/bus/pci/rescan 2>/dev/null || true"
+      when: _mesh1_reachable | bool
+      changed_when: true
+      failed_when: false
+
+    - name: Bring up original interfaces on mesh1  # noqa command-instead-of-shell
+      ansible.builtin.shell:
+        cmd: >-
+          {{ _cleanup_ssh }} "ifup --all --force 2>/dev/null || true"
+      when: _mesh1_reachable | bool
+      changed_when: true
+      failed_when: false
+
+    - name: Check if OpenWrt is running
+      ansible.builtin.command:
+        cmd: qm status 100
+      register: _vm_status
+      changed_when: false
+      failed_when: false
+
+    - name: Remove DHCP lease for mesh1 from OpenWrt  # noqa command-instead-of-shell
+      ansible.builtin.shell:
+        cmd: |
+          sshpass -p '' ssh \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o PubkeyAuthentication=no -o ConnectTimeout=10 \
+            root@10.10.10.1 "
+          changed=0;
+          while uci show dhcp 2>/dev/null | grep -q \"name='mesh1'\"; do
+            idx=\$(uci show dhcp | grep \"name='mesh1'\" | head -1 | grep -oP 'dhcp\.@host\[\\K[0-9]+');
+            [ -z \"\$idx\" ] && break;
+            uci delete dhcp.@host[\$idx];
+            changed=1;
+          done;
+          [ \"\$changed\" = '1' ] && uci commit dhcp && /etc/init.d/dnsmasq restart;
+          echo done"
+      when: "'running' in (_vm_status.stdout | default(''))"
+      changed_when: true
+      failed_when: false

@@ -115,12 +115,14 @@
       {{ (existing_physical_bridges + new_bridge_names) | sort }}
     cacheable: true
 
-- name: Fail if fewer than two bridges are available
+- name: Fail if fewer than two bridges are available (router nodes only)
   ansible.builtin.fail:
     msg: >-
       Only {{ proxmox_all_bridges | length }} bridge(s) found.
       An OpenWrt router needs at least 2 physical NICs (WAN + LAN).
-  when: proxmox_all_bridges | length < 2
+  when:
+    - "'router_nodes' in group_names"
+    - proxmox_all_bridges | length < 2
 
 # ── WAN bridge detection ────────────────────────────────────────
 # The bridge carrying the default route connects to the upstream

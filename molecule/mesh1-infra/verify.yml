@@ -1,0 +1,77 @@
+---
+- name: Verify shared infrastructure on mesh1
+  hosts: lan_hosts
+  gather_facts: true
+  tasks:
+    - name: Check for bridge interfaces on mesh1
+      ansible.builtin.shell:
+        cmd: ip -o link show type bridge | wc -l
+      register: _bridge_count
+      changed_when: false
+
+    - name: Assert at least one bridge exists
+      ansible.builtin.assert:
+        that:
+          - (_bridge_count.stdout | trim | int) >= 1
+        fail_msg: "No bridge interfaces found on mesh1"
+
+    - name: Check deploy_stamp was written
+      ansible.builtin.stat:
+        path: /etc/ansible/facts.d/vm_builds.fact
+      register: _stamp
+
+    - name: Assert deploy_stamp exists
+      ansible.builtin.assert:
+        that: _stamp.stat.exists
+        fail_msg: "deploy_stamp was not written to mesh1"
+
+    - name: Read deploy_stamp content
+      ansible.builtin.slurp:
+        src: /etc/ansible/facts.d/vm_builds.fact
+      register: _stamp_content
+
+    - name: Assert deploy_stamp contains infrastructure play
+      ansible.builtin.assert:
+        that:
+          - "'infrastructure' in (_stamp_content.content | b64decode)"
+        fail_msg: "deploy_stamp does not record the infrastructure play"
+
+    - name: Check if IOMMU kernel groups exist
+      ansible.builtin.shell:
+        cmd: find /sys/kernel/iommu_groups/ -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l
+      register: _iommu_groups
+      changed_when: false
+
+    - name: Report IOMMU status
+      ansible.builtin.debug:
+        msg: >-
+          IOMMU groups: {{ _iommu_groups.stdout | trim }}.
+          {{ 'IOMMU is active.' if (_iommu_groups.stdout | trim | int) > 0
+             else 'IOMMU is not active (WiFi passthrough will be skipped).' }}
+
+    - name: Check for wireless interfaces
+      ansible.builtin.shell:
+        cmd: ls /sys/class/net/*/wireless 2>/dev/null | wc -l
+      register: _wifi_count
+      changed_when: false
+      failed_when: false
+
+    - name: Report WiFi device status
+      ansible.builtin.debug:
+        msg: >-
+          WiFi interfaces detected: {{ _wifi_count.stdout | trim | int }}.
+          {{ 'PCI passthrough available.' if (_iommu_groups.stdout | trim | int) > 0
+             else 'PCI passthrough skipped (no IOMMU).' }}
+
+    - name: Check Proxmox API is responsive
+      ansible.builtin.command:
+        cmd: pvesh get /version --output-format json
+      register: _pve_version
+      changed_when: false
+
+    - name: Assert Proxmox API works
+      ansible.builtin.assert:
+        that:
+          - _pve_version.rc == 0
+          - "'version' in _pve_version.stdout"
+        fail_msg: "Proxmox API is not responding on mesh1"

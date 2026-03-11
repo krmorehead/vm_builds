@@ -158,6 +158,35 @@
     - not iommu_active | bool
     - pci_passthrough_allow_reboot | bool
 
+- name: Re-check IOMMU status after reboot
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      find /sys/kernel/iommu_groups/ -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l
+    executable: /bin/bash
+  register: iommu_recheck
+  changed_when: false
+  when:
+    - wifi_pci_devices | length > 0
+    - not iommu_active | bool
+    - pci_passthrough_allow_reboot | bool
+
+- name: Update IOMMU status after reboot
+  ansible.builtin.set_fact:
+    iommu_active: "{{ (iommu_recheck.stdout | default('0') | int) > 0 }}"
+  when:
+    - wifi_pci_devices | length > 0
+    - iommu_recheck is not skipped
+
+- name: Fail if IOMMU is still not active after reboot
+  ansible.builtin.fail:
+    msg: >-
+      IOMMU is not active after reboot on {{ inventory_hostname }}. WiFi PCI
+      passthrough requires VT-d (Intel) or AMD-Vi enabled in BIOS/UEFI.
+  when:
+    - wifi_pci_devices | length > 0
+    - not iommu_active | bool
+
 # ── IOMMU group isolation check ───────────────────────────────
 
 - name: Read IOMMU group for each WiFi device
@@ -170,6 +199,28 @@
   register: wifi_iommu_groups
   changed_when: false
   when: wifi_pci_devices | length > 0
+
+- name: Validate IOMMU group assignments are numeric
+  ansible.builtin.set_fact:
+    _iommu_groups_valid: >-
+      {{ wifi_iommu_groups.results | default([])
+         | map(attribute='stdout')
+         | map('trim')
+         | reject('match', '^\d+$')
+         | list | length == 0 }}
+  when: wifi_pci_devices | length > 0
+
+- name: Fail if IOMMU groups are not properly assigned
+  ansible.builtin.fail:
+    msg: >-
+      WiFi device IOMMU groups resolved to non-numeric values
+      ({{ wifi_iommu_groups.results | map(attribute='stdout') | map('trim') | join(', ') }})
+      on {{ inventory_hostname }}. IOMMU is enabled but devices are not properly
+      grouped. Check BIOS ACS settings or try adding
+      pcie_acs_override=downstream,multifunction to GRUB_CMDLINE_LINUX_DEFAULT.
+  when:
+    - wifi_pci_devices | length > 0
+    - not (_iommu_groups_valid | default(false) | bool)
 
 - name: Count devices in each IOMMU group
   ansible.builtin.shell:

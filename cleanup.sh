@@ -50,20 +50,20 @@ set -a; source "$ENV_FILE"; set +a
 
 case "$COMMAND" in
     restore)
-        echo "Restoring host config on ${PROXMOX_HOST}..."
+        echo "Restoring host config on ${PRIMARY_HOST}..."
         python3 build.py --playbook cleanup --tags restore --env "$ENV_FILE"
         ;;
     full-restore)
-        echo "Full restore (VMs + config) on ${PROXMOX_HOST}..."
+        echo "Full restore (VMs + config) on ${PRIMARY_HOST}..."
         python3 build.py --playbook cleanup --tags full-restore --env "$ENV_FILE"
         ;;
     clean)
-        echo "Clean reset (destroy VMs + restore config) on ${PROXMOX_HOST}..."
+        echo "Clean reset (destroy VMs + restore config) on ${PRIMARY_HOST}..."
         python3 build.py --playbook cleanup --tags clean --env "$ENV_FILE"
         ;;
     rollback)
         ROLLBACK_TAG="openwrt-${FEATURE}-rollback"
-        echo "Rolling back ${FEATURE} on ${PROXMOX_HOST} (tag: ${ROLLBACK_TAG})..."
+        echo "Rolling back ${FEATURE} on ${PRIMARY_HOST} (tag: ${ROLLBACK_TAG})..."
         python3 build.py --playbook cleanup --tags "$ROLLBACK_TAG" --env "$ENV_FILE"
         ;;
     *)

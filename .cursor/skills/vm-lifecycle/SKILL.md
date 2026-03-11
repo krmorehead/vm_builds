@@ -453,13 +453,31 @@ skill for full details. Summary:
       # ... undo UCI, remove packages, restart services
 ```
 
+## Hardware detection: hard-fail by default
+
+NEVER add "graceful skip" for hardware expected on every host. Roles MUST
+hard-fail when required hardware is missing. The reasoning: silent skips mask
+fixable problems (BIOS settings, missing drivers) behind warnings that are
+easy to miss, wasting entire test cycles.
+
+| Hardware   | Expectation     | Detection role               |
+|------------|----------------|------------------------------|
+| iGPU       | REQUIRED       | `proxmox_igpu` (hard-fail)   |
+| WiFi + VT-d| REQUIRED       | `proxmox_pci_passthrough` (hard-fail) |
+| NIC count  | Dynamic OK     | `proxmox_bridges` (2+ only for `router_nodes`) |
+
+Previous bug: `proxmox_pci_passthrough` silently skipped passthrough when
+IOMMU groups were invalid. Root cause was VT-d disabled in BIOS — a
+30-second fix masked for an entire test cycle.
+
 ## Test strategy
 
 - `molecule/default/` is the full integration test (rebuilds everything from scratch).
 - Per-feature scenarios (`molecule/<feature>/`) test incremental changes on top of the baseline.
 - Per-feature scenarios assume the baseline exists (router VM running). They do NOT rebuild.
-- Full `molecule test` before committing. Per-feature scenarios for fast iteration during development.
-- See the `ansible-testing` skill for baseline model details and per-feature scenario setup.
+- Use `molecule converge` + `molecule verify` for day-to-day iteration (preserves baseline).
+- Use `molecule test` only for clean-state validation (CI, pre-commit). It destroys the baseline.
+- After `molecule test`, ALWAYS re-run `molecule converge` to restore the baseline before working on layered scenarios.
 - Cleanup destroys ALL VMs via `qm list` iteration — not hardcoded VMIDs.
 - Reproduce production bugs on the test machine first (`test.env`). Only involve production when the test machine cannot reproduce.
 - Use TDD: write the verify assertion first, confirm it fails, implement the fix, confirm it passes.

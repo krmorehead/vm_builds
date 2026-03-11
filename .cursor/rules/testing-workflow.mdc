@@ -34,13 +34,23 @@ For any non-trivial code change:
 When adding a new feature: write the verify assertion that checks the feature
 works, then implement the feature.
 
-## Converge vs full test
+## Converge vs full test (baseline workflow)
 
-- Use `molecule converge` for rapid iteration when you know what you're fixing
-  and don't need cleanup between runs.
-- Use `molecule test` for the final verification — it includes cleanup → converge
-  → verify → cleanup, proving the build works from a clean state.
+- Use `molecule converge` + `molecule verify` for day-to-day iteration. This
+  preserves the OpenWrt baseline so leaf nodes (mesh1) remain accessible and
+  layered scenarios don't need a full rebuild (~4 min saved).
+- Use `molecule test` only for clean-state validation (CI, pre-commit, final
+  proof). It destroys the baseline at the end.
+- After `molecule test`, ALWAYS re-run `molecule converge` to restore the
+  baseline before working on layered scenarios.
 - NEVER consider a fix complete until `molecule test` passes end-to-end.
+
+## Hard-fail over graceful degradation
+
+NEVER add "graceful skip" for hardware expected on every host. iGPU is present
+on every modern Intel CPU. WiFi and VT-d/IOMMU are required for passthrough.
+Silent skips mask fixable BIOS settings behind warnings that waste test cycles.
+NIC count is the exception — hardware legitimately varies.
 
 ## Productive wait time
 

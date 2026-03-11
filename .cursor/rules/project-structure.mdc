@@ -16,8 +16,8 @@ Every service type has exactly two roles:
 Shared infrastructure roles run once per host before any service roles:
 - `proxmox_backup` — tar host config + vzdump existing VMs
 - `proxmox_bridges` — discover NICs, create virtual bridges, export `proxmox_all_bridges` fact
-- `proxmox_pci_passthrough` — IOMMU/vfio-pci for WiFi, export `wifi_pci_devices` fact
-- `proxmox_igpu` — detect Intel iGPU, verify Quick Sync, export `igpu_*` facts
+- `proxmox_pci_passthrough` — IOMMU/vfio-pci for WiFi, export `wifi_pci_devices` fact (requires VT-d in BIOS)
+- `proxmox_igpu` — detect Intel iGPU, verify Quick Sync, export `igpu_*` facts (hard-fails if no iGPU)
 - `proxmox_lxc` — shared LXC provisioning helper (consumed via `include_role`, not standalone)
 
 ## Playbook execution order (site.yml)
@@ -60,6 +60,7 @@ Service-specific provision plays target flavor groups.
 - `media_nodes` — Jellyfin, Kodi, Moonlight
 - `desktop_nodes` — Desktop VM, UX Kiosk
 - `gaming_nodes` — Gaming VM (separate physical machine)
+- `lan_hosts` — Satellite Proxmox nodes behind the OpenWrt router (accessed via ProxyJump)
 A host can belong to multiple flavor groups.
 
 ## Deployment tracking
@@ -80,10 +81,13 @@ All VMIDs defined in `group_vars/all.yml`.
 
 ## Variable scoping
 - **Required secrets**: `.env` file → `lookup('env', 'VAR_NAME')` in `group_vars/proxmox.yml`
+- **API tokens**: `<HOSTNAME>_API_TOKEN` in `.env`/`test.env` (e.g., `HOME_API_TOKEN`, `MESH1_API_TOKEN`). `group_vars/proxmox.yml` resolves dynamically via `(inventory_hostname | upper | replace('-', '_')) + '_API_TOKEN'`.
+- **Primary host**: `PRIMARY_HOST` in `.env`/`test.env` — the entry point IP that `build.py` probes.
 - **Optional env vars**: `.env` file → `lookup('env', 'VAR_NAME') | default('', true)` in role `defaults/main.yml` (e.g., `WAN_MAC`)
 - **Shared VM params**: `group_vars/all.yml` (VMID, image path, storage)
 - **Proxmox connection**: `group_vars/proxmox.yml` (API auth, SSH settings)
 - **Per-host overrides**: `host_vars/<hostname>.yml` (IP, reboot policy)
+- **LAN host SSH**: `group_vars/lan_hosts.yml` (ProxyJump through primary host)
 - **Role defaults**: `roles/<role>/defaults/main.yml` (never cross-reference between roles)
 - **Cross-role facts**: `set_fact` with `cacheable: true` or `add_host` variables
 
@@ -98,8 +102,10 @@ All VMIDs defined in `group_vars/all.yml`.
 | `.env` | Production secrets (gitignored) |
 | `.state/addresses.json` | Cached host IPs for cross-run discovery (gitignored) |
 | `tasks/reconstruct_openwrt_group.yml` | Reusable dynamic group reconstruction for per-feature scenarios and rollback |
+| `tasks/bootstrap_lan_host.yml` | Reusable bootstrap for LAN hosts (DHCP lease + API token) |
 | `molecule/default/` | Integration tests against test machine |
 | `molecule/openwrt-*/` | Per-feature scenarios (security, vlans, dns, mesh) |
+| `molecule/mesh1-infra/` | Shared infrastructure on secondary LAN node |
 
 ## Adding a new LXC service — checklist
 1. Create `roles/<type>_lxc/tasks/main.yml` that uses `include_role: proxmox_lxc` with service-specific vars
@@ -137,6 +143,19 @@ All VMIDs defined in `group_vars/all.yml`.
 - Image paths are defined in `group_vars/all.yml` (e.g., `openwrt_image_path`, `proxmox_lxc_template_path`).
 - ALWAYS use `role_path` for source paths in tasks. Bare relative paths break when Molecule runs from non-default scenarios.
 - See `vm-lifecycle` skill, Image management section, for the full pattern.
+
+## Hardware detection: hard-fail over graceful degradation
+- ALWAYS prefer hard-fail when expected hardware is missing. Graceful degradation masks real problems.
+- iGPU: REQUIRED on every host. `proxmox_igpu` hard-fails if absent. Every modern Intel CPU has an iGPU.
+- WiFi + VT-d/IOMMU: REQUIRED for PCI passthrough. `proxmox_pci_passthrough` hard-fails if IOMMU is not active after reboot or if IOMMU groups are invalid.
+- NIC count: OK to handle dynamically — hardware legitimately varies (1 NIC on mesh satellites, 3+ on router nodes). The 2-bridge minimum is gated on `router_nodes` group membership.
+- Previous bug: `proxmox_pci_passthrough` "gracefully skipped" WiFi passthrough when IOMMU groups were invalid. The real cause was VT-d disabled in BIOS on mesh1. The silent skip masked a fixable BIOS setting for an entire test cycle.
+
+## Baseline workflow
+- The OpenWrt baseline on the primary host is expensive to rebuild (~4 min). Layered scenarios (`mesh1-infra`, `openwrt-security`, etc.) depend on it.
+- Use `molecule converge` + `molecule verify` for day-to-day iteration. This leaves the baseline running so leaf nodes (mesh1) remain accessible.
+- Use `molecule test` only for clean-state validation (CI, pre-commit). It destroys everything.
+- After a full `molecule test`, re-run `molecule converge` to restore the baseline before working on layered scenarios.
 
 ## Testing requirements
 - ALWAYS run `molecule test` after changing roles, playbooks, or molecule config

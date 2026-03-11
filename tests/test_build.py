@@ -75,8 +75,8 @@ class TestValidateEnv:
     @pytest.fixture()
     def complete_env(self):
         return {
-            "PROXMOX_API_TOKEN_SECRET": "secret-value",
-            "PROXMOX_HOST": "192.168.1.100",
+            "HOME_API_TOKEN": "secret-value",
+            "PRIMARY_HOST": "192.168.1.100",
             "MESH_KEY": "passphrase",
         }
 
@@ -84,15 +84,15 @@ class TestValidateEnv:
         assert build.validate_env(complete_env) == []
 
     def test_missing_one(self):
-        env = {"PROXMOX_HOST": "1.2.3.4", "MESH_KEY": "key"}
-        assert build.validate_env(env) == ["PROXMOX_API_TOKEN_SECRET"]
+        env = {"PRIMARY_HOST": "1.2.3.4", "MESH_KEY": "key"}
+        assert build.validate_env(env) == ["HOME_API_TOKEN"]
 
     def test_all_missing(self):
         assert build.validate_env({}) == build.REQUIRED_ENV
 
     def test_empty_value_treated_as_missing(self, complete_env):
-        complete_env["PROXMOX_HOST"] = ""
-        assert build.validate_env(complete_env) == ["PROXMOX_HOST"]
+        complete_env["PRIMARY_HOST"] = ""
+        assert build.validate_env(complete_env) == ["PRIMARY_HOST"]
 
 
 # ── resolve_playbook ─────────────────────────────────────────────────
@@ -239,7 +239,7 @@ class TestFindAnsiblePlaybook:
 class TestResolveProxmoxHost:
     def test_returns_primary_when_reachable(self, monkeypatch):
         monkeypatch.setattr(build, "probe_host", lambda *a, **kw: True)
-        env = {"PROXMOX_HOST": "10.0.0.1"}
+        env = {"PRIMARY_HOST": "10.0.0.1"}
         assert build.resolve_proxmox_host(env) == "10.0.0.1"
 
     def test_falls_back_to_cached_ip(self, tmp_path, monkeypatch):
@@ -253,7 +253,7 @@ class TestResolveProxmoxHost:
         monkeypatch.setattr(build, "STATE_DIR", tmp_path)
         state_file = tmp_path / "addresses.json"
         state_file.write_text('{"host":"home","ips":["10.0.0.1","10.10.10.2"]}')
-        env = {"PROXMOX_HOST": "10.0.0.1"}
+        env = {"PRIMARY_HOST": "10.0.0.1"}
         result = build.resolve_proxmox_host(env)
         assert result == "10.10.10.2"
         assert probed == ["10.0.0.1", "10.10.10.2"]
@@ -261,7 +261,7 @@ class TestResolveProxmoxHost:
     def test_returns_empty_when_all_unreachable(self, tmp_path, monkeypatch):
         monkeypatch.setattr(build, "probe_host", lambda *a, **kw: False)
         monkeypatch.setattr(build, "STATE_DIR", tmp_path)
-        env = {"PROXMOX_HOST": "10.0.0.1"}
+        env = {"PRIMARY_HOST": "10.0.0.1"}
         assert build.resolve_proxmox_host(env) == ""
 
     def test_corrupt_state_file_handled(self, tmp_path, monkeypatch):
@@ -269,7 +269,7 @@ class TestResolveProxmoxHost:
         monkeypatch.setattr(build, "STATE_DIR", tmp_path)
         state_file = tmp_path / "addresses.json"
         state_file.write_text("NOT-JSON{{{")
-        env = {"PROXMOX_HOST": "10.0.0.1"}
+        env = {"PRIMARY_HOST": "10.0.0.1"}
         assert build.resolve_proxmox_host(env) == ""
 
     def test_skips_primary_in_fallback(self, tmp_path, monkeypatch):
@@ -283,7 +283,7 @@ class TestResolveProxmoxHost:
         monkeypatch.setattr(build, "STATE_DIR", tmp_path)
         state_file = tmp_path / "addresses.json"
         state_file.write_text('{"ips":["10.0.0.1","10.10.10.2"]}')
-        env = {"PROXMOX_HOST": "10.0.0.1"}
+        env = {"PRIMARY_HOST": "10.0.0.1"}
         result = build.resolve_proxmox_host(env)
         assert result == "10.0.0.1"
         assert probed == ["10.0.0.1"]
@@ -300,7 +300,7 @@ class TestMain:
     def test_missing_required_vars_returns_1(self, tmp_path, monkeypatch):
         monkeypatch.setattr(build, "PROJECT_ROOT", tmp_path)
         env_file = tmp_path / ".env"
-        env_file.write_text("PROXMOX_HOST=1.2.3.4\n")
+        env_file.write_text("PRIMARY_HOST=1.2.3.4\n")
         assert build.main(["--env", ".env"]) == 1
 
     def test_nonexistent_playbook_returns_1(self, tmp_path, monkeypatch):
@@ -310,7 +310,7 @@ class TestMain:
         playbooks_dir.mkdir()
         env_file = tmp_path / ".env"
         env_file.write_text(
-            "PROXMOX_API_TOKEN_SECRET=x\nPROXMOX_HOST=1.2.3.4\nMESH_KEY=k\n"
+            "HOME_API_TOKEN=x\nPRIMARY_HOST=1.2.3.4\nMESH_KEY=k\n"
         )
         assert build.main(["--env", ".env", "--playbook", "nope"]) == 1
 
@@ -320,7 +320,7 @@ class TestMain:
         monkeypatch.setattr(build, "probe_host", lambda *a, **kw: False)
         env_file = tmp_path / ".env"
         env_file.write_text(
-            "PROXMOX_API_TOKEN_SECRET=x\nPROXMOX_HOST=1.2.3.4\nMESH_KEY=k\n"
+            "HOME_API_TOKEN=x\nPRIMARY_HOST=1.2.3.4\nMESH_KEY=k\n"
         )
         assert build.main(["--env", ".env"]) == 1
 
@@ -333,7 +333,7 @@ class TestMain:
         (playbooks_dir / "site.yml").write_text("---\n")
         env_file = tmp_path / ".env"
         env_file.write_text(
-            "PROXMOX_API_TOKEN_SECRET=x\nPROXMOX_HOST=1.2.3.4\nMESH_KEY=k\n"
+            "HOME_API_TOKEN=x\nPRIMARY_HOST=1.2.3.4\nMESH_KEY=k\n"
         )
         assert build.main(["--env", ".env"]) == 1
 
@@ -347,7 +347,7 @@ class TestMain:
         (playbooks_dir / "cleanup.yml").write_text("---\n")
         env_file = tmp_path / ".env"
         env_file.write_text(
-            "PROXMOX_API_TOKEN_SECRET=x\nPROXMOX_HOST=1.2.3.4\nMESH_KEY=k\n"
+            "HOME_API_TOKEN=x\nPRIMARY_HOST=1.2.3.4\nMESH_KEY=k\n"
         )
         captured_cmd = []
 
@@ -382,7 +382,7 @@ class TestMain:
         (playbooks_dir / "site.yml").write_text("---\n")
         env_file = tmp_path / ".env"
         env_file.write_text(
-            "PROXMOX_API_TOKEN_SECRET=x\nPROXMOX_HOST=1.2.3.4\nMESH_KEY=k\n"
+            "HOME_API_TOKEN=x\nPRIMARY_HOST=1.2.3.4\nMESH_KEY=k\n"
         )
         captured_cmd = []
 

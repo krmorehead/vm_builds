@@ -3,7 +3,8 @@
 # (VA-API), and export facts for LXC containers (bind mount) and VMs
 # (hostpci passthrough).
 #
-# Gracefully skipped when no Intel GPU is present.
+# Fails if no Intel iGPU is detected — every host in this project
+# is expected to have one.
 # Deliberately separate from proxmox_pci_passthrough: the iGPU stays
 # on the host driver (i915, shared) rather than being bound to
 # vfio-pci (exclusive).
@@ -23,6 +24,14 @@
 - name: Set iGPU availability flag
   ansible.builtin.set_fact:
     igpu_available: "{{ _igpu_lspci.rc == 0 and _igpu_lspci.stdout | length > 0 }}"
+
+- name: Fail if no Intel iGPU detected
+  ansible.builtin.fail:
+    msg: >-
+      No Intel iGPU found on {{ inventory_hostname }}. Every Proxmox host
+      in this project is expected to have an Intel iGPU for Quick Sync
+      transcoding and LXC GPU passthrough.
+  when: not (igpu_available | bool)
 
 - name: Extract iGPU PCI address
   ansible.builtin.set_fact:

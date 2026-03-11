@@ -1,6 +1,9 @@
 # Environment (production secrets)
 .env
 
+# Auto-generated secrets (key generation during playbook runs)
+.env.generated
+
 # Python virtual environment
 .venv/
 __pycache__/

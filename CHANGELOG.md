@@ -36,6 +36,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Backup manifest version** -- `project_version` field added to the
   backup manifest for version-aware restore decisions.
 - **Pytest coverage** for rollback tag naming convention and pass-through.
+- **Multi-node testing infrastructure** — `mesh1-infra` Molecule scenario for
+  running shared infrastructure roles on a secondary Proxmox node behind the
+  OpenWrt router. Includes `tasks/bootstrap_lan_host.yml` for DHCP lease and
+  API token provisioning. `lan_hosts` inventory group with ProxyJump SSH config.
+- **Scalable env var convention** — renamed `PROXMOX_HOST` → `PRIMARY_HOST`,
+  `PROXMOX_API_TOKEN_SECRET` → `HOME_API_TOKEN`. API tokens follow
+  `<HOSTNAME>_API_TOKEN` convention with dynamic lookup in `group_vars/proxmox.yml`.
 
 - **`proxmox_lxc` role** -- reusable LXC container provisioning with
   parameterized resources, networking, features, mount entries, auto-start,

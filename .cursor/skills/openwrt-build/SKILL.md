@@ -190,7 +190,7 @@ To avoid collisions between the WAN subnet and the OpenWrt LAN subnet:
 
 ## State file for cross-run IP discovery
 
-`build.py` probes `PROXMOX_HOST` before running Ansible. If unreachable, it reads `.state/addresses.json` for cached alternative IPs. This handles cable-swap scenarios where the original management IP is no longer routable.
+`build.py` probes `PRIMARY_HOST` before running Ansible. If unreachable, it reads `.state/addresses.json` for cached alternative IPs. This handles cable-swap scenarios where the original management IP is no longer routable.
 
 The state file is written by `openwrt_configure` and cleaned by both cleanup playbooks. It is gitignored.
 

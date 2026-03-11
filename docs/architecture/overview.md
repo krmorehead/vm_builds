@@ -95,9 +95,13 @@ A host composes its build by belonging to one or more **flavor groups** in the
 inventory. Shared infrastructure (`proxmox_backup`, `proxmox_bridges`,
 `proxmox_pci_passthrough`, `proxmox_igpu`) runs on every host in `proxmox`.
 
+Hosts on the OpenWrt LAN subnet (not directly reachable from the controller)
+belong to `lan_hosts`, which automatically configures SSH ProxyJump through
+the primary Proxmox host. See the `multi-node-ssh` skill for details.
+
 ```
 Build Profiles
-├── Home Entertainment Box
+├── Home Entertainment Box (home, primary — directly reachable)
 │   ├── router_nodes       → OpenWrt
 │   ├── vpn_nodes          → WireGuard
 │   ├── dns_nodes          → Pi-hole
@@ -106,6 +110,9 @@ Build Profiles
 │   ├── service_nodes      → Home Assistant
 │   ├── media_nodes        → Jellyfin, Kodi, Moonlight
 │   └── desktop_nodes      → Debian Desktop, UX Kiosk
+│
+├── LAN Satellite (mesh1 — via ProxyJump, requires OpenWrt running)
+│   └── lan_hosts          → ProxyJump SSH config (group_vars/lan_hosts.yml)
 │
 ├── Minimal Router
 │   ├── router_nodes       → OpenWrt
@@ -232,6 +239,7 @@ PCI Device Handling (separate roles)
 │
 └── proxmox_igpu
     ├── Purpose: iGPU detection, driver/VA-API setup, fact export for containers and VMs
+    ├── Requirement: Intel iGPU MUST be present on every host (hard fail if absent)
     ├── Method: Keep host i915 driver loaded, install vainfo, export device paths
     ├── Exports: igpu_available, igpu_pci_address, igpu_render_device, igpu_card_device,
     │           igpu_render_gid, igpu_video_gid
@@ -253,7 +261,10 @@ Internet
             ├── wlan0 ← PCIe passthrough (802.11s mesh)
             │
             └── LAN Network (all other services connect here)
-                ├── Proxmox Host (LAN management IP on LAN bridge)
+                ├── Proxmox Host "home" (LAN management IP on LAN bridge, 10.10.10.2)
+                ├── Proxmox Host "mesh1" (LAN node, 10.10.10.210, via ProxyJump)
+                │   └── SSH: controller → home (.201) → mesh1 (.210 via LAN bridge)
+                │
                 ├── WireGuard VPN (VMID 101)
                 │   └── wg0 tunnel → home server
                 │       ├── rsyslog forwards logs through tunnel
@@ -456,7 +467,7 @@ Shared Roles (run once per host, before any service roles)
 ├── proxmox_bridges
 │   ├── Runs on: proxmox
 │   ├── Purpose: Discover physical NICs, create virtual bridges
-│   └── Exports: proxmox_all_bridges
+│   └── Exports: proxmox_all_bridges, proxmox_wan_bridge
 │
 ├── proxmox_pci_passthrough
 │   ├── Runs on: proxmox
@@ -466,6 +477,7 @@ Shared Roles (run once per host, before any service roles)
 ├── proxmox_igpu
 │   ├── Runs on: proxmox
 │   ├── Purpose: Detect Intel iGPU, load i915, install VA-API, export device info
+│   ├── Requirement: Intel iGPU MUST be present (hard fail if absent)
 │   └── Exports: igpu_available, igpu_pci_address, igpu_render_device,
 │                igpu_card_device, igpu_render_gid, igpu_video_gid
 │
@@ -596,9 +608,11 @@ vm_builds/
 │   ├── hosts.yml                 Hosts + flavor groups + empty dynamic groups
 │   ├── group_vars/
 │   │   ├── all.yml               VMIDs, image paths, LXC templates, storage
-│   │   └── proxmox.yml           API auth, SSH settings
+│   │   ├── proxmox.yml           API auth, SSH settings
+│   │   └── lan_hosts.yml         ProxyJump SSH config for LAN-reachable hosts
 │   └── host_vars/
-│       └── home.yml              Per-host overrides
+│       ├── home.yml              Per-host overrides (primary node, direct SSH)
+│       └── mesh1.yml             LAN node (10.10.10.210, ProxyJump via home)
 │
 ├── playbooks/
 │   ├── site.yml                  Main orchestration playbook
@@ -652,14 +666,16 @@ vm_builds/
 │       └── gaming_configure/
 │
 ├── tasks/
-│   └── reconstruct_openwrt_group.yml   Reusable dynamic group reconstruction
+│   ├── reconstruct_openwrt_group.yml   Reusable dynamic group reconstruction
+│   └── bootstrap_lan_host.yml         SSH key check, DHCP lease, API token for LAN nodes
 │
 ├── molecule/
-│   ├── default/                   Full integration tests
+│   ├── default/                   Full integration tests (home only)
 │   ├── openwrt-security/          Per-feature: security hardening
 │   ├── openwrt-vlans/             Per-feature: VLAN segmentation
 │   ├── openwrt-dns/               Per-feature: encrypted DNS
-│   └── openwrt-mesh/              Per-feature: mesh enhancements
+│   ├── openwrt-mesh/              Per-feature: mesh enhancements
+│   └── mesh1-infra/               Cross-hardware: shared infra on mesh1 (LAN node)
 │
 ├── images/                        VM disk images (gitignored)
 │

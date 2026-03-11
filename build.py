@@ -9,19 +9,19 @@ in testable functions; see tests/test_build.py.
 .env file format (one VAR=VALUE per line, no quotes needed):
 ─────────────────────────────────────────────────────────────
     # Required
-    PROXMOX_API_TOKEN_SECRET=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-    PROXMOX_HOST=192.168.1.100
+    HOME_API_TOKEN=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    PRIMARY_HOST=192.168.1.100
     MESH_KEY=your-secure-mesh-passphrase
 
     # Optional
     WAN_MAC=AA:BB:CC:DD:EE:FF
 
-    # PROXMOX_API_TOKEN_SECRET
+    # HOME_API_TOKEN
     #   The Proxmox API token secret. Create one in the PVE web UI at
     #   Datacenter > Permissions > API Tokens. Use user root@pam,
     #   token ID "ansible", and UNCHECK Privilege Separation.
     #
-    # PROXMOX_HOST
+    # PRIMARY_HOST
     #   IP address of the target Proxmox node. Must be reachable via
     #   SSH (key-based auth) from this machine.
     #
@@ -73,8 +73,8 @@ VENV_DIR = PROJECT_ROOT / ".venv"
 DEFAULT_PLAYBOOK = "site.yml"
 
 REQUIRED_ENV = [
-    "PROXMOX_API_TOKEN_SECRET",
-    "PROXMOX_HOST",
+    "HOME_API_TOKEN",
+    "PRIMARY_HOST",
     "MESH_KEY",
 ]
 
@@ -120,11 +120,11 @@ def probe_host(ip: str, port: int = 22, timeout: float = 5.0) -> bool:
 def resolve_proxmox_host(env: dict[str, str]) -> str:
     """Return a reachable IP for the Proxmox host.
 
-    Tries the configured PROXMOX_HOST first.  If unreachable, falls back to
+    Tries the configured PRIMARY_HOST first.  If unreachable, falls back to
     cached IPs from a previous run stored in .state/addresses.json.
     Returns an empty string if no IP is reachable.
     """
-    primary = env["PROXMOX_HOST"]
+    primary = env["PRIMARY_HOST"]
     print(f"Probing {primary} ...", end=" ", flush=True)
     if probe_host(primary):
         print("reachable")
@@ -301,7 +301,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         print(
-            f"  Configured: {env['PROXMOX_HOST']}",
+            f"  Configured: {env['PRIMARY_HOST']}",
             file=sys.stderr,
         )
         state_file = STATE_DIR / "addresses.json"
@@ -309,11 +309,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  Cached:     {state_file}", file=sys.stderr)
         else:
             print("  No cached addresses found (.state/addresses.json)", file=sys.stderr)
-        print("  Update PROXMOX_HOST or check network connectivity.", file=sys.stderr)
+        print("  Update PRIMARY_HOST or check network connectivity.", file=sys.stderr)
         return 1
-    if host != env["PROXMOX_HOST"]:
-        print(f"  Using cached IP {host} (original {env['PROXMOX_HOST']} unreachable)")
-    env["PROXMOX_HOST"] = host
+    if host != env["PRIMARY_HOST"]:
+        print(f"  Using cached IP {host} (original {env['PRIMARY_HOST']} unreachable)")
+    env["PRIMARY_HOST"] = host
 
     # Resolve playbook
     playbook = resolve_playbook(args.playbook)

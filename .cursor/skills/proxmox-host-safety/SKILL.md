@@ -72,6 +72,18 @@ Previous bug: hardcoded `vmbr0 = WAN` made Proxmox GUI unreachable when the mode
 - Set `pci_passthrough_allow_reboot: true` in host vars to allow automated reboots.
 - After reboot, wait for SSH to come back with `wait_for_connection`.
 
+### 4b. Hardware detection: hard-fail, not graceful skip
+
+- iGPU: every modern Intel CPU has one. `proxmox_igpu` MUST hard-fail if absent.
+- WiFi + VT-d/IOMMU: required for PCI passthrough. `proxmox_pci_passthrough`
+  MUST hard-fail if IOMMU is not active after reboot or groups are invalid.
+- NIC count: OK to handle dynamically (hardware legitimately varies).
+- NEVER add "graceful skip" for hardware expected on every host. Silent skips
+  mask fixable BIOS settings (VT-d disabled) behind warnings that are easy to miss.
+- Previous bug: `proxmox_pci_passthrough` silently skipped WiFi passthrough when
+  IOMMU groups were invalid on mesh1. Root cause was VT-d disabled in BIOS —
+  a 30-second fix masked for an entire test cycle.
+
 ### 5. Cleanup completeness
 
 When ANY role deploys a file to the Proxmox host, ALWAYS add it to the removal list in BOTH cleanup playbooks (`molecule/default/cleanup.yml` AND `playbooks/cleanup.yml`).

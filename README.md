@@ -125,16 +125,16 @@ cp test.env .env
 Edit `.env`:
 
 ```
-PROXMOX_API_TOKEN_SECRET=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-PROXMOX_HOST=192.168.1.100
+HOME_API_TOKEN=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+PRIMARY_HOST=192.168.1.100
 MESH_KEY=your-secure-mesh-passphrase
 # WAN_MAC=AA:BB:CC:DD:EE:FF
 ```
 
 | Variable | Required | Description |
 |---|---|---|
-| `PROXMOX_API_TOKEN_SECRET` | Yes | API token secret from step 5 |
-| `PROXMOX_HOST` | Yes | IP address of your Proxmox node |
+| `HOME_API_TOKEN` | Yes | API token secret from step 5 |
+| `PRIMARY_HOST` | Yes | IP address of your Proxmox node |
 | `MESH_KEY` | Yes | WPA3-SAE passphrase for the 802.11s mesh network |
 | `WAN_MAC` | No | Clone this MAC onto the WAN NIC to match your old router (avoids ISP DHCP issues) |
 
@@ -297,7 +297,7 @@ molecule test        # full pipeline: cleanup -> syntax -> converge -> verify ->
 
 1. Add a host entry under `proxmox` in `inventory/hosts.yml`.
 2. Create `inventory/host_vars/<hostname>.yml` with
-   `ansible_host: "{{ lookup('env', 'PROXMOX_HOST') }}"` or a static IP.
+   `ansible_host: "{{ lookup('env', 'PRIMARY_HOST') }}"` or a static IP.
 3. Ensure SSH key access works: `ssh root@<ip> hostname`.
 4. Run the playbook.
 
@@ -547,7 +547,7 @@ To re-provision, destroy the VM first (`qm destroy <vmid>`) and re-run.
 |---|---|---|
 | `proxmoxer` import error | Not running inside the venv | `source .venv/bin/activate` |
 | `sshpass` not found | Missing system package | `sudo apt install sshpass` |
-| `PROXMOX_API_TOKEN_SECRET` empty | `.env` not sourced | `set -a; source .env; set +a` or use `./run.sh` |
+| `HOME_API_TOKEN` empty | `.env` not sourced | `set -a; source .env; set +a` or use `./run.sh` |
 | `node ... does not exist` | `proxmox_node` doesn't match PVE hostname | Set `proxmox_node` in host_vars |
 | SSH timeout on bootstrap | Proxmox bridge not reaching OpenWrt LAN | Check `openwrt_bootstrap_bridge` |
 | WAN route timeout | No upstream DHCP on the WAN bridge | Verify the WAN bridge has a physical NIC with upstream connectivity |

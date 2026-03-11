@@ -1,0 +1,11 @@
+---
+# Hosts behind the OpenWrt router on the LAN subnet (10.10.10.0/24).
+# Controller cannot route to this subnet directly -- SSH goes through
+# the primary Proxmox host via ProxyJump.
+ansible_ssh_common_args: >-
+  -o ProxyJump=root@{{ lookup('env', 'PRIMARY_HOST') }}
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o ConnectTimeout=10
+  -o ServerAliveInterval=15
+  -o ServerAliveCountMax=4

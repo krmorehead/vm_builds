@@ -28,18 +28,35 @@ When adding diagnostic tasks during troubleshooting, ALWAYS generalize them
 and make them permanent before closing the issue. Ad-hoc diagnostics that get
 deleted are wasted work — the next failure will need them again.
 
+# Hard-fail over graceful degradation
+
+NEVER add "graceful skip" logic for hardware that is expected on every host.
+Graceful degradation masks real, fixable problems (wrong BIOS settings,
+missing drivers, kernel parameters) behind silent skips.
+
+- iGPU, WiFi, IOMMU/VT-d: ALWAYS hard-fail if absent. These are required.
+- NIC count, bridge topology: OK to handle dynamically — hardware varies.
+- Previous bug: `proxmox_pci_passthrough` silently skipped WiFi passthrough
+  when IOMMU groups were invalid on mesh1. Root cause was VT-d disabled in
+  BIOS — a 30-second fix that was masked for an entire test cycle.
+
 # Code custodianship
 
 After completing a feature or fixing a bug, ALWAYS do a custodianship pass:
 
-1. **Pipefail audit.** Grep for `ansible.builtin.shell` tasks with `|` and
+1. **Credentials safety audit.** Grep ALL cleanup playbooks (`molecule/*/cleanup.yml`,
+   `playbooks/cleanup.yml`) for `authorized_keys`, `pveum`, `token`, `.ssh`.
+   Cleanup must NEVER remove SSH keys, API tokens, or any operator-created
+   credential. Violation = catastrophic: permanently locks out remote nodes.
+2. **Pipefail audit.** Grep for `ansible.builtin.shell` tasks with `|` and
    verify `set -o pipefail` is present (except BusyBox/OpenWrt targets).
-2. **Cleanup parity.** Diff the removal lists in `molecule/default/cleanup.yml`
+3. **Cleanup parity.** Diff the removal lists in `molecule/default/cleanup.yml`
    and `playbooks/cleanup.yml` — they must clean the same files.
-3. **Doc accuracy.** Check that `docs/architecture/overview.md` role exports
+   Every item in cleanup must be something the playbook itself deployed.
+4. **Doc accuracy.** Check that `docs/architecture/overview.md` role exports
    match actual `set_fact` calls. Check that bridge references use
    "WAN bridge" / "LAN bridge" instead of hardcoded names.
-4. **Verify coverage.** Every role that runs in `site.yml` MUST have at least
+5. **Verify coverage.** Every role that runs in `site.yml` MUST have at least
    one assertion in `molecule/default/verify.yml`. A role that passes silently
    provides no safety net.
 

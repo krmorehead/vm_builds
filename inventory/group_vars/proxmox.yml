@@ -6,4 +6,7 @@ proxmox_node: "{{ inventory_hostname }}"
 proxmox_api_host: "{{ ansible_host }}"
 proxmox_api_user: root@pam
 proxmox_api_token_id: ansible
-proxmox_api_token_secret: "{{ lookup('env', 'PROXMOX_API_TOKEN_SECRET') }}"
+# Convention: env var is <HOSTNAME>_API_TOKEN (uppercased inventory_hostname).
+# Adding a new host = adding <HOST>_API_TOKEN= to .env. No host_vars override needed.
+proxmox_api_token_secret: >-
+  {{ lookup('env', (inventory_hostname | upper | replace('-', '_')) + '_API_TOKEN') }}

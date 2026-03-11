@@ -1,0 +1,47 @@
+---
+- name: Verify OpenWrt baseline exists on home
+  hosts: router_nodes
+  gather_facts: false
+  tasks:
+    - name: Check VM 100 is running
+      ansible.builtin.command:
+        cmd: qm status 100
+      register: _vm_status
+      changed_when: false
+      failed_when: "'running' not in _vm_status.stdout"
+
+    - name: Fail fast if baseline missing
+      ansible.builtin.assert:
+        that: "'running' in _vm_status.stdout"
+        fail_msg: >-
+          OpenWrt VM 100 is not running on home. The mesh1-infra scenario
+          requires the OpenWrt baseline. Run 'molecule converge' (default
+          scenario) first.
+
+- name: Bootstrap mesh1 from primary host
+  hosts: router_nodes
+  gather_facts: true
+  tasks:
+    - name: Bootstrap LAN host
+      ansible.builtin.include_tasks: ../../tasks/bootstrap_lan_host.yml
+      vars:
+        _lan_host_ip: 10.10.10.210
+        _lan_host_name: mesh1
+
+- name: Verify mesh1 is reachable via ProxyJump
+  hosts: lan_hosts
+  gather_facts: false
+  tasks:
+    - name: Ping mesh1
+      ansible.builtin.ping:
+
+- name: Run shared infrastructure on mesh1
+  hosts: lan_hosts
+  gather_facts: true
+  roles:
+    - proxmox_bridges
+    - proxmox_pci_passthrough
+    - proxmox_igpu
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: infrastructure

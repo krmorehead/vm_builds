@@ -1,0 +1,133 @@
+---
+# Bootstrap a LAN host that sits behind the OpenWrt router.
+# Called from the primary Proxmox host (router_nodes).
+#
+# Requires:
+#   _lan_host_ip   – LAN IP of the target host (e.g. 10.10.10.210)
+#   _lan_host_name – inventory hostname of the target (e.g. mesh1)
+#
+# Requires: SSH key auth already working (set up via Proxmox GUI shell
+#           or ssh-copy-id through the SSH tunnel).
+#
+# What this does:
+#   1. Verifies key-based SSH to the LAN host
+#   2. Creates a DHCP static lease on OpenWrt (if missing)
+#   3. Creates a Proxmox API token on the LAN host (if missing)
+#   4. Saves the token to test.env on the controller
+
+- name: Check if SSH key auth works to {{ _lan_host_name }}
+  ansible.builtin.command:
+    cmd: >-
+      ssh -o ConnectTimeout=10
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+      -o BatchMode=yes -o PasswordAuthentication=no
+      root@{{ _lan_host_ip }} hostname
+  register: _key_auth_check
+  failed_when: false
+  changed_when: false
+
+- name: Fail if key auth not set up
+  ansible.builtin.fail:
+    msg: >-
+      SSH key auth to {{ _lan_host_name }} ({{ _lan_host_ip }}) is not
+      working. Set up key auth first:
+
+        1. Open SSH tunnel:  ssh -L 8007:{{ _lan_host_ip }}:8006 root@{{ lookup('env', 'PRIMARY_HOST') }}
+        2. Open browser:     https://localhost:8007
+        3. Log in to {{ _lan_host_name }} Proxmox GUI
+        4. Open Shell (top right) and run:
+             mkdir -p /root/.ssh && chmod 700 /root/.ssh
+             echo '<controller_pubkey>' >> /root/.ssh/authorized_keys
+             echo '<primary_host_pubkey>' >> /root/.ssh/authorized_keys
+             chmod 600 /root/.ssh/authorized_keys
+        5. Verify:  ssh -o ProxyJump=root@{{ lookup('env', 'PRIMARY_HOST') }} root@{{ _lan_host_ip }} hostname
+  when: _key_auth_check.rc != 0
+
+- name: Define SSH shorthand for {{ _lan_host_name }}
+  ansible.builtin.set_fact:
+    _lan_ssh: >-
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+      -o ConnectTimeout=10 root@{{ _lan_host_ip }}
+
+# --- DHCP static lease on OpenWrt ---
+
+- name: Define OpenWrt SSH command
+  ansible.builtin.set_fact:
+    _openwrt_ssh: >-
+      sshpass -p '' ssh
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+      -o PubkeyAuthentication=no -o ConnectTimeout=10
+      root@10.10.10.1
+
+- name: Get MAC address of {{ _lan_host_name }}
+  ansible.builtin.shell:
+    cmd: >-
+      {{ _lan_ssh }} "ip link show | grep -A1 'state UP' | grep ether | awk '{print $2}' | head -1"
+  register: _lan_host_mac_raw
+  changed_when: false
+
+- name: Set MAC fact
+  ansible.builtin.set_fact:
+    _lan_host_mac: "{{ _lan_host_mac_raw.stdout | trim }}"
+
+- name: Check if DHCP lease already exists for {{ _lan_host_name }}
+  ansible.builtin.shell:
+    cmd: >-
+      {{ _openwrt_ssh }} "uci show dhcp 2>/dev/null | grep -c \"name='{{ _lan_host_name }}'\" || echo 0"
+  register: _lease_exists_raw
+  changed_when: false
+  failed_when: false
+
+- name: Set lease existence fact
+  ansible.builtin.set_fact:
+    _lease_exists: "{{ (_lease_exists_raw.stdout | trim | int) > 0 }}"
+
+- name: Create DHCP static lease for {{ _lan_host_name }}
+  ansible.builtin.shell:
+    cmd: >-
+      {{ _openwrt_ssh }} "
+      uci add dhcp host;
+      uci set dhcp.@host[-1].name='{{ _lan_host_name }}';
+      uci set dhcp.@host[-1].mac='{{ _lan_host_mac }}';
+      uci set dhcp.@host[-1].ip='{{ _lan_host_ip }}';
+      uci set dhcp.@host[-1].dns='1';
+      uci commit dhcp;
+      /etc/init.d/dnsmasq restart"
+  when: not (_lease_exists | bool)
+  changed_when: true
+
+# --- Proxmox API token ---
+
+- name: Check if API token already exists on {{ _lan_host_name }}
+  ansible.builtin.shell:
+    cmd: >-
+      {{ _lan_ssh }} "pveum user token list root@pam --output-format json 2>/dev/null"
+  register: _token_list_raw
+  changed_when: false
+  failed_when: false
+
+- name: Set token existence fact
+  ansible.builtin.set_fact:
+    _token_exists: "{{ 'ansible' in (_token_list_raw.stdout | default('')) }}"
+
+- name: Create API token on {{ _lan_host_name }}
+  ansible.builtin.shell:
+    cmd: >-
+      {{ _lan_ssh }} "pveum user token add root@pam ansible --privsep=0 --output-format json 2>/dev/null"
+  register: _token_create_raw
+  when: not (_token_exists | bool)
+  changed_when: true
+
+- name: Extract token secret
+  ansible.builtin.set_fact:
+    _new_token_secret: >-
+      {{ (_token_create_raw.stdout | from_json).value | default('') }}
+  when: not (_token_exists | bool) and (_token_create_raw.stdout | default('') | length > 0)
+
+- name: Save new token to test.env on controller
+  ansible.builtin.lineinfile:
+    path: "{{ playbook_dir }}/../test.env"
+    regexp: '^{{ _lan_host_name | upper | replace("-", "_") }}_API_TOKEN='
+    line: "{{ _lan_host_name | upper | replace('-', '_') }}_API_TOKEN={{ _new_token_secret }}"
+  delegate_to: localhost
+  when: not (_token_exists | bool) and (_new_token_secret | default('') | length > 0)

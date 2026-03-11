@@ -40,11 +40,35 @@ the final end-to-end proof from a clean state.
 source .venv/bin/activate
 set -a; source test.env; set +a
 
-molecule test          # full pipeline
-molecule converge      # run playbook only
+molecule test          # full clean-state pipeline (destroys baseline)
+molecule converge      # run playbook only (preserves baseline)
 molecule verify        # run assertions only
 molecule cleanup       # reset test host
 ```
+
+## Baseline workflow
+
+The OpenWrt baseline on the primary host takes ~4 minutes to build. Layered
+scenarios (`mesh1-infra`, `openwrt-security`, etc.) and leaf nodes (mesh1)
+all depend on it. Prefer keeping the baseline running between test runs.
+
+**Day-to-day iteration:**
+```bash
+molecule converge                  # build/update baseline (idempotent)
+molecule verify                    # run assertions
+molecule converge -s mesh1-infra   # run layered scenario (baseline must exist)
+molecule verify -s mesh1-infra     # verify layered scenario
+```
+
+**Clean-state validation (CI, pre-commit, final proof):**
+```bash
+molecule test                      # full pipeline — destroys everything at the end
+molecule converge                  # restore baseline for further work
+```
+
+**After a full `molecule test`:** ALWAYS re-run `molecule converge` to restore
+the baseline before working on layered scenarios. Otherwise leaf nodes are
+unreachable (no OpenWrt = no LAN).
 
 ## Molecule pipeline sequence
 
@@ -54,14 +78,14 @@ molecule cleanup       # reset test host
 3. `syntax` — ansible syntax check
 4. `converge` — run `playbooks/site.yml`
 5. `verify` — run `molecule/default/verify.yml`
-6. `cleanup` — reset host after test
+6. `cleanup` — reset host after test (destroys baseline)
 
 There is NO `lint` phase in the Molecule config. Run `ansible-lint` and `yamllint` separately.
 
 ## Architecture
 
 - **Driver**: `delegated` (real Proxmox hardware, not Docker)
-- **Platform**: test machine IP from `PROXMOX_HOST` env var
+- **Platform**: test machine IP from `PRIMARY_HOST` env var
 - **Platform groups**: `proxmox` + all flavor groups (e.g., `router_nodes`)
 - **Provisioner**: `playbooks/site.yml`
 - **Cleanup**: `playbooks/cleanup.yml --tags clean`
@@ -152,8 +176,8 @@ provisioner:
       host_key_checking: false
       retry_files_enabled: false
   env:
-    PROXMOX_API_TOKEN_SECRET: ${PROXMOX_API_TOKEN_SECRET}
-    PROXMOX_HOST: ${PROXMOX_HOST}
+    HOME_API_TOKEN: ${HOME_API_TOKEN}
+    PRIMARY_HOST: ${PRIMARY_HOST}
     MESH_KEY: ${MESH_KEY}
   inventory:
     links:
@@ -429,7 +453,7 @@ path resolved from `molecule/proxmox-lxc/` instead of the project root.
 ## Before running tests
 
 1. Source test env: `set -a; source test.env; set +a`
-2. Verify SSH: `ssh root@$PROXMOX_HOST hostname`
+2. Verify SSH: `ssh root@$PRIMARY_HOST hostname`
 3. Verify images exist: `ls images/openwrt.img images/*.tar.zst`
 4. If previous run left host in bad state, power-cycle the machine
 
@@ -510,7 +534,27 @@ directly against VMs in verify — use raw commands instead.
         fail_msg: "HomeAssistant VM is not running"
 ```
 
+## Hard-fail over graceful degradation
+
+NEVER add "graceful skip" logic for hardware expected on every host. Silent
+skips mask fixable problems (wrong BIOS settings, missing drivers).
+
+- **iGPU**: REQUIRED. `proxmox_igpu` hard-fails if absent. Every modern Intel
+  CPU has one.
+- **WiFi + VT-d/IOMMU**: REQUIRED for passthrough. `proxmox_pci_passthrough`
+  hard-fails if IOMMU is not active or groups are invalid.
+- **NIC count**: OK to handle dynamically — hardware legitimately varies.
+- Previous bug: graceful skip of IOMMU masked a disabled VT-d BIOS setting on
+  mesh1 for an entire test cycle. A 30-second BIOS fix was hidden behind
+  "WARNING: skipping passthrough."
+
 ## Cleanup completeness
+
+**CRITICAL — cleanup must NEVER destroy access credentials:**
+- NEVER remove `/root/.ssh/authorized_keys` from any host. SSH keys are operator prerequisites. Removing them permanently locks out remote nodes — potentially thousands of miles away with no physical console access.
+- NEVER remove Proxmox API tokens (`pveum user token remove`). API tokens are operator-created, stored in `.env`, and required for all Ansible runs.
+- NEVER remove ANY credential the operator created manually. Apply this test to EVERY cleanup task: "Did the converge/playbook create this?" If no → do not touch it.
+- Previous bug: mesh1-infra cleanup removed both authorized_keys and the API token from a LAN satellite node, permanently locking out all SSH and API access.
 
 When a role writes a new file to the Proxmox host, ALWAYS add it to the removal list in BOTH:
 - `molecule/default/cleanup.yml` (test cleanup)
@@ -537,7 +581,7 @@ Previous bug: `ansible-proxmox-lan.conf` was deployed by `openwrt_configure` but
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `UNREACHABLE` during converge | SSH broken or host down | Check `PROXMOX_HOST`, verify SSH |
+| `UNREACHABLE` during converge | SSH broken or host down | Check `PRIMARY_HOST`, verify SSH |
 | `community.proxmox` not found | Collections missing | `ansible-galaxy collection install -r requirements.yml` |
 | Bridge numbers keep incrementing | Cleanup didn't remove bridges | `./cleanup.sh clean test.env` |
 | WiFi radios=0 after converge | PCI passthrough not cleaned up | Ensure cleanup unbinds vfio-pci, reloads modules, rescans PCI |
