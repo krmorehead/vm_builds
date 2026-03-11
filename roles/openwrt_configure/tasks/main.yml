@@ -74,24 +74,18 @@
 - name: Commit network changes (keeping LAN IP at default)
   ansible.builtin.raw: uci commit
 
-- name: Restart firewall and DHCP synchronously
+- name: Schedule Phase 1 service restart via detached script
   ansible.builtin.raw: >-
-    /etc/init.d/firewall restart;
-    /etc/init.d/dnsmasq restart
-  changed_when: true
-
-- name: Schedule Phase 1 network restart via detached script
-  ansible.builtin.raw: >-
-    printf '#!/bin/sh\nsleep 3\n/etc/init.d/network restart\nsleep 5\n/etc/init.d/firewall restart\n/etc/init.d/dropbear restart\nrm -f /tmp/_restart_net.sh\n'
+    printf '#!/bin/sh\nsleep 1\n/etc/init.d/firewall restart\n/etc/init.d/dnsmasq restart\nsleep 2\n/etc/init.d/network restart\nsleep 5\n/etc/init.d/firewall restart\n/etc/init.d/dropbear restart\nrm -f /tmp/_restart_net.sh\n'
     > /tmp/_restart_net.sh &&
     chmod +x /tmp/_restart_net.sh &&
     start-stop-daemon -S -b -x /tmp/_restart_net.sh
   ignore_unreachable: true
   changed_when: true
 
-- name: Pause for network and SSH to stabilize
+- name: Pause for services and network to stabilize
   ansible.builtin.pause:
-    seconds: 25
+    seconds: 30
 
 - name: Remove bootstrap IP from WAN bridge on Proxmox
   ansible.builtin.shell:
@@ -133,6 +127,22 @@
 - name: Restart firewall after network topology change
   ansible.builtin.raw: /etc/init.d/firewall restart
   changed_when: true
+
+- name: Phase 1 diagnostics
+  ansible.builtin.raw: |
+    echo "wan_route=$(ip -o route show default | head -1)"
+    echo "wan_ip=$(ip -4 addr show dev {{ wan_device }} 2>/dev/null | awk '/inet /{print $2}' | head -1)"
+    echo "lan_ip=$(ip -4 addr show dev br-lan 2>/dev/null | awk '/inet /{print $2}' | head -1)"
+    echo "dns=$(cat /tmp/resolv.conf.d/resolv.conf.auto 2>/dev/null | head -2)"
+    echo "fw_status=$(/etc/init.d/firewall status 2>&1)"
+    echo "dmesg_errors=$(dmesg | grep -i 'error\|segfault\|duplicate' | tail -3)"
+  register: _phase1_diag
+  changed_when: false
+  failed_when: false
+
+- name: Report Phase 1 network state
+  ansible.builtin.debug:
+    var: _phase1_diag.stdout_lines
 
 # ── WiFi driver installation (needs WAN internet) ──────────────
 
@@ -254,27 +264,206 @@
 - name: Set DHCP lease time
   ansible.builtin.raw: uci set dhcp.lan.leasetime='{{ openwrt_dhcp_leasetime }}'
 
+# ── DHCP reservation for Proxmox host LAN management IP ──────────
+# The Proxmox host gets its LAN IP via DHCP from this VM on every boot.
+# A static lease ensures it always gets the same predictable IP.
+
+- name: Get Proxmox LAN bridge MAC address
+  ansible.builtin.command:
+    cmd: cat /sys/class/net/{{ _lan_bridge }}/address
+  register: _lan_bridge_mac
+  delegate_to: "{{ _proxmox_host }}"
+  changed_when: false
+
+- name: Compute Proxmox LAN management IP (for DHCP reservation)
+  ansible.builtin.set_fact:
+    _proxmox_lan_ip: "{{ openwrt_lan_ip.split('.')[0:3] | join('.') }}.{{ proxmox_lan_mgmt_ip_offset }}"
+
+- name: Remove existing DHCP reservations for proxmox host
+  ansible.builtin.raw: |
+    while uci -q get dhcp.@host[-1] >/dev/null 2>&1; do
+      name=$(uci -q get dhcp.@host[-1].name 2>/dev/null)
+      mac=$(uci -q get dhcp.@host[-1].mac 2>/dev/null | tr 'A-F' 'a-f')
+      target_mac=$(echo '{{ _lan_bridge_mac.stdout | trim }}' | tr 'A-F' 'a-f')
+      if [ "$name" = "proxmox" ] || [ "$mac" = "$target_mac" ]; then
+        uci delete dhcp.@host[-1]
+      else
+        break
+      fi
+    done
+  changed_when: false
+
+- name: Add DHCP static lease for Proxmox host
+  ansible.builtin.raw: |
+    uci add dhcp host
+    uci set dhcp.@host[-1].name='proxmox'
+    uci set dhcp.@host[-1].mac='{{ _lan_bridge_mac.stdout | trim }}'
+    uci set dhcp.@host[-1].ip='{{ _proxmox_lan_ip | trim }}'
+  changed_when: true
+
+- name: Remove stale deferred MAC file from previous runs
+  ansible.builtin.raw: rm -f /etc/openwrt_wan_mac_deferred
+  changed_when: false
+
+- name: Check for WAN MAC conflict on L2 segment
+  ansible.builtin.raw: |
+    mac="{{ openwrt_wan_mac | lower }}"
+    wan_dev="{{ wan_device }}"
+    conflict="no"
+    reason=""
+    # Check 1: exact MAC in /proc/net/arp
+    if awk -v m="$mac" 'tolower($4)==m{found=1} END{exit !found}' /proc/net/arp 2>/dev/null; then
+      conflict="yes"
+      reason="exact MAC found in ARP table"
+    fi
+    # Check 2: derive EUI-64 and check IPv6 neighbor table for SLAAC collision
+    b1=$(echo "$mac" | cut -d: -f1)
+    b2=$(echo "$mac" | cut -d: -f2)
+    b3=$(echo "$mac" | cut -d: -f3)
+    b4=$(echo "$mac" | cut -d: -f4)
+    b5=$(echo "$mac" | cut -d: -f5)
+    b6=$(echo "$mac" | cut -d: -f6)
+    b1f=$(printf '%02x' $((0x$b1 ^ 2)))
+    eui="${b1f}${b2}:${b3}ff:fe${b4}:${b5}${b6}"
+    if ip -6 neigh 2>/dev/null | grep -qi "$eui"; then
+      conflict="yes"
+      reason="EUI-64 $eui found in IPv6 neighbor table"
+    fi
+    # Check 3: gateway MAC shares OUI with cloned MAC (same-device indicator)
+    gw_ip=$(ip route show default 2>/dev/null | awk '/^default/{print $3}' | head -1)
+    if [ -n "$gw_ip" ]; then
+      ping -c 1 -W 2 "$gw_ip" >/dev/null 2>&1 || true
+      sleep 1
+      gw_mac=$(awk -v ip="$gw_ip" '$1==ip{print tolower($4)}' /proc/net/arp | head -1)
+      cloned_oui=$(echo "$mac" | cut -d: -f1-3)
+      gw_oui=$(echo "$gw_mac" | cut -d: -f1-3)
+      if [ -n "$gw_oui" ] && [ "$cloned_oui" = "$gw_oui" ]; then
+        conflict="yes"
+        reason="gateway $gw_ip MAC $gw_mac shares OUI $gw_oui with cloned MAC"
+      fi
+    fi
+    echo "conflict=$conflict"
+    echo "reason=$reason"
+  register: _mac_conflict_check
+  changed_when: false
+  when: openwrt_wan_mac | default('') | length > 0
+
+- name: Set MAC conflict fact
+  ansible.builtin.set_fact:
+    _wan_mac_conflict: "{{ 'conflict=yes' in (_mac_conflict_check.stdout | default('')) }}"
+  when: openwrt_wan_mac | default('') | length > 0
+
+- name: Report MAC conflict detection result
+  ansible.builtin.debug:
+    msg: >-
+      {{ _mac_conflict_check.stdout_lines | default([]) | join(' | ') }}
+  when: openwrt_wan_mac | default('') | length > 0
+
+- name: Save deferred WAN MAC to file (conflict detected)
+  ansible.builtin.raw: >-
+    echo '{{ openwrt_wan_mac }}' > /etc/openwrt_wan_mac_deferred &&
+    chmod 644 /etc/openwrt_wan_mac_deferred
+  when:
+    - openwrt_wan_mac | default('') | length > 0
+    - _wan_mac_conflict | default(false) | bool
+
+- name: Deploy WAN MAC auto-apply init script
+  ansible.builtin.raw: |
+    cat > /etc/init.d/wan_mac_apply << 'INITEOF'
+    #!/bin/sh /etc/rc.common
+    START=99
+
+    start() {
+        local deferred="/etc/openwrt_wan_mac_deferred"
+        [ -f "$deferred" ] || return 0
+
+        local mac=$(cat "$deferred" | tr -d ' \t\n\r')
+        [ -n "$mac" ] || return 0
+
+        local wan_dev=$(uci get network.wan.device 2>/dev/null || echo "eth0")
+
+        local tries=0
+        while [ $tries -lt 30 ]; do
+            ip route show default 2>/dev/null | grep -q default && break
+            sleep 2
+            tries=$((tries + 1))
+        done
+        local conflict="no"
+        local mac_lower=$(echo "$mac" | tr 'A-F' 'a-f')
+        if awk -v m="$mac_lower" 'tolower($4)==m{found=1} END{exit !found}' /proc/net/arp 2>/dev/null; then
+            conflict="yes"
+        fi
+        local b1=$(echo "$mac_lower" | cut -d: -f1)
+        local b2=$(echo "$mac_lower" | cut -d: -f2)
+        local b3=$(echo "$mac_lower" | cut -d: -f3)
+        local b4=$(echo "$mac_lower" | cut -d: -f4)
+        local b5=$(echo "$mac_lower" | cut -d: -f5)
+        local b6=$(echo "$mac_lower" | cut -d: -f6)
+        local b1f=$(printf '%02x' $((0x$b1 ^ 2)))
+        local eui="${b1f}${b2}:${b3}ff:fe${b4}:${b5}${b6}"
+        if ip -6 neigh 2>/dev/null | grep -qi "$eui"; then
+            conflict="yes"
+        fi
+        local gw_ip=$(ip route show default 2>/dev/null | awk '/^default/{print $3}' | head -1)
+        if [ -n "$gw_ip" ]; then
+            ping -c 1 -W 2 "$gw_ip" >/dev/null 2>&1
+            local gw_mac=$(awk -v ip="$gw_ip" '$1==ip{print tolower($4)}' /proc/net/arp | head -1)
+            local cloned_oui=$(echo "$mac_lower" | cut -d: -f1-3)
+            local gw_oui=$(echo "$gw_mac" | cut -d: -f1-3)
+            if [ -n "$gw_oui" ] && [ "$cloned_oui" = "$gw_oui" ]; then
+                conflict="yes"
+            fi
+        fi
+
+        if [ "$conflict" = "no" ]; then
+            logger -t wan_mac_apply "No conflict for MAC $mac - applying and restarting network"
+            uci set network.wan.macaddr="$mac"
+            uci commit network
+            rm -f "$deferred"
+            /etc/init.d/network restart
+        else
+            logger -t wan_mac_apply "Conflict still present for MAC $mac - keeping deferred"
+        fi
+    }
+    INITEOF
+    chmod +x /etc/init.d/wan_mac_apply
+    /etc/init.d/wan_mac_apply enable
+  when:
+    - openwrt_wan_mac | default('') | length > 0
+    - _wan_mac_conflict | default(false) | bool
+
+- name: Report WAN MAC deferred
+  ansible.builtin.debug:
+    msg: >-
+      WAN MAC {{ openwrt_wan_mac }} conflicts with a device on the WAN segment.
+      Saved to /etc/openwrt_wan_mac_deferred. The MAC will be applied
+      automatically on the next boot/restart once the conflicting device
+      is removed.
+  when:
+    - openwrt_wan_mac | default('') | length > 0
+    - _wan_mac_conflict | default(false) | bool
+
+- name: Clone WAN MAC address
+  ansible.builtin.raw: uci set network.wan.macaddr='{{ openwrt_wan_mac }}'
+  when:
+    - openwrt_wan_mac | default('') | length > 0
+    - not (_wan_mac_conflict | default(false) | bool)
+
 - name: Commit all final changes
   ansible.builtin.raw: uci commit
 
-- name: Restart firewall and DHCP
+- name: Schedule final service restart via detached script
   ansible.builtin.raw: >-
-    /etc/init.d/firewall restart;
-    /etc/init.d/dnsmasq restart
-  changed_when: true
-
-- name: Schedule final network restart via detached script
-  ansible.builtin.raw: >-
-    printf '#!/bin/sh\nsleep 3\n/etc/init.d/network restart\nsleep 5\n/etc/init.d/firewall restart\n/etc/init.d/dropbear restart\nrm -f /tmp/_restart_net.sh\n'
+    printf '#!/bin/sh\nsleep 1\n/etc/init.d/firewall restart\n/etc/init.d/dnsmasq restart\nsleep 2\n/etc/init.d/network restart\nsleep 5\n/etc/init.d/firewall restart\n/etc/init.d/dropbear restart\nrm -f /tmp/_restart_net.sh\n'
     > /tmp/_restart_net.sh &&
     chmod +x /tmp/_restart_net.sh &&
     start-stop-daemon -S -b -x /tmp/_restart_net.sh
   ignore_unreachable: true
   changed_when: true
 
-- name: Pause for network to restart
+- name: Pause for services and network to restart
   ansible.builtin.pause:
-    seconds: 20
+    seconds: 30
 
 - name: Clean up bootstrap IP from LAN bridge
   ansible.builtin.command:
@@ -286,13 +475,11 @@
   changed_when: true
 
 # ── Proxmox LAN management IP ──────────────────────────────────
-# Give the Proxmox host a static IP on the LAN bridge so the GUI
-# is reachable from leaf nodes regardless of WAN topology.
+# Add the management IP immediately so the GUI is reachable this
+# session. Upgrade the LAN bridge to DHCP so it auto-acquires on boot.
 
-- name: Compute Proxmox LAN management IP
+- name: Set Proxmox LAN CIDR
   ansible.builtin.set_fact:
-    _proxmox_lan_ip: >-
-      {{ openwrt_lan_ip.split('.')[0:3] | join('.') }}.{{ proxmox_lan_mgmt_ip_offset }}
     _proxmox_lan_cidr: "{{ _netmask_cidr_map[openwrt_lan_netmask] | default('24') }}"
 
 - name: Check if Proxmox LAN IP is already present
@@ -302,13 +489,38 @@
   delegate_to: "{{ _proxmox_host }}"
   changed_when: false
 
+- name: Remove conflicting LAN-subnet IPs from non-LAN bridges
+  ansible.builtin.shell:
+    cmd: >-
+      prefix=$(echo "{{ _proxmox_lan_ip | trim }}" | cut -d. -f1-3);
+      for br in $(ip -o link show type bridge | awk -F': ' '{print $2}'); do
+        [ "$br" = "{{ _lan_bridge }}" ] && continue;
+        ip -o -4 addr show dev "$br" 2>/dev/null | awk '{print $4}' |
+        while read cidr; do
+          ip_part=$(echo "$cidr" | cut -d/ -f1);
+          if echo "$ip_part" | grep -q "^${prefix}\."; then
+            ip addr del "$cidr" dev "$br" 2>/dev/null;
+            echo "removed $cidr from $br";
+          fi;
+        done;
+      done
+  delegate_to: "{{ _proxmox_host }}"
+  changed_when: false
+  failed_when: false
+
+- name: Remove stale temp LAN config files
+  ansible.builtin.file:
+    path: /etc/network/interfaces.d/ansible-temp-lan.conf
+    state: absent
+  delegate_to: "{{ _proxmox_host }}"
+
 - name: Add Proxmox management IP to LAN bridge
   ansible.builtin.command:
     cmd: >-
-      ip addr add {{ _proxmox_lan_ip }}/{{ _proxmox_lan_cidr }}
+      ip addr add {{ _proxmox_lan_ip | trim }}/{{ _proxmox_lan_cidr }}
       dev {{ _lan_bridge }}
   delegate_to: "{{ _proxmox_host }}"
-  when: _proxmox_lan_ip not in _lan_bridge_addr.stdout
+  when: _proxmox_lan_ip | trim not in _lan_bridge_addr.stdout
 
 - name: Ensure interfaces.d is sourced on Proxmox host
   ansible.builtin.lineinfile:
@@ -317,13 +529,17 @@
     state: present
   delegate_to: "{{ _proxmox_host }}"
 
-- name: Deploy persistent LAN management config on Proxmox host
-  ansible.builtin.template:
-    src: proxmox-lan-mgmt.conf.j2
-    dest: /etc/network/interfaces.d/ansible-proxmox-lan.conf
-    owner: root
-    group: root
-    mode: "0644"
+- name: Upgrade LAN bridge to DHCP in ansible-bridges.conf
+  ansible.builtin.replace:
+    path: /etc/network/interfaces.d/ansible-bridges.conf
+    regexp: "^(iface {{ _lan_bridge }} inet) manual$"
+    replace: "\\1 dhcp"
+  delegate_to: "{{ _proxmox_host }}"
+
+- name: Remove separate LAN management config if it exists
+  ansible.builtin.file:
+    path: /etc/network/interfaces.d/ansible-proxmox-lan.conf
+    state: absent
   delegate_to: "{{ _proxmox_host }}"
 
 # ── Host address state file (for build.py auto-detection) ──────
@@ -377,14 +593,30 @@
       (original {{ hostvars[_proxmox_host].ansible_host }} unreachable)
   when: _mgmt_probe is failed
 
-# ── Final report ────────────────────────────────────────────────
+# ── Final diagnostics and report ──────────────────────────────
 
-- name: Report final configuration
+- name: Final build diagnostics
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      echo "vm_status=$(qm status 100 2>&1)"
+      echo "vm_onboot=$(qm config 100 2>/dev/null | grep -oP 'onboot: \K.*')"
+      echo "vm_startup=$(qm config 100 2>/dev/null | grep -oP 'startup: \K.*')"
+      echo "lan_bridge_ip=$(ip -4 addr show dev {{ _lan_bridge }} | grep -oP 'inet \K[^/]+')"
+      echo "lan_bridge_dhcp=$(grep -c 'inet dhcp' /etc/network/interfaces.d/ansible-bridges.conf 2>/dev/null || echo 0)"
+    executable: /bin/bash
+  delegate_to: "{{ _proxmox_host }}"
+  register: _final_diag
+  changed_when: false
+  failed_when: false
+
+- name: Report final build state
   ansible.builtin.debug:
     msg: >-
-      OpenWrt LAN configured at {{ openwrt_lan_ip }}/{{ openwrt_lan_netmask }}
-      (WAN on {{ wan_device }}, prefix {{ _wan_prefix | default('unknown') }}).
-      WiFi radios={{ wifi_radios | default([]) | length }}.
-      Proxmox GUI reachable at {{ _proxmox_lan_ip }} from LAN.
-      Connect to {{ openwrt_lan_ip }} to reach the router.
+      OpenWrt LAN={{ openwrt_lan_ip }}/{{ openwrt_lan_netmask }}
+      WAN={{ wan_device }} prefix={{ _wan_prefix | default('unknown') }}
+      WiFi={{ wifi_radios | default([]) | length }} radios
+      MAC={{ openwrt_wan_mac | default('auto') }}
+      Proxmox GUI={{ _proxmox_lan_ip }}
+      | {{ _final_diag.stdout_lines | default([]) | join(' | ') }}
   ignore_unreachable: true

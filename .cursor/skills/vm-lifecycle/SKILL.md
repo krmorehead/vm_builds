@@ -151,9 +151,55 @@ If the configure role needs to download packages:
 
 The `deploy_stamp` role writes `/etc/ansible/facts.d/vm_builds.fact` on Proxmox hosts after each play. On subsequent runs with `gather_facts: true`, the data is available as `ansible_local.vm_builds`. Each play appends its entry without overwriting others.
 
+## Diagnostics pattern
+
+Every VM type SHOULD include diagnostic tasks at key milestones in its roles.
+These run on every build and provide debug context when things fail.
+
+Standard diagnostic milestones for any VM:
+
+1. **Post-bootstrap** (`<type>_vm`): VM status, bridge layout, bootstrap IP, `dmesg` errors
+2. **Post-configure** (`<type>_configure`): Service status, network state, final config
+3. **Final report** (`<type>_configure`): Summary of all configured parameters
+
+Rules:
+- `changed_when: false` and `failed_when: false` — diagnostics MUST NOT break the build
+- Register output and display via `debug: var:` so it appears in logs
+- Include `dmesg` checks — kernel errors are often the root cause when app-level symptoms mislead
+- Include protocol-level checks — ICMP ping working does NOT mean TCP/HTTP works
+
+When troubleshooting adds ad-hoc debug tasks, ALWAYS generalize and make them
+permanent before closing the issue.
+
+## Detached/async operations
+
+When a configure role restarts services that sever the SSH connection, use
+detached scripts (see `async-job-patterns` rule). Key points:
+
+- Launch returns success ≠ script completed successfully
+- ALWAYS verify the expected outcome after the pause (`wait_for`, service check)
+- NEVER restart services synchronously when the restart changes firewall/network rules affecting the current SSH path
+
+## Cleanup completeness
+
+When a role deploys a file to the Proxmox host or the controller, ALWAYS add
+it to both cleanup playbooks (`molecule/default/cleanup.yml` and `playbooks/cleanup.yml`).
+
+Current managed files:
+- `/etc/network/interfaces.d/ansible-bridges.conf` (may be modified in-place to `inet dhcp`)
+- `/etc/network/interfaces.d/ansible-proxmox-lan.conf` (legacy, removed by converge if present)
+- `/etc/network/interfaces.d/ansible-temp-lan.conf` (test workaround, cleaned up)
+- `/etc/modprobe.d/blacklist-wifi.conf`
+- `/etc/modprobe.d/vfio-pci.conf`
+- `/etc/ansible/facts.d/vm_builds.fact`
+- `/tmp/openwrt.img` (edge case: left behind if build fails mid-upload)
+- `.state/addresses.json` (controller, via `delegate_to: localhost`)
+
 ## Test strategy
 
 - Molecule converge provisions ALL VMs in sequence (site.yml runs everything).
 - Molecule verify checks each VM type with independent assertions.
 - Cleanup destroys ALL VMs via `qm list` iteration — not hardcoded VMIDs.
 - For VM-specific test scenarios, add separate Molecule scenarios: `molecule/<type>/`.
+- Reproduce production bugs on the test machine first (`test.env`). Only involve production when the test machine cannot reproduce.
+- Use TDD: write the verify assertion first, confirm it fails, implement the fix, confirm it passes.

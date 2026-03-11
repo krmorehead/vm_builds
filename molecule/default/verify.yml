@@ -133,34 +133,7 @@
           VM net0 is on {{ vm_net0_bridge.stdout | trim }},
           expected WAN bridge {{ wan_bridge }}
 
-    # ── WAN MAC address cloning ────────────────────────────────────
-
-    - name: Get VM net0 MAC address
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          qm config {{ openwrt_vm_id }} | grep '^net0:' | grep -oP 'macaddr=\K[^,]+'
-        executable: /bin/bash
-      register: vm_net0_mac
-      changed_when: false
-      failed_when: false
-
-    - name: Assert WAN MAC matches configured value
-      ansible.builtin.assert:
-        that: (vm_net0_mac.stdout | trim | upper) == (wan_mac_env | upper)
-        fail_msg: >-
-          VM net0 MAC={{ vm_net0_mac.stdout | trim }},
-          expected={{ wan_mac_env }}
-      vars:
-        wan_mac_env: "{{ lookup('env', 'WAN_MAC') }}"
-      when: (lookup('env', 'WAN_MAC') | default('') | length) > 0
-
-    - name: Report WAN MAC status
-      ansible.builtin.debug:
-        msg: >-
-          WAN MAC cloning {{ 'active: ' + (vm_net0_mac.stdout | trim)
-          if (lookup('env', 'WAN_MAC') | default('') | length) > 0
-          else 'not configured (using auto-generated MAC)' }}
+    # ── WAN MAC address cloning (checked later via openwrt_ssh) ────
 
     # ── Proxmox LAN management IP ────────────────────────────────
 
@@ -190,23 +163,59 @@
         openwrt_lan_ip: >-
           {{ proxmox_lan_ip.split('.')[0:3] | join('.') }}.1
 
-    - name: Check persistent LAN management config exists
+    - name: Read ansible-bridges.conf for LAN bridge DHCP check
+      ansible.builtin.slurp:
+        src: /etc/network/interfaces.d/ansible-bridges.conf
+      register: bridges_conf_raw
+
+    - name: Assert LAN bridge uses DHCP in bridges config
+      ansible.builtin.assert:
+        that:
+          - "'iface ' ~ lan_bridge ~ ' inet dhcp' in (bridges_conf_raw.content | b64decode)"
+        fail_msg: >-
+          LAN bridge {{ lan_bridge }} is not configured as 'inet dhcp' in
+          ansible-bridges.conf. The Proxmox host will not auto-acquire a
+          LAN management IP on boot.
+          Content: {{ bridges_conf_raw.content | b64decode }}
+
+    - name: Assert separate LAN management config is absent
       ansible.builtin.stat:
         path: /etc/network/interfaces.d/ansible-proxmox-lan.conf
-      register: lan_mgmt_conf
+      register: old_lan_conf
 
-    - name: Assert persistent LAN management config exists
+    - name: Verify old separate LAN config was removed
       ansible.builtin.assert:
-        that: lan_mgmt_conf.stat.exists
+        that: not old_lan_conf.stat.exists
         fail_msg: >-
-          /etc/network/interfaces.d/ansible-proxmox-lan.conf not found.
-          Proxmox LAN IP is not persistent across reboots.
+          Stale ansible-proxmox-lan.conf still exists. It should be removed
+          since the LAN bridge DHCP config is now in ansible-bridges.conf.
+
+    - name: Verify Proxmox GUI port 8006 is accessible on LAN IP
+      ansible.builtin.wait_for:
+        host: "{{ proxmox_lan_ip }}"
+        port: 8006
+        timeout: 10
+
+    - name: Check bridge has auto directive for boot persistence
+      ansible.builtin.shell:
+        cmd: >-
+          grep -c 'auto {{ lan_bridge }}' /etc/network/interfaces.d/ansible-bridges.conf
+      register: bridge_auto_check
+      changed_when: false
+
+    - name: Assert bridge comes up automatically on boot
+      ansible.builtin.assert:
+        that: (bridge_auto_check.stdout | trim | int) > 0
+        fail_msg: >-
+          Bridge {{ lan_bridge }} does not have 'auto' directive.
+          It will not start automatically on boot.
 
     - name: Report Proxmox LAN management
       ansible.builtin.debug:
         msg: >-
-          Proxmox LAN IP={{ proxmox_lan_ip }} on {{ lan_bridge }},
-          persistent config={{ lan_mgmt_conf.stat.exists }},
+          Proxmox LAN IP={{ proxmox_lan_ip }} on {{ lan_bridge }} (DHCP via bridges.conf),
+          bridge_auto=yes, DHCP_config=yes,
+          GUI port 8006=accessible,
           OpenWrt LAN IP={{ openwrt_lan_ip }}
 
     # ── IOMMU ─────────────────────────────────────────────────────
@@ -323,12 +332,174 @@
         that: (dhcp_leasetime.stdout | trim | length) > 0
         fail_msg: "DHCP leasetime not set"
 
+    - name: Get Proxmox LAN bridge MAC for reservation check
+      ansible.builtin.shell:
+        cmd: cat /sys/class/net/{{ lan_bridge }}/address
+      register: lan_bridge_mac_raw
+      delegate_to: "{{ inventory_hostname }}"
+      changed_when: false
+
+    - name: Check DHCP static lease for Proxmox host on OpenWrt
+      ansible.builtin.shell:
+        cmd: >-
+          {{ openwrt_ssh }} "uci show dhcp | grep -i '{{ lan_bridge_mac_raw.stdout | trim }}' || echo 'no_reservation'"
+      register: dhcp_reservation
+      changed_when: false
+
+    - name: Assert DHCP reservation exists for Proxmox host
+      ansible.builtin.assert:
+        that: "'no_reservation' not in dhcp_reservation.stdout"
+        fail_msg: >-
+          No DHCP static lease found on OpenWrt for Proxmox LAN bridge
+          MAC {{ lan_bridge_mac_raw.stdout | trim }}. The Proxmox host
+          will not get a predictable LAN IP on boot.
+          Output: {{ dhcp_reservation.stdout }}
+
+    - name: Check DHCP reservation IP matches expected
+      ansible.builtin.shell:
+        cmd: >-
+          {{ openwrt_ssh }} "uci show dhcp | grep '.ip=' | grep '{{ proxmox_lan_ip }}' || echo 'ip_mismatch'"
+      register: dhcp_reservation_ip
+      changed_when: false
+
+    - name: Assert DHCP reservation IP is correct
+      ansible.builtin.assert:
+        that: "'ip_mismatch' not in dhcp_reservation_ip.stdout"
+        fail_msg: >-
+          DHCP reservation IP does not match expected {{ proxmox_lan_ip }}.
+          Output: {{ dhcp_reservation_ip.stdout }}
+
     - name: Report DHCP configuration
       ansible.builtin.debug:
         msg: >-
           DHCP: start={{ dhcp_start.stdout | trim }},
           limit={{ dhcp_limit.stdout | trim }},
-          leasetime={{ dhcp_leasetime.stdout | trim }}
+          leasetime={{ dhcp_leasetime.stdout | trim }},
+          proxmox_reservation={{ 'yes' if 'no_reservation' not in dhcp_reservation.stdout else 'no' }}
+
+    # ── Proxmox GUI from LAN (leaf node perspective) ───────────────
+
+    - name: Test Proxmox GUI reachable from OpenWrt VM (leaf node view)
+      ansible.builtin.shell:
+        cmd: >-
+          {{ openwrt_ssh }}
+          "(echo QUIT | nc {{ proxmox_lan_ip }} 8006) </dev/null >/dev/null 2>&1; echo exit=\$?"
+      register: gui_from_lan
+      changed_when: false
+
+    - name: Assert Proxmox GUI is reachable from LAN
+      ansible.builtin.assert:
+        that: "'exit=0' in gui_from_lan.stdout"
+        fail_msg: >-
+          Cannot reach Proxmox GUI at {{ proxmox_lan_ip }}:8006 from
+          OpenWrt VM. Leaf nodes cannot access the Proxmox web interface.
+          Output: {{ gui_from_lan.stdout }}
+
+    # ── WAN MAC address cloning ────────────────────────────────────
+
+    - name: Get UCI WAN MAC setting from OpenWrt
+      ansible.builtin.shell:
+        cmd: >-
+          {{ openwrt_ssh }} "uci get network.wan.macaddr 2>/dev/null || echo ''"
+      register: vm_wan_mac
+      changed_when: false
+
+    - name: Check for deferred WAN MAC file
+      ansible.builtin.shell:
+        cmd: >-
+          {{ openwrt_ssh }} "cat /etc/openwrt_wan_mac_deferred 2>/dev/null || echo ''"
+      register: vm_deferred_mac
+      changed_when: false
+
+    - name: Set WAN MAC test facts
+      ansible.builtin.set_fact:
+        _wan_mac_env: "{{ lookup('env', 'WAN_MAC') | default('') }}"
+        _wan_mac_uci: "{{ vm_wan_mac.stdout | trim }}"
+        _wan_mac_deferred: "{{ vm_deferred_mac.stdout | trim }}"
+
+    - name: Assert MAC applied OR deferred when WAN_MAC is set
+      ansible.builtin.assert:
+        that: >-
+          (_wan_mac_uci | upper) == (_wan_mac_env | upper)
+          or (_wan_mac_deferred | upper) == (_wan_mac_env | upper)
+        fail_msg: >-
+          WAN_MAC={{ _wan_mac_env }} but neither UCI ({{ _wan_mac_uci }})
+          nor deferred file ({{ _wan_mac_deferred }}) contains it
+      when: _wan_mac_env | length > 0
+
+    - name: Assert MAC not in both UCI and deferred file
+      ansible.builtin.assert:
+        that: not (_wan_mac_uci | length > 0 and _wan_mac_deferred | length > 0)
+        fail_msg: >-
+          WAN MAC in both UCI ({{ _wan_mac_uci }}) and deferred file
+          ({{ _wan_mac_deferred }}) — should be one or the other
+      when: _wan_mac_env | length > 0
+
+    - name: Assert no WAN MAC artifacts when not configured
+      ansible.builtin.assert:
+        that:
+          - _wan_mac_uci == ""
+          - _wan_mac_deferred == ""
+        fail_msg: >-
+          WAN_MAC not set but found UCI={{ _wan_mac_uci }},
+          deferred={{ _wan_mac_deferred }}
+      when: _wan_mac_env | length == 0
+
+    - name: Check WAN MAC auto-apply init script exists when deferred
+      ansible.builtin.shell:
+        cmd: >-
+          {{ openwrt_ssh }} "test -x /etc/init.d/wan_mac_apply && echo 'present' || echo 'missing'"
+      register: mac_init_script
+      changed_when: false
+      when: _wan_mac_deferred | length > 0
+
+    - name: Assert auto-apply init script is deployed when MAC deferred
+      ansible.builtin.assert:
+        that: (mac_init_script.stdout | trim) == "present"
+        fail_msg: >-
+          Deferred MAC file exists but /etc/init.d/wan_mac_apply is
+          {{ mac_init_script.stdout | trim }}. The MAC would never be
+          auto-applied on reboot.
+      when: _wan_mac_deferred | length > 0
+
+    - name: Check init script is enabled (symlinked in rc.d)
+      ansible.builtin.shell:
+        cmd: >-
+          {{ openwrt_ssh }} "ls /etc/rc.d/S99wan_mac_apply 2>/dev/null && echo 'enabled' || echo 'disabled'"
+      register: mac_init_enabled
+      changed_when: false
+      when: _wan_mac_deferred | length > 0
+
+    - name: Assert init script is enabled when MAC deferred
+      ansible.builtin.assert:
+        that: "'enabled' in (mac_init_enabled.stdout | trim)"
+        fail_msg: >-
+          wan_mac_apply init script is not enabled — won't run on boot.
+          Status: {{ mac_init_enabled.stdout | trim }}
+      when: _wan_mac_deferred | length > 0
+
+    - name: Check dmesg for IPv6 duplicate address errors
+      ansible.builtin.shell:
+        cmd: >-
+          {{ openwrt_ssh }} "dmesg | grep -c 'IPv6 duplicate address' 2>/dev/null || echo 0"
+      register: ipv6_dup_count
+      changed_when: false
+
+    - name: Assert no IPv6 duplicate address errors
+      ansible.builtin.assert:
+        that: (ipv6_dup_count.stdout | trim | int) == 0
+        fail_msg: >-
+          Found {{ ipv6_dup_count.stdout | trim }} IPv6 duplicate address
+          errors in dmesg — indicates MAC conflict on L2 segment
+
+    - name: Report WAN MAC status
+      ansible.builtin.debug:
+        msg: >-
+          WAN MAC: {{ 'applied via UCI: ' + _wan_mac_uci
+          if _wan_mac_uci | length > 0
+          else ('deferred to /etc/openwrt_wan_mac_deferred: ' + _wan_mac_deferred
+          if _wan_mac_deferred | length > 0
+          else 'not configured (using auto-generated MAC)') }}
 
     # ── WiFi ────────────────────────────────────────────────────
 

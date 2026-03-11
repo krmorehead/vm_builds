@@ -19,6 +19,12 @@ Trigger: any of these happened during the session:
 - A variable was undefined at runtime
 - A test failed for a non-obvious reason
 - Something that worked locally broke on the real host
+- An ad-hoc diagnostic was needed to identify the root cause
+- A detached/async operation failed silently
+
+When adding diagnostic tasks during troubleshooting, ALWAYS generalize them
+and make them permanent before closing the issue. Ad-hoc diagnostics that get
+deleted are wasted work — the next failure will need them again.
 
 # Mandatory testing
 

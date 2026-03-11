@@ -23,8 +23,12 @@ alwaysApply: true
 - Override with `openwrt_wan_bridge` in `host_vars` if auto-detection picks the wrong bridge.
 
 ## WAN MAC address cloning
-- When replacing an existing router, set `WAN_MAC` in `.env` to clone the old router's MAC onto net0. ISPs tie DHCP leases to the MAC — without cloning, the WAN gets no IP.
-- The MAC is set at the Proxmox VM NIC level (`qm set --net0 virtio,...,macaddr=XX:XX:XX:XX:XX:XX`), not inside OpenWrt.
+- When replacing an existing router, set `WAN_MAC` in `.env` to clone the old router's MAC. ISPs tie DHCP leases to the MAC — without cloning, the WAN gets no IP.
+- NEVER apply `WAN_MAC` at the Proxmox VM NIC level (`qm set --net0 macaddr=...`). ALWAYS go through the MAC conflict detection flow during configure.
+- The conflict detection checks three layers: (1) exact MAC in `/proc/net/arp`, (2) EUI-64 in IPv6 neighbor table, (3) gateway MAC shares OUI with cloned MAC.
+- If a conflict is detected, the MAC is saved to `/etc/openwrt_wan_mac_deferred` on the VM and an init script (`/etc/init.d/wan_mac_apply`) is deployed. On every boot, the init script re-runs conflict detection and auto-applies the MAC once the conflict is gone. No manual intervention needed.
+- Consumer routers use sequential MACs across ports (WAN: `...63:08`, LAN: `...63:09`). The OUI check catches this pattern.
+- Previous bug: cloned MAC shared OUI with the old router's LAN MAC. IPv6 SLAAC generated the same global address on both devices → DAD failure → corrupted network stack → `wget` EPERM, `opkg` failures, DNS timeouts, `libubox` segfaults — while ICMP ping still worked.
 - `WAN_MAC` is optional. Omit it entirely for auto-generated MACs (the common case).
 
 ## VM auto-start on boot
@@ -33,9 +37,12 @@ alwaysApply: true
 - The `qm set` task runs unconditionally (not guarded by `vm_exists`) to self-heal.
 
 ## Proxmox LAN management IP
-- After OpenWrt configures the LAN subnet, `openwrt_configure` adds a static IP on the LAN bridge for Proxmox (default: `.2` in the LAN subnet).
+- After OpenWrt configures the LAN subnet, `openwrt_configure` adds a management IP on the LAN bridge for Proxmox (default: `.2` in the LAN subnet).
 - This ensures the Proxmox GUI is reachable from leaf nodes regardless of which physical port connects upstream.
-- The config is persisted to `/etc/network/interfaces.d/ansible-proxmox-lan.conf` so it survives reboots.
+- The IP is DYNAMIC at startup (DHCP from OpenWrt) but PERSISTENT (static reservation ensures the same IP).
+- The LAN bridge stanza in `ansible-bridges.conf` is upgraded from `inet manual` to `inet dhcp`. OpenWrt has a DHCP static lease mapping the Proxmox host's LAN bridge MAC to the computed IP.
+- NEVER use a separate `ansible-proxmox-lan.conf` with `inet dhcp` — it conflicts with the `inet manual` stanza and `ifreload -a` won't start the DHCP client.
+- NEVER add IPs to non-LAN bridges (e.g., vmbr0) in the same subnet as the LAN bridge. Two routes for the same /24 on different bridges causes the kernel to prefer the wrong interface, silently breaking all LAN VM connectivity even though ARP resolves correctly. The playbook MUST clean stale LAN-subnet IPs from non-LAN bridges before adding the LAN management IP.
 
 ## Host IP auto-detection
 - `build.py` probes `PROXMOX_HOST` via TCP port 22 before running Ansible. If unreachable, it falls back to cached IPs from `.state/addresses.json`.
@@ -46,8 +53,9 @@ alwaysApply: true
 
 ## Firewall restart after network topology changes
 - After ANY network restart that changes WAN/LAN interface assignments, ALWAYS restart the firewall. Firewall zone bindings go stale when interfaces change.
-- Detached restart scripts MUST restart in order: network → firewall → dropbear.
-- Previous bug: Phase 1 restart omitted `firewall restart`. The WAN interface changed but the firewall didn't rebind zones. `opkg update` got EPERM ("Operation not permitted") because outbound traffic wasn't recognized as belonging to the WAN zone.
+- NEVER restart the firewall synchronously over SSH when WAN zone rules have changed. Applying WAN zone rules (input REJECT) kills the SSH connection. ALWAYS use detached scripts with `ignore_unreachable: true`.
+- Detached restart scripts MUST restart in order: firewall → dnsmasq → network → firewall → dropbear. The first firewall restart prepares for the topology change; the second rebinds zones after interface changes.
+- Previous bugs: (1) Script omitted `firewall restart` → stale zones → `opkg update` EPERM. (2) Synchronous firewall restart before detached script killed SSH because WAN zone input REJECT was applied to the bootstrap path.
 
 ## Bootstrap bridge selection
 - OpenWrt's default LAN is on eth0, which maps to the WAN bridge (auto-detected).
@@ -76,9 +84,10 @@ alwaysApply: true
 
 ## Cleanup completeness
 - When ANY role deploys a file to the host, ALWAYS add it to the removal list in BOTH `molecule/default/cleanup.yml` AND `playbooks/cleanup.yml`.
-- Current ansible-managed host files: `ansible-bridges.conf`, `ansible-proxmox-lan.conf`, `blacklist-wifi.conf`, `vfio-pci.conf`.
+- Current ansible-managed host files: `ansible-bridges.conf`, `blacklist-wifi.conf`, `vfio-pci.conf`.
+- Also clean: `ansible-proxmox-lan.conf` (legacy, superseded by bridges.conf DHCP), `ansible-temp-lan.conf` (test workaround).
 - Local state files (`.state/addresses.json`) must also be cleaned via `delegate_to: localhost`.
-- Previous bug: `ansible-proxmox-lan.conf` was deployed but not cleaned up, leaving stale IPs across test runs.
+- Previous bug: stale `ansible-temp-lan.conf` with a LAN-subnet IP on vmbr0 created a duplicate route that broke LAN connectivity for multiple test runs. The temp file was created manually during debugging and not cleaned by the playbook.
 
 ## Shell pipeline safety
 - ALWAYS use `set -o pipefail` in any `ansible.builtin.shell` task that contains a pipeline (`|`). Without it, failures in earlier commands are silently swallowed.

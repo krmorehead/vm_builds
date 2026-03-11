@@ -71,8 +71,11 @@
       loop:
         - /etc/network/interfaces.d/ansible-bridges.conf
         - /etc/network/interfaces.d/ansible-proxmox-lan.conf
+        - /etc/network/interfaces.d/ansible-temp-lan.conf
         - /etc/modprobe.d/blacklist-wifi.conf
         - /etc/modprobe.d/vfio-pci.conf
+        - /etc/ansible/facts.d/vm_builds.fact
+        - /tmp/openwrt.img
 
     - name: Tear down stale bridges
       ansible.builtin.shell:

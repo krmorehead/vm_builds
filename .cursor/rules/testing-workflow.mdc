@@ -1,0 +1,66 @@
+---
+description: Test-first reproduction, TDD workflow, and productive use of test wait time
+alwaysApply: true
+---
+
+# Testing workflow
+
+## Test-first reproduction
+
+When a bug is reported against a production host, ALWAYS reproduce it on the
+test machine first using `molecule test` or `molecule converge`. NEVER iterate
+on production when a test machine is available.
+
+1. Replicate the production environment in `test.env` (same env vars, same image).
+2. Run `molecule test` to see if the bug reproduces.
+3. If it reproduces, fix and verify on the test machine.
+4. If it does NOT reproduce, add diagnostics and compare output between test and production.
+5. Only involve the production host when the test machine cannot reproduce the issue.
+
+Previous bug: SSH timeout was reported on production. Instead of debugging
+blind on the production host, we added `WAN_MAC` to `test.env` and
+immediately reproduced the issue, iterated through 4 fix cycles in 15 minutes.
+
+## TDD iteration pattern
+
+For any non-trivial code change:
+
+1. **Write or update the verify assertion first** (`molecule/default/verify.yml`).
+2. Run `molecule test` — the new assertion should fail (proves the test catches the issue).
+3. Implement the fix in the role.
+4. Run `molecule test` — the assertion should now pass.
+5. Update skills/rules with lessons learned.
+
+When adding a new feature: write the verify assertion that checks the feature
+works, then implement the feature.
+
+## Converge vs full test
+
+- Use `molecule converge` for rapid iteration when you know what you're fixing
+  and don't need cleanup between runs.
+- Use `molecule test` for the final verification — it includes cleanup → converge
+  → verify → cleanup, proving the build works from a clean state.
+- NEVER consider a fix complete until `molecule test` passes end-to-end.
+
+## Productive wait time
+
+When a long-running command is backgrounded (`molecule test`, `converge`), use
+the wait time productively. See the `use-idle-time` rule for priority order.
+
+NEVER just poll. Start productive work immediately and interleave status checks.
+Tell the user what you're reviewing so they have context on parallel work.
+
+## Diagnosing test failures
+
+When a test fails, follow this diagnostic order:
+
+1. **Read the full error context** — grep for `FAILED`, `fatal:`, `UNREACHABLE` in the terminal output.
+2. **Check dmesg on the target** — kernel-level errors (IPv6 DAD, segfaults, interface errors) are often the root cause when application-level symptoms are misleading.
+3. **Check interface/bridge state** — `ip addr`, `ip route`, bridge memberships.
+4. **Check firewall state** — zone bindings, nftables chains.
+5. **Test actual protocols** — ICMP ping working does NOT mean TCP works. Always test with the protocol the application uses.
+6. **Add permanent diagnostics** — if you had to add ad-hoc debug tasks, generalize them and make them permanent so the next failure is easier to diagnose.
+
+Previous bug: `ping 8.8.8.8` worked but `wget` got EPERM. Root cause was
+IPv6 DAD failure from duplicate MAC corrupting uclient/libubox — only visible
+in `dmesg`.

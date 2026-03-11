@@ -284,20 +284,44 @@ Override auto-detection by setting `openwrt_wan_bridge` in `host_vars`
 
 ### Proxmox LAN Management IP
 
-After OpenWrt configures the LAN subnet, the `openwrt_configure` role adds
-a static IP to the LAN bridge on the Proxmox host (default: `.2` in the
+After OpenWrt configures the LAN subnet, `openwrt_configure` gives the
+Proxmox host a predictable IP on the LAN bridge (default: `.2` in the
 LAN subnet, e.g., `10.10.10.2`). This ensures the Proxmox GUI is reachable
 from leaf nodes regardless of which physical port connects upstream.
 
-The IP is persisted to `/etc/network/interfaces.d/ansible-proxmox-lan.conf`
-so it survives reboots.
+The IP is **dynamic at startup, then stable**:
+
+1. `ip addr add` applies the IP immediately for the current session
+2. The LAN bridge stanza in `ansible-bridges.conf` is upgraded from
+   `inet manual` to `inet dhcp`
+3. A DHCP static reservation on OpenWrt maps the Proxmox host's LAN
+   bridge MAC to the computed IP
+4. On every boot, the DHCP client acquires the same reserved IP
+5. Any stale LAN-subnet IPs on non-LAN bridges are removed to prevent
+   routing conflicts (duplicate /24 routes on different bridges)
+
+This replaces the earlier `ansible-proxmox-lan.conf` approach, which
+used a separate static config file that conflicted with the bridge's
+`inet manual` stanza and broke `ifreload -a`.
 
 ### WAN MAC Address Cloning
 
 When replacing an existing router, the ISP may tie its DHCP lease to the
 old router's MAC address. Set `WAN_MAC` in `.env` to clone the old MAC
-onto OpenWrt's WAN NIC (`net0`). This is applied at the Proxmox VM level
-so the cloned MAC appears on the wire — no OpenWrt configuration needed.
+onto OpenWrt's WAN interface.
+
+Before applying the MAC, the build runs a three-layer conflict detection:
+1. Exact MAC match in the ARP table
+2. EUI-64 match in the IPv6 neighbor table (SLAAC collision)
+3. Gateway MAC shares OUI with the cloned MAC (same-device indicator)
+
+If no conflict is detected, the MAC is applied via UCI
+(`network.wan.macaddr`) during the final configure phase. If a conflict
+IS detected (e.g., old router still connected on the same L2 segment),
+the MAC is saved to `/etc/openwrt_wan_mac_deferred` on the VM and an
+init script is deployed. On every boot, the init script re-runs the
+conflict detection and automatically applies the MAC once the
+conflicting device is removed — no manual intervention needed.
 
 Omit `WAN_MAC` entirely to use the auto-generated virtio MAC (default).
 

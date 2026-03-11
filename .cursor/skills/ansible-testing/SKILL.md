@@ -12,6 +12,28 @@ config. NEVER consider a task complete until the full test suite passes.
 When adding or changing behavior, ALWAYS update `molecule/default/verify.yml`
 with corresponding assertions before running the test.
 
+## Test-first reproduction
+
+When a bug is reported against production, ALWAYS reproduce it on the test
+machine first. Replicate the production environment in `test.env` (same env
+vars, same image) and run `molecule test`. Only involve the production host
+when the test machine cannot reproduce the issue.
+
+Previous bug: SSH timeout on production was reproduced by adding `WAN_MAC` to
+`test.env`. Four fix-and-verify cycles completed in 15 minutes without touching
+production.
+
+## TDD iteration pattern
+
+1. Write or update the verify assertion in `verify.yml` first.
+2. `molecule test` — the assertion should fail (proves the test catches the issue).
+3. Implement the fix in the role.
+4. `molecule test` — the assertion should now pass.
+5. Update skills/rules with lessons learned.
+
+Use `molecule converge` for rapid mid-fix iteration. Use `molecule test` for
+the final end-to-end proof from a clean state.
+
 ## Quick start
 
 ```bash
@@ -150,8 +172,27 @@ Previous bug: `ansible-proxmox-lan.conf` was deployed by `openwrt_configure` but
 | `Timeout waiting for SSH` | Network restart dropped connection | Verify SSH args include `ConnectTimeout=10`, `ServerAliveInterval=15` |
 | `opkg update` fails with HTTPS error | HTTPS not supported | Ensure `sed -i 's\|https://\|http://\|g'` runs before `opkg update` |
 | `opkg update` fails with "Operation not permitted" | Firewall zones stale after network restart | Restart firewall after network topology change, before outbound connections |
+| Conflict detection script returns wrong result | BusyBox `ip neigh show` doesn't support IP filter args | Use `/proc/net/arp` with `awk` instead of `ip neigh show dev eth0 <ip>` |
+| MAC stored without colons in UCI | BusyBox `tr -d '[:space:]'` deletes `:` | Use `tr -d ' \t\n\r'` instead of `tr -d '[:space:]'` |
+| GUI reachability test fails on OpenWrt | BusyBox `nc` doesn't support `-w` timeout flag | Use `(echo QUIT \| nc HOST PORT) </dev/null` |
+| VM reachable by IPv6 but not IPv4 on LAN bridge | Stale LAN-subnet IP on another bridge creates duplicate /24 route | Remove conflicting IPs from non-LAN bridges; kernel picks the first route |
+| `ifreload -a` doesn't start DHCP client | Separate `inet dhcp` file conflicts with `inet manual` in bridges.conf | Modify bridge stanza in-place; never use a second config file for same iface |
+| Route filter hides default route | `ip route show default dev eth0` misses routes using OpenWrt aliases | Use `ip route show default` without `dev` filter |
 | `deprecated-local-action` lint error | Used `local_action` syntax | Replace with `delegate_to: localhost` (see below) |
 | Stale LAN IP after cleanup | Missing config file in cleanup list | Add the file to both cleanup playbooks |
+
+## Ansible syntax pitfalls with `raw:` heredocs
+
+When using `ansible.builtin.raw: |` with shell heredocs (e.g., `cat << 'EOF'`),
+the Ansible argument parser may fail on content that looks like Jinja2:
+
+- `${var:-default}` — the `${...}` is misinterpreted. Use `$var` or avoid defaults.
+- `|| true` inside heredocs — can confuse the parser in some contexts.
+- POSIX character classes in `tr` (e.g., `[:space:]`) — the colons can interact
+  with YAML/Jinja2 parsing.
+
+ALWAYS run `ansible-playbook --syntax-check playbooks/site.yml` after modifying
+`raw:` tasks with heredocs. The syntax check catches these before deployment.
 
 ## Shell task safety
 
@@ -203,6 +244,37 @@ NEVER use `local_action`. It was deprecated in Ansible and trips `deprecated-loc
 ```
 
 NEVER use short module names (e.g., `command`). ALWAYS use FQCNs (e.g., `ansible.builtin.command`).
+
+## Permanent diagnostics in playbooks
+
+Every VM build playbook SHOULD include diagnostic tasks at key milestones
+(post-bootstrap, post-restart, final state). These run on every build and
+provide the debug output needed when things fail.
+
+Rules for diagnostic tasks:
+
+1. ALWAYS use `changed_when: false` and `failed_when: false` — diagnostics must
+   never break the build.
+2. Register the output and use `debug: var:` to display it. This ensures the
+   output appears in the Ansible log and terminal files.
+3. Include kernel-level checks (`dmesg` errors) — these are often the smoking
+   gun when application-level symptoms are misleading.
+4. Include the actual protocol test (not just ping). ICMP working does NOT
+   mean TCP/HTTP works.
+5. When you add ad-hoc debug tasks during troubleshooting, generalize them and
+   make them permanent before closing the issue.
+
+Previous bug: `ping 8.8.8.8` worked but `wget` segfaulted. The root cause
+(IPv6 DAD failure from duplicate MAC) was only visible in `dmesg`. Had
+permanent diagnostics been in place, the first run would have shown the issue.
+
+## Diagnosing failures — priority order
+
+1. **Terminal output**: grep for `FAILED`, `fatal:`, `UNREACHABLE`
+2. **Kernel logs**: `dmesg | grep -iE 'error|segfault|duplicate'`
+3. **Interface/bridge state**: `ip addr`, `ip route`, bridge membership
+4. **Firewall state**: zone bindings, nftables chains
+5. **Protocol-level test**: test with the actual protocol (TCP, HTTP) not just ICMP
 
 ## Lint configuration
 

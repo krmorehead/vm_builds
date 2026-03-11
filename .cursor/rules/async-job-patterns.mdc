@@ -1,0 +1,82 @@
+---
+description: Patterns for detached/async operations that outlive the triggering SSH connection
+alwaysApply: false
+globs:
+  - roles/*/tasks/*.yml
+  - playbooks/*.yml
+  - molecule/*/converge.yml
+---
+
+# Async and detached job patterns
+
+## Detached scripts on remote hosts
+
+When a remote operation will sever the SSH connection (network restart,
+firewall restart, service reconfiguration), use a detached script:
+
+```yaml
+- name: Schedule restart via detached script
+  ansible.builtin.raw: >-
+    printf '#!/bin/sh\nsleep 1\n<commands>\nrm -f /tmp/_script.sh\n'
+    > /tmp/_script.sh &&
+    chmod +x /tmp/_script.sh &&
+    start-stop-daemon -S -b -x /tmp/_script.sh
+  ignore_unreachable: true
+  changed_when: true
+```
+
+### Rules
+
+1. ALWAYS use `ignore_unreachable: true` on the task that launches the script.
+   The SSH connection may drop before the task result is returned.
+2. The detached script MUST self-clean (`rm -f /tmp/_script.sh`) as its last
+   command. If the file still exists after the expected runtime, the script
+   failed.
+3. NEVER assume the script succeeded just because the launch task returned ok.
+   The launch only confirms `start-stop-daemon` spawned the process —
+   the script's internal commands may still fail.
+4. ALWAYS follow a detached script with a `pause` that exceeds the script's
+   total runtime (sum of all sleeps + command times + buffer).
+5. After the pause, verify the expected outcome (e.g., `wait_for` on a port,
+   check an IP, verify a service is running) rather than trusting the script.
+
+### Verification pattern
+
+```yaml
+- name: Launch detached restart
+  ansible.builtin.raw: ...
+  ignore_unreachable: true
+
+- name: Wait for services to stabilize
+  ansible.builtin.pause:
+    seconds: 30
+
+- name: Verify expected outcome
+  ansible.builtin.wait_for:
+    host: "{{ target_ip }}"
+    port: 22
+    timeout: 120
+  delegate_to: "{{ proxmox_host }}"
+```
+
+The `wait_for` is the real success check. The pause is just a buffer.
+
+## Synchronous restarts over SSH
+
+NEVER restart a service synchronously if the restart will change firewall
+rules, network topology, or SSH configuration affecting the current connection.
+
+Previous bugs:
+- Synchronous `firewall restart` applied WAN zone rules (input REJECT) to the
+  active SSH path, killing the connection.
+- Synchronous `network restart` changed interface assignments while the SSH
+  connection was routed through the old topology.
+
+## Long-running Ansible tasks
+
+For tasks that take longer than the default SSH timeout:
+
+1. Set `async: <seconds>` and `poll: <interval>` on the task.
+2. Or increase `ConnectTimeout` and `ServerAliveInterval` in `ansible_ssh_common_args`.
+3. NEVER use `async` with `poll: 0` (fire-and-forget) unless you have a
+   separate verification step.

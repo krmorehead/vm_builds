@@ -30,3 +30,21 @@ ALWAYS use the wait time for productive work instead of just polling.
   context on the parallel work.
 - If the test run fails, prioritize fixing the failure over finishing the
   review work.
+- A `molecule test` run takes ~4-5 minutes. That is enough time to review
+  and update 2-3 files. Use it.
+
+## When to trigger
+
+This rule activates any time you run a command with `block_until_ms: 0` (backgrounded).
+The most common triggers:
+
+- `molecule test` (~4-5 min)
+- `molecule converge` (~3-4 min)
+- `ansible-playbook` against real hardware (~2-5 min)
+
+## What NOT to do during idle time
+
+- Do NOT make code changes to files that the running test depends on.
+  The test is using the current state of the codebase.
+- Do NOT start a second molecule run — only one can run at a time.
+- Do NOT forget to check on the test. Interleave checks every 60-120 seconds.

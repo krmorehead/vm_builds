@@ -100,9 +100,7 @@
     cmd: >-
       qm set {{ openwrt_vm_id }}
       --net{{ idx }}
-      virtio,bridge={{ bridge }}{{ ',macaddr=' + openwrt_wan_mac
-      if (idx == 0 and openwrt_wan_mac | default('') | length > 0)
-      else '' }}
+      virtio,bridge={{ bridge }}
   loop: "{{ _ordered_bridges }}"
   loop_control:
     index_var: idx
@@ -181,6 +179,24 @@
     delay: 15
     timeout: 180
 
+- name: Bootstrap diagnostics
+  ansible.builtin.shell:
+    cmd: |
+      echo "vm_status=$(qm status {{ openwrt_vm_id }} 2>&1)"
+      echo "bootstrap_bridge={{ _bootstrap_bridge }}"
+      echo "bootstrap_ip=$(ip -4 addr show dev {{ _bootstrap_bridge }} | grep -oP 'inet \K[^ ]+')"
+      echo "bridges={{ _ordered_bridges | join(',') }}"
+      echo "wan_bridge={{ _wan_bridge }}"
+      echo "dmesg_errors=$(dmesg | grep -iE 'duplicate|segfault|error.*eth' | tail -3)"
+    executable: /bin/bash
+  register: _boot_diag
+  changed_when: false
+  failed_when: false
+
+- name: Report bootstrap state
+  ansible.builtin.debug:
+    var: _boot_diag.stdout_lines
+
 - name: Detect upstream gateway IP for LAN subnet selection
   ansible.builtin.shell:
     cmd: |
@@ -211,6 +227,7 @@
       -o ServerAliveInterval=15
       -o ServerAliveCountMax=4
     openwrt_wan_device: eth0
+    openwrt_wan_mac: "{{ openwrt_wan_mac | default('') }}"
     upstream_wan_prefix: "{{ _upstream_prefix }}"
     _proxmox_host: "{{ inventory_hostname }}"
     _wan_bridge: "{{ _wan_bridge }}"
