@@ -1,0 +1,33 @@
+---
+- name: Test proxmox_lxc role with a throwaway container
+  hosts: proxmox
+  gather_facts: true
+  vars:
+    test_ct_id: 999
+    test_ct_hostname: lxc-test
+    test_ct_dynamic_group: lxc_test
+  tasks:
+    - name: Detect first available bridge
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ip -o link show type bridge | awk -F': ' '{print $2}' | head -1
+        executable: /bin/bash
+      register: _detected_bridge
+      changed_when: false
+
+    - name: Provision test LXC container
+      ansible.builtin.include_role:
+        name: proxmox_lxc
+      vars:
+        lxc_ct_id: "{{ test_ct_id }}"
+        lxc_ct_hostname: "{{ test_ct_hostname }}"
+        lxc_ct_dynamic_group: "{{ test_ct_dynamic_group }}"
+        lxc_ct_memory: 128
+        lxc_ct_swap: 0
+        lxc_ct_cores: 1
+        lxc_ct_disk: "2"
+        lxc_ct_onboot: false
+        lxc_ct_startup_order: 99
+        lxc_ct_bridge: "{{ _detected_bridge.stdout | trim }}"
+        lxc_ct_ip: dhcp

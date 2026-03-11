@@ -21,10 +21,27 @@ Trigger: any of these happened during the session:
 - Something that worked locally broke on the real host
 - An ad-hoc diagnostic was needed to identify the root cause
 - A detached/async operation failed silently
+- Documentation was found to be stale or inaccurate
+- A coding convention was violated in multiple files (systemic issue)
 
 When adding diagnostic tasks during troubleshooting, ALWAYS generalize them
 and make them permanent before closing the issue. Ad-hoc diagnostics that get
 deleted are wasted work — the next failure will need them again.
+
+# Code custodianship
+
+After completing a feature or fixing a bug, ALWAYS do a custodianship pass:
+
+1. **Pipefail audit.** Grep for `ansible.builtin.shell` tasks with `|` and
+   verify `set -o pipefail` is present (except BusyBox/OpenWrt targets).
+2. **Cleanup parity.** Diff the removal lists in `molecule/default/cleanup.yml`
+   and `playbooks/cleanup.yml` — they must clean the same files.
+3. **Doc accuracy.** Check that `docs/architecture/overview.md` role exports
+   match actual `set_fact` calls. Check that bridge references use
+   "WAN bridge" / "LAN bridge" instead of hardcoded names.
+4. **Verify coverage.** Every role that runs in `site.yml` MUST have at least
+   one assertion in `molecule/default/verify.yml`. A role that passes silently
+   provides no safety net.
 
 # Mandatory testing
 

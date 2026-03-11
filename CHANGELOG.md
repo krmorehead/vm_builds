@@ -8,6 +8,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`proxmox_lxc` role** -- reusable LXC container provisioning with
+  parameterized resources, networking, features, mount entries, auto-start,
+  and dynamic group registration via `community.proxmox.proxmox_pct_remote`.
+- **`proxmox_igpu` role** -- Intel iGPU detection, i915 driver management,
+  Quick Sync (VA-API) verification via `vainfo`, and fact export for
+  containers/VMs needing GPU access.
+- **Self-hosted LXC templates** -- templates stored in `images/` and
+  uploaded to Proxmox during provisioning (no external download needed).
+- **VMID allocation scheme** -- 100-series network, 200-series services,
+  300-series media, 400-series desktop, 500-series observability, 600-series
+  gaming. Defined in `group_vars/all.yml`.
+- **Flavor groups** -- `router_nodes`, `vpn_nodes`, `dns_nodes`,
+  `wifi_nodes`, `monitoring_nodes`, `service_nodes`, `media_nodes`,
+  `desktop_nodes`, `gaming_nodes` in inventory for build profile composition.
+- **Build profiles documentation** (`docs/architecture/build-profiles.md`).
+- **Auto-start configuration** -- `proxmox_startup_order` lookup table and
+  `proxmox_ondemand_services` list in `group_vars/all.yml`.
+- **Per-feature Molecule scenarios** -- `proxmox-lxc` and `proxmox-igpu`
+  for fast, isolated testing of individual roles.
+- **Proxmox repo management** -- enterprise repo disabling, no-subscription
+  repo setup, DNS fallback for apt operations.
 - **`build.py`** -- Python build script with playbook selection (`--playbook`),
   tag control (`--tags`, `--skip-tags`), host targeting (`--limit`), dry run
   (`--check`), and `.env` validation. Replaces `run.sh` for day-to-day use.

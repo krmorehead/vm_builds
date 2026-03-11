@@ -20,10 +20,11 @@ OpenWrt is a router VM — it consumes ALL Proxmox bridges (WAN + every LAN port
 7. Switch opkg feeds from HTTPS to HTTP (`sed -i 's|https://|http://|g'`) before `opkg update` — the base image lacks TLS certificates.
 8. The `WAN_MAC` env variable is optional. NEVER apply it at the Proxmox NIC level during VM creation (`qm set --net0 macaddr=...`). ALWAYS go through the MAC conflict detection flow during the final configure phase. If no conflict is detected, apply via UCI (`uci set network.wan.macaddr`). If a conflict IS detected, defer the MAC to `/etc/openwrt_wan_mac_deferred` on the VM. An init script auto-applies it on the next boot when the conflict is gone.
 9. Duplicate MAC addresses on the same L2 segment cause IPv6 DAD failures, corrupt uclient/libubox state, and cause `wget`/`opkg` segfaults — even when ICMP ping works. Consumer routers use sequential MACs across ports — the WAN MAC and LAN MAC often share the same OUI and differ by ±1 in the last byte.
-10. BusyBox `ip neigh show` does NOT support IP filter arguments like full iproute2. ALWAYS use `/proc/net/arp` with `awk` to look up gateway MACs on OpenWrt. Similarly, avoid `ip -o`, `grep -oP`, and `grep -E` on OpenWrt.
-11. BusyBox `tr -d '[:space:]'` deletes colons (`:`) because BusyBox treats `[:space:]` as a character set containing `[`, `:`, `s`, `p`, `a`, `c`, `e`, `]` — NOT as a POSIX character class. ALWAYS use explicit chars: `tr -d ' \t\n\r'`.
-12. BusyBox `nc` does NOT support `-w` (timeout) flag. Use `(echo QUIT | nc HOST PORT) </dev/null` for TCP port checks. NEVER use `echo | nc -w 3` on OpenWrt.
-13. When checking for the default route in scripts on OpenWrt, NEVER filter by device name (`ip route show default dev eth0`). OpenWrt's netifd may use interface aliases (e.g., `wan`, `eth0.2`) that differ from the physical device name. Use `ip route show default` without a device filter.
+10. BusyBox ash does NOT support `set -o pipefail`. NEVER add pipefail to `ansible.builtin.raw` tasks or `{{ openwrt_ssh }}` commands that run on OpenWrt. Pipefail is required for all host-side `ansible.builtin.shell` tasks — see the `proxmox-safety` rule.
+11. BusyBox `ip neigh show` does NOT support IP filter arguments like full iproute2. ALWAYS use `/proc/net/arp` with `awk` to look up gateway MACs on OpenWrt. Similarly, avoid `ip -o`, `grep -oP`, and `grep -E` on OpenWrt.
+12. BusyBox `tr -d '[:space:]'` deletes colons (`:`) because BusyBox treats `[:space:]` as a character set containing `[`, `:`, `s`, `p`, `a`, `c`, `e`, `]` — NOT as a POSIX character class. ALWAYS use explicit chars: `tr -d ' \t\n\r'`.
+13. BusyBox `nc` does NOT support `-w` (timeout) flag. Use `(echo QUIT | nc HOST PORT) </dev/null` for TCP port checks. NEVER use `echo | nc -w 3` on OpenWrt.
+14. When checking for the default route in scripts on OpenWrt, NEVER filter by device name (`ip route show default dev eth0`). OpenWrt's netifd may use interface aliases (e.g., `wan`, `eth0.2`) that differ from the physical device name. Use `ip route show default` without a device filter.
 
 ## WAN/LAN bridge ordering
 

@@ -1,12 +1,63 @@
 ---
-project_version: "1.0.0"
+project_version: "1.1.0"
 
+# ── Storage ───────────────────────────────────────────────────────
+proxmox_storage: local-lvm
+
+# ── LXC defaults ─────────────────────────────────────────────────
+proxmox_lxc_default_template: debian-12-standard_12.12-1_amd64.tar.zst
+proxmox_lxc_template_storage: local
+proxmox_lxc_template_path: images/debian-12-standard_12.12-1_amd64.tar.zst
+
+# ── OpenWrt Router (VM) ──────────────────────────────────────────
 openwrt_image_path: images/openwrt.img
-
 openwrt_vm_id: 100
 openwrt_vm_name: openwrt-router
 openwrt_vm_memory: 512
 openwrt_vm_cores: 2
 openwrt_vm_disk_size: 512M
 
-proxmox_storage: local-lvm
+# ── Network Tier (100-199) ───────────────────────────────────────
+wireguard_ct_id: 101
+pihole_ct_id: 102
+meshwifi_ct_id: 103
+
+# ── Service Tier (200-299) ───────────────────────────────────────
+homeassistant_ct_id: 200
+
+# ── Media Tier (300-399) ─────────────────────────────────────────
+jellyfin_ct_id: 300
+kodi_ct_id: 301
+moonlight_ct_id: 302
+
+# ── Desktop Tier (400-499) ───────────────────────────────────────
+desktop_vm_id: 400
+kiosk_ct_id: 401
+
+# ── Observability Tier (500-599) ─────────────────────────────────
+netdata_ct_id: 500
+rsyslog_ct_id: 501
+
+# ── Gaming (600-699) ─────────────────────────────────────────────
+gaming_vm_id: 600
+
+# ── Startup order ────────────────────────────────────────────────
+# Maps VMID to Proxmox boot priority. Lower numbers start first.
+# On-demand services use onboot: false (no startup order needed).
+proxmox_startup_order:
+  100: 1     # OpenWrt Router
+  101: 2     # WireGuard VPN
+  102: 3     # Pi-hole
+  500: 3     # Netdata
+  501: 3     # rsyslog
+  103: 4     # Mesh WiFi Controller
+  200: 5     # Home Assistant
+  300: 5     # Jellyfin
+  401: 6     # Custom UX Kiosk
+  600: 1     # Gaming VM (auto-start on gaming rig)
+
+# On-demand services (onboot: false, started manually)
+proxmox_ondemand_services:
+  - 301      # Kodi
+  - 302      # Moonlight
+  - 400      # Desktop VM

@@ -182,6 +182,7 @@
 - name: Bootstrap diagnostics
   ansible.builtin.shell:
     cmd: |
+      set -o pipefail
       echo "vm_status=$(qm status {{ openwrt_vm_id }} 2>&1)"
       echo "bootstrap_bridge={{ _bootstrap_bridge }}"
       echo "bootstrap_ip=$(ip -4 addr show dev {{ _bootstrap_bridge }} | grep -oP 'inet \K[^ ]+')"

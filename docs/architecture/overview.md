@@ -227,13 +227,14 @@ PCI Device Handling (separate roles)
 ├── proxmox_pci_passthrough
 │   ├── Purpose: Exclusive device passthrough (WiFi, discrete GPU)
 │   ├── Method: Unbind from host driver, bind to vfio-pci
-│   ├── Exports: wifi_pci_devices, gpu_pci_devices
-│   └── Consumer: openwrt_vm (WiFi), gaming_vm (discrete GPU)
+│   ├── Exports: wifi_pci_devices (future: gpu_pci_devices for discrete GPUs)
+│   └── Consumer: openwrt_vm (WiFi); future: gaming_vm (discrete GPU)
 │
 └── proxmox_igpu
-    ├── Purpose: iGPU detection and fact export for containers and VMs
-    ├── Method: Keep host i915 driver loaded, export device paths and PCI address
-    ├── Exports: igpu_render_device, igpu_card_device, igpu_render_gid, igpu_pci_address
+    ├── Purpose: iGPU detection, driver/VA-API setup, fact export for containers and VMs
+    ├── Method: Keep host i915 driver loaded, install vainfo, export device paths
+    ├── Exports: igpu_available, igpu_pci_address, igpu_render_device, igpu_card_device,
+    │           igpu_render_gid, igpu_video_gid
     ├── LXC consumers (shared bind mount): jellyfin_lxc, kodi_lxc, moonlight_lxc, kiosk_lxc
     └── VM consumer (exclusive hostpci): desktop_vm (takes GPU from host when running)
 ```
@@ -444,12 +445,13 @@ Shared Roles (run once per host, before any service roles)
 ├── proxmox_pci_passthrough
 │   ├── Runs on: proxmox
 │   ├── Purpose: vfio-pci binding for exclusive devices (WiFi, discrete GPU)
-│   └── Exports: wifi_pci_devices, gpu_pci_devices
+│   └── Exports: wifi_pci_devices (future: gpu_pci_devices)
 │
 ├── proxmox_igpu
 │   ├── Runs on: proxmox
-│   ├── Purpose: Detect Intel iGPU, verify Quick Sync, export device info
-│   └── Exports: igpu_render_device, igpu_render_gid, igpu_available
+│   ├── Purpose: Detect Intel iGPU, load i915, install VA-API, export device info
+│   └── Exports: igpu_available, igpu_pci_address, igpu_render_device,
+│                igpu_card_device, igpu_render_gid, igpu_video_gid
 │
 ├── proxmox_lxc (helper -- included by other roles, not a standalone play)
 │   ├── Purpose: Template download, pct create, networking, start, add_host

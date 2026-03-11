@@ -40,18 +40,24 @@ Blocked milestones (waiting on LXC projects):
 - Syslog forwarding to rsyslog collector
 - Prometheus metrics export
 
-### `2026-03-09-00` Shared Infrastructure
+### `2026-03-09-00` Shared Infrastructure ✓
 
 Framework for LXC container provisioning, iGPU detection, VMID allocation,
-flavor groups, display-exclusive orchestration, and auto-start configuration.
+flavor groups, and auto-start configuration. Complete.
 
-Key deliverables:
-- `proxmox_lxc` shared role (parameterized, reusable)
-- `proxmox_igpu` detection and fact export
-- Full VMID allocation scheme (100–699)
-- Inventory flavor groups and build profiles
-- Display-exclusive hookscripts
-- Resource validation pre-flight
+Delivered:
+- `proxmox_lxc` shared role (parameterized, reusable, `pct_remote` connection)
+- `proxmox_igpu` role (i915 loading, Quick Sync verification, vainfo, fact export)
+- Full VMID allocation scheme (100–699) in `group_vars/all.yml`
+- Inventory flavor groups and build profiles (`docs/architecture/build-profiles.md`)
+- Auto-start configuration (startup order table, `proxmox_lxc` native support)
+- Proxmox repo management (enterprise → no-subscription, DNS fallback)
+- Per-feature Molecule scenarios (`proxmox-lxc`, `proxmox-igpu`)
+
+Relocated to other projects:
+- Display-exclusive hookscripts → Custom UX Kiosk (`2026-03-09-12`, M5)
+- WiFi passthrough coexistence → OpenWrt Router (`2026-03-09-01`, M0)
+- Resource validation → future operations project
 
 ## Short-Term Goals
 
@@ -72,10 +78,10 @@ Key deliverables:
 - Deploy Dawn (802.11k/v/r) for client steering across mesh nodes.
 - Centralized mesh configuration across all nodes.
 
-### LXC Framework (project 00, M1–M4)
-- Shared `proxmox_lxc` role for container provisioning.
-- iGPU detection for media containers.
-- Flavor groups and build profiles in inventory.
+### ~~LXC Framework (project 00, M1–M4)~~ ✓
+- ~~Shared `proxmox_lxc` role for container provisioning.~~ Done.
+- ~~iGPU detection for media containers.~~ Done.
+- ~~Flavor groups and build profiles in inventory.~~ Done.
 
 ## Medium-Term Goals
 

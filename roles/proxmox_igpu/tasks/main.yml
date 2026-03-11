@@ -1,0 +1,278 @@
+---
+# Detect Intel iGPU, ensure the driver is loaded, verify Quick Sync
+# (VA-API), and export facts for LXC containers (bind mount) and VMs
+# (hostpci passthrough).
+#
+# Gracefully skipped when no Intel GPU is present.
+# Deliberately separate from proxmox_pci_passthrough: the iGPU stays
+# on the host driver (i915, shared) rather than being bound to
+# vfio-pci (exclusive).
+
+# ── Detection ─────────────────────────────────────────────────────
+
+- name: Detect Intel VGA controller via lspci
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      lspci -nn | grep -i 'VGA compatible controller.*Intel' | head -1
+    executable: /bin/bash
+  register: _igpu_lspci
+  changed_when: false
+  failed_when: false
+
+- name: Set iGPU availability flag
+  ansible.builtin.set_fact:
+    igpu_available: "{{ _igpu_lspci.rc == 0 and _igpu_lspci.stdout | length > 0 }}"
+
+- name: Extract iGPU PCI address
+  ansible.builtin.set_fact:
+    igpu_pci_address: >-
+      {{ _igpu_lspci.stdout.split(' ')[0] | default('') }}
+  when: igpu_available | bool
+
+# ── Ensure i915 driver is loaded ─────────────────────────────────
+
+- name: Check i915 driver is loaded
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      lsmod | grep -c '^i915'
+    executable: /bin/bash
+  register: _i915_check
+  changed_when: false
+  failed_when: false
+  when: igpu_available | bool
+
+- name: Remove any i915 blacklist entries
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      grep -rl 'blacklist i915' /etc/modprobe.d/ 2>/dev/null | \
+        xargs -r sed -i '/blacklist i915/d'
+    executable: /bin/bash
+  changed_when: true
+  failed_when: false
+  when:
+    - igpu_available | bool
+    - _i915_check.rc != 0
+
+- name: Load i915 kernel module
+  community.general.modprobe:
+    name: i915
+    state: present
+  when:
+    - igpu_available | bool
+    - _i915_check.rc != 0
+
+- name: Wait for DRI devices to appear after i915 load
+  ansible.builtin.wait_for:
+    path: /dev/dri/renderD128
+    timeout: 10
+  when:
+    - igpu_available | bool
+    - _i915_check.rc != 0
+
+# ── Device node detection (dynamic, not hardcoded) ────────────────
+
+- name: Find render device
+  ansible.builtin.stat:
+    path: /dev/dri/renderD128
+  register: _render_stat
+  when: igpu_available | bool
+
+- name: Find card device by matching i915 driver
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      for card in /dev/dri/card*; do
+        [ -e "$card" ] || continue
+        num=$(basename "$card" | sed 's/card//')
+        driver=$(readlink -f "/sys/class/drm/card${num}/device/driver" \
+                 2>/dev/null | xargs basename 2>/dev/null)
+        if [ "$driver" = "i915" ]; then
+          echo "$card"
+          exit 0
+        fi
+      done
+      exit 1
+    executable: /bin/bash
+  register: _card_detect
+  changed_when: false
+  failed_when: false
+  when: igpu_available | bool
+
+- name: Set device path facts
+  ansible.builtin.set_fact:
+    igpu_render_device: >-
+      {{ '/dev/dri/renderD128'
+      if (_render_stat.stat.exists | default(false)) else '' }}
+    igpu_card_device: >-
+      {{ _card_detect.stdout | default('') | trim }}
+  when: igpu_available | bool
+
+- name: Assert iGPU devices are present
+  ansible.builtin.assert:
+    that:
+      - igpu_render_device | length > 0
+      - igpu_card_device | length > 0
+    fail_msg: >-
+      iGPU detected at {{ igpu_pci_address }} and i915 loaded,
+      but DRI devices are missing.
+      render={{ igpu_render_device }},
+      card={{ igpu_card_device }}.
+      Check dmesg for i915 errors.
+  when: igpu_available | bool
+
+# ── Render and video group GIDs ───────────────────────────────────
+
+- name: Read render group GID
+  ansible.builtin.command:
+    cmd: getent group render
+  register: _render_group
+  changed_when: false
+  failed_when: false
+  when: igpu_available | bool
+
+- name: Read video group GID
+  ansible.builtin.command:
+    cmd: getent group video
+  register: _video_group
+  changed_when: false
+  failed_when: false
+  when: igpu_available | bool
+
+- name: Set group GID facts
+  ansible.builtin.set_fact:
+    igpu_render_gid: >-
+      {{ _render_group.stdout.split(':')[2] | default('')
+      if _render_group.rc == 0 else '' }}
+    igpu_video_gid: >-
+      {{ _video_group.stdout.split(':')[2] | default('')
+      if _video_group.rc == 0 else '' }}
+  when: igpu_available | bool
+
+# ── DNS check (apt needs working DNS) ─────────────────────────────
+
+- name: Check DNS resolution
+  ansible.builtin.command:
+    cmd: getent hosts deb.debian.org
+  register: _dns_check
+  changed_when: false
+  failed_when: false
+  when: igpu_available | bool
+
+- name: Add fallback DNS if resolution fails
+  ansible.builtin.copy:
+    dest: /etc/resolv.conf
+    mode: "0644"
+    content: |
+      nameserver 8.8.8.8
+      nameserver 1.1.1.1
+  when:
+    - igpu_available | bool
+    - _dns_check.rc != 0
+
+# ── Proxmox repo management (needed for vainfo install) ──────────
+
+- name: Disable PVE enterprise repo (requires subscription)
+  ansible.builtin.command:
+    cmd: mv /etc/apt/sources.list.d/pve-enterprise.sources /etc/apt/sources.list.d/pve-enterprise.sources.disabled
+  args:
+    removes: /etc/apt/sources.list.d/pve-enterprise.sources
+  when: igpu_available | bool
+
+- name: Disable Ceph enterprise repo (requires subscription)
+  ansible.builtin.command:
+    cmd: mv /etc/apt/sources.list.d/ceph.sources /etc/apt/sources.list.d/ceph.sources.disabled
+  args:
+    removes: /etc/apt/sources.list.d/ceph.sources
+  when: igpu_available | bool
+
+- name: Add Proxmox no-subscription repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/pve-no-subscription.sources
+    mode: "0644"
+    content: |
+      Types: deb
+      URIs: http://download.proxmox.com/debian/pve
+      Suites: {{ ansible_facts['distribution_release'] }}
+      Components: pve-no-subscription
+      Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+  when: igpu_available | bool
+
+- name: Verify enterprise repos are disabled
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      ls /etc/apt/sources.list.d/pve-enterprise.sources 2>/dev/null && exit 1
+      ls /etc/apt/sources.list.d/ceph.sources 2>/dev/null && exit 1
+      ls /etc/apt/sources.list.d/pve-no-subscription.sources >/dev/null
+    executable: /bin/bash
+  changed_when: false
+  when: igpu_available | bool
+
+# ── Quick Sync verification via vainfo ────────────────────────────
+
+- name: Install vainfo and intel-media-va-driver for Quick Sync
+  ansible.builtin.apt:
+    name:
+      - vainfo
+      - intel-media-va-driver
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: igpu_available | bool
+
+- name: Run vainfo to verify VA-API / Quick Sync
+  ansible.builtin.command:
+    cmd: vainfo
+  register: _vainfo
+  changed_when: false
+  failed_when: false
+  when: igpu_available | bool
+  environment:
+    DISPLAY: ""
+    LIBVA_DRIVER_NAME: "iHD"
+
+- name: Display vainfo output
+  ansible.builtin.debug:
+    var: _vainfo.stdout_lines
+  when:
+    - igpu_available | bool
+    - _vainfo.rc == 0
+
+- name: Warn if vainfo failed
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: vainfo failed (rc={{ _vainfo.rc }}).
+      Quick Sync may not be available.
+      stderr: {{ _vainfo.stderr | default('') }}
+  when:
+    - igpu_available | bool
+    - _vainfo.rc != 0
+
+# ── Set empty facts when iGPU is absent ───────────────────────────
+
+- name: Set empty iGPU facts when not available
+  ansible.builtin.set_fact:
+    igpu_pci_address: ""
+    igpu_render_device: ""
+    igpu_card_device: ""
+    igpu_render_gid: ""
+    igpu_video_gid: ""
+  when: not igpu_available | bool
+
+# ── Summary ───────────────────────────────────────────────────────
+
+- name: Display iGPU detection summary
+  ansible.builtin.debug:
+    msg: |
+      iGPU Detection Summary:
+        available:     {{ igpu_available }}
+        pci_address:   {{ igpu_pci_address }}
+        render_device: {{ igpu_render_device }}
+        card_device:   {{ igpu_card_device }}
+        render_gid:    {{ igpu_render_gid }}
+        video_gid:     {{ igpu_video_gid }}
+        i915_loaded:   {{ (igpu_available | bool) and (_i915_check.rc | default(1)) == 0 }}
+        vainfo_ok:     {{ (_vainfo.rc | default(1)) == 0 }}

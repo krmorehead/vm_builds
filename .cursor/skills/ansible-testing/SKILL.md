@@ -98,6 +98,28 @@ Scenario Hierarchy
 30-60 seconds. During development, iterate with per-feature scenarios.
 Run full integration before committing.
 
+### Two kinds of per-feature scenarios
+
+There are two distinct patterns for per-feature scenarios:
+
+1. **Layered feature scenarios** (e.g., `openwrt-security`, `openwrt-vlans`):
+   assume the baseline exists (router VM running), converge only their tagged
+   plays, verify only their assertions, clean up only their changes.
+
+2. **Standalone role scenarios** (e.g., `proxmox-lxc`, `proxmox-igpu`):
+   test a single shared infrastructure role in isolation. They converge the
+   role, verify its output, and clean up any artifacts. They do NOT depend
+   on the baseline — they can run against a bare Proxmox host.
+
+Standalone scenarios are the right pattern for shared roles that run on the
+Proxmox host before any VMs are created. Layered scenarios are for features
+that build on top of existing VM/container state.
+
+Previous learning: the `proxmox-lxc` and `proxmox-igpu` scenarios were
+developed independently of the default integration test. This allowed
+rapid iteration on iGPU driver issues (4+ fix cycles in one session)
+without waiting for the full 4-minute default test each time.
+
 ### Per-feature scenario setup
 
 Each per-feature scenario needs its own `molecule.yml` that shares the
@@ -236,11 +258,96 @@ molecule verify -s openwrt-security   # check only (after manual fixes)
 molecule test
 ```
 
+### Standalone role scenario setup
+
+Standalone scenarios test a single role without any baseline dependency.
+Use these for shared infrastructure roles (`proxmox_lxc`, `proxmox_igpu`,
+future shared roles). They converge the role directly, verify facts and
+artifacts, then clean up host state changes.
+
+```yaml
+# molecule/proxmox-igpu/converge.yml
+---
+- name: Test proxmox_igpu role
+  hosts: proxmox
+  gather_facts: true
+  roles:
+    - proxmox_igpu
+```
+
+Key differences from layered scenarios:
+
+1. **No baseline dependency** — no need to populate dynamic groups first.
+2. **Cleanup restores host state** — enterprise repos, config files, etc.
+   The cleanup is role-specific, not a full `cleanup.yml --tags` call.
+3. **VMID 999 for throwaway resources** — standalone LXC tests use VMID 999
+   to avoid collisions with real service VMIDs.
+4. **Include cleanup in `test_sequence`** — standalone scenarios SHOULD
+   include `cleanup` at the end (unlike layered scenarios which inherit it).
+
+### Fact scoping across Molecule phases
+
+Facts set during `converge` are NOT available in `verify`. Molecule runs
+converge and verify as separate Ansible invocations with independent fact
+caches.
+
+**Impact:** If a role exports facts via `set_fact` (e.g., `proxmox_igpu`
+exports `igpu_available`, `igpu_render_device`, etc.), those facts will be
+undefined in verify.yml.
+
+**Fix:** For read-only roles, re-include the role in verify:
+
+```yaml
+# molecule/proxmox-igpu/verify.yml
+---
+- name: Verify proxmox_igpu role
+  hosts: proxmox
+  gather_facts: true
+  roles:
+    - proxmox_igpu    # re-run to populate facts (idempotent)
+  tasks:
+    - name: Assert igpu_available fact is set
+      ansible.builtin.assert:
+        that: igpu_available is defined
+```
+
+For roles with side effects, use shell commands in verify to check state
+directly instead of relying on Ansible facts.
+
+Previous bug: `proxmox-igpu` verify failed with "igpu_available is not
+defined" because the fact was only set during converge. Re-including the
+role (which is idempotent) fixed it.
+
+### Molecule file path resolution
+
+`role_path` and relative paths behave differently depending on which
+scenario is running. The working directory during a Molecule run is the
+scenario directory (`molecule/<scenario>/`), not the project root.
+
+**Impact:** A task referencing `../../images/template.tar.zst` works from
+`molecule/default/` but breaks from `molecule/proxmox-lxc/` because the
+relative path resolves differently.
+
+**Fix:** ALWAYS use `role_path` or `MOLECULE_PROJECT_DIRECTORY` for paths
+that need to resolve relative to the project root:
+
+```yaml
+# GOOD — resolves correctly regardless of which scenario runs
+src: "{{ role_path }}/../../{{ lxc_ct_template_path }}"
+
+# BAD — breaks when called from non-default scenarios
+src: "../../images/{{ lxc_ct_template }}"
+```
+
+Previous bug: `proxmox_lxc` template upload failed with "Could not find
+or access" when run from the `proxmox-lxc` scenario because the relative
+path resolved from `molecule/proxmox-lxc/` instead of the project root.
+
 ## Before running tests
 
 1. Source test env: `set -a; source test.env; set +a`
 2. Verify SSH: `ssh root@$PROXMOX_HOST hostname`
-3. Verify OpenWrt image exists: `ls images/openwrt.img`
+3. Verify images exist: `ls images/openwrt.img images/*.tar.zst`
 4. If previous run left host in bad state, power-cycle the machine
 
 ## Molecule platform groups
@@ -328,6 +435,19 @@ When a role writes a new file to the Proxmox host, ALWAYS add it to the removal 
 
 When a role writes a local state file (e.g., `.state/addresses.json`), ALWAYS add a `delegate_to: localhost` cleanup task to remove it.
 
+**Parity rule:** The two cleanup playbooks MUST remove the same set of files.
+When adding a file to one, ALWAYS add it to the other. Periodically diff
+the removal lists to catch drift. Current managed files:
+
+- Host config: `ansible-bridges.conf`, `ansible-proxmox-lan.conf` (legacy),
+  `ansible-temp-lan.conf` (test workaround)
+- Module config: `blacklist-wifi.conf`, `vfio-pci.conf`
+- Apt repos: `pve-no-subscription.sources` (added by igpu), enterprise
+  repos (renamed to `.disabled`, restored on cleanup)
+- Templates/images: `/tmp/openwrt.img`, `/var/lib/vz/template/cache/debian-*.tar.zst`
+- Facts: `vm_builds.fact`
+- Local: `.state/addresses.json`
+
 Previous bug: `ansible-proxmox-lan.conf` was deployed by `openwrt_configure` but not removed by cleanup, causing stale LAN management IPs on subsequent test runs.
 
 ## Common failures
@@ -349,6 +469,12 @@ Previous bug: `ansible-proxmox-lan.conf` was deployed by `openwrt_configure` but
 | Route filter hides default route | `ip route show default dev eth0` misses routes using OpenWrt aliases | Use `ip route show default` without `dev` filter |
 | `deprecated-local-action` lint error | Used `local_action` syntax | Replace with `delegate_to: localhost` (see below) |
 | Stale LAN IP after cleanup | Missing config file in cleanup list | Add the file to both cleanup playbooks |
+| `igpu_available is not defined` in verify | Facts from converge not available in verify | Re-include the role in verify.yml (see fact scoping section) |
+| `Could not find or access` template | Relative path resolved from scenario dir | Use `role_path` for paths (see path resolution section) |
+| `ModuleNotFoundError: paramiko` | Missing Python dep for `pct_remote` | `pip install paramiko` and add to `requirements.txt` |
+| `apt-get update` hangs on Proxmox host | Enterprise repos unreachable without subscription | Rename to `.disabled`, add no-subscription repo (see proxmox-safety rule) |
+| `lsmod \| grep -q` returns rc=141 | SIGPIPE from `grep -q` with `pipefail` | Use `grep -c` instead (see proxmox-safety rule) |
+| `intel-media-va-driver-non-free` not found | Wrong package name for Debian version | Check packages with `apt-cache search`; use `intel-media-va-driver` |
 
 ## Ansible syntax pitfalls with `raw:` heredocs
 
@@ -373,11 +499,26 @@ ALWAYS set `executable: /bin/bash` on shell tasks that use bash-specific
 features (`set -o pipefail`, `{print $3}`, process substitution). The
 default shell may be `/bin/sh` which doesn't support `pipefail`.
 
+**Exception:** `ansible.builtin.raw` tasks and `{{ openwrt_ssh }}` commands
+that run on OpenWrt/BusyBox ash. BusyBox ash does NOT support `pipefail`.
+Do not add it to those commands.
+
+ALWAYS use the block scalar (`cmd: |`) format for pipefail commands, not
+the folded scalar (`cmd: >-`). This keeps `set -o pipefail` on its own
+line and avoids YAML joining it with the command.
+
 ```yaml
 # BAD — if `ip route` fails, awk sees empty stdin, returns success
 - name: Get gateway
   ansible.builtin.shell:
     cmd: ip route show default | awk '{print $3}' | head -1
+
+# BAD — folded scalar joins pipefail with command on one line
+- name: Get gateway
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail
+      ip route show default | awk '{print $3}' | head -1
 
 # GOOD — pipeline failure propagates correctly
 - name: Get gateway
@@ -388,9 +529,20 @@ default shell may be `/bin/sh` which doesn't support `pipefail`.
     executable: /bin/bash
 ```
 
-Previous bug: a gateway detection pipeline in `openwrt_vm` was missing
-`set -o pipefail`. If `ip route` failed, the variable silently got an
-empty string instead of raising an error.
+### Audit pattern
+
+This class of bug is silent and recurring. Periodically scan the codebase:
+
+```bash
+# Find shell tasks with pipes but no pipefail
+rg -l 'ansible.builtin.shell' roles/ molecule/ playbooks/ | \
+  xargs rg -l '\|' | sort -u
+# Then manually check each file for set -o pipefail
+```
+
+Previous bug: a single audit pass found missing `pipefail` in 6 roles and
+both cleanup playbooks. All were silent — no test caught them because the
+upstream commands happened to succeed during testing.
 
 ## Deprecated Ansible patterns
 

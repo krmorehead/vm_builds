@@ -1,0 +1,20 @@
+---
+- name: Clean up iGPU test artifacts
+  hosts: proxmox
+  gather_facts: false
+  tasks:
+    - name: Remove Proxmox no-subscription repo
+      ansible.builtin.file:
+        path: /etc/apt/sources.list.d/pve-no-subscription.sources
+        state: absent
+
+    - name: Re-enable enterprise repos
+      ansible.builtin.shell:
+        cmd: |
+          for f in /etc/apt/sources.list.d/pve-enterprise.sources.disabled \
+                   /etc/apt/sources.list.d/ceph.sources.disabled; do
+            [ -f "$f" ] && mv "$f" "${f%.disabled}"
+          done
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false

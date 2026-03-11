@@ -222,7 +222,8 @@
 
     - name: Check IOMMU status
       ansible.builtin.shell:
-        cmd: >-
+        cmd: |
+          set -o pipefail
           dmesg | grep -i -c 'IOMMU enabled\|DMAR.*IOMMU\|Adding to iommu group'
         executable: /bin/bash
       register: iommu_verify
@@ -234,6 +235,71 @@
         msg: >-
           IOMMU {{ 'active' if (iommu_verify.stdout | int) > 0
           else 'not active (no WiFi passthrough)' }}
+
+    # ── iGPU detection (spot-check from proxmox_igpu role) ────────
+
+    - name: Check if Intel iGPU is present
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          lspci -nn | grep -ic 'VGA compatible controller.*Intel'
+        executable: /bin/bash
+      register: igpu_present
+      changed_when: false
+      failed_when: false
+
+    - name: Verify i915 driver loaded when iGPU present
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          lsmod | grep -c '^i915'
+        executable: /bin/bash
+      register: i915_loaded
+      changed_when: false
+      when: (igpu_present.stdout | trim | int) > 0
+
+    - name: Assert i915 is loaded
+      ansible.builtin.assert:
+        that: (i915_loaded.stdout | trim | int) > 0
+        fail_msg: "Intel iGPU detected but i915 driver is not loaded"
+      when: (igpu_present.stdout | trim | int) > 0
+
+    - name: Verify render device exists when iGPU present
+      ansible.builtin.stat:
+        path: /dev/dri/renderD128
+      register: render_dev
+      when: (igpu_present.stdout | trim | int) > 0
+
+    - name: Assert render device exists
+      ansible.builtin.assert:
+        that: render_dev.stat.exists
+        fail_msg: "/dev/dri/renderD128 missing despite iGPU and i915"
+      when: (igpu_present.stdout | trim | int) > 0
+
+    - name: Verify vainfo is installed when iGPU present
+      ansible.builtin.command:
+        cmd: which vainfo
+      changed_when: false
+      when: (igpu_present.stdout | trim | int) > 0
+
+    - name: Verify enterprise repos are disabled when iGPU present
+      ansible.builtin.stat:
+        path: /etc/apt/sources.list.d/pve-enterprise.sources
+      register: enterprise_repo
+      when: (igpu_present.stdout | trim | int) > 0
+
+    - name: Assert enterprise repo is disabled
+      ansible.builtin.assert:
+        that: not enterprise_repo.stat.exists
+        fail_msg: "pve-enterprise.sources still active after proxmox_igpu"
+      when: (igpu_present.stdout | trim | int) > 0
+
+    - name: Report iGPU status
+      ansible.builtin.debug:
+        msg: >-
+          iGPU: {{ 'present, i915 loaded, vainfo installed'
+          if (igpu_present.stdout | trim | int) > 0
+          else 'not detected (skipped)' }}
 
     # ── OpenWrt connectivity and configuration ────────────────────
 

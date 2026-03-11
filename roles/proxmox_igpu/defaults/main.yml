@@ -1,0 +1,3 @@
+---
+# No configurable defaults -- the role auto-detects everything
+# and ensures i915 is loaded, vainfo is installed, and Quick Sync works.

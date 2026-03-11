@@ -1,0 +1,108 @@
+---
+- name: Verify proxmox_lxc provisioning
+  hosts: proxmox
+  gather_facts: false
+  vars:
+    test_ct_id: 999
+    test_ct_hostname: lxc-test
+    test_ct_dynamic_group: lxc_test
+  tasks:
+    - name: Check container status
+      ansible.builtin.command:
+        cmd: pct status {{ test_ct_id }}
+      register: ct_status
+      changed_when: false
+
+    - name: Assert container is running
+      ansible.builtin.assert:
+        that: "'running' in ct_status.stdout"
+        fail_msg: "Test container {{ test_ct_id }} is not running"
+
+    - name: Get container config
+      ansible.builtin.command:
+        cmd: pct config {{ test_ct_id }}
+      register: ct_config
+      changed_when: false
+
+    - name: Assert hostname is set
+      ansible.builtin.assert:
+        that: "'hostname: ' ~ test_ct_hostname in ct_config.stdout"
+        fail_msg: "Container hostname not set to {{ test_ct_hostname }}"
+
+    - name: Assert memory is configured
+      ansible.builtin.assert:
+        that: "'memory: 128' in ct_config.stdout"
+        fail_msg: "Container memory not set to 128"
+
+    - name: Assert onboot is disabled for test container
+      ansible.builtin.assert:
+        that: "'onboot: 0' in ct_config.stdout"
+        fail_msg: "Test container should have onboot disabled"
+
+    - name: Assert container has network interface
+      ansible.builtin.assert:
+        that: "'net0' in ct_config.stdout"
+        fail_msg: "Container missing net0 network interface"
+
+    - name: Verify container can execute commands
+      ansible.builtin.command:
+        cmd: pct exec {{ test_ct_id }} -- hostname
+      register: ct_hostname
+      changed_when: false
+
+    - name: Assert hostname matches
+      ansible.builtin.assert:
+        that: "ct_hostname.stdout | trim == test_ct_hostname"
+        fail_msg: >-
+          Container hostname '{{ ct_hostname.stdout | trim }}'
+          does not match expected '{{ test_ct_hostname }}'
+
+    - name: Detect first available bridge
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ip -o link show type bridge | awk -F': ' '{print $2}' | head -1
+        executable: /bin/bash
+      register: _detected_bridge
+      changed_when: false
+
+    - name: Verify idempotence - run include_role again
+      ansible.builtin.include_role:
+        name: proxmox_lxc
+      vars:
+        lxc_ct_id: "{{ test_ct_id }}"
+        lxc_ct_hostname: "{{ test_ct_hostname }}"
+        lxc_ct_dynamic_group: "{{ test_ct_dynamic_group }}"
+        lxc_ct_memory: 128
+        lxc_ct_swap: 0
+        lxc_ct_cores: 1
+        lxc_ct_disk: "2"
+        lxc_ct_onboot: false
+        lxc_ct_startup_order: 99
+        lxc_ct_bridge: "{{ _detected_bridge.stdout | trim }}"
+        lxc_ct_ip: dhcp
+
+    - name: Check container still running after idempotent run
+      ansible.builtin.command:
+        cmd: pct status {{ test_ct_id }}
+      register: ct_status_idem
+      changed_when: false
+
+    - name: Assert container survived idempotent run
+      ansible.builtin.assert:
+        that: "'running' in ct_status_idem.stdout"
+        fail_msg: "Container not running after idempotent run"
+
+    - name: Verify container is in dynamic group
+      ansible.builtin.assert:
+        that: "test_ct_hostname in groups[test_ct_dynamic_group]"
+        fail_msg: >-
+          Container {{ test_ct_hostname }} not found in
+          dynamic group {{ test_ct_dynamic_group }}
+
+- name: Verify pct_remote connection to test container
+  hosts: lxc_test
+  gather_facts: false
+  tasks:
+    - name: Ping container via pct_remote connection
+      ansible.builtin.ping:

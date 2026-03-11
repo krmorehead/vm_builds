@@ -167,6 +167,8 @@ See: `ansible-testing` skill (baseline model, scenario setup),
 **Verify:**
 
 - [ ] `molecule test` (default) still passes end-to-end
+- [ ] WiFi PCIe passthrough still works when `proxmox_igpu` role runs on
+      same host (relocated from shared-infrastructure M2)
 - [ ] `molecule converge -s openwrt-security` succeeds when baseline exists
 - [ ] `molecule converge -s openwrt-security` fails fast with clear error
       when baseline does not exist

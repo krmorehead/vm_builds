@@ -13,14 +13,6 @@ platforms:
   - name: home
     groups:
       - proxmox
-      - router_nodes
-      - vpn_nodes
-      - dns_nodes
-      - wifi_nodes
-      - monitoring_nodes
-      - service_nodes
-      - media_nodes
-      - desktop_nodes
 
 provisioner:
   name: ansible
@@ -47,7 +39,6 @@ verifier:
 scenario:
   test_sequence:
     - dependency
-    - cleanup
     - syntax
     - converge
     - verify

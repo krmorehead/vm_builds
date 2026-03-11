@@ -75,7 +75,9 @@
 
 - name: Check if IOMMU is active
   ansible.builtin.shell:
-    cmd: dmesg | grep -i -c 'IOMMU enabled\|DMAR.*IOMMU\|Adding to iommu group'
+    cmd: |
+      set -o pipefail
+      dmesg | grep -i -c 'IOMMU enabled\|DMAR.*IOMMU\|Adding to iommu group'
     executable: /bin/bash
   register: iommu_check
   changed_when: false
@@ -171,7 +173,10 @@
 
 - name: Count devices in each IOMMU group
   ansible.builtin.shell:
-    cmd: ls -1 /sys/kernel/iommu_groups/{{ item.stdout | trim }}/devices/ | wc -l
+    cmd: |
+      set -o pipefail
+      ls -1 /sys/kernel/iommu_groups/{{ item.stdout | trim }}/devices/ | wc -l
+    executable: /bin/bash
   loop: "{{ wifi_iommu_groups.results | default([]) }}"
   register: iommu_group_sizes
   changed_when: false

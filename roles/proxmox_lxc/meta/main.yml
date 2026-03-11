@@ -1,0 +1,13 @@
+---
+galaxy_info:
+  author: kyle
+  license: proprietary
+  role_name: proxmox_lxc
+  description: Shared LXC container provisioning on Proxmox VE
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm
+
+dependencies: []

@@ -1,0 +1,37 @@
+---
+# Required -- the consuming role MUST set these via include_role vars.
+# lxc_ct_id: 102
+# lxc_ct_hostname: "pihole"
+
+# Resources
+lxc_ct_memory: 256
+lxc_ct_swap: 256
+lxc_ct_cores: 1
+lxc_ct_disk: "4"
+
+# Template (locally hosted, uploaded to Proxmox during provisioning)
+lxc_ct_template: "{{ proxmox_lxc_default_template }}"
+lxc_ct_template_path: "{{ proxmox_lxc_template_path }}"
+lxc_ct_template_storage: "{{ proxmox_lxc_template_storage | default('local') }}"
+
+# Networking -- defaults to DHCP on the first LAN bridge.
+# Override in the consuming role for static IPs.
+lxc_ct_bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
+lxc_ct_ip: "dhcp"
+lxc_ct_gateway: ""
+lxc_ct_nameserver: ""
+
+# Container features
+lxc_ct_features: []
+lxc_ct_mount_entries: []
+lxc_ct_unprivileged: true
+
+# Auto-start
+lxc_ct_onboot: true
+lxc_ct_startup_order: 5
+
+# Dynamic inventory group for the configure play
+lxc_ct_dynamic_group: ""
+
+# Storage pool
+lxc_ct_storage: "{{ proxmox_storage | default('local-lvm') }}"

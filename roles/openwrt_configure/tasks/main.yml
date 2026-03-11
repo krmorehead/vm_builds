@@ -76,8 +76,16 @@
 
 - name: Schedule Phase 1 service restart via detached script
   ansible.builtin.raw: >-
-    printf '#!/bin/sh\nsleep 1\n/etc/init.d/firewall restart\n/etc/init.d/dnsmasq restart\nsleep 2\n/etc/init.d/network restart\nsleep 5\n/etc/init.d/firewall restart\n/etc/init.d/dropbear restart\nrm -f /tmp/_restart_net.sh\n'
+    printf '#!/bin/sh\nsleep 1\n/etc/init.d/firewall restart\n'
     > /tmp/_restart_net.sh &&
+    printf '/etc/init.d/dnsmasq restart\nsleep 2\n'
+    >> /tmp/_restart_net.sh &&
+    printf '/etc/init.d/network restart\nsleep 5\n'
+    >> /tmp/_restart_net.sh &&
+    printf '/etc/init.d/firewall restart\n/etc/init.d/dropbear restart\n'
+    >> /tmp/_restart_net.sh &&
+    printf 'rm -f /tmp/_restart_net.sh\n'
+    >> /tmp/_restart_net.sh &&
     chmod +x /tmp/_restart_net.sh &&
     start-stop-daemon -S -b -x /tmp/_restart_net.sh
   ignore_unreachable: true
@@ -89,10 +97,11 @@
 
 - name: Remove bootstrap IP from WAN bridge on Proxmox
   ansible.builtin.shell:
-    cmd: >-
-      for br in $(ip -o addr show to {{ _bootstrap_ip }}/{{ _bootstrap_cidr }}
-      | awk '{print $2}'); do
-      ip addr del {{ _bootstrap_ip }}/{{ _bootstrap_cidr }} dev "$br" 2>/dev/null || true;
+    cmd: |
+      set -o pipefail
+      for br in $(ip -o addr show to {{ _bootstrap_ip }}/{{ _bootstrap_cidr }} \
+        | awk '{print $2}'); do
+        ip addr del {{ _bootstrap_ip }}/{{ _bootstrap_cidr }} dev "$br" 2>/dev/null || true
       done
     executable: /bin/bash
   delegate_to: "{{ _proxmox_host }}"
@@ -454,8 +463,16 @@
 
 - name: Schedule final service restart via detached script
   ansible.builtin.raw: >-
-    printf '#!/bin/sh\nsleep 1\n/etc/init.d/firewall restart\n/etc/init.d/dnsmasq restart\nsleep 2\n/etc/init.d/network restart\nsleep 5\n/etc/init.d/firewall restart\n/etc/init.d/dropbear restart\nrm -f /tmp/_restart_net.sh\n'
+    printf '#!/bin/sh\nsleep 1\n/etc/init.d/firewall restart\n'
     > /tmp/_restart_net.sh &&
+    printf '/etc/init.d/dnsmasq restart\nsleep 2\n'
+    >> /tmp/_restart_net.sh &&
+    printf '/etc/init.d/network restart\nsleep 5\n'
+    >> /tmp/_restart_net.sh &&
+    printf '/etc/init.d/firewall restart\n/etc/init.d/dropbear restart\n'
+    >> /tmp/_restart_net.sh &&
+    printf 'rm -f /tmp/_restart_net.sh\n'
+    >> /tmp/_restart_net.sh &&
     chmod +x /tmp/_restart_net.sh &&
     start-stop-daemon -S -b -x /tmp/_restart_net.sh
   ignore_unreachable: true
@@ -491,19 +508,21 @@
 
 - name: Remove conflicting LAN-subnet IPs from non-LAN bridges
   ansible.builtin.shell:
-    cmd: >-
-      prefix=$(echo "{{ _proxmox_lan_ip | trim }}" | cut -d. -f1-3);
+    cmd: |
+      set -o pipefail
+      prefix=$(echo "{{ _proxmox_lan_ip | trim }}" | cut -d. -f1-3)
       for br in $(ip -o link show type bridge | awk -F': ' '{print $2}'); do
-        [ "$br" = "{{ _lan_bridge }}" ] && continue;
+        [ "$br" = "{{ _lan_bridge }}" ] && continue
         ip -o -4 addr show dev "$br" 2>/dev/null | awk '{print $4}' |
         while read cidr; do
-          ip_part=$(echo "$cidr" | cut -d/ -f1);
+          ip_part=$(echo "$cidr" | cut -d/ -f1)
           if echo "$ip_part" | grep -q "^${prefix}\."; then
-            ip addr del "$cidr" dev "$br" 2>/dev/null;
-            echo "removed $cidr from $br";
-          fi;
-        done;
+            ip addr del "$cidr" dev "$br" 2>/dev/null
+            echo "removed $cidr from $br"
+          fi
+        done
       done
+    executable: /bin/bash
   delegate_to: "{{ _proxmox_host }}"
   changed_when: false
   failed_when: false

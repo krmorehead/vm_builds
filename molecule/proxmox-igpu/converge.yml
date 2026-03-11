@@ -1,0 +1,6 @@
+---
+- name: Test proxmox_igpu role
+  hosts: proxmox
+  gather_facts: true
+  roles:
+    - proxmox_igpu

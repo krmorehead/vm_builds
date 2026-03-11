@@ -108,7 +108,33 @@ Decisions
   - Dashboard URL configured
 - [ ] Extend `molecule/default/cleanup.yml` for container 401
 
-### Milestone 5: Documentation
+### Milestone 5: Display-Exclusive Orchestration
+
+_Requires at least one other display-capable service (Kodi, Moonlight, or
+Desktop VM). Relocated from shared-infrastructure project._
+
+- [ ] Create Proxmox hookscript (`/var/lib/vz/snippets/display-exclusive.sh`):
+  - On pre-start: stop all other display services
+  - On post-stop of non-default service: start Kiosk (default)
+  - Display service VMIDs read from a config variable
+- [ ] Deploy hookscript via Ansible task in the infrastructure play
+- [ ] Attach hookscript to display-exclusive containers/VMs
+      (`pct set` / `qm set --hookscript`)
+- [ ] Add Ansible pre-task in `site.yml` that enforces exclusion during deploys
+
+**Verify:**
+
+- [ ] Hookscript exists at `/var/lib/vz/snippets/display-exclusive.sh`
+- [ ] Starting Kodi stops Kiosk automatically
+- [ ] Stopping Kodi restarts Kiosk automatically
+- [ ] Starting Desktop VM stops all LXC display services
+
+**Rollback:**
+
+- Remove hookscript from `/var/lib/vz/snippets/`
+- Detach hookscript from containers/VMs (`pct set --delete hookscript`)
+
+### Milestone 6: Documentation
 
 - [ ] Create `docs/architecture/kiosk-build.md`
 - [ ] Document Cage + Chromium, display-exclusive default state, dashboard config

@@ -1,0 +1,13 @@
+---
+galaxy_info:
+  author: kyle
+  license: proprietary
+  role_name: proxmox_igpu
+  description: Detect Intel iGPU and export facts for LXC/VM consumers
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm
+
+dependencies: []

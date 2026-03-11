@@ -6,17 +6,19 @@ alwaysApply: true
 # vm_builds Project Context
 
 ## What this project is
-An Ansible project that automates VM provisioning and configuration on Proxmox VE. Currently deploys an OpenWrt router VM. Designed to expand to multiple VM types (Home Assistant, Pi-hole, NAS, etc.) using the patterns below.
+An Ansible project that automates VM and LXC container provisioning on Proxmox VE. Currently deploys an OpenWrt router VM with shared LXC infrastructure ready for service containers.
 
-## Architecture pattern: two-role per VM
-Every VM type has exactly two roles:
-- `<type>_vm` — provision the VM on Proxmox (create, disk import, NIC attach, start, bootstrap SSH)
-- `<type>_configure` — configure the running VM (packages, services, networking)
+## Architecture pattern: two-role per service
+Every service type has exactly two roles:
+- `<type>_vm` + `<type>_configure` — for VMs (KVM/QEMU): provision via qm, configure via SSH
+- `<type>_lxc` + `<type>_configure` — for containers: provision via `include_role: proxmox_lxc`, configure via `community.proxmox.proxmox_pct_remote`
 
-Shared infrastructure roles run once per host before any VM roles:
+Shared infrastructure roles run once per host before any service roles:
 - `proxmox_backup` — tar host config + vzdump existing VMs
 - `proxmox_bridges` — discover NICs, create virtual bridges, export `proxmox_all_bridges` fact
 - `proxmox_pci_passthrough` — IOMMU/vfio-pci for WiFi, export `wifi_pci_devices` fact
+- `proxmox_igpu` — detect Intel iGPU, verify Quick Sync, export `igpu_*` facts
+- `proxmox_lxc` — shared LXC provisioning helper (consumed via `include_role`, not standalone)
 
 ## Playbook execution order (site.yml)
 ```
@@ -24,6 +26,7 @@ Play 0: proxmox_backup             (targets: proxmox, tag: backup)
          deploy_stamp: backup
 Play 1: proxmox_bridges            (targets: proxmox — shared infra)
          proxmox_pci_passthrough
+         proxmox_igpu
          deploy_stamp: infrastructure
 Play 2: openwrt_vm                 (targets: router_nodes — VM provision)
          deploy_stamp: openwrt_vm
@@ -35,11 +38,18 @@ flavor group, add a configure play targeting the dynamic group, and include
 `deploy_stamp` in the provision play.
 
 ## Device flavors (inventory groups)
-Hosts belong to child groups under `proxmox` that determine which VMs they receive.
-Shared infrastructure (backup, bridges, PCI) targets `proxmox` and runs on every host.
-VM-specific provision plays target flavor groups (e.g., `router_nodes`).
-- `router_nodes` — hosts that get an OpenWrt router VM
-- Future: `service_nodes`, `monitor_nodes`, etc.
+Hosts belong to child groups under `proxmox` that determine which services they receive.
+Shared infrastructure (backup, bridges, PCI, iGPU) targets `proxmox` and runs on every host.
+Service-specific provision plays target flavor groups.
+- `router_nodes` — OpenWrt router VM
+- `vpn_nodes` — WireGuard VPN
+- `dns_nodes` — Pi-hole
+- `wifi_nodes` — Mesh WiFi Controller
+- `monitoring_nodes` — Netdata, rsyslog
+- `service_nodes` — Home Assistant
+- `media_nodes` — Jellyfin, Kodi, Moonlight
+- `desktop_nodes` — Desktop VM, UX Kiosk
+- `gaming_nodes` — Gaming VM (separate physical machine)
 A host can belong to multiple flavor groups.
 
 ## Deployment tracking
@@ -49,9 +59,14 @@ contains the project version, last run timestamp, and per-play history.
 Bump `project_version` in `group_vars/all.yml` when cutting a release.
 
 ## VMID allocation
-- 100-series: network VMs (openwrt_vm_id: 100)
-- 200-series: service VMs (future)
-Define all VMIDs in `group_vars/all.yml`.
+- 100-199: Network (100 OpenWrt, 101 WireGuard, 102 Pi-hole, 103 Mesh WiFi)
+- 200-299: Services (200 Home Assistant)
+- 300-399: Media (300 Jellyfin, 301 Kodi, 302 Moonlight)
+- 400-499: Desktop (400 Desktop VM, 401 Kiosk)
+- 500-599: Observability (500 Netdata, 501 rsyslog)
+- 600-699: Gaming (600 Gaming VM)
+- 999: reserved for molecule test containers
+All VMIDs defined in `group_vars/all.yml`.
 
 ## Variable scoping
 - **Required secrets**: `.env` file → `lookup('env', 'VAR_NAME')` in `group_vars/proxmox.yml`
@@ -74,26 +89,42 @@ Define all VMIDs in `group_vars/all.yml`.
 | `.state/addresses.json` | Cached host IPs for cross-run discovery (gitignored) |
 | `molecule/default/` | Integration tests against test machine |
 
+## Adding a new LXC service — checklist
+1. Create `roles/<type>_lxc/tasks/main.yml` that uses `include_role: proxmox_lxc` with service-specific vars
+2. Create `roles/<type>_configure/defaults/main.yml` and `roles/<type>_configure/tasks/main.yml`
+3. VMID already defined in `group_vars/all.yml` (`<type>_ct_id`)
+4. Add a provision play in `site.yml` targeting the flavor group
+5. Include `deploy_stamp` as the last role in the provision play
+6. Add a configure play targeting the dynamic group (`ansible_connection: community.proxmox.proxmox_pct_remote`)
+7. Dynamic group and flavor group already exist in `inventory/hosts.yml`
+8. Flavor group already in `molecule/default/molecule.yml` platform groups
+9. Create `molecule/<type>-lxc/` per-feature scenario (converge + verify + cleanup)
+10. Extend `molecule/default/verify.yml` with assertions for the new service
+11. Update `docs/architecture/` with a `<type>-build.md`
+12. Add a CHANGELOG entry under `[Unreleased]`
+
 ## Adding a new VM type — checklist
 1. Create `roles/<type>_vm/defaults/main.yml` and `roles/<type>_vm/tasks/main.yml`
 2. Create `roles/<type>_configure/defaults/main.yml` and `roles/<type>_configure/tasks/main.yml`
-3. Add VMID to `group_vars/all.yml` (e.g., `homeassistant_vm_id: 200`)
-4. Add a new provision play in `playbooks/site.yml` targeting the appropriate flavor group
+3. VMID already defined in `group_vars/all.yml` (`<type>_vm_id`)
+4. Add a provision play in `site.yml` targeting the flavor group
 5. Include `deploy_stamp` as the last role in the provision play
-6. Add a new configure play targeting the dynamic group
-7. Add `<type>` group to `inventory/hosts.yml` (empty hosts, populated by `add_host`)
-8. Add the flavor group (e.g., `service_nodes`) to `inventory/hosts.yml` if it doesn't exist
-9. Add the flavor group to `molecule/default/molecule.yml` platform groups
+6. Add a configure play targeting the dynamic group
+7. Dynamic group and flavor group already exist in `inventory/hosts.yml`
+8. Flavor group already in `molecule/default/molecule.yml` platform groups
+9. Create `molecule/<type>-vm/` per-feature scenario
 10. Extend `molecule/default/verify.yml` with assertions for the new VM
-11. Extend `molecule/default/cleanup.yml` if custom teardown is needed (VM destruction is automatic)
-12. Update `docs/architecture/` with a `<type>-build.md`
-13. Add a CHANGELOG entry under `[Unreleased]`
-14. Bump `project_version` in `group_vars/all.yml` when releasing
+11. Update `docs/architecture/` with a `<type>-build.md`
+12. Add a CHANGELOG entry under `[Unreleased]`
 
-## Image management
-- VM images stored in `images/` directory (gitignored)
-- Each VM type defines its image path in role defaults (e.g., `openwrt_image_path: images/openwrt.img`)
-- Images are uploaded to Proxmox `/tmp/`, imported via `qm importdisk`, then deleted
+## Image and template management
+- ALL images and templates are stored locally in `images/` (gitignored) and uploaded to Proxmox during provisioning. NEVER depend on remote downloads from the Proxmox host.
+- VM images: uploaded to `/tmp/`, imported via `qm importdisk`, then deleted.
+- LXC templates: uploaded to `/var/lib/vz/template/cache/` via `ansible.builtin.copy`.
+- NEVER use `pveam download` — the host may lack internet (router VM destroyed) or have unreachable enterprise repos (no subscription).
+- Image paths are defined in `group_vars/all.yml` (e.g., `openwrt_image_path`, `proxmox_lxc_template_path`).
+- ALWAYS use `role_path` for source paths in tasks. Bare relative paths break when Molecule runs from non-default scenarios.
+- See `vm-lifecycle` skill, Image management section, for the full pattern.
 
 ## Testing requirements
 - ALWAYS run `molecule test` after changing roles, playbooks, or molecule config

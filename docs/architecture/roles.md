@@ -170,3 +170,118 @@ All configuration is done with `ansible.builtin.raw` since OpenWrt has no Python
 | `openwrt_mesh_key` | From `MESH_KEY` env | WPA3-SAE passphrase |
 | `openwrt_mesh_channel` | `auto` | WiFi channel |
 | `openwrt_mesh_encryption` | `sae` | Encryption method |
+
+---
+
+## proxmox_lxc
+
+**Purpose:** Reusable role for provisioning LXC containers on Proxmox. Each service's `<type>_lxc` role consumes this via `include_role` with service-specific variables.
+
+### How It Works
+
+1. Validates required parameters (`lxc_ct_id`, `lxc_ct_hostname`).
+2. Checks if the container already exists (`pct status`). Skips creation if present.
+3. Uploads the LXC template from the controller's `images/` directory to the Proxmox host's template cache (if not already cached).
+4. Builds and executes `pct create` with all parameters (resources, networking, storage, unprivileged flag).
+5. Applies mount entries and container features via `pct set`.
+6. Sets `onboot` and `startup` order (unconditional, self-healing).
+7. Starts the container and waits for readiness (`pct exec -- hostname`).
+8. Registers the container in a dynamic Ansible group via `add_host` with the `community.proxmox.proxmox_pct_remote` connection plugin (no SSH needed).
+
+### Key Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `lxc_ct_id` | _(required)_ | Proxmox container ID |
+| `lxc_ct_hostname` | _(required)_ | Container hostname |
+| `lxc_ct_memory` | `256` | RAM in MB |
+| `lxc_ct_swap` | `256` | Swap in MB |
+| `lxc_ct_cores` | `1` | CPU cores |
+| `lxc_ct_disk` | `"4"` | Root disk size in GB |
+| `lxc_ct_template` | `proxmox_lxc_default_template` | Template filename |
+| `lxc_ct_template_path` | `proxmox_lxc_template_path` | Local path to template file |
+| `lxc_ct_template_storage` | `local` | Proxmox storage for template cache |
+| `lxc_ct_bridge` | Second bridge from `proxmox_all_bridges` | Network bridge |
+| `lxc_ct_ip` | `dhcp` | IP configuration (`dhcp` or `<ip>/<cidr>`) |
+| `lxc_ct_gateway` | `""` | Default gateway (empty for DHCP) |
+| `lxc_ct_nameserver` | `""` | DNS server (empty for DHCP) |
+| `lxc_ct_features` | `[]` | Container features (e.g., `["nesting=1"]`) |
+| `lxc_ct_mount_entries` | `[]` | Device bind mounts for `/dev/dri` etc. |
+| `lxc_ct_unprivileged` | `true` | Run as unprivileged container |
+| `lxc_ct_onboot` | `true` | Start on host boot |
+| `lxc_ct_startup_order` | `5` | Proxmox boot priority (lower = earlier) |
+| `lxc_ct_dynamic_group` | `""` | Ansible group for `add_host` registration |
+| `lxc_ct_storage` | `proxmox_storage` | Proxmox storage pool for rootfs |
+
+### Usage Pattern
+
+Service-specific LXC roles consume `proxmox_lxc` via `include_role`:
+
+```yaml
+- name: Provision Pi-hole container
+  ansible.builtin.include_role:
+    name: proxmox_lxc
+  vars:
+    lxc_ct_id: "{{ pihole_ct_id }}"
+    lxc_ct_hostname: pihole
+    lxc_ct_dynamic_group: pihole
+    lxc_ct_memory: 256
+    lxc_ct_cores: 1
+    lxc_ct_disk: "4"
+```
+
+---
+
+## proxmox_igpu
+
+**Purpose:** Detect the Intel iGPU, ensure the `i915` driver is loaded, install VA-API tools, verify Quick Sync hardware transcoding, and export facts for containers and VMs that need GPU access.
+
+### How It Works
+
+1. Detects Intel VGA controller via `lspci`.
+2. If no Intel GPU found, sets `igpu_available: false` and skips remaining tasks.
+3. Checks if `i915` kernel module is loaded. If not: removes any blacklist entries from `/etc/modprobe.d/` and loads the module via `modprobe`.
+4. Waits for `/dev/dri/renderD128` to appear after driver load.
+5. Dynamically finds the card device (`/dev/dri/cardN`) by matching the `i915` driver in sysfs (does not hardcode `card0`).
+6. Reads `render` and `video` group GIDs for container permission mapping.
+7. Verifies DNS resolution (falls back to `8.8.8.8` if broken).
+8. Disables Proxmox enterprise repos (renames to `.disabled`), adds the no-subscription repo.
+9. Installs `vainfo` and `intel-media-va-driver` via apt.
+10. Runs `vainfo` to verify VA-API profiles are available (H.264, HEVC, VP8, VP9).
+
+### Exported Facts
+
+| Fact | Type | Description |
+|------|------|-------------|
+| `igpu_available` | bool | Whether an Intel iGPU was detected |
+| `igpu_pci_address` | string | PCI bus address (e.g., `00:02.0`) |
+| `igpu_render_device` | string | Render node path (e.g., `/dev/dri/renderD128`) |
+| `igpu_card_device` | string | Card device path (e.g., `/dev/dri/card1`) |
+| `igpu_render_gid` | string | GID of the `render` group on the host |
+| `igpu_video_gid` | string | GID of the `video` group on the host |
+
+### Container Usage
+
+LXC containers that need iGPU access use bind mounts via `proxmox_lxc`:
+
+```yaml
+lxc_ct_mount_entries:
+  - "mp0: /dev/dri/renderD128,mp=/dev/dri/renderD128"
+lxc_ct_features:
+  - "mount=cgroup"
+```
+
+The container must add the user to the `render` and `video` groups using
+the GIDs exported by this role.
+
+### Host State Changes
+
+Unlike read-only detection roles, `proxmox_igpu` modifies host state:
+
+- Loads `i915` kernel module (persists until reboot)
+- Renames enterprise repos to `.disabled` in `/etc/apt/sources.list.d/`
+- Creates `/etc/apt/sources.list.d/pve-no-subscription.sources`
+- Installs `vainfo` and `intel-media-va-driver` packages
+- May update `/etc/resolv.conf` if DNS is broken
+
+Cleanup restores enterprise repos and removes the no-subscription file.

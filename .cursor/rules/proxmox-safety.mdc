@@ -84,14 +84,18 @@ alwaysApply: true
 
 ## Cleanup completeness
 - When ANY role deploys a file to the host, ALWAYS add it to the removal list in BOTH `molecule/default/cleanup.yml` AND `playbooks/cleanup.yml`.
-- Current ansible-managed host files: `ansible-bridges.conf`, `blacklist-wifi.conf`, `vfio-pci.conf`.
+- Current ansible-managed host files: `ansible-bridges.conf`, `blacklist-wifi.conf`, `vfio-pci.conf`, `pve-no-subscription.sources`.
 - Also clean: `ansible-proxmox-lan.conf` (legacy, superseded by bridges.conf DHCP), `ansible-temp-lan.conf` (test workaround).
+- Enterprise repo renames: restore `pve-enterprise.sources.disabled` → `pve-enterprise.sources` and `ceph.sources.disabled` → `ceph.sources`.
 - Local state files (`.state/addresses.json`) must also be cleaned via `delegate_to: localhost`.
 - Previous bug: stale `ansible-temp-lan.conf` with a LAN-subnet IP on vmbr0 created a duplicate route that broke LAN connectivity for multiple test runs. The temp file was created manually during debugging and not cleaned by the playbook.
 
 ## Shell pipeline safety
 - ALWAYS use `set -o pipefail` in any `ansible.builtin.shell` task that contains a pipeline (`|`). Without it, failures in earlier commands are silently swallowed.
 - ALWAYS set `executable: /bin/bash` on these tasks. The default shell may be `/bin/sh`, which doesn't support `pipefail`.
+- **Exception:** Tasks that SSH into OpenWrt (`ansible.builtin.raw` / `{{ openwrt_ssh }}`) run on BusyBox ash, which does NOT support `pipefail`. Do not add it to those commands.
+- When adding `pipefail`, use the block scalar (`cmd: |`) format, not the folded scalar (`cmd: >-`), so the `set -o pipefail` line is clearly separated from the command.
+- **Audit cadence:** Periodically grep for `ansible.builtin.shell` tasks with `|` in the command and verify they have `set -o pipefail`. This class of bug is silent and recurring — it appeared in `proxmox_backup`, `proxmox_pci_passthrough`, `openwrt_vm`, `openwrt_configure`, and both cleanup playbooks during a single audit pass.
 - Previous bug: `ip route show default | awk | head` in `openwrt_vm` was missing `set -o pipefail`. If `ip route` failed, the variable silently got an empty string.
 
 ## Entry point conventions
@@ -103,7 +107,48 @@ alwaysApply: true
 - NEVER use `local_action`. It is deprecated. ALWAYS use `delegate_to: localhost` instead.
 - ALWAYS use FQCNs (e.g., `ansible.builtin.command`, not `command`).
 
+## Proxmox enterprise repos
+- Proxmox ships with `pve-enterprise.sources` and `ceph.sources` which require a paid subscription. Without it, `apt-get update` hangs trying to connect to `enterprise.proxmox.com`.
+- NEVER use `sed` or `Enabled: no` to disable deb822 `.sources` files — the results are unreliable. ALWAYS rename them to `.disabled` using `mv`.
+- When disabling enterprise repos, ALWAYS disable BOTH `pve-enterprise.sources` AND `ceph.sources`. Missing either one causes `apt` to hang.
+- After disabling enterprise repos, add the no-subscription repo (`pve-no-subscription`) so Proxmox packages remain updateable.
+- ALWAYS add cleanup tasks that restore `.disabled` repos to their original names and remove the no-subscription repo file.
+- Previous bug: `Enabled: false` and `Enabled: no` appended to deb822 files were silently ignored by apt, causing all `apt-get` operations to hang on the enterprise repo connection.
+
+## DNS resolution
+- After cleanup destroys the OpenWrt router VM, `/etc/resolv.conf` on the Proxmox host still points to `10.10.10.1` (the router's LAN IP). Without the router running, DNS breaks and all `apt` operations hang.
+- Roles that need internet access (apt installs, downloads) SHOULD check DNS first with `getent hosts deb.debian.org` and fall back to `8.8.8.8` / `1.1.1.1` if resolution fails.
+
+## Shell pipefail with grep -q
+- NEVER use `grep -q` in a pipeline with `set -o pipefail`. When `grep -q` exits early after matching, the upstream command (e.g., `lsmod`) receives SIGPIPE and the pipeline exit code becomes 141 (128 + SIGPIPE). Use `grep -c` instead to count matches (returns 0 for no match, >0 for match).
+- Previous bug: `lsmod | grep -q '^i915'` returned rc=141 with pipefail, causing Ansible to think i915 wasn't loaded when it was.
+
+## Package name verification
+- NEVER assume a package name is correct without checking. Package names vary between Debian releases, between Debian and Ubuntu, and between architectures.
+- ALWAYS verify with `apt-cache search <keyword>` or `apt list <name>` before adding a package to an Ansible task.
+- Previous bug: `intel-media-va-driver-non-free` was the correct package on Debian Bullseye but does not exist on Debian Trixie. The correct package is `intel-media-va-driver`. The `apt` task failed with "No package matching" and required a manual investigation to find the right name.
+
+## Dynamic device detection
+- NEVER hardcode device paths like `/dev/dri/card0`. The card number depends on driver probe order and can change across reboots or kernel updates.
+- ALWAYS detect devices dynamically by querying sysfs driver bindings. For example, to find the i915-backed card device: iterate `/dev/dri/card*`, check `readlink -f /sys/class/drm/cardN/device/driver`, and match on the driver name.
+- Previous bug: `/dev/dri/card0` was assumed to be the Intel iGPU, but on a system with multiple GPUs (or after a kernel update), `card0` was the discrete GPU. The sysfs-based detection finds the correct device regardless of probe order.
+- Same principle applies to PCI devices, network interfaces, and any hardware that can appear in variable order.
+
+## LXC pct_remote connection
+- The `community.proxmox.proxmox_pct_remote` connection plugin requires the `paramiko` Python package on the controller.
+- ALWAYS add `paramiko` to `requirements.txt` when using `pct_remote`.
+- `pct_remote` SSHes to the Proxmox host and runs `pct exec` inside the container. No SSH server or bootstrap IP needed inside the container.
+- When `add_host` registers a container for `pct_remote`, it MUST set `ansible_connection: community.proxmox.proxmox_pct_remote`, `ansible_host: <proxmox_host_ip>`, `proxmox_vmid: <container_id>`, and `ansible_user: root`.
+- Previous bug: `ModuleNotFoundError: No module named 'paramiko'` at runtime. The dependency wasn't in `requirements.txt` because it wasn't needed until LXC containers were added.
+
 ## Backup before changes
 - Every playbook run should back up host config and existing VMs first (Play 0: `proxmox_backup`).
 - Use `vzdump` for VM backups, tar for host config.
 - Never destroy VMs without a backup manifest confirming they were backed up.
+
+## Documentation accuracy
+- When changing a role's exported facts, bridge names, device paths, or connection patterns, ALWAYS update `docs/architecture/` in the same commit.
+- `overview.md` contains two role-reference diagrams (the GPU decomposition tree and the role catalog). Both MUST list the same exports — if you update one, update the other.
+- NEVER document planned/future exports (e.g., `gpu_pci_devices`) as if they already exist. Mark them explicitly with "(future)" or omit them.
+- NEVER hardcode bridge names (e.g., `vmbr0`, `vmbr1`) in architecture docs. Use descriptive terms ("WAN bridge", "LAN bridge") since bridges are auto-detected at runtime.
+- Previous bug: `overview.md` listed `gpu_pci_devices` as an export of `proxmox_pci_passthrough`, but the role only exports `wifi_pci_devices`. The `proxmox_igpu` export list was also incomplete (missing `igpu_pci_address`, `igpu_card_device`, `igpu_video_gid`). `openwrt-build.md` hardcoded `vmbr0` as the bootstrap bridge when it's actually auto-detected.

@@ -30,7 +30,9 @@
 
     - name: List all current VMs
       ansible.builtin.shell:
-        cmd: qm list 2>/dev/null | awk 'NR>1 {print $1}'
+        cmd: |
+          set -o pipefail
+          qm list 2>/dev/null | awk 'NR>1 {print $1}'
         executable: /bin/bash
       register: current_vms
       changed_when: false
@@ -50,6 +52,32 @@
       ansible.builtin.command:
         cmd: qm destroy {{ item }} --purge
       loop: "{{ current_vms.stdout_lines | default([]) }}"
+      failed_when: false
+
+    - name: List all current containers
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct list 2>/dev/null | awk 'NR>1 {print $1}'
+        executable: /bin/bash
+      register: current_cts
+      changed_when: false
+
+    - name: Stop all containers
+      ansible.builtin.command:
+        cmd: pct stop {{ item }}
+      loop: "{{ current_cts.stdout_lines | default([]) }}"
+      failed_when: false
+
+    - name: Wait for containers to stop
+      ansible.builtin.pause:
+        seconds: 3
+      when: current_cts.stdout_lines | default([]) | length > 0
+
+    - name: Destroy all containers
+      ansible.builtin.command:
+        cmd: pct destroy {{ item }} --purge
+      loop: "{{ current_cts.stdout_lines | default([]) }}"
       failed_when: false
 
     - name: Unbind devices from vfio-pci
@@ -75,11 +103,31 @@
         - /etc/modprobe.d/blacklist-wifi.conf
         - /etc/modprobe.d/vfio-pci.conf
         - /etc/ansible/facts.d/vm_builds.fact
+        - /etc/apt/sources.list.d/pve-no-subscription.sources
         - /tmp/openwrt.img
+
+    - name: Remove cached LXC templates
+      ansible.builtin.shell:
+        cmd: rm -f /var/lib/vz/template/cache/debian-*.tar.zst
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Re-enable enterprise repos if disabled
+      ansible.builtin.shell:
+        cmd: |
+          for f in /etc/apt/sources.list.d/pve-enterprise.sources.disabled \
+                   /etc/apt/sources.list.d/ceph.sources.disabled; do
+            [ -f "$f" ] && mv "$f" "${f%.disabled}"
+          done
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
 
     - name: Tear down stale bridges
       ansible.builtin.shell:
         cmd: |
+          set -o pipefail
           for br in $(ip -o link show type bridge | awk -F': ' '{print $2}'); do
             grep -q "auto $br" /etc/network/interfaces 2>/dev/null && continue
             ip link set "$br" down 2>/dev/null || true

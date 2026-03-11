@@ -1,0 +1,153 @@
+---
+# Shared LXC provisioning role.
+# Consumed by service-specific roles via include_role with vars overrides.
+#
+# Required vars from the consuming role:
+#   lxc_ct_id           - VMID (e.g., 102)
+#   lxc_ct_hostname     - container hostname (e.g., "pihole")
+#   lxc_ct_dynamic_group - Ansible group for configure play (e.g., "pihole")
+
+- name: Validate required LXC parameters
+  ansible.builtin.assert:
+    that:
+      - lxc_ct_id is defined
+      - lxc_ct_hostname is defined
+      - lxc_ct_dynamic_group | default('') | length > 0
+    fail_msg: >-
+      proxmox_lxc requires lxc_ct_id, lxc_ct_hostname, and
+      lxc_ct_dynamic_group to be set by the consuming role.
+
+- name: Check if container already exists
+  ansible.builtin.command:
+    cmd: pct status {{ lxc_ct_id }}
+  register: _lxc_status
+  failed_when: false
+  changed_when: false
+
+- name: Set container existence flag
+  ansible.builtin.set_fact:
+    lxc_exists: "{{ _lxc_status.rc == 0 }}"
+
+# ── Template upload ───────────────────────────────────────────────
+
+- name: Check if LXC template is already cached
+  ansible.builtin.command:
+    cmd: pveam list {{ lxc_ct_template_storage }}
+  register: _template_list
+  changed_when: false
+  when: not lxc_exists | bool
+
+- name: Upload LXC template to Proxmox host
+  ansible.builtin.copy:
+    src: >-
+      {{ lxc_ct_template_path
+      if lxc_ct_template_path.startswith('/')
+      else (role_path + '/../../' + lxc_ct_template_path) }}
+    dest: "/var/lib/vz/template/cache/{{ lxc_ct_template }}"
+    mode: "0644"
+  when:
+    - not lxc_exists | bool
+    - lxc_ct_template not in (_template_list.stdout | default(''))
+
+# ── Container creation ────────────────────────────────────────────
+
+- name: Build network config string
+  ansible.builtin.set_fact:
+    _lxc_net0: >-
+      name=eth0,bridge={{ lxc_ct_bridge
+      }}{{ ',ip=' + lxc_ct_ip if lxc_ct_ip != 'dhcp'
+      else ',ip=dhcp'
+      }}{{ ',gw=' + lxc_ct_gateway
+      if lxc_ct_gateway | default('') | length > 0
+      else '' }}
+  when: not lxc_exists | bool
+
+- name: Build pct create command
+  ansible.builtin.set_fact:
+    _pct_create_cmd: >-
+      pct create {{ lxc_ct_id }}
+      {{ lxc_ct_template_storage }}:vztmpl/{{ lxc_ct_template }}
+      --hostname {{ lxc_ct_hostname }}
+      --memory {{ lxc_ct_memory }}
+      --swap {{ lxc_ct_swap }}
+      --cores {{ lxc_ct_cores }}
+      --rootfs {{ lxc_ct_storage }}:{{ lxc_ct_disk }}
+      --net0 {{ _lxc_net0 }}
+      {{ '--nameserver ' + lxc_ct_nameserver
+      if lxc_ct_nameserver | default('') | length > 0
+      else '' }}
+      {{ '--unprivileged 1'
+      if lxc_ct_unprivileged else '--unprivileged 0' }}
+      {{ '--features ' + (lxc_ct_features | join(','))
+      if lxc_ct_features | length > 0 else '' }}
+      --start false
+  when: not lxc_exists | bool
+
+- name: Create LXC container
+  ansible.builtin.command:
+    cmd: "{{ _pct_create_cmd }}"
+  when: not lxc_exists | bool
+
+# ── Device bind mounts ────────────────────────────────────────────
+
+- name: Apply device mount entries
+  ansible.builtin.command:
+    cmd: >-
+      pct set {{ lxc_ct_id }}
+      -mp{{ idx }} {{ item }},mp={{ item }}
+  loop: "{{ lxc_ct_mount_entries }}"
+  loop_control:
+    index_var: idx
+  when:
+    - not lxc_exists | bool
+    - lxc_ct_mount_entries | length > 0
+
+# ── Auto-start (runs unconditionally to self-heal) ────────────────
+
+- name: Configure container auto-start
+  ansible.builtin.command:
+    cmd: >-
+      pct set {{ lxc_ct_id }}
+      --onboot {{ '1' if lxc_ct_onboot else '0' }}
+      --startup order={{ lxc_ct_startup_order }}
+  changed_when: true
+
+# ── Start container ───────────────────────────────────────────────
+
+- name: Start container
+  ansible.builtin.command:
+    cmd: pct start {{ lxc_ct_id }}
+  when: not lxc_exists | bool
+
+- name: Wait for container to be ready
+  ansible.builtin.command:
+    cmd: pct exec {{ lxc_ct_id }} -- hostname
+  register: _ct_hostname
+  retries: 10
+  delay: 3
+  until: _ct_hostname.rc == 0
+  changed_when: false
+
+# ── Register in dynamic inventory ─────────────────────────────────
+
+- name: Add container to dynamic inventory group
+  ansible.builtin.add_host:
+    name: "{{ lxc_ct_hostname }}"
+    groups: "{{ lxc_ct_dynamic_group }}"
+    ansible_connection: community.proxmox.proxmox_pct_remote
+    ansible_host: "{{ ansible_host }}"
+    ansible_user: root
+    proxmox_vmid: "{{ lxc_ct_id }}"
+
+# ── Post-provision diagnostics ────────────────────────────────────
+
+- name: Container post-provision diagnostics
+  ansible.builtin.command:
+    cmd: pct status {{ lxc_ct_id }} --verbose
+  register: _lxc_diag
+  changed_when: false
+  failed_when: false
+
+- name: Display container diagnostics
+  ansible.builtin.debug:
+    var: _lxc_diag.stdout_lines

@@ -16,6 +16,7 @@
   roles:
     - proxmox_bridges
     - proxmox_pci_passthrough
+    - proxmox_igpu
     - role: deploy_stamp
       vars:
         deploy_stamp_play: infrastructure

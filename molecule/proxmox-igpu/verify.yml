@@ -1,0 +1,145 @@
+---
+- name: Verify proxmox_igpu role
+  hosts: proxmox
+  gather_facts: true
+  roles:
+    - proxmox_igpu
+  tasks:
+    - name: Assert igpu_available fact is set
+      ansible.builtin.assert:
+        that: igpu_available is defined
+        fail_msg: "igpu_available fact was not exported"
+
+    # -- When iGPU is present, verify the full stack works --
+
+    - name: Assert iGPU facts are complete
+      ansible.builtin.assert:
+        that:
+          - igpu_pci_address | length > 0
+          - igpu_render_device | length > 0
+          - igpu_card_device | length > 0
+          - igpu_render_gid | length > 0
+          - igpu_video_gid | length > 0
+        fail_msg: >-
+          iGPU detected but facts incomplete:
+          pci={{ igpu_pci_address }},
+          render={{ igpu_render_device }},
+          card={{ igpu_card_device }},
+          render_gid={{ igpu_render_gid }},
+          video_gid={{ igpu_video_gid }}
+      when: igpu_available | bool
+
+    - name: Assert render device exists on disk
+      ansible.builtin.stat:
+        path: "{{ igpu_render_device }}"
+      register: _render_check
+      when: igpu_available | bool
+
+    - name: Verify render device is present
+      ansible.builtin.assert:
+        that: _render_check.stat.exists
+        fail_msg: "{{ igpu_render_device }} does not exist"
+      when: igpu_available | bool
+
+    - name: Assert card device exists on disk
+      ansible.builtin.stat:
+        path: "{{ igpu_card_device }}"
+      register: _card_check
+      when: igpu_available | bool
+
+    - name: Verify card device is present
+      ansible.builtin.assert:
+        that: _card_check.stat.exists
+        fail_msg: "{{ igpu_card_device }} does not exist"
+      when: igpu_available | bool
+
+    - name: Assert i915 driver is loaded
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          lsmod | grep -c '^i915'
+        executable: /bin/bash
+      changed_when: false
+      when: igpu_available | bool
+
+    - name: Assert i915 is bound to the iGPU PCI device
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          lspci -k -s {{ igpu_pci_address }} | grep -c 'Kernel driver in use: i915'
+        executable: /bin/bash
+      changed_when: false
+      when: igpu_available | bool
+
+    - name: Assert vainfo is installed
+      ansible.builtin.command:
+        cmd: which vainfo
+      changed_when: false
+      when: igpu_available | bool
+
+    - name: Run vainfo and verify Quick Sync profiles
+      ansible.builtin.command:
+        cmd: vainfo
+      register: _vainfo_verify
+      changed_when: false
+      failed_when: false
+      when: igpu_available | bool
+      environment:
+        DISPLAY: ""
+        LIBVA_DRIVER_NAME: "iHD"
+
+    - name: Assert vainfo reports VA-API profiles
+      ansible.builtin.assert:
+        that: "'VAProfile' in _vainfo_verify.stdout"
+        fail_msg: >-
+          vainfo did not report any VA-API profiles.
+          Quick Sync is not working.
+          stdout: {{ _vainfo_verify.stdout }}
+          stderr: {{ _vainfo_verify.stderr }}
+      when: igpu_available | bool
+
+    - name: Assert Proxmox no-subscription repo is configured
+      ansible.builtin.stat:
+        path: /etc/apt/sources.list.d/pve-no-subscription.sources
+      register: _nosub_check
+      when: igpu_available | bool
+
+    - name: Verify no-subscription repo exists
+      ansible.builtin.assert:
+        that: _nosub_check.stat.exists
+        fail_msg: "pve-no-subscription.sources not found"
+      when: igpu_available | bool
+
+    - name: Assert enterprise repos are disabled
+      ansible.builtin.stat:
+        path: /etc/apt/sources.list.d/pve-enterprise.sources
+      register: _enterprise_check
+      when: igpu_available | bool
+
+    - name: Verify enterprise repo is disabled
+      ansible.builtin.assert:
+        that: not _enterprise_check.stat.exists
+        fail_msg: "pve-enterprise.sources still active -- should be .disabled"
+      when: igpu_available | bool
+
+    # -- When iGPU is absent, verify graceful skip --
+
+    - name: Assert empty facts when iGPU absent
+      ansible.builtin.assert:
+        that:
+          - igpu_pci_address == ''
+          - igpu_render_device == ''
+          - igpu_card_device == ''
+          - igpu_render_gid == ''
+          - igpu_video_gid == ''
+        fail_msg: "iGPU not available but facts are non-empty"
+      when: not igpu_available | bool
+
+    - name: Display iGPU test result summary
+      ansible.builtin.debug:
+        msg: >-
+          iGPU verified: available={{ igpu_available }},
+          pci={{ igpu_pci_address }},
+          render={{ igpu_render_device }},
+          card={{ igpu_card_device }},
+          vainfo={{ _vainfo_verify.rc | default('skipped') }}

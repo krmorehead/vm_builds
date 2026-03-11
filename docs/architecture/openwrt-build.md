@@ -90,8 +90,8 @@ The image source is configurable via `openwrt_image_path` in `inventory/group_va
 
 Fresh OpenWrt has no password on root and runs Dropbear SSH. The playbook establishes initial connectivity by:
 
-1. Adding a temporary IP (`192.168.1.2/24`) to the first bridge (`vmbr0`). OpenWrt's factory default puts LAN on `eth0`, so initially both WAN and the bootstrap IP share `vmbr0`.
+1. Adding a temporary IP (`192.168.1.2/24`) to the auto-detected WAN bridge (the bridge backing the host's default route). OpenWrt's factory default puts LAN on `eth0`, so initially both WAN and the bootstrap IP share the same bridge.
 2. Waiting for OpenWrt's default LAN IP (`192.168.1.1`) to respond on port 22.
 3. Using `ProxyJump` through the Proxmox host for SSH, with `sshpass` for empty-password auth and SSH keepalives (`ServerAliveInterval=15`).
-4. During Phase 1 of configuration, the bootstrap IP is migrated from `vmbr0` (WAN bridge) to `vmbr1` (LAN bridge) after networking restarts.
+4. During Phase 1 of configuration, the bootstrap IP is migrated from the WAN bridge to the LAN bridge after networking restarts.
 5. After configuration completes, the temporary IP is removed.

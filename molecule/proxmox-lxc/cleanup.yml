@@ -1,0 +1,30 @@
+---
+- name: Destroy test LXC container
+  hosts: proxmox
+  gather_facts: false
+  vars:
+    test_ct_id: 999
+  tasks:
+    - name: Check if test container exists
+      ansible.builtin.command:
+        cmd: pct status {{ test_ct_id }}
+      register: ct_status
+      failed_when: false
+      changed_when: false
+
+    - name: Stop test container
+      ansible.builtin.command:
+        cmd: pct stop {{ test_ct_id }}
+      when: ct_status.rc == 0
+      failed_when: false
+
+    - name: Wait for container to stop
+      ansible.builtin.pause:
+        seconds: 3
+      when: ct_status.rc == 0
+
+    - name: Destroy test container
+      ansible.builtin.command:
+        cmd: pct destroy {{ test_ct_id }} --purge
+      when: ct_status.rc == 0
+      failed_when: false
