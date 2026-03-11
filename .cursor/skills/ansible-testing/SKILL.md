@@ -179,47 +179,29 @@ converge will fail fast (can't SSH to OpenWrt) with a clear error.
 
 Per-feature converge playbooks run only their tagged plays. They MUST
 populate the `openwrt` dynamic group first since the baseline's `add_host`
-state doesn't persist across molecule runs:
+state doesn't persist across molecule runs.
+
+The reconstruction logic MUST detect the current SSH auth method. After
+security hardening (M1), SSH uses key auth. Before M1 (or after rollback),
+SSH uses password auth with empty password. Extract this into a reusable
+task file to avoid duplication across converge, verify, and cleanup.
 
 ```yaml
 # molecule/openwrt-security/converge.yml
 ---
-- name: Populate OpenWrt dynamic group from baseline
-  hosts: proxmox
+- name: Reconstruct openwrt dynamic group from baseline
+  hosts: router_nodes
   gather_facts: true
   tasks:
-    - name: Detect OpenWrt LAN IP from Proxmox LAN bridge
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          lan_br=$(ip -o route show default | awk '{print $5}' | head -1)
-          # Get first non-WAN bridge
-          for br in /sys/class/net/vmbr*/; do
-            brname=$(basename "$br")
-            [ "$brname" = "$lan_br" ] && continue
-            ip -o -4 addr show dev "$brname" | awk '{print $4}' | cut -d/ -f1 | head -1
-            break
-          done
-        executable: /bin/bash
-      register: _proxmox_lan_ip
+    - name: Verify VM 100 is running
+      ansible.builtin.command:
+        cmd: qm status 100
+      register: _vm_status
       changed_when: false
+      failed_when: "'running' not in _vm_status.stdout"
 
-    - name: Compute OpenWrt LAN IP
-      ansible.builtin.set_fact:
-        _openwrt_ip: >-
-          {{ _proxmox_lan_ip.stdout.split('.')[0:3] | join('.') }}.1
-
-    - name: Add OpenWrt to dynamic group
-      ansible.builtin.add_host:
-        name: openwrt-router
-        groups: openwrt
-        ansible_host: "{{ _openwrt_ip }}"
-        ansible_user: root
-        ansible_ssh_common_args: >-
-          -o ProxyJump=root@{{ ansible_host }}
-          -o StrictHostKeyChecking=no
-          -o UserKnownHostsFile=/dev/null
-          -o ConnectTimeout=10
+    - name: Include reusable group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_openwrt_group.yml
 
 - name: Apply security hardening
   hosts: openwrt
@@ -231,9 +213,110 @@ state doesn't persist across molecule runs:
         tasks_from: security.yml
 ```
 
+### Reusable group reconstruction task file
+
+Extract the group reconstruction logic into `tasks/reconstruct_openwrt_group.yml`
+at the project root. This file is consumed by:
+- Per-feature `converge.yml` (molecule scenarios)
+- Per-feature `verify.yml` (molecule scenarios)
+- `playbooks/cleanup.yml` (rollback plays)
+
+The task file MUST:
+1. Detect the OpenWrt LAN IP from Proxmox bridge state
+2. Detect whether key auth or password auth is active
+3. Build the correct `ansible_ssh_common_args` for the detected auth method
+4. Register the host via `add_host` with appropriate args
+
+Auth detection heuristic:
+- If `OPENWRT_SSH_PRIVATE_KEY` env var is set AND `deploy_stamp` shows
+  security hardening was applied → use key auth
+- Otherwise → use password auth (empty password, `sshpass`)
+
+```yaml
+# tasks/reconstruct_openwrt_group.yml (simplified)
+---
+- name: Detect OpenWrt LAN IP from Proxmox LAN bridge
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      wan_br=$(ip -o route show default | awk '{print $5}' | head -1)
+      for br in /sys/class/net/vmbr*/; do
+        brname=$(basename "$br")
+        [ "$brname" = "$wan_br" ] && continue
+        ip -o -4 addr show dev "$brname" | awk '{print $4}' | cut -d/ -f1 | head -1
+        break
+      done
+    executable: /bin/bash
+  register: _proxmox_lan_ip
+  changed_when: false
+
+- name: Compute OpenWrt LAN IP
+  ansible.builtin.set_fact:
+    _openwrt_ip: >-
+      {{ _proxmox_lan_ip.stdout.split('.')[0:3] | join('.') }}.1
+
+- name: Detect SSH auth method
+  ansible.builtin.set_fact:
+    _use_key_auth: >-
+      {{ (lookup('env', 'OPENWRT_SSH_PRIVATE_KEY') | length > 0) and
+         (ansible_local.vm_builds.plays.openwrt_security is defined) }}
+
+- name: Add OpenWrt to dynamic group
+  ansible.builtin.add_host:
+    name: openwrt-router
+    groups: openwrt
+    ansible_host: "{{ _openwrt_ip }}"
+    ansible_user: root
+    ansible_ssh_common_args: >-
+      -o ProxyJump=root@{{ ansible_host }}
+      -o StrictHostKeyChecking=no
+      -o UserKnownHostsFile=/dev/null
+      -o ConnectTimeout=10
+      -o ServerAliveInterval=15
+      -o ServerAliveCountMax=4
+      {% if _use_key_auth %}
+      -i {{ lookup('env', 'OPENWRT_SSH_PRIVATE_KEY') }}
+      {% endif %}
+```
+
+### Per-feature verify pattern
+
+Per-feature verify playbooks also run as a separate `ansible-playbook`
+invocation, so the dynamic group is empty. The verify MUST reconstruct
+the group before running assertions that target the VM.
+
+```yaml
+# molecule/openwrt-security/verify.yml
+---
+- name: Reconstruct openwrt dynamic group
+  hosts: router_nodes
+  gather_facts: true
+  tasks:
+    - name: Include reusable group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_openwrt_group.yml
+
+- name: Verify security hardening
+  hosts: openwrt
+  gather_facts: false
+  tasks:
+    - name: Check banIP is installed
+      ansible.builtin.raw: opkg list-installed | grep banip
+      register: _banip
+      changed_when: false
+    - name: Assert banIP installed
+      ansible.builtin.assert:
+        that: _banip.rc == 0
+```
+
+Previous bug: per-feature verify assertions targeting the `openwrt` group
+ran with zero hosts, silently passing all assertions. The group was empty
+because `add_host` from converge doesn't persist into verify.
+
 ### Per-feature cleanup pattern
 
-Per-feature cleanup runs only the feature's rollback tag:
+Per-feature cleanup runs only the feature's rollback tag. The
+`cleanup.yml` playbook includes its own group reconstruction play
+(tagged with all rollback tags), so no reconstruction is needed here:
 
 ```yaml
 # molecule/openwrt-security/cleanup.yml
@@ -475,6 +558,9 @@ Previous bug: `ansible-proxmox-lan.conf` was deployed by `openwrt_configure` but
 | `apt-get update` hangs on Proxmox host | Enterprise repos unreachable without subscription | Rename to `.disabled`, add no-subscription repo (see proxmox-safety rule) |
 | `lsmod \| grep -q` returns rc=141 | SIGPIPE from `grep -q` with `pipefail` | Use `grep -c` instead (see proxmox-safety rule) |
 | `intel-media-va-driver-non-free` not found | Wrong package name for Debian version | Check packages with `apt-cache search`; use `intel-media-va-driver` |
+| Per-feature verify passes with 0 assertions | Dynamic group empty in verify (separate invocation) | Add group reconstruction play at top of verify.yml |
+| Rollback play targets 0 hosts | Dynamic group empty in cleanup (separate invocation) | Add reconstruction play in cleanup.yml, tagged with all rollback tags |
+| SSH auth fails after security rollback | Rollback re-enabled password but didn't clear root password | Rollback MUST clear `/etc/shadow` root hash to restore empty-password baseline |
 
 ## Ansible syntax pitfalls with `raw:` heredocs
 

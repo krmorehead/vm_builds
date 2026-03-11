@@ -26,6 +26,87 @@ OpenWrt is a router VM — it consumes ALL Proxmox bridges (WAN + every LAN port
 13. BusyBox `nc` does NOT support `-w` (timeout) flag. Use `(echo QUIT | nc HOST PORT) </dev/null` for TCP port checks. NEVER use `echo | nc -w 3` on OpenWrt.
 14. When checking for the default route in scripts on OpenWrt, NEVER filter by device name (`ip route show default dev eth0`). OpenWrt's netifd may use interface aliases (e.g., `wan`, `eth0.2`) that differ from the physical device name. Use `ip route show default` without a device filter.
 
+## Feature integration via task files
+
+Post-baseline features (security, VLANs, DNS, mesh) are implemented as
+separate task files within `roles/openwrt_configure/tasks/`:
+
+```
+roles/openwrt_configure/tasks/
+├── main.yml          # Baseline configuration (WAN, LAN, DHCP, firewall)
+├── security.yml      # M1: SSH hardening, banIP
+├── vlans.yml         # M2: VLAN segmentation
+├── dns.yml           # M3: Encrypted DNS (https-dns-proxy)
+├── mesh.yml          # M4: 802.11s mesh + Dawn steering
+└── pihole_dns.yml    # M5: Pi-hole forwarding chain
+```
+
+Each feature gets TWO plays in `site.yml`:
+1. A configure play targeting the `openwrt` dynamic group with `include_role`
+   using `tasks_from: <feature>.yml`
+2. A `deploy_stamp` play targeting `router_nodes` (Proxmox host) to record
+   the feature was applied
+
+Both plays share a tag (e.g., `openwrt-security`) so they can be run
+independently via `--tags`.
+
+This pattern avoids re-running baseline tasks when iterating on a feature
+and enables per-feature molecule scenarios that converge only the relevant
+task file.
+
+## SSH auth transition
+
+After security hardening (M1), OpenWrt switches from password auth (empty
+password) to key-only auth. This is a critical ordering problem:
+
+1. **Deploy key**: copy the public key to OpenWrt via `raw` (password auth still works)
+2. **Verify key auth**: test SSH with the key to confirm it works
+3. **Disable password auth**: `uci set dropbear.@dropbear[0].PasswordAuth='off'`
+4. **Re-register `openwrt` host**: `add_host` with `-i <key_path>` in SSH args
+
+Steps 1-4 MUST happen in this exact order within a single play. If step 3
+runs before step 2 confirms key auth works, the VM becomes unreachable.
+
+The key path comes from `OPENWRT_SSH_PRIVATE_KEY` env var (optional, defined
+in role `defaults/main.yml`). When not set, security hardening skips SSH
+lockdown and only installs banIP.
+
+**Rollback** must reverse this completely: re-enable password auth in dropbear,
+clear the root password in `/etc/shadow` (restore empty-password baseline),
+and remove the authorized key.
+
+## VLAN implementation (virtual environment)
+
+On physical OpenWrt routers, VLANs use DSA or swconfig for port-based tagging.
+In a Proxmox VM, OpenWrt has no physical switch — only virtual NICs (`eth0`,
+`eth1`, etc.) backed by Proxmox bridges.
+
+VLANs in the virtual environment use 802.1Q VLAN devices on bridge ports:
+
+```
+eth1 (LAN bridge port)
+├── eth1.10 (IoT VLAN)
+├── eth1.20 (Guest VLAN)
+└── eth1.30 (Management VLAN)
+```
+
+Proxmox bridges pass tagged frames by default. No `bridge-vlan-aware` or
+trunk configuration is needed on the Proxmox side — the VLAN tagging happens
+entirely within OpenWrt.
+
+NEVER use DSA or swconfig configurations for virtual OpenWrt deployments.
+
+## Encrypted DNS integration
+
+`https-dns-proxy` on OpenWrt auto-configures dnsmasq on install: it adds
+itself as the upstream DNS server and restarts dnsmasq. No manual dnsmasq
+configuration is needed for the basic DoH setup.
+
+The configure task only needs to:
+1. Install `https-dns-proxy` (with retries per rule 4)
+2. Optionally configure specific DoH providers via UCI
+3. Verify DNS resolution works through the proxy
+
 ## WAN/LAN bridge ordering
 
 `openwrt_vm` orders bridges so the WAN bridge is always `net0`/`eth0`:

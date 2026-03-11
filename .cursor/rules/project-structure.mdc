@@ -37,6 +37,16 @@ When adding a new VM type, add a new provision play targeting the appropriate
 flavor group, add a configure play targeting the dynamic group, and include
 `deploy_stamp` in the provision play.
 
+Post-baseline features are added as separate task files in the configure role
+(e.g., `roles/openwrt_configure/tasks/security.yml`). Each feature gets a
+PAIR of plays in `site.yml`: (1) configure on the dynamic group, (2) `deploy_stamp`
+on the flavor group. Both share a tag and use `never` so they're opt-in.
+
+Dynamic groups populated by `add_host` are ephemeral. Any entry point that
+runs as a separate `ansible-playbook` invocation (per-feature molecule
+converge/verify, cleanup/rollback) MUST reconstruct the group first.
+Extract reconstruction into `tasks/reconstruct_<type>_group.yml`.
+
 ## Device flavors (inventory groups)
 Hosts belong to child groups under `proxmox` that determine which services they receive.
 Shared infrastructure (backup, bridges, PCI, iGPU) targets `proxmox` and runs on every host.

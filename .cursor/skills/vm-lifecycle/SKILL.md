@@ -17,15 +17,18 @@ This project manages multiple VM and LXC container types on Proxmox. Each servic
 4. Service-specific variables live in role `defaults/main.yml`. Shared variables live in `group_vars/all.yml`. NEVER put service-specific defaults in group_vars.
 5. Each provision role MUST check for existing VM/container before creating. Guard ALL creation tasks with `when: not vm_exists | bool` (VMs) or `when: not lxc_exists | bool` (containers via `proxmox_lxc`).
 6. VMIDs: 100s network, 200s services, 300s media, 400s desktop, 500s observability, 600s gaming. All defined in `group_vars/all.yml`.
-6. The `<type>_vm` role adds the VM to dynamic inventory via `add_host`. The `<type>_configure` role runs in a separate play targeting that group.
-7. NEVER reference another role's defaults. Use `set_fact` with `cacheable: true` or `add_host` variables to pass data.
-8. Every provision play targeting Proxmox hosts MUST include `deploy_stamp` as its last role.
-9. Every new role MUST have `meta/main.yml` with `author`, `license: proprietary`, `role_name`, `description`, `min_ansible_version`, and `platforms`.
-10. Provision plays target **flavor groups** (e.g., `router_nodes`, `service_nodes`), NOT `proxmox` directly. Shared infra targets `proxmox`.
-11. Every VM MUST configure `--onboot 1 --startup order=N` via `qm set`. This task runs unconditionally to self-heal. Define `<type>_vm_startup_order` in role defaults.
-12. When a role deploys files to the host, ALWAYS add them to both cleanup playbooks.
-13. Optional env variables go in role `defaults/main.yml` via `lookup('env', ...) | default('', true)`. NEVER add optional vars to `REQUIRED_ENV` in `build.py`.
-14. Every configured feature MUST have a corresponding assertion in `verify.yml`. "VM is running" is NOT sufficient — verify services, network topology, auto-start, and state files.
+7. The `<type>_vm` role adds the VM to dynamic inventory via `add_host`. The `<type>_configure` role runs in a separate play targeting that group.
+8. NEVER reference another role's defaults. Use `set_fact` with `cacheable: true` or `add_host` variables to pass data.
+9. Every provision play targeting Proxmox hosts MUST include `deploy_stamp` as its last role.
+10. Every new role MUST have `meta/main.yml` with `author`, `license: proprietary`, `role_name`, `description`, `min_ansible_version`, and `platforms`.
+11. Provision plays target **flavor groups** (e.g., `router_nodes`, `service_nodes`), NOT `proxmox` directly. Shared infra targets `proxmox`.
+12. Every VM MUST configure `--onboot 1 --startup order=N` via `qm set`. This task runs unconditionally to self-heal. Define `<type>_vm_startup_order` in role defaults.
+13. When a role deploys files to the host, ALWAYS add them to both cleanup playbooks.
+14. Optional env variables go in role `defaults/main.yml` via `lookup('env', ...) | default('', true)`. NEVER add optional vars to `REQUIRED_ENV` in `build.py`.
+15. Every configured feature MUST have a corresponding assertion in `verify.yml`. "VM is running" is NOT sufficient — verify services, network topology, auto-start, and state files.
+16. Feature plays that target dynamic groups MUST be paired with a `deploy_stamp` play targeting the flavor group (Proxmox host). The VM doesn't store `vm_builds.fact` — the host does.
+17. Post-baseline features are implemented as separate task files in the configure role, NOT as separate roles. This avoids cross-role variable dependencies and keeps the configure role as the single owner of VM configuration.
+18. Every entry point that targets a dynamic group as a separate `ansible-playbook` invocation (per-feature converge, verify, cleanup/rollback) MUST reconstruct the group first. `add_host` state is ephemeral.
 
 ## Playbook execution order (site.yml)
 
@@ -34,12 +37,53 @@ Play 0: proxmox_backup             (targets: proxmox, tag: backup)
          deploy_stamp: backup
 Play 1: proxmox_bridges            (targets: proxmox — shared infra)
          proxmox_pci_passthrough
+         proxmox_igpu
          deploy_stamp: infrastructure
 Play 2: <type>_vm                  (targets: <flavor_group> — VM provision)
          deploy_stamp: <type>_vm
 Play 3: <type>_configure           (targets: <type> — dynamic group)
+Play 4+: Feature plays             (targets: <type> — dynamic group, per-feature tags)
+         deploy_stamp on <flavor_group> after each feature play
 Play N: Bootstrap cleanup          (targets: proxmox — remove temp networking)
 ```
+
+### Feature plays (post-baseline)
+
+When a configure role grows beyond the initial baseline, new features are
+added as separate task files in the configure role (e.g.,
+`roles/<type>_configure/tasks/security.yml`). Each feature gets a PAIR of
+plays in `site.yml`:
+
+```yaml
+- name: Apply <feature> to <type>
+  hosts: <dynamic_group>
+  tags: [<type>-<feature>, never]
+  gather_facts: false
+  tasks:
+    - name: Include <feature> tasks
+      ansible.builtin.include_role:
+        name: <type>_configure
+        tasks_from: <feature>.yml
+
+- name: Record <feature> deployment
+  hosts: <flavor_group>
+  tags: [<type>-<feature>, never]
+  gather_facts: true
+  roles:
+    - role: deploy_stamp
+      vars:
+        deploy_play: <type>_<feature>
+```
+
+The `never` tag prevents feature plays from running during full converge
+(they are opt-in via `--tags`). The paired `deploy_stamp` play runs on the
+Proxmox host (flavor group), not the VM, because `vm_builds.fact` lives on
+the host.
+
+This pattern enables:
+- Per-feature molecule scenarios that converge only the relevant task file
+- Version-aware convergence via `deploy_stamp`
+- Independent feature rollback via `cleanup.yml` tags
 
 ## Device flavors (inventory groups)
 
@@ -359,6 +403,34 @@ Current managed files:
 
 Cleanup MUST destroy both VMs (`qm list` iteration) AND containers
 (`pct list` iteration). NEVER hardcode VMIDs in cleanup.
+
+## Dynamic group reconstruction
+
+Dynamic groups populated by `add_host` (e.g., `openwrt`, `pihole`) are
+ephemeral — they exist only within a single `ansible-playbook` invocation.
+Any entry point that runs as a separate invocation MUST reconstruct the
+group before targeting it.
+
+Entry points that need reconstruction:
+- Per-feature `molecule/*/converge.yml`
+- Per-feature `molecule/*/verify.yml`
+- `playbooks/cleanup.yml` (rollback plays)
+
+ALWAYS extract group reconstruction into a reusable task file (e.g.,
+`tasks/reconstruct_<type>_group.yml`) to avoid duplication. The task file
+must:
+1. Verify the VM/container is running
+2. Detect its IP from host-side state (bridge IPs, DHCP leases, etc.)
+3. Detect the current auth method (may change after security hardening)
+4. Register the host via `add_host` with the correct connection args
+
+See the `ansible-testing` skill for the full pattern with auth detection.
+
+Previous bug: per-feature verify assertions targeting the `openwrt` group
+ran with zero hosts — all assertions passed silently because Ansible skips
+plays when the host group is empty. The issue was only caught during plan
+review, not at runtime, because "0 assertions passed" looks the same as
+"all assertions passed" in Ansible output.
 
 ## Rollback conventions
 
