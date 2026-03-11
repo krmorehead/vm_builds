@@ -67,6 +67,175 @@ There is NO `lint` phase in the Molecule config. Run `ansible-lint` and `yamllin
 - **Cleanup**: `playbooks/cleanup.yml --tags clean`
 - **Config**: `molecule/default/molecule.yml`
 
+## Baseline testing model
+
+The **baseline** is the state after `molecule/default` converges successfully:
+router VM running, WAN/LAN configured, DHCP serving, firewall active. All
+per-feature molecule scenarios start from this baseline and only converge/revert
+their own changes.
+
+```
+Scenario Hierarchy
+├── molecule/default/              Full integration (rebuild everything)
+│   ├── converge.yml               imports site.yml
+│   ├── verify.yml                 ALL baseline + feature assertions
+│   └── cleanup.yml                full cleanup (destroy VMs, restore host)
+│
+├── molecule/openwrt-security/     Per-feature (assumes baseline exists)
+│   ├── converge.yml               runs only security plays via tags
+│   ├── verify.yml                 security-specific assertions only
+│   └── cleanup.yml                runs security rollback only
+│
+├── molecule/openwrt-vlans/        Per-feature
+│   ├── converge.yml               runs only VLAN plays via tags
+│   ├── verify.yml                 VLAN-specific assertions only
+│   └── cleanup.yml                runs VLAN rollback only
+│
+└── ...
+```
+
+**Why:** Full `molecule test` takes 4-5 minutes. Per-feature scenarios take
+30-60 seconds. During development, iterate with per-feature scenarios.
+Run full integration before committing.
+
+### Per-feature scenario setup
+
+Each per-feature scenario needs its own `molecule.yml` that shares the
+platform config with `default` but uses a different test sequence:
+
+```yaml
+# molecule/openwrt-security/molecule.yml
+dependency:
+  name: galaxy
+  options:
+    requirements-file: ${MOLECULE_PROJECT_DIRECTORY}/requirements.yml
+
+driver:
+  name: default
+  options:
+    managed: false
+
+platforms:
+  - name: home
+    groups:
+      - proxmox
+      - router_nodes
+
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      roles_path: ${MOLECULE_PROJECT_DIRECTORY}/roles
+      collections_paths: ${MOLECULE_PROJECT_DIRECTORY}/collections
+      host_key_checking: false
+      retry_files_enabled: false
+  env:
+    PROXMOX_API_TOKEN_SECRET: ${PROXMOX_API_TOKEN_SECRET}
+    PROXMOX_HOST: ${PROXMOX_HOST}
+    MESH_KEY: ${MESH_KEY}
+  inventory:
+    links:
+      host_vars: ../../inventory/host_vars/
+      group_vars: ../../inventory/group_vars/
+
+verifier:
+  name: ansible
+
+scenario:
+  test_sequence:
+    - dependency
+    - syntax
+    - converge
+    - verify
+    - cleanup
+```
+
+No initial cleanup phase — the baseline must already exist. If it doesn't,
+converge will fail fast (can't SSH to OpenWrt) with a clear error.
+
+### Per-feature converge pattern
+
+Per-feature converge playbooks run only their tagged plays. They MUST
+populate the `openwrt` dynamic group first since the baseline's `add_host`
+state doesn't persist across molecule runs:
+
+```yaml
+# molecule/openwrt-security/converge.yml
+---
+- name: Populate OpenWrt dynamic group from baseline
+  hosts: proxmox
+  gather_facts: true
+  tasks:
+    - name: Detect OpenWrt LAN IP from Proxmox LAN bridge
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          lan_br=$(ip -o route show default | awk '{print $5}' | head -1)
+          # Get first non-WAN bridge
+          for br in /sys/class/net/vmbr*/; do
+            brname=$(basename "$br")
+            [ "$brname" = "$lan_br" ] && continue
+            ip -o -4 addr show dev "$brname" | awk '{print $4}' | cut -d/ -f1 | head -1
+            break
+          done
+        executable: /bin/bash
+      register: _proxmox_lan_ip
+      changed_when: false
+
+    - name: Compute OpenWrt LAN IP
+      ansible.builtin.set_fact:
+        _openwrt_ip: >-
+          {{ _proxmox_lan_ip.stdout.split('.')[0:3] | join('.') }}.1
+
+    - name: Add OpenWrt to dynamic group
+      ansible.builtin.add_host:
+        name: openwrt-router
+        groups: openwrt
+        ansible_host: "{{ _openwrt_ip }}"
+        ansible_user: root
+        ansible_ssh_common_args: >-
+          -o ProxyJump=root@{{ ansible_host }}
+          -o StrictHostKeyChecking=no
+          -o UserKnownHostsFile=/dev/null
+          -o ConnectTimeout=10
+
+- name: Apply security hardening
+  hosts: openwrt
+  gather_facts: false
+  tasks:
+    - name: Include security hardening tasks
+      ansible.builtin.include_role:
+        name: openwrt_configure
+        tasks_from: security.yml
+```
+
+### Per-feature cleanup pattern
+
+Per-feature cleanup runs only the feature's rollback tag:
+
+```yaml
+# molecule/openwrt-security/cleanup.yml
+---
+- name: Rollback security hardening
+  ansible.builtin.import_playbook: ../../playbooks/cleanup.yml
+  tags: [openwrt-security-rollback]
+```
+
+### Running per-feature tests
+
+```bash
+# Establish baseline (once, or when baseline is stale)
+molecule converge
+
+# Iterate on a feature
+molecule test -s openwrt-security     # converge + verify + cleanup
+molecule converge -s openwrt-security # apply only (for debugging)
+molecule verify -s openwrt-security   # check only (after manual fixes)
+
+# Full integration (before commit)
+molecule test
+```
+
 ## Before running tests
 
 1. Source test env: `set -a; source test.env; set +a`

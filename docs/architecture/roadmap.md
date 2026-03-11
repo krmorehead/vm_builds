@@ -1,6 +1,6 @@
 # Roadmap
 
-## Current State (v0.1)
+## Current State (v1.0)
 
 A single playbook that provisions and configures an OpenWrt router VM on Proxmox with:
 
@@ -15,40 +15,76 @@ A single playbook that provisions and configures an OpenWrt router VM on Proxmox
 - Integration test framework (Molecule) against a dedicated test node.
 - LLM-optimized rules and skills for AI-assisted development continuity.
 
+## Active Projects
+
+Project plans live in `docs/projects/`. Each follows the conventions in the
+`project-planning` skill: milestones with inline verify, rollback, and
+dependency tracking.
+
+### `2026-03-09-01` OpenWrt Router (Hardening & Features)
+
+Establishes the **baseline testing model** and **per-feature rollback
+conventions**, then adds security hardening, VLANs, encrypted DNS, and mesh
+enhancements on top of the existing router.
+
+Key deliverables:
+- Per-feature molecule scenarios (fast iteration without full rebuild)
+- Per-feature rollback tags in `cleanup.yml`
+- Root password, SSH keys, banIP intrusion prevention
+- VLAN segmentation (management, IoT, guest)
+- Encrypted upstream DNS via `https-dns-proxy` (DoH)
+- Dawn client steering for 802.11k/v/r mesh
+
+Blocked milestones (waiting on LXC projects):
+- Pi-hole DNS forwarding chain
+- Syslog forwarding to rsyslog collector
+- Prometheus metrics export
+
+### `2026-03-09-00` Shared Infrastructure
+
+Framework for LXC container provisioning, iGPU detection, VMID allocation,
+flavor groups, display-exclusive orchestration, and auto-start configuration.
+
+Key deliverables:
+- `proxmox_lxc` shared role (parameterized, reusable)
+- `proxmox_igpu` detection and fact export
+- Full VMID allocation scheme (100–699)
+- Inventory flavor groups and build profiles
+- Display-exclusive hookscripts
+- Resource validation pre-flight
+
 ## Short-Term Goals
 
-### OpenWrt Hardening
+### OpenWrt Hardening (project 01, M1)
 - Set a root password and deploy SSH keys (disable password auth).
-- Configure syslog forwarding to a central log server.
-- Enable automatic security updates via `opkg` scheduled task.
-- Install and configure `banIP` or `crowdsec` for intrusion prevention.
+- Install and configure `banIP` for intrusion prevention.
+- Firewall tightening: SYN flood protection, invalid packet drop.
 
-### DNS and Ad Blocking
-- Install and configure `adguardhome` or `banIP` for DNS-level filtering.
-- Configure upstream DNS (DoH/DoT) for encrypted DNS resolution.
-
-### VLAN Support
+### VLAN Support (project 01, M2)
 - Tag LAN ports with VLAN IDs for network segmentation (IoT, guest, management).
 - Create separate firewall zones and DHCP pools per VLAN.
 
-### Multi-Node Mesh
-- Deploy the same playbook to multiple Proxmox nodes, each running an OpenWrt VM.
-- Mesh nodes auto-discover each other via 802.11s and form a unified LAN.
-- Centralized configuration of mesh parameters across all nodes.
+### Encrypted DNS (project 01, M3)
+- Install `https-dns-proxy` for DNS-over-HTTPS to upstream resolvers.
+- DNS rebinding protection in dnsmasq.
 
-### Monitoring
-- Export Proxmox and OpenWrt metrics (CPU, memory, bandwidth, WiFi clients).
-- Deploy a lightweight monitoring stack (Prometheus node_exporter + Grafana, or similar).
+### Multi-Node Mesh (project 01, M4)
+- Deploy Dawn (802.11k/v/r) for client steering across mesh nodes.
+- Centralized mesh configuration across all nodes.
+
+### LXC Framework (project 00, M1–M4)
+- Shared `proxmox_lxc` role for container provisioning.
+- iGPU detection for media containers.
+- Flavor groups and build profiles in inventory.
 
 ## Medium-Term Goals
 
-### Additional VM Types
-- The project name is `vm_builds` (plural) -- the architecture supports multiple VM roles beyond OpenWrt.
-- Potential candidates: Home Assistant, Pi-hole, NAS/file server, media server, development environments.
-- Each VM type gets its own role pair: `<type>_vm` (provisioning) and `<type>_configure` (setup).
-- VMID ranges are pre-allocated: 100-series for network, 200-series for services.
-- Shared infrastructure roles (`proxmox_bridges`, `proxmox_backup`) already run once per host and export facts for all VMs.
-- See `docs/architecture/overview.md` for the expansion pattern and `.cursor/skills/vm-lifecycle/SKILL.md` for step-by-step guidance.
+### Additional VM/LXC Types
+- The project name is `vm_builds` (plural) — the architecture supports multiple service types.
+- Near-term candidates: WireGuard VPN, Pi-hole, rsyslog, Netdata.
+- Each service type gets its own role pair: `<type>_lxc` + `<type>_configure` (or `<type>_vm`).
+- VMID ranges pre-allocated: 100s network, 200s services, 300s media, 400s desktop, 500s observability, 600s gaming.
+- See `docs/architecture/overview.md` for the full target architecture and `.cursor/skills/vm-lifecycle/SKILL.md` for implementation patterns.
 
 ### Backup and Recovery
 - Automated VM snapshots before configuration changes.
@@ -67,7 +103,7 @@ A single playbook that provisions and configures an OpenWrt router VM on Proxmox
 ## Long-Term Vision
 
 ### Infrastructure as Code for the Home Network
-- The entire home network -- routing, switching, WiFi, DNS, firewall, VPN, monitoring -- is defined in this repository.
+- The entire home network — routing, switching, WiFi, DNS, firewall, VPN, monitoring — is defined in this repository.
 - A new Proxmox node can be added to the inventory and fully provisioned in minutes.
 - Configuration drift is detected and corrected by scheduled playbook runs.
 - The repository serves as living documentation of the network topology.

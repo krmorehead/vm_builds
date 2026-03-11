@@ -195,11 +195,34 @@ Current managed files:
 - `/tmp/openwrt.img` (edge case: left behind if build fails mid-upload)
 - `.state/addresses.json` (controller, via `delegate_to: localhost`)
 
+## Rollback conventions
+
+Every feature MUST define a rollback procedure. See the `rollback-patterns`
+skill for full details. Summary:
+
+- Per-feature rollback uses tags in `cleanup.yml`: `--tags <feature>-rollback`
+- Rollback tags use the `never` meta-tag so they don't run during full cleanup
+- Each feature's project plan milestone includes inline rollback steps
+- `deploy_stamp` records which features are applied; rollback checks this
+
+```yaml
+# cleanup.yml pattern for per-feature rollback
+- name: Rollback <feature>
+  hosts: <target_group>
+  tags: [<feature>-rollback, never]
+  gather_facts: false
+  tasks:
+    - name: Revert changes
+      # ... undo UCI, remove packages, restart services
+```
+
 ## Test strategy
 
-- Molecule converge provisions ALL VMs in sequence (site.yml runs everything).
-- Molecule verify checks each VM type with independent assertions.
+- `molecule/default/` is the full integration test (rebuilds everything from scratch).
+- Per-feature scenarios (`molecule/<feature>/`) test incremental changes on top of the baseline.
+- Per-feature scenarios assume the baseline exists (router VM running). They do NOT rebuild.
+- Full `molecule test` before committing. Per-feature scenarios for fast iteration during development.
+- See the `ansible-testing` skill for baseline model details and per-feature scenario setup.
 - Cleanup destroys ALL VMs via `qm list` iteration — not hardcoded VMIDs.
-- For VM-specific test scenarios, add separate Molecule scenarios: `molecule/<type>/`.
 - Reproduce production bugs on the test machine first (`test.env`). Only involve production when the test machine cannot reproduce.
 - Use TDD: write the verify assertion first, confirm it fails, implement the fix, confirm it passes.
