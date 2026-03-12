@@ -61,7 +61,10 @@
 - name: Remove cached LXC templates on LAN host  # noqa command-instead-of-shell
   ansible.builtin.shell:
     cmd: >-
-      {{ _cleanup_ssh }} "rm -f /var/lib/vz/template/cache/debian-*.tar.zst /var/lib/vz/template/cache/openwrt-*.tar.gz"
+      {{ _cleanup_ssh }} "rm -f
+      /var/lib/vz/template/cache/debian-*.tar.zst
+      /var/lib/vz/template/cache/openwrt-*.tar.gz
+      /var/lib/vz/template/cache/pihole-*.tar.zst"
   when: _host_reachable | bool
   changed_when: true
   failed_when: false

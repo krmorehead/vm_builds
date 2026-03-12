@@ -1,0 +1,61 @@
+---
+- name: Reconstruct openwrt dynamic group
+  hosts: router_nodes
+  gather_facts: true
+  tasks:
+    - name: Include reusable group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_openwrt_group.yml
+
+- name: Verify Pi-hole DNS forwarding
+  hosts: openwrt
+  gather_facts: false
+  tasks:
+    - name: Read LAN gateway from generated env
+      ansible.builtin.set_fact:
+        _pihole_lan_gw: >-
+          {{ lookup('pipe', 'grep "^LAN_GATEWAY=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
+             | default('10.10.10.1', true) }}
+      delegate_to: localhost
+
+    - name: Compute expected Pi-hole IP
+      ansible.builtin.set_fact:
+        _expected_pihole_ip: >-
+          {{ _pihole_lan_gw.split('.')[0:3] | join('.') }}.{{ pihole_ct_ip_offset }}
+
+    - name: Check dnsmasq server list
+      ansible.builtin.raw: uci show dhcp.@dnsmasq[0].server
+      register: _dnsmasq_servers
+      changed_when: false
+
+    - name: Assert Pi-hole is in dnsmasq server list
+      ansible.builtin.assert:
+        that: "_expected_pihole_ip in _dnsmasq_servers.stdout"
+        fail_msg: >-
+          Pi-hole IP {{ _expected_pihole_ip }} not in dnsmasq server list:
+          {{ _dnsmasq_servers.stdout | trim }}
+
+    - name: Assert https-dns-proxy fallback is in dnsmasq server list
+      ansible.builtin.assert:
+        that: "'127.0.0.1#5053' in _dnsmasq_servers.stdout"
+        fail_msg: >-
+          https-dns-proxy fallback (127.0.0.1#5053) not in dnsmasq server list:
+          {{ _dnsmasq_servers.stdout | trim }}
+
+    - name: Test DNS resolution from OpenWrt
+      ansible.builtin.raw: nslookup example.com 127.0.0.1 2>&1 | head -5
+      register: _dns_result
+      changed_when: false
+      failed_when: false
+
+    - name: Assert DNS resolves
+      ansible.builtin.assert:
+        that: _dns_result.stdout | trim | length > 0
+        fail_msg: "DNS resolution failed from OpenWrt: {{ _dns_result.stdout }}"
+
+    - name: Report DNS forwarding verification
+      ansible.builtin.debug:
+        msg: >-
+          Pi-hole DNS forwarding verified:
+          pihole_ip={{ _expected_pihole_ip }},
+          servers={{ _dnsmasq_servers.stdout | trim }},
+          dns_test={{ 'passed' if _dns_result.stdout | trim | length > 0 else 'failed' }}

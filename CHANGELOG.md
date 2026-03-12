@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Pi-hole DNS filtering** -- LXC container (VMID 102, 256 MB RAM, 2 GB disk)
+  running Pi-hole for network-wide DNS-level ad and tracker blocking. Custom
+  Debian 12 template with Pi-hole pre-installed (built by `build-images.sh`).
+  `pihole_lxc` role provisions the container on the LAN subnet; `pihole_configure`
+  role applies host-specific settings (web password, upstream DNS, gravity
+  update). `openwrt_configure/tasks/pihole_dns.yml` configures OpenWrt dnsmasq
+  to forward DNS to Pi-hole with https-dns-proxy as fallback. Per-feature
+  molecule scenarios (`pihole-lxc`, `openwrt-pihole-dns`), rollback tags
+  (`pihole-rollback`, `openwrt-pihole-dns-rollback`), and reusable group
+  reconstruction (`tasks/reconstruct_pihole_group.yml`).
 - **WireGuard VPN client** -- first LXC container in the project. Lightweight
   container (VMID 101, 128 MB RAM, 1 GB disk) running a WireGuard client
   with persistent tunnel, IP forwarding, and iptables NAT/MASQUERADE. All

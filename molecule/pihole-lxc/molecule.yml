@@ -13,29 +13,7 @@ platforms:
   - name: home
     groups:
       - proxmox
-      - router_nodes
-      - vpn_nodes
       - dns_nodes
-      - wifi_nodes
-      - monitoring_nodes
-      - service_nodes
-      - media_nodes
-      - desktop_nodes
-  - name: mesh1
-    groups:
-      - proxmox
-      - lan_hosts
-      - vpn_nodes
-      - wifi_nodes
-  - name: ai
-    groups:
-      - proxmox
-      - vpn_nodes
-  - name: mesh2
-    groups:
-      - proxmox
-      - vpn_nodes
-      - wifi_nodes
 
 provisioner:
   name: ansible
@@ -49,13 +27,7 @@ provisioner:
       pipelining: true
   env:
     HOME_API_TOKEN: ${HOME_API_TOKEN}
-    MESH1_API_TOKEN: ${MESH1_API_TOKEN}
-    MESH2_API_TOKEN: ${MESH2_API_TOKEN}
-    AI_API_TOKEN: ${AI_API_TOKEN}
     PRIMARY_HOST: ${PRIMARY_HOST}
-    AI_HOST: ${AI_HOST}
-    MESH_2_HOST: ${MESH_2_HOST}
-    MESH_KEY: ${MESH_KEY}
     PIHOLE_WEB_PASSWORD: ${PIHOLE_WEB_PASSWORD}
   inventory:
     links:
@@ -68,7 +40,6 @@ verifier:
 scenario:
   test_sequence:
     - dependency
-    - cleanup
     - syntax
     - converge
     - verify

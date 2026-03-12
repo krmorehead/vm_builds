@@ -111,6 +111,23 @@
 
 # ── Phase 3: Services (flavor groups span all hosts) ─────────────
 
+- name: Provision Pi-hole LXC
+  hosts: dns_nodes
+  gather_facts: false
+  tags: [pihole]
+  roles:
+    - pihole_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: pihole_lxc
+
+- name: Configure Pi-hole
+  hosts: pihole
+  gather_facts: true
+  tags: [pihole]
+  roles:
+    - pihole_configure
+
 - name: Provision WireGuard LXC
   hosts: vpn_nodes
   gather_facts: false
@@ -222,6 +239,36 @@
     - role: deploy_stamp
       vars:
         deploy_stamp_play: openwrt_mesh
+
+- name: Reconstruct openwrt group for Pi-hole DNS forwarding
+  hosts: router_nodes
+  gather_facts: true
+  tags:
+    - openwrt-pihole-dns
+    - openwrt-pihole-dns-rollback
+    - never
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: ../tasks/reconstruct_openwrt_group.yml
+
+- name: Apply Pi-hole DNS forwarding to OpenWrt
+  hosts: openwrt
+  gather_facts: false
+  tags: [openwrt-pihole-dns, never]
+  tasks:
+    - name: Include Pi-hole DNS tasks
+      ansible.builtin.include_role:
+        name: openwrt_configure
+        tasks_from: pihole_dns.yml
+
+- name: Record Pi-hole DNS forwarding
+  hosts: router_nodes
+  gather_facts: false
+  tags: [openwrt-pihole-dns, never]
+  roles:
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: openwrt_pihole_dns
 
 - name: Clean up bootstrap networking
   hosts: proxmox:!lan_hosts

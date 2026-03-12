@@ -30,6 +30,13 @@ proxmox_lxc_template_path: images/debian-12-standard_12.12-1_amd64.tar.zst
 openwrt_lxc_template: openwrt-mesh-lxc-24.10.0-x86-64-rootfs.tar.gz
 openwrt_lxc_template_path: images/openwrt-mesh-lxc-24.10.0-x86-64-rootfs.tar.gz
 
+# ── Pi-hole LXC ──────────────────────────────────────────────────
+# Custom image built by build-images.sh: Debian 12 + Pi-hole pre-installed.
+# Run ./build-images.sh before first deploy.
+pihole_lxc_template: pihole-debian-12-amd64.tar.zst
+pihole_lxc_template_path: images/pihole-debian-12-amd64.tar.zst
+pihole_ct_ip_offset: 10
+
 # ── OpenWrt Router (VM) ──────────────────────────────────────────
 # Custom image built by build-images.sh: mesh/security/DNS packages baked in.
 # Run ./build-images.sh before first deploy.

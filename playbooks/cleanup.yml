@@ -12,6 +12,7 @@
     - openwrt-vlans-rollback
     - openwrt-dns-rollback
     - openwrt-mesh-rollback
+    - openwrt-pihole-dns-rollback
     - never
   tasks:
     - name: Include group reconstruction
@@ -112,6 +113,37 @@
         opkg remove dawn 2>/dev/null
         crontab -l 2>/dev/null | grep -v 'mesh_peer' | crontab - 2>/dev/null
         uci commit
+      changed_when: true
+
+# ── Per-feature rollback: Pi-hole container ───────────────────────
+
+- name: Rollback Pi-hole container
+  hosts: dns_nodes
+  gather_facts: false
+  tags: [pihole-rollback, never]
+  tasks:
+    - name: Stop and destroy Pi-hole container
+      ansible.builtin.shell:
+        cmd: |
+          pct stop {{ pihole_ct_id }} 2>/dev/null || true
+          sleep 2
+          pct destroy {{ pihole_ct_id }} --purge 2>/dev/null || true
+        executable: /bin/bash
+      changed_when: true
+
+# ── Per-feature rollback: Pi-hole DNS forwarding ──────────────────
+
+- name: Rollback Pi-hole DNS forwarding
+  hosts: openwrt
+  gather_facts: false
+  tags: [openwrt-pihole-dns-rollback, never]
+  tasks:
+    - name: Remove Pi-hole from dnsmasq and keep https-dns-proxy only
+      ansible.builtin.raw: |
+        while uci -q delete dhcp.@dnsmasq[0].server 2>/dev/null; do true; done
+        uci add_list dhcp.@dnsmasq[0].server='127.0.0.1#5053'
+        uci commit dhcp
+        /etc/init.d/dnsmasq restart
       changed_when: true
 
 # ── Per-feature rollback: WireGuard VPN ───────────────────────────
@@ -337,7 +369,7 @@
 
     - name: Remove cached LXC templates
       ansible.builtin.shell:
-        cmd: rm -f /var/lib/vz/template/cache/debian-*.tar.zst /var/lib/vz/template/cache/openwrt-*.tar.gz
+        cmd: rm -f /var/lib/vz/template/cache/debian-*.tar.zst /var/lib/vz/template/cache/openwrt-*.tar.gz /var/lib/vz/template/cache/pihole-*.tar.zst
         executable: /bin/bash
       changed_when: true
       failed_when: false

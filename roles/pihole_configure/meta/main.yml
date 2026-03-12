@@ -1,0 +1,13 @@
+---
+dependencies: []
+
+galaxy_info:
+  author: kyle
+  license: proprietary
+  role_name: pihole_configure
+  description: Configure Pi-hole DNS filtering with host-specific settings
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm

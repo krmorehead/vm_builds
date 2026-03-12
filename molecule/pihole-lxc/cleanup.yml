@@ -1,0 +1,22 @@
+---
+- name: Destroy Pi-hole container
+  hosts: dns_nodes
+  gather_facts: false
+  vars:
+    pihole_ct_id: 102
+  tasks:
+    - name: Stop Pi-hole container
+      ansible.builtin.command:
+        cmd: pct stop {{ pihole_ct_id }}
+      failed_when: false
+      changed_when: true
+
+    - name: Wait for container to stop
+      ansible.builtin.pause:
+        seconds: 2
+
+    - name: Destroy Pi-hole container
+      ansible.builtin.command:
+        cmd: pct destroy {{ pihole_ct_id }} --purge
+      failed_when: false
+      changed_when: true

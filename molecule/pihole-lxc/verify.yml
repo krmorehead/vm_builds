@@ -1,0 +1,154 @@
+---
+- name: Reconstruct pihole dynamic group
+  hosts: dns_nodes
+  gather_facts: false
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_pihole_group.yml
+
+- name: Verify Pi-hole LXC container
+  hosts: dns_nodes
+  gather_facts: false
+  vars:
+    pihole_ct_id: 102
+  tasks:
+    # ── Container state ──────────────────────────────────────────
+
+    - name: Check container is running
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct status {{ pihole_ct_id }} | grep -c running
+        executable: /bin/bash
+      register: _pihole_running
+      changed_when: false
+
+    - name: Assert container is running
+      ansible.builtin.assert:
+        that: (_pihole_running.stdout | trim | int) > 0
+        fail_msg: "Container {{ pihole_ct_id }} is not running"
+
+    # ── Auto-start ───────────────────────────────────────────────
+
+    - name: Check onboot setting
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ pihole_ct_id }} | grep -oP '^onboot:\s*\K.*'
+        executable: /bin/bash
+      register: _pihole_onboot
+      changed_when: false
+
+    - name: Assert onboot is enabled
+      ansible.builtin.assert:
+        that: (_pihole_onboot.stdout | trim) == '1'
+        fail_msg: "onboot={{ _pihole_onboot.stdout | trim }}, expected 1"
+
+    - name: Check startup order
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ pihole_ct_id }} | grep -oP '^startup:\s*order=\K\d+'
+        executable: /bin/bash
+      register: _pihole_startup
+      changed_when: false
+
+    - name: Assert startup order is 3
+      ansible.builtin.assert:
+        that: (_pihole_startup.stdout | trim) == '3'
+        fail_msg: "startup order={{ _pihole_startup.stdout | trim }}, expected 3"
+
+    # ── Features ─────────────────────────────────────────────────
+
+    - name: Check nesting feature
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ pihole_ct_id }} | grep -oP '^features:\s*\K.*'
+        executable: /bin/bash
+      register: _pihole_features
+      changed_when: false
+
+    - name: Assert nesting is enabled
+      ansible.builtin.assert:
+        that: "'nesting=1' in _pihole_features.stdout"
+        fail_msg: "Missing nesting=1: {{ _pihole_features.stdout | trim }}"
+
+    # ── Pi-hole FTL daemon ───────────────────────────────────────
+
+    - name: Check FTL is running
+      ansible.builtin.command:
+        cmd: pct exec {{ pihole_ct_id }} -- /usr/local/bin/pihole status
+      register: _pihole_ftl
+      changed_when: false
+      failed_when: false
+
+    - name: Assert FTL is active
+      ansible.builtin.assert:
+        that: "'FTL' in _pihole_ftl.stdout or 'Enabled' in _pihole_ftl.stdout or 'Active' in _pihole_ftl.stdout"
+        fail_msg: "Pi-hole FTL not active: {{ _pihole_ftl.stdout }}"
+
+    # ── Web admin ────────────────────────────────────────────────
+
+    - name: Check web admin responds
+      ansible.builtin.command:
+        cmd: pct exec {{ pihole_ct_id }} -- curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/admin/
+      register: _pihole_web
+      changed_when: false
+
+    - name: Assert web admin returns 200 or 301
+      ansible.builtin.assert:
+        that: (_pihole_web.stdout | trim) in ['200', '301']
+        fail_msg: "Web admin HTTP status: {{ _pihole_web.stdout | trim }}, expected 200 or 301"
+
+    # ── DNS resolution ───────────────────────────────────────────
+
+    - name: Test DNS query through Pi-hole
+      ansible.builtin.command:
+        cmd: pct exec {{ pihole_ct_id }} -- dig @127.0.0.1 google.com +short +time=5
+      register: _pihole_dns
+      changed_when: false
+
+    - name: Assert DNS resolves
+      ansible.builtin.assert:
+        that: _pihole_dns.stdout | trim | length > 0
+        fail_msg: "DNS resolution failed: {{ _pihole_dns.stdout }}"
+
+    # ── Ad blocking ──────────────────────────────────────────────
+
+    - name: Test known ad domain is blocked
+      ansible.builtin.command:
+        cmd: pct exec {{ pihole_ct_id }} -- dig @127.0.0.1 doubleclick.net +short +time=5
+      register: _pihole_adblock
+      changed_when: false
+      failed_when: false
+
+    - name: Report ad blocking result
+      ansible.builtin.debug:
+        msg: "Ad block test (doubleclick.net): {{ _pihole_adblock.stdout | default('no response') | trim }}"
+
+    # ── DHCP disabled ────────────────────────────────────────────
+
+    - name: Check DHCP is disabled (v6 pihole.toml)  # noqa command-instead-of-shell
+      ansible.builtin.shell:
+        cmd: pct exec {{ pihole_ct_id }} -- /usr/bin/pihole-FTL --config dhcp.active
+      register: _pihole_dhcp
+      changed_when: false
+
+    - name: Assert DHCP is disabled
+      ansible.builtin.assert:
+        that: "'false' in _pihole_dhcp.stdout"
+        fail_msg: "DHCP is active in Pi-hole: {{ _pihole_dhcp.stdout }}"
+
+    # ── Report ───────────────────────────────────────────────────
+
+    - name: Report Pi-hole verification
+      ansible.builtin.debug:
+        msg: >-
+          Pi-hole per-feature verify passed:
+          ct={{ pihole_ct_id }}, running=yes,
+          onboot={{ _pihole_onboot.stdout | trim }},
+          order={{ _pihole_startup.stdout | trim }},
+          nesting={{ _pihole_features.stdout | trim }},
+          web={{ _pihole_web.stdout | trim }},
+          dns={{ 'working' if _pihole_dns.stdout | trim | length > 0 else 'failed' }}

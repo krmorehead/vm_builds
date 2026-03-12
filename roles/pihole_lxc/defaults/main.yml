@@ -1,0 +1,11 @@
+---
+pihole_ct_hostname: pihole
+pihole_ct_memory: 256
+pihole_ct_cores: 1
+pihole_ct_disk: "2"
+pihole_ct_template: "{{ pihole_lxc_template }}"
+pihole_ct_template_path: "{{ pihole_lxc_template_path }}"
+pihole_ct_onboot: true
+pihole_ct_startup_order: 3
+pihole_ct_features:
+  - "nesting=1"

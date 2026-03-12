@@ -85,12 +85,15 @@ Phase 2: LAN satellites (reachable after OpenWrt creates the LAN)
            deploy_stamp: infrastructure
 
 Phase 3: Services (flavor groups span both primary + LAN hosts)
-  Play 7: wireguard_lxc (vpn_nodes)       tag: wireguard
+  Play 7: pihole_lxc (dns_nodes)          tag: pihole
+           deploy_stamp: pihole_lxc
+  Play 8: pihole_configure (pihole)       tag: pihole
+  Play 9: wireguard_lxc (vpn_nodes)       tag: wireguard
            deploy_stamp: wireguard_lxc
-  Play 8: wireguard_configure (wireguard) tag: wireguard
-  Play 9: openwrt_mesh_lxc (wifi_nodes:!router_nodes) tag: mesh-wifi
+  Play 10: wireguard_configure (wireguard) tag: wireguard
+  Play 11: openwrt_mesh_lxc (wifi_nodes:!router_nodes) tag: mesh-wifi
            deploy_stamp: openwrt_mesh_lxc
-  Play 10: openwrt_mesh_configure (openwrt_mesh) tag: mesh-wifi
+  Play 12: openwrt_mesh_configure (openwrt_mesh) tag: mesh-wifi
 
 Per-feature plays (opt-in via --tags, tagged with [never])
 Bootstrap cleanup (proxmox:!lan_hosts)    tag: cleanup
@@ -190,12 +193,15 @@ All VMIDs defined in `group_vars/all.yml`.
 | `.state/addresses.json` | Cached host IPs for cross-run discovery (gitignored) |
 | `tasks/reconstruct_openwrt_group.yml` | Reusable dynamic group reconstruction for per-feature scenarios and rollback |
 | `tasks/reconstruct_wireguard_group.yml` | Reusable dynamic group reconstruction for WireGuard |
+| `tasks/reconstruct_pihole_group.yml` | Reusable dynamic group reconstruction for Pi-hole |
 | `tasks/bootstrap_lan_host.yml` | Reusable bootstrap for LAN hosts (DHCP lease + API token) |
 | `tasks/cleanup_lan_host.yml` | Reusable per-LAN-host cleanup (SSH from primary host) |
 | `molecule/default/` | Full integration tests (home, mesh1, ai, mesh2 — 4-node) |
 | `molecule/default/cleanup_lan_host.yml` | Per-LAN-host cleanup tasks for test scenarios |
 | `molecule/openwrt-*/` | Per-feature scenarios (security, vlans, dns, mesh) |
 | `molecule/wireguard-lxc/` | Per-feature scenario for WireGuard VPN container |
+| `molecule/pihole-lxc/` | Per-feature scenario for Pi-hole DNS container |
+| `molecule/openwrt-pihole-dns/` | Per-feature scenario for OpenWrt DNS forwarding to Pi-hole |
 | `molecule/mesh1-infra/` | Lightweight infra-only on mesh1 (quick iteration) |
 
 ## Adding a new LXC service — checklist

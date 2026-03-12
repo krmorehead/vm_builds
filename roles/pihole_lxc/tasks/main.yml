@@ -1,0 +1,64 @@
+---
+# ── Verify Pi-hole template exists ───────────────────────────────
+- name: Check Pi-hole LXC template exists on controller
+  ansible.builtin.stat:
+    path: "{{ role_path }}/../../{{ pihole_ct_template_path }}"
+  register: _pihole_template_stat
+  delegate_to: localhost
+
+- name: Fail if Pi-hole template is missing
+  ansible.builtin.fail:
+    msg: >-
+      Pi-hole template not found: {{ pihole_ct_template_path }}.
+      Run ./build-images.sh to build it.
+  when: not (_pihole_template_stat.stat.exists | default(false))
+
+# ── Determine container network ─────────────────────────────────
+# dns_nodes are always behind OpenWrt. No WAN-connected case needed.
+
+- name: Read LAN gateway from generated env
+  ansible.builtin.set_fact:
+    _lan_gateway: >-
+      {{ lookup('pipe', 'grep "^LAN_GATEWAY=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
+         | default('10.10.10.1', true) }}
+    _lan_cidr: >-
+      {{ lookup('pipe', 'grep "^LAN_CIDR=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
+         | default('24', true) }}
+
+- name: Compute Pi-hole container IP
+  ansible.builtin.set_fact:
+    _pihole_ct_ip: >-
+      {{ _lan_gateway.split('.')[0:3] | join('.') }}.{{ pihole_ct_ip_offset }}
+
+- name: Report Pi-hole container IP assignment
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: pihole IP={{ _pihole_ct_ip }}/{{ _lan_cidr }}
+      gw={{ _lan_gateway }} (OpenWrt LAN)
+
+# ── Provision via shared proxmox_lxc role ────────────────────────
+
+- name: Provision Pi-hole LXC container
+  ansible.builtin.include_role:
+    name: proxmox_lxc
+  vars:
+    lxc_ct_id: "{{ pihole_ct_id }}"
+    lxc_ct_hostname: "{{ pihole_ct_hostname }}"
+    lxc_ct_dynamic_group: pihole
+    lxc_ct_memory: "{{ pihole_ct_memory }}"
+    lxc_ct_cores: "{{ pihole_ct_cores }}"
+    lxc_ct_disk: "{{ pihole_ct_disk }}"
+    lxc_ct_onboot: "{{ pihole_ct_onboot }}"
+    lxc_ct_startup_order: "{{ pihole_ct_startup_order }}"
+    lxc_ct_features: "{{ pihole_ct_features }}"
+    lxc_ct_template: "{{ pihole_ct_template }}"
+    lxc_ct_template_path: "{{ pihole_ct_template_path }}"
+    lxc_ct_ip: "{{ _pihole_ct_ip }}/{{ _lan_cidr }}"
+    lxc_ct_gateway: "{{ _lan_gateway }}"
+    lxc_ct_nameserver: "{{ _lan_gateway }}"
+    lxc_ct_bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
+
+- name: Export Pi-hole static IP for downstream roles
+  ansible.builtin.set_fact:
+    pihole_static_ip: "{{ _pihole_ct_ip }}"
+    cacheable: true

@@ -251,6 +251,12 @@
         fail_msg: "deploy_stamp missing wireguard_lxc entry: {{ stamp.plays.keys() | list }}"
       when: "'vpn_nodes' in group_names"
 
+    - name: Assert stamp contains pihole_lxc (dns nodes only)
+      ansible.builtin.assert:
+        that: "'pihole_lxc' in stamp.plays"
+        fail_msg: "deploy_stamp missing pihole_lxc entry: {{ stamp.plays.keys() | list }}"
+      when: "'dns_nodes' in group_names"
+
     - name: Assert stamp contains openwrt_mesh_lxc (mesh wifi nodes only)
       ansible.builtin.assert:
         that: "'openwrt_mesh_lxc' in stamp.plays"
@@ -839,7 +845,10 @@
 
     - name: Read LAN_GATEWAY value from generated env  # noqa command-instead-of-shell
       ansible.builtin.shell:
-        cmd: grep '^LAN_GATEWAY=' "{{ playbook_dir }}/../../test.env.generated" | cut -d= -f2
+        cmd: |
+          set -o pipefail
+          grep '^LAN_GATEWAY=' "{{ playbook_dir }}/../../test.env.generated" | cut -d= -f2
+        executable: /bin/bash
       register: _generated_lan_gw
       delegate_to: localhost
       changed_when: false
@@ -866,7 +875,151 @@
           Mesh={{ mesh_iface_count.stdout | default('0') | trim }},
           LAN_GATEWAY(generated)={{ _generated_lan_gw.stdout | trim }}
 
-# ── Play 3: WireGuard assertions (all vpn_nodes) ─────────────────
+# ── Play 3: Pi-hole assertions (dns_nodes) ───────────────────────
+
+- name: Verify Pi-hole LXC on DNS nodes
+  hosts: dns_nodes
+  gather_facts: false
+  tasks:
+    # ── Pi-hole container ──────────────────────────────────────────
+
+    - name: Check Pi-hole container is running
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct status {{ pihole_ct_id }} | grep -c running
+        executable: /bin/bash
+      register: pihole_ct_running
+      changed_when: false
+
+    - name: Assert Pi-hole container is running
+      ansible.builtin.assert:
+        that: (pihole_ct_running.stdout | trim | int) > 0
+        fail_msg: "Container {{ pihole_ct_id }} is not running on {{ inventory_hostname }}"
+
+    - name: Get Pi-hole container onboot setting
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ pihole_ct_id }} | grep -oP '^onboot:\s*\K.*'
+        executable: /bin/bash
+      register: pihole_ct_onboot
+      changed_when: false
+
+    - name: Assert Pi-hole container starts on boot
+      ansible.builtin.assert:
+        that: (pihole_ct_onboot.stdout | trim) == '1'
+        fail_msg: >-
+          Container {{ pihole_ct_id }} on {{ inventory_hostname }}
+          onboot={{ pihole_ct_onboot.stdout | trim }}, expected 1
+
+    - name: Get Pi-hole container startup order
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ pihole_ct_id }} | grep -oP '^startup:\s*order=\K\d+'
+        executable: /bin/bash
+      register: pihole_ct_startup
+      changed_when: false
+
+    - name: Assert Pi-hole container has startup order 3
+      ansible.builtin.assert:
+        that: (pihole_ct_startup.stdout | trim) == '3'
+        fail_msg: >-
+          Container {{ pihole_ct_id }} on {{ inventory_hostname }}
+          startup order={{ pihole_ct_startup.stdout | trim }}, expected 3
+
+    - name: Get Pi-hole container features
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ pihole_ct_id }} | grep -oP '^features:\s*\K.*'
+        executable: /bin/bash
+      register: pihole_ct_features
+      changed_when: false
+
+    - name: Assert Pi-hole container has nesting enabled
+      ansible.builtin.assert:
+        that: "'nesting=1' in pihole_ct_features.stdout"
+        fail_msg: >-
+          Container {{ pihole_ct_id }} on {{ inventory_hostname }}
+          missing nesting=1 in features: {{ pihole_ct_features.stdout | trim }}
+
+    # ── Pi-hole FTL service ───────────────────────────────────────
+
+    - name: Check FTL daemon is running
+      ansible.builtin.command:
+        cmd: pct exec {{ pihole_ct_id }} -- /usr/local/bin/pihole status
+      register: pihole_ftl_status
+      changed_when: false
+      failed_when: false
+
+    - name: Assert FTL is active
+      ansible.builtin.assert:
+        that: "'FTL' in pihole_ftl_status.stdout or 'Enabled' in pihole_ftl_status.stdout or 'Active' in pihole_ftl_status.stdout"
+        fail_msg: "Pi-hole FTL not active: {{ pihole_ftl_status.stdout }}"
+
+    # ── Web admin ────────────────────────────────────────────────
+
+    - name: Check web admin responds
+      ansible.builtin.command:
+        cmd: pct exec {{ pihole_ct_id }} -- curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/admin/
+      register: pihole_web_status
+      changed_when: false
+
+    - name: Assert web admin is accessible
+      ansible.builtin.assert:
+        that: (pihole_web_status.stdout | trim) in ['200', '301']
+        fail_msg: "Web admin HTTP status: {{ pihole_web_status.stdout | trim }}"
+
+    # ── DNS resolution ───────────────────────────────────────────
+
+    - name: Test DNS query through Pi-hole
+      ansible.builtin.command:
+        cmd: pct exec {{ pihole_ct_id }} -- dig @127.0.0.1 google.com +short +time=5
+      register: pihole_dns_test
+      changed_when: false
+      retries: 3
+      delay: 5
+      until: pihole_dns_test.rc == 0 and (pihole_dns_test.stdout | trim | length > 0)
+
+    - name: Assert DNS resolves through Pi-hole
+      ansible.builtin.assert:
+        that: pihole_dns_test.stdout | trim | length > 0
+        fail_msg: "DNS resolution failed through Pi-hole"
+
+    # ── DHCP disabled ────────────────────────────────────────────
+
+    - name: Check DHCP is disabled in Pi-hole (v6 pihole.toml)  # noqa command-instead-of-shell
+      ansible.builtin.shell:
+        cmd: pct exec {{ pihole_ct_id }} -- /usr/bin/pihole-FTL --config dhcp.active
+      register: pihole_dhcp_check
+      changed_when: false
+
+    - name: Assert DHCP is disabled
+      ansible.builtin.assert:
+        that: "'false' in pihole_dhcp_check.stdout"
+        fail_msg: "DHCP is active in Pi-hole — should be disabled: {{ pihole_dhcp_check.stdout }}"
+
+    # ── deploy_stamp ─────────────────────────────────────────────
+
+    - name: Assert stamp contains pihole_lxc (dns nodes only)
+      ansible.builtin.assert:
+        that: "'pihole_lxc' in stamp.plays"
+        fail_msg: "deploy_stamp missing pihole_lxc entry: {{ stamp.plays.keys() | list }}"
+
+    - name: Report Pi-hole verification
+      ansible.builtin.debug:
+        msg: >-
+          Pi-hole verification passed on {{ inventory_hostname }}:
+          container={{ pihole_ct_id }}, running=yes,
+          onboot={{ pihole_ct_onboot.stdout | trim }},
+          order={{ pihole_ct_startup.stdout | trim }},
+          nesting={{ pihole_ct_features.stdout | trim }},
+          web={{ pihole_web_status.stdout | trim }},
+          dns={{ 'working' if pihole_dns_test.stdout | trim | length > 0 else 'failed' }}
+
+# ── Play 4: WireGuard assertions (all vpn_nodes) ─────────────────
 
 - name: Verify WireGuard LXC on VPN nodes
   hosts: vpn_nodes

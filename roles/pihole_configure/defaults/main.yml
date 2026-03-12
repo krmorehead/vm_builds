@@ -1,0 +1,9 @@
+---
+pihole_web_password: "{{ lookup('env', 'PIHOLE_WEB_PASSWORD') | default('', true) }}"
+pihole_upstream_dns_1: "1.1.1.1"
+pihole_upstream_dns_2: "1.0.0.1"
+pihole_query_logging_days: 7
+
+# pct exec uses a restricted PATH that excludes /usr/local/bin
+pihole_bin: /usr/local/bin/pihole
+pihole_ftl_bin: /usr/bin/pihole-FTL

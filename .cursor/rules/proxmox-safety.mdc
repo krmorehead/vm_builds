@@ -186,7 +186,9 @@ alwaysApply: true
 - All other hosts → containers use `ansible_default_ipv4.gateway/prefix` on the WAN bridge (`proxmox_wan_bridge`).
 - For WAN-connected hosts, offset container IPs by +200 to avoid collisions with LAN containers (e.g., .203 instead of .3).
 - WAN-connected containers MUST use `proxmox_wan_bridge` as their bridge. The default bridge (`proxmox_all_bridges[1]`) is the SECOND bridge, which on multi-NIC WAN hosts is typically connected to a different physical NIC than the management interface.
+- ALWAYS verify IP offsets for new services do not collide with existing services on the same subnet. WireGuard uses `wireguard_ct_ip_offset(3) + group_index` for up to N vpn_nodes. New service offsets must be above the max WireGuard IP. Current allocation: .1 OpenWrt, .2 Proxmox mgmt, .3-.6 WireGuard, .10 Pi-hole.
 - Previous bug: `wireguard-ai` container was on `vmbr1` (connected to `nic0`) but the host's internet was on `vmbr0` (connected to `nic1`). The container had a correct IP and route but zero L2 connectivity to the gateway.
+- Previous bug: Pi-hole at offset 5 collided with WireGuard on mesh1 (offset 3 + vpn_nodes index 2 = 5). Both containers claimed 10.10.10.5 on the same LAN. Tests passed because `pct exec` bypasses the network, but production would have ARP ambiguity. Fixed by moving Pi-hole to offset 10.
 
 ## Dynamic inventory and failed hosts
 - ALWAYS use `ansible_play_hosts` (not `ansible_play_hosts_all`) in `add_host` loops that register containers. `ansible_play_hosts_all` includes hosts that failed in earlier plays, leading to phantom container registrations for containers that were never created.
@@ -207,6 +209,11 @@ alwaysApply: true
 - WiFi kernel modules MUST be loaded on the HOST by the provisioning role (`openwrt_mesh_lxc`) BEFORE the container is created and the PHY is moved. The configure role (`openwrt_mesh_configure`) MUST NOT load modules.
 - Previous bug: `modprobe iwlwifi` ran inside the container via `pct_remote` after the PHY was already moved. The module reload created a new PHY in the host namespace. WiFi detection inside the container found zero radios.
 
+## pct exec PATH limitation
+- `pct exec` (and `lxc-attach`) uses a restricted PATH: `/sbin:/bin:/usr/sbin:/usr/bin`. Binaries in `/usr/local/bin/` (e.g., `pihole`) are NOT found.
+- ALWAYS use full paths for binaries in `/usr/local/bin/` or `/opt/` when running via `pct exec`, `pct_remote`, or `ansible.builtin.command` on containers.
+- Previous bug: `pihole -a -p` via `pct_remote` failed with `[Errno 2] No such file or directory: b'pihole'`. The binary was at `/usr/local/bin/pihole` but PATH didn't include it. Fixed by using `/usr/local/bin/pihole`.
+
 ## Shell syntax through pct_remote
 - `pct_remote` builds `/usr/sbin/pct exec <vmid> -- <cmd>` and sends it as a single string via SSH to the Proxmox host. The HOST's bash interprets the entire string before `pct exec` runs.
 - Semicolons (`;`), pipes (`|`), and `&&`/`||` are parsed by the HOST bash, NOT inside the container. Semicolons split commands — only the first runs in the container.
@@ -214,6 +221,18 @@ alwaysApply: true
 - ALWAYS wrap `raw:` commands that need shell features (semicolons, pipes, redirections) in `/bin/sh -c '...'`. Single quotes protect the payload from host bash. Busybox ash provides `PATH=/sbin:/usr/sbin:/bin:/usr/bin`.
 - Exception: `[ -x /path ] && echo yes || echo no` works WITHOUT sh -c because `[` is exec'd by lxc-attach, and `&&`/`||` chain at the host level (the echo output is captured by Ansible either way).
 - Previous bugs: (1) `for ... do ... done` via `pct_remote` caused syntax error — host bash can't parse compound commands passed to `pct exec`. (2) `export PATH="..."; opkg update` caused `lxc-attach: Failed to exec "export"` — export is a builtin, not a binary. The semicolon split meant `opkg update` ran on the HOST, not in the container.
+
+## Pi-hole v6 configuration
+- Pi-hole v6 uses `/etc/pihole/pihole.toml` (NOT `setupVars.conf` or `pihole-FTL.conf`). Both legacy files are absent in v6.
+- Pi-hole v6 uses FTL's embedded web server (NOT lighttpd). Do not try to manage `lighttpd.service`.
+- Use `/usr/bin/pihole-FTL --config <key> <value>` for programmatic configuration. Changes are applied immediately (FTL receives SIGHUP).
+- `pihole -a -p` still works for password setting (backward compat).
+- For unattended install, pre-seed `/etc/pihole/pihole.toml` with at least `dns.upstreams` before running the installer. The installer detects the file and treats the install as an upgrade, skipping interactive prompts. Create the `pihole` user/group first.
+- `PIHOLE_SKIP_OS_CHECK=true` is needed when installing in LXC containers — the installer's DNS-based OS check fails during fresh container setup.
+- ALWAYS run `pihole -g` (gravity update) BEFORE switching the container's `resolv.conf` to `127.0.0.1`. Gravity downloads blocklists from the internet, which needs working DNS. If you switch to localhost first, the gravity update hangs waiting for DNS that isn't fully ready yet.
+- Previous bug: Configure role set `resolv.conf` to `127.0.0.1`, restarted FTL, then ran `pihole -g`. The gravity update hung indefinitely because FTL's DNS wasn't fully initialized when the download started. Fix: move `resolv.conf` change to after gravity succeeds.
+- Previous bug: Configure role templated `setupVars.conf` and managed `lighttpd.service` — both failed because v6 doesn't use them.
+- Previous bug: Image build used `setupVars.conf` for unattended install (v5 approach). This worked via migration but is not the v6-native approach. Pre-seeding `pihole.toml` is the community standard.
 
 ## Documentation accuracy
 - When changing a role's exported facts, bridge names, device paths, or connection patterns, ALWAYS update `docs/architecture/` in the same commit.

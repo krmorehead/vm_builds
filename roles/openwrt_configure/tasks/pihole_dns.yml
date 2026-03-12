@@ -1,0 +1,82 @@
+---
+# Pi-hole DNS forwarding (Milestone 3)
+#
+# Configures OpenWrt's dnsmasq to forward DNS queries to Pi-hole.
+# Pi-hole is the primary upstream; https-dns-proxy (127.0.0.1#5053)
+# is the fallback when Pi-hole is unavailable.
+#
+# All tasks guarded by pihole_static_ip being defined.
+
+# ── Derive Pi-hole IP from LAN topology ──────────────────────────
+
+- name: Read LAN gateway from generated env
+  ansible.builtin.set_fact:
+    _pihole_lan_gateway: >-
+      {{ lookup('pipe', 'grep "^LAN_GATEWAY=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
+         | default('10.10.10.1', true) }}
+  delegate_to: localhost
+
+- name: Compute Pi-hole static IP
+  ansible.builtin.set_fact:
+    pihole_static_ip: >-
+      {{ _pihole_lan_gateway.split('.')[0:3] | join('.') }}.{{ pihole_ct_ip_offset }}
+
+- name: Report Pi-hole DNS forwarding target
+  ansible.builtin.debug:
+    msg: "Configuring dnsmasq to forward DNS to Pi-hole at {{ pihole_static_ip }}"
+
+# ── Configure dnsmasq server list ────────────────────────────────
+
+- name: Set dnsmasq noresolv (ignore ISP DNS)
+  ansible.builtin.raw: uci set dhcp.@dnsmasq[0].noresolv='1'
+  when: pihole_static_ip is defined
+
+- name: Clear existing dnsmasq server entries
+  ansible.builtin.raw: |
+    while uci -q delete dhcp.@dnsmasq[0].server 2>/dev/null; do true; done
+  changed_when: false
+  when: pihole_static_ip is defined
+
+- name: Add Pi-hole as primary dnsmasq upstream
+  ansible.builtin.raw: uci add_list dhcp.@dnsmasq[0].server='{{ pihole_static_ip }}'
+  when: pihole_static_ip is defined
+
+- name: Add https-dns-proxy as fallback upstream
+  ansible.builtin.raw: uci add_list dhcp.@dnsmasq[0].server='127.0.0.1#5053'
+  when: pihole_static_ip is defined
+
+# ── DNS rebinding protection ────────────────────────────────────
+
+- name: Enable DNS rebinding protection
+  ansible.builtin.raw: uci set dhcp.@dnsmasq[0].rebind_protection='1'
+  when: pihole_static_ip is defined
+
+- name: Enable rebinding localhost
+  ansible.builtin.raw: uci set dhcp.@dnsmasq[0].rebind_localhost='1'
+  when: pihole_static_ip is defined
+
+# ── Commit and restart ──────────────────────────────────────────
+
+- name: Commit DNS changes and restart dnsmasq
+  ansible.builtin.raw: |
+    uci commit dhcp
+    /etc/init.d/dnsmasq restart
+  when: pihole_static_ip is defined
+
+- name: Wait for DNS to stabilize
+  ansible.builtin.pause:
+    seconds: 3
+
+# ── Verify DNS works through Pi-hole ─────────────────────────────
+
+- name: Test DNS resolution through Pi-hole
+  ansible.builtin.raw: nslookup example.com {{ pihole_static_ip }} 2>&1 | head -5
+  register: _pihole_dns_verify
+  changed_when: false
+  failed_when: false
+  when: pihole_static_ip is defined
+
+- name: Report Pi-hole DNS status
+  ansible.builtin.debug:
+    msg: "Pi-hole DNS test: {{ _pihole_dns_verify.stdout_lines | default(['no output']) | join(' ') }}"
+  when: pihole_static_ip is defined

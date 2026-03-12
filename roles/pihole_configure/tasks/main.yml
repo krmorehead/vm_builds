@@ -1,0 +1,138 @@
+---
+# Pi-hole v6 is pre-installed in the custom LXC template (build-images.sh).
+# v6 uses /etc/pihole/pihole.toml (NOT setupVars.conf or pihole-FTL.conf).
+# This role applies host-specific config via the pihole-FTL CLI:
+#   - Web admin password
+#   - Upstream DNS servers
+#   - Query logging retention
+#   - DHCP disabled (OpenWrt handles DHCP)
+#   - Container DNS pointed to itself after setup
+
+# ── Set web password ────────────────────────────────────────────
+
+- name: Set Pi-hole web admin password
+  ansible.builtin.command:
+    cmd: "{{ pihole_bin }} -a -p {{ pihole_web_password }}"
+  when: pihole_web_password | length > 0
+  changed_when: true
+  no_log: true
+
+- name: Set empty password if none provided
+  ansible.builtin.command:
+    cmd: "{{ pihole_bin }} -a -p"
+  when: pihole_web_password | length == 0
+  changed_when: true
+
+# ── Configure upstream DNS ──────────────────────────────────────
+
+- name: Read current upstream DNS
+  ansible.builtin.command:
+    cmd: "{{ pihole_ftl_bin }} --config dns.upstreams"
+  register: _current_upstreams
+  changed_when: false
+
+- name: Set upstream DNS servers
+  ansible.builtin.command:
+    cmd: >-
+      {{ pihole_ftl_bin }} --config
+      dns.upstreams '["{{ pihole_upstream_dns_1 }}", "{{ pihole_upstream_dns_2 }}"]'
+  when: >-
+    pihole_upstream_dns_1 not in _current_upstreams.stdout or
+    pihole_upstream_dns_2 not in _current_upstreams.stdout
+  changed_when: true
+  notify: _restart_ftl
+
+# ── Configure query logging retention ────────────────────────────
+
+- name: Read current query log retention
+  ansible.builtin.command:
+    cmd: "{{ pihole_ftl_bin }} --config database.maxDBdays"
+  register: _current_maxdays
+  changed_when: false
+
+- name: Set database max days for query log retention
+  ansible.builtin.command:
+    cmd: >-
+      {{ pihole_ftl_bin }} --config
+      database.maxDBdays {{ pihole_query_logging_days }}
+  when: (_current_maxdays.stdout | trim) != (pihole_query_logging_days | string)
+  changed_when: true
+  notify: _restart_ftl
+
+# ── Ensure DHCP is disabled ─────────────────────────────────────
+
+- name: Read current DHCP state
+  ansible.builtin.command:
+    cmd: "{{ pihole_ftl_bin }} --config dhcp.active"
+  register: _current_dhcp
+  changed_when: false
+
+- name: Ensure Pi-hole DHCP server is disabled
+  ansible.builtin.command:
+    cmd: "{{ pihole_ftl_bin }} --config dhcp.active false"
+  when: "'false' not in _current_dhcp.stdout"
+  changed_when: true
+  notify: _restart_ftl
+
+# ── Restart FTL if config changed, then wait for readiness ───────
+
+- name: Flush handlers to restart FTL if config changed
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for pihole-FTL to be ready
+  ansible.builtin.command:
+    cmd: "{{ pihole_bin }} status"
+  register: _ftl_ready
+  changed_when: false
+  retries: 10
+  delay: 2
+  until: _ftl_ready.rc == 0
+
+# ── Update gravity database ─────────────────────────────────────
+# Gravity downloads blocklists from the internet. The container's
+# resolv.conf still points to the OpenWrt gateway at this point,
+# ensuring reliable DNS for the downloads.
+
+- name: Update Pi-hole gravity database
+  ansible.builtin.command:
+    cmd: "{{ pihole_bin }} -g"
+  changed_when: true
+  register: _gravity_update
+  retries: 3
+  delay: 10
+  until: _gravity_update.rc == 0
+
+# ── Switch container DNS to localhost ────────────────────────────
+# Only safe AFTER gravity succeeds — gravity needs external DNS to
+# download blocklists. Once gravity is populated, FTL can resolve
+# via its configured upstreams and we no longer need the gateway.
+
+- name: Point container DNS to itself
+  ansible.builtin.copy:
+    content: "nameserver 127.0.0.1\n"
+    dest: /etc/resolv.conf
+    mode: "0644"
+
+# ── Post-configure diagnostics ───────────────────────────────────
+
+- name: Check Pi-hole status
+  ansible.builtin.command:
+    cmd: "{{ pihole_bin }} status"
+  register: _pihole_status
+  changed_when: false
+  failed_when: false
+
+- name: Report Pi-hole status
+  ansible.builtin.debug:
+    var: _pihole_status.stdout_lines
+
+- name: Test DNS resolution via Pi-hole
+  ansible.builtin.command:
+    cmd: dig @127.0.0.1 google.com +short +time=5
+  register: _dns_test
+  changed_when: false
+  failed_when: false
+
+- name: Report DNS test result
+  ansible.builtin.debug:
+    msg: "DNS test (google.com): {{ _dns_test.stdout | default('no response') }}"

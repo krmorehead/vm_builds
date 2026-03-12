@@ -1,0 +1,19 @@
+---
+- name: Provision Pi-hole LXC container
+  hosts: dns_nodes
+  gather_facts: false
+  roles:
+    - pihole_lxc
+
+- name: Reconstruct pihole dynamic group
+  hosts: dns_nodes
+  gather_facts: false
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_pihole_group.yml
+
+- name: Configure Pi-hole
+  hosts: pihole
+  gather_facts: true
+  roles:
+    - pihole_configure

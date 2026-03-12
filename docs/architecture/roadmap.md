@@ -114,11 +114,26 @@ Delivered:
 - Full verify coverage: container state, auto-start, nesting, kernel module,
   wg0 interface, service enabled, IP forwarding, NAT, `.env.generated`
 
+### `2026-03-09-03` Pi-hole DNS Filtering ✓
+
+LXC container running Pi-hole for network-wide DNS-level ad and tracker
+blocking. OpenWrt's dnsmasq forwards DNS queries to Pi-hole.
+
+Delivered:
+- `pihole_lxc` role (thin wrapper around `proxmox_lxc`, custom Debian 12 template)
+- `pihole_configure` role (pihole-FTL CLI config, web password, upstream DNS, gravity update)
+- `openwrt_configure/tasks/pihole_dns.yml` (dnsmasq server list: Pi-hole + DoH fallback)
+- Per-feature molecule scenarios (`pihole-lxc`, `openwrt-pihole-dns`)
+- `tasks/reconstruct_pihole_group.yml` for dynamic group reconstruction
+- Rollback plays in `playbooks/cleanup.yml` (`pihole-rollback`, `openwrt-pihole-dns-rollback`)
+- Pi-hole image build section in `build-images.sh` (Debian 12 + Pi-hole baked in)
+- Full verify coverage: container state, auto-start, nesting, FTL, web admin, DNS, ad blocking
+
 ## Medium-Term Goals
 
 ### Additional VM/LXC Types
 - The project name is `vm_builds` (plural) — the architecture supports multiple service types.
-- Near-term candidates: Pi-hole, rsyslog, Netdata.
+- Near-term candidates: rsyslog, Netdata.
 - Each service type gets its own role pair: `<type>_lxc` + `<type>_configure` (or `<type>_vm`).
 - VMID ranges pre-allocated: 100s network, 200s services, 300s media, 400s desktop, 500s observability, 600s gaming.
 - See `docs/architecture/overview.md` for the full target architecture and `.cursor/skills/vm-lifecycle/SKILL.md` for implementation patterns.

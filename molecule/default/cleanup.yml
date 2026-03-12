@@ -112,7 +112,7 @@
 
     - name: Remove cached LXC templates
       ansible.builtin.shell:
-        cmd: rm -f /var/lib/vz/template/cache/debian-*.tar.zst /var/lib/vz/template/cache/openwrt-*.tar.gz
+        cmd: rm -f /var/lib/vz/template/cache/debian-*.tar.zst /var/lib/vz/template/cache/openwrt-*.tar.gz /var/lib/vz/template/cache/pihole-*.tar.zst
         executable: /bin/bash
       changed_when: true
       failed_when: false
