@@ -18,32 +18,62 @@ This rule activates when opening or editing any `project_plan.md` in
 
 ## Quick reference (full checklist in skill)
 
+### Structural
 1. **Dynamic group persistence**: every separate `ansible-playbook` invocation
    that targets a dynamic group MUST reconstruct it first.
 2. **Auth transitions**: if a milestone changes connection method, specify
    ordering, re-registration, detection, and rollback.
 3. **Rollback completeness**: every rollback undoes everything the milestone
    changed (UCI, packages, files, auth, cron, services).
-4. **LXC features**: unprivileged containers needing iptables/nftables MUST
-   declare `nesting=1`. Missing features cause silent runtime failures.
-5. **Internet connectivity**: roles that download packages must document how
-   the VM/container reaches the internet and resolves DNS.
-6. **Prerequisite verification**: grep the codebase to confirm claimed
+4. **One path, no fallbacks**: reject "try X, fall back to Y" logic.
+
+### Container/VM
+5. **LXC features**: declare required features (`nesting=1`, etc.) or
+   explicitly state "no special features required."
+6. **Bake, don't configure at runtime**: packages AND base configuration
+   belong in the image build. Configure roles only apply host-specific
+   topology. Even if software is pre-installed (e.g., rsyslog in Debian),
+   the image must pre-configure it.
+7. **Image build milestone**: every service needs M0 with a
+   `build-images.sh` section and custom template variables in
+   `group_vars/all.yml`. Using `proxmox_lxc_default_template` directly
+   bypasses the image verification gate.
+
+### Cross-reference
+8. **Prerequisite verification**: grep the codebase to confirm claimed
    prerequisites exist (VMIDs, groups, molecule platforms, .gitignore entries).
-7. **site.yml play ordering**: clarify positioning relative to `never`-tagged
+9. **site.yml play ordering**: clarify positioning relative to `never`-tagged
    plays. State whether the new tag runs during normal converge or is opt-in.
-8. **Cleanup parity**: files deployed by roles must appear in BOTH cleanup
-   playbooks. Rollback tags must appear in `playbooks/cleanup.yml`.
-9. **Cross-reference architecture docs**: verify plays, tags, and resources
-   match `overview.md`, `roles.md`, `build-profiles.md`, and `roadmap.md`.
-10. **Bake, don't configure at runtime**: if the plan calls for runtime
-   package installation, reject it. Packages belong in the image build.
-   See Design principles in `project-structure.mdc`.
-11. **One path, no fallbacks**: if the plan adds "try X, fall back to Y"
-   logic, reject it. See Design principles in `project-structure.mdc`.
+10. **Shared tags**: if a tag is shared with another service (e.g.,
+    `[monitoring]`), document this is intentional and the implication.
+11. **Cleanup parity**: files deployed by roles must appear in BOTH cleanup
+    playbooks. Rollback tags must appear in `playbooks/cleanup.yml`.
+12. **Architecture doc consistency**: verify plays, tags, and resources
+    match `overview.md`, `roles.md`, `build-profiles.md`, and `roadmap.md`.
+
+### Completeness
+13. **Network topology assumption**: document which host topologies the
+    service supports. If the flavor group spans LAN and WAN hosts,
+    specify the branching strategy (bridge, subnet, gateway, DNS).
+14. **Container IP offset**: verify the offset is defined in
+    `group_vars/all.yml` and doesn't collide with existing allocations
+    (WireGuard 3–6, Pi-hole 10). Check WAN offset (+200) against
+    physical host IPs.
+15. **Milestone consolidation**: provisioning + site.yml integration
+    should be one milestone. Blocked stubs should be deferred to
+    downstream projects, not kept as dead code.
+16. **Future integration notes**: document how downstream projects
+    interact with the new service.
 
 ## Previous bugs caught by plan review
 
 - WireGuard plan omitted `nesting=1` — iptables MASQUERADE would fail at runtime
 - WireGuard plan added `.env.generated` to `.gitignore` but it was already there
 - OpenWrt plan had SSH auth transition gaps and dynamic group persistence issues
+- rsyslog plan skipped image build — configure role would create spool dirs and
+  enable TCP modules at runtime, violating "bake, don't configure"
+- rsyslog plan used `proxmox_lxc_default_template` — bypassed image existence check
+- rsyslog plan had no network topology assumption — `monitoring_nodes` spans all
+  build profiles including WAN-connected hosts without OpenWrt
+- rsyslog plan split provisioning and site.yml integration into two milestones
+- rsyslog plan kept log client pattern as stubs instead of deferring downstream

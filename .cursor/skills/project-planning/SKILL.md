@@ -224,32 +224,36 @@ Before considering a plan ready for execution, verify each item.
 7. **No fallback paths**: Does the plan introduce any "try X, fall back to Y"
    logic? If so, reject it. One tested path per feature. Missing prerequisites
    should fail with an actionable error message, not silently degrade.
-7. **Verify from the right host**: Do verify assertions run on the Proxmox
+8. **Verify from the right host**: Do verify assertions run on the Proxmox
    host (via `qm`, shell commands) or inside the VM (via dynamic group)?
    If inside the VM, the verify needs group reconstruction too.
 
 ### Container/VM capability checks
 
-8. **LXC features and capabilities**: If the plan provisions an LXC
+9. **LXC features and capabilities**: If the plan provisions an LXC
    container, verify that required features are declared:
    - `nesting=1`: needed for iptables/nftables inside unprivileged containers
    - `mount=cgroup`: needed for cgroup mounts (systemd containers)
    - `keyctl=1`: needed for kernel key management
+   - If no special features are needed, the plan MUST explicitly state
+     "no special LXC features required" so reviewers don't wonder.
    Previous bug: WireGuard plan omitted `nesting=1`. The `iptables -t nat
    MASQUERADE` command in M2 would have failed with "Permission denied"
    at runtime.
-9. **Bake, don't configure at runtime** (per `project-structure.mdc`): if
-   the plan mentions runtime package installation (`opkg install`,
-   `apt install`), reject it. Packages belong in the image build. Configure
-   roles only apply host-specific topology. If a service truly needs a
-   runtime exception, document why explicitly.
-10. **Kernel module host-side loading**: If the service needs kernel modules
+10. **Bake, don't configure at runtime** (per `project-structure.mdc`): if
+    the plan mentions runtime package installation (`opkg install`,
+    `apt install`), reject it. Packages AND base configuration belong in
+    the image build. Configure roles only apply host-specific topology
+    (IPs, bridges, subnets, forwarding targets). If software is already
+    in the base OS (e.g., rsyslog in Debian), the image build should
+    pre-configure it — the configure role should not set up listeners,
+    spool directories, or logrotate from scratch.
+11. **Kernel module host-side loading**: If the service needs kernel modules
     (WireGuard, VFIO, GPU drivers), verify the plan loads them on the
     Proxmox HOST (not inside the container — LXC shares the host kernel).
     Include persistence via `/etc/modules-load.d/` and cleanup removal of
     both the config file and `modprobe -r`.
-
-11. **WiFi PHY namespace move**: If the plan provisions an LXC container
+12. **WiFi PHY namespace move**: If the plan provisions an LXC container
     that needs WiFi access, verify:
     - Container is privileged (`unprivileged: false`) — namespace moves
       require CAP_NET_ADMIN
@@ -264,41 +268,91 @@ Before considering a plan ready for execution, verify each item.
     and blacklist-wifi.conf from a prior run kept iwlwifi blacklisted
     and the device bound to vfio-pci.
 
+### Image build checks
+
+13. **Image build milestone**: Does the plan include an image build
+    milestone (M0) with a `build-images.sh` section? Every service needs
+    a purpose-built image, even if the software is pre-installed in the
+    base OS. The image build bakes in default configuration, spool
+    directories, and service-specific setup. If the plan says "pre-installed
+    on Debian, no build needed", reject it — the IMAGE may not need extra
+    packages, but it DOES need pre-configuration.
+    Previous bug: rsyslog plan skipped M0 because "rsyslog is pre-installed
+    on Debian." But the configure role then had to create spool directories,
+    enable TCP modules, and set up logrotate at runtime — all of which
+    belong in the image.
+14. **Image template variables**: Does the plan define custom template
+    variables (`<type>_lxc_template`, `<type>_lxc_template_path`) in
+    `group_vars/all.yml`? Using `proxmox_lxc_default_template` directly
+    bypasses the image verification gate. Every service should reference
+    its own template variable so the provision role can hard-fail if the
+    custom image is missing.
+
 ### Cross-reference checks
 
-11. **Prerequisite verification**: Grep the codebase to confirm claimed
+15. **Prerequisite verification**: Grep the codebase to confirm claimed
     prerequisites actually exist: VMIDs in `group_vars/all.yml`, flavor
     groups in `inventory/hosts.yml`, dynamic groups in inventory, platform
     groups in `molecule/default/molecule.yml`.
-12. **site.yml play ordering**: Verify the proposed play position doesn't
+16. **site.yml play ordering**: Verify the proposed play position doesn't
     conflict with existing plays. Count the actual play numbers. Clarify
     positioning relative to `never`-tagged per-feature plays. If the new
     plays are NOT tagged `never`, explicitly state they run during normal
     converge.
-13. **Tag collision**: Verify proposed tags don't collide with existing
+17. **Tag collision**: Verify proposed tags don't collide with existing
     tags in `site.yml` or `cleanup.yml`.
-14. **Cleanup parity**: Verify that files deployed by the new roles are
+18. **Shared tags**: If the plan uses a tag shared with another service
+    (e.g., `[monitoring]` for rsyslog + netdata), document this is
+    intentional and explain the implication: you cannot deploy just one
+    of the services via tag once both exist in `site.yml`.
+19. **Cleanup parity**: Verify that files deployed by the new roles are
     added to BOTH `molecule/default/cleanup.yml` AND `playbooks/cleanup.yml`.
     Also verify `playbooks/cleanup.yml` gets rollback tags if the service
     supports per-feature rollback.
-15. **Architecture doc consistency**: Verify the plan's plays, tags, and
+20. **Architecture doc consistency**: Verify the plan's plays, tags, and
     resource allocations match `overview.md`'s target site.yml and VM
     table. Flag any discrepancies.
 
 ### Completeness checks
 
-16. **Gitignore coverage**: If the plan creates new generated or state
+21. **Gitignore coverage**: If the plan creates new generated or state
     files (e.g., `.env.generated`, `.state/`), verify they are already in
     `.gitignore`. Don't add redundant task items for files already covered.
-17. **Predictable IP for consumers**: If the service will be consumed by
+22. **Predictable IP for consumers**: If the service will be consumed by
     other services (routing, DNS forwarding, log collection), verify the
     plan addresses how consumers discover a stable IP (static lease, DNS,
     etc.). Document this even if the solution is deferred to a downstream
     project.
-18. **Future integration notes**: If the service introduces a new pattern
+23. **Future integration notes**: If the service introduces a new pattern
     (e.g., `.env.generated` accumulation, NAT routing), add a "Future
     Integration Considerations" section documenting how downstream
     projects should interact with it.
+24. **Network topology assumption**: Does the plan document which host
+    topologies the service supports? If the flavor group could include
+    hosts both behind OpenWrt (LAN) and directly on WAN, the plan MUST
+    specify the topology branching strategy (bridge, subnet, gateway,
+    DNS). A "Network topology assumption" section is required for all
+    LXC container plans.
+    Previous bug: rsyslog plan only said "static IP on LAN bridge" but
+    `monitoring_nodes` appears in ALL build profiles including Gaming
+    Rig (no OpenWrt). WAN-connected hosts need different bridge, gateway,
+    and DNS settings.
+25. **Container IP offset allocation**: If the service uses static IPs
+    computed from an offset, verify the offset is defined in
+    `group_vars/all.yml` and doesn't collide with existing allocations.
+    Current allocations: WireGuard 3–6, Pi-hole 10. WAN offsets add +200.
+    Check WAN offset against physical host IPs on the supernet.
+26. **Milestone consolidation**: Are any milestones redundant? Provisioning
+    and site.yml integration should be in the SAME milestone (not split).
+    Per-feature rollback plays in cleanup.yml should be in the testing
+    milestone (where per-feature scenarios are defined), not a separate
+    milestone.
+27. **Deferred work ownership**: If the plan contains milestones that are
+    "blocked on" downstream projects, verify they are explicitly deferred
+    to those projects with a clear integration point. Stubs in site.yml,
+    cleanup.yml, and task files create dead code.
+    Previous bug: OpenWrt M5-M7 stubs (pihole_dns, syslog, monitoring)
+    were implemented then removed because they belonged downstream.
 
 ## Cross-references
 
