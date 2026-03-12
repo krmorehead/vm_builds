@@ -14,10 +14,10 @@ OpenWrt is a router VM — it consumes ALL Proxmox bridges (WAN + every LAN port
 1. OpenWrt gets ALL bridges: WAN on `net0`/`eth0`, remaining bridges as LAN ports. Most other VMs need only ONE LAN bridge.
 2. The WAN bridge is auto-detected by `proxmox_bridges` via the host's default route. NEVER hardcode a bridge as WAN. Override with `openwrt_wan_bridge` in `host_vars` only if auto-detection fails.
 3. After ANY network restart that changes interface assignments, ALWAYS restart the firewall before attempting outbound connections. Firewall zone bindings go stale when interfaces change.
-4. Network operations (`opkg update`, `wget`) MUST have `retries` + `delay`. DNS, DHCP, and firewall state take seconds to settle after a restart.
+4. Network operations (`wget`, DNS lookups) MUST have `retries` + `delay`. DNS, DHCP, and firewall state take seconds to settle after a restart.
 5. Detached restart scripts MUST restart services in order: `firewall` → `dnsmasq` → `network` → `firewall` → `dropbear`. The first firewall/dnsmasq restart prepares for the topology change; the second firewall restart rebinds zones after interface changes.
 6. NEVER restart the firewall synchronously over SSH when WAN zone rules have changed. The firewall applies WAN zone rules (input REJECT) to the current SSH path, killing the connection. ALWAYS use detached scripts with `ignore_unreachable: true`.
-7. Switch opkg feeds from HTTPS to HTTP (`sed -i 's|https://|http://|g'`) before `opkg update` — the base image lacks TLS certificates.
+7. Per the project's "Bake, don't configure at runtime" principle: all packages are in the custom image. Configure roles NEVER run `opkg install`. To add a package, update `build-images.sh` and rebuild.
 8. The `WAN_MAC` env variable is optional. NEVER apply it at the Proxmox NIC level during VM creation (`qm set --net0 macaddr=...`). ALWAYS go through the MAC conflict detection flow during the final configure phase. If no conflict is detected, apply via UCI (`uci set network.wan.macaddr`). If a conflict IS detected, defer the MAC to `/etc/openwrt_wan_mac_deferred` on the VM. An init script auto-applies it on the next boot when the conflict is gone.
 9. Duplicate MAC addresses on the same L2 segment cause IPv6 DAD failures, corrupt uclient/libubox state, and cause `wget`/`opkg` segfaults — even when ICMP ping works. Consumer routers use sequential MACs across ports — the WAN MAC and LAN MAC often share the same OUI and differ by ±1 in the last byte.
 10. BusyBox ash does NOT support `set -o pipefail`. NEVER add pipefail to `ansible.builtin.raw` tasks or `{{ openwrt_ssh }}` commands that run on OpenWrt. Pipefail is required for all host-side `ansible.builtin.shell` tasks — see the `proxmox-safety` rule.
@@ -25,6 +25,96 @@ OpenWrt is a router VM — it consumes ALL Proxmox bridges (WAN + every LAN port
 12. BusyBox `tr -d '[:space:]'` deletes colons (`:`) because BusyBox treats `[:space:]` as a character set containing `[`, `:`, `s`, `p`, `a`, `c`, `e`, `]` — NOT as a POSIX character class. ALWAYS use explicit chars: `tr -d ' \t\n\r'`.
 13. BusyBox `nc` does NOT support `-w` (timeout) flag. Use `(echo QUIT | nc HOST PORT) </dev/null` for TCP port checks. NEVER use `echo | nc -w 3` on OpenWrt.
 14. When checking for the default route in scripts on OpenWrt, NEVER filter by device name (`ip route show default dev eth0`). OpenWrt's netifd may use interface aliases (e.g., `wan`, `eth0.2`) that differ from the physical device name. Use `ip route show default` without a device filter.
+
+## Custom images (build-images.sh)
+
+The project uses the OpenWrt Image Builder to create pre-configured images
+with packages pre-installed and sane defaults baked in. This eliminates
+EPERM/opkg failures during converge and significantly speeds up configuration.
+
+Two images are produced:
+
+1. **Mesh LXC rootfs** (`openwrt-mesh-lxc-*-rootfs.tar.gz`):
+   - WiFi packages pre-installed (`wpad-mesh-openssl`, `iw`, `kmod-iwlwifi`,
+     `kmod-mt76`, `kmod-ath9k`, `kmod-ath10k-ct`)
+   - `iw` included for namespace-aware WiFi detection via netlink
+   - Firewall stripped (`-firewall4`, `-nftables`)
+   - No routing (`-dnsmasq`, `-ppp`, `-odhcpd-ipv6only`)
+   - UCI defaults: `eth0` on DHCP, no WAN, no IPv6, HTTP opkg feeds
+
+2. **Router VM image** (`openwrt-router-*-combined.img.gz`):
+   - WiFi mesh packages pre-installed
+   - Security packages (`banip`), DNS packages (`https-dns-proxy`), mesh
+     steering (`dawn`), diagnostics (`curl`, `ip-full`, `tcpdump`)
+   - No UCI defaults baked in — `openwrt_configure` handles all config
+     dynamically based on detected topology
+
+Build: `./build-images.sh` (downloads Image Builder once, caches in
+`.image-builder-cache/`). Use `--clean` to force re-download.
+
+Per the project's design principles (`project-structure.mdc`): custom images
+are REQUIRED, there is no fallback, and configure roles NEVER run
+`opkg install`. To add a package, add it to `build-images.sh` and rebuild.
+
+### Shell syntax and PATH through pct_remote
+
+The `community.proxmox.proxmox_pct_remote` connection plugin builds:
+`/usr/sbin/pct exec <vmid> -- <cmd>` and sends it as a single string via
+SSH to the Proxmox host. The HOST's bash interprets the entire string
+before `pct exec` runs. This means:
+
+1. **Semicolons split at host level.** `cmd1; cmd2` becomes two separate
+   commands on the Proxmox host — only `cmd1` runs inside the container.
+2. **Pipes split at host level.** `cmd1 | cmd2` — `cmd1` runs inside the
+   container, `cmd2` runs on the HOST (filtering stdout from the container).
+   This happens to work for text processing but is fragile.
+3. **`export` is NOT a binary.** `lxc-attach` tries to exec the first word
+   of the command as a binary. `export` is a shell builtin — it fails with
+   `lxc-attach: Failed to exec "export"`.
+4. **PATH is not set inside the container.** `lxc-attach`'s `execvp` uses
+   the default path (`/bin:/usr/bin`), which misses `/sbin` and `/usr/sbin`
+   where OpenWrt puts `uci`, `wifi`, `iw`.
+
+**Solution: wrap all commands in `/bin/sh -c '...'`.**
+The single quotes protect the payload from the host bash. Inside the
+container, busybox ash provides its default
+`PATH=/sbin:/usr/sbin:/bin:/usr/bin`.
+
+```yaml
+# BAD — semicolons split at host level, export is not a binary
+- ansible.builtin.raw: >-
+    export PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH";
+    opkg update
+
+# BAD — for loops break (host bash tries to exec "for")
+- ansible.builtin.raw: >-
+    for mod in iwlwifi ath9k; do modprobe "$mod" 2>/dev/null; done
+
+# GOOD — sh -c wraps everything in a container-side shell
+- ansible.builtin.raw: >-
+    /bin/sh -c 'opkg update'
+
+# GOOD — complex commands with semicolons inside sh -c
+- ansible.builtin.raw: >-
+    /bin/sh -c
+    'opkg list-installed 2>/dev/null | grep -c wpad-mesh || true'
+
+# GOOD — multi-command chains use && inside sh -c
+- ansible.builtin.raw: >-
+    /bin/sh -c
+    'uci set wireless.mesh0=wifi-iface &&
+    uci set wireless.mesh0.device="radio0" &&
+    uci commit wireless'
+```
+
+**Quoting rules for sh -c through pct_remote:**
+- Outer single quotes protect the entire payload from host bash
+- Inside, use double quotes for values: `uci set foo.bar="value"`
+- NEVER nest single quotes — use double quotes or drop quotes for
+  simple alphanumeric values
+- `&&` and `||` inside single quotes are interpreted by container ash
+- `[ ... ] && echo x || echo y` WITHOUT sh -c is OK — `[` is exec'd
+  by lxc-attach, `&&`/`||` chain at host level (works for simple checks)
 
 ## Feature integration via task files
 
@@ -218,6 +308,61 @@ root cause non-obvious without `dmesg` diagnostics.
 The deferred file is cleaned at the start of each run (`rm -f`) for
 idempotency. The VM destruction during cleanup also removes it. The init
 script self-cleans by removing the deferred file after applying the MAC.
+
+## OpenWrt Mesh LXC (satellite nodes)
+
+Mesh satellite nodes (`wifi_nodes:!router_nodes`) run OpenWrt in a **privileged
+LXC container** instead of a VM. This allows WiFi management via 802.11s mesh
+without requiring PCIe passthrough (IOMMU/VT-d). The container receives the
+host's WiFi PHY via `iw phy <phy> set netns <pid>` (network namespace move).
+
+Key differences from the VM pattern:
+- No routing — mesh containers are NOT routers. They run 802.11s only.
+- Uses the OpenWrt rootfs tarball (`openwrt-*-rootfs.tar.gz`), not the VM disk image.
+- Must be privileged (`unprivileged: false`) for the PHY namespace move.
+- Must set `--ostype unmanaged` because Proxmox cannot auto-detect OpenWrt.
+- Container readiness uses `ls /` (not `hostname`, which is absent in BusyBox).
+- `lxc_ct_skip_debian_cleanup: true` to avoid dpkg operations on OpenWrt.
+- A Proxmox hookscript re-moves the WiFi PHY after container restarts.
+
+WiFi PHY handling:
+1. Load common WiFi kernel modules (`iwlwifi`, `ath9k`, etc.) on the host.
+2. Detect PHYs in `/sys/class/ieee80211/`.
+3. If no PHYs found, hard-fail. All `wifi_nodes` are expected to have WiFi.
+   Missing WiFi usually means stale vfio-pci bindings from a previous run
+   or missing firmware.
+4. Move PHYs into the container's network namespace.
+5. Deploy hookscript for persistence across reboots.
+
+IMPORTANT: Detect WiFi radios inside LXC containers with `iw phy` (netlink),
+NOT `ls /sys/class/ieee80211/` (sysfs). LXC containers bind-mount the host's
+sysfs, which doesn't reflect network-namespace-specific entries like WiFi PHYs.
+`iw phy` queries the kernel via netlink and correctly sees PHYs moved into the
+container's network namespace. The `iw` package must be pre-installed in the
+custom image or via `opkg install iw`.
+Previous bug: `ls /sys/class/ieee80211/` inside the container returned empty
+despite a successful `iw phy set netns` — sysfs showed the host's view.
+
+IMPORTANT: NEVER `modprobe` WiFi modules inside the container via `pct_remote`.
+`modprobe` inside the container runs on the HOST kernel (containers share the
+kernel). If the module reloads, the new PHY appears in the HOST namespace, not
+the container namespace — effectively un-doing the PHY namespace move. Modules
+MUST be loaded on the host BEFORE the container is created and the PHY moved.
+Previous bug: `modprobe iwlwifi` inside the container via `pct_remote` caused
+the PHY to revert to the host namespace. WiFi detection inside the container
+then found zero radios despite a successful namespace move.
+
+IMPORTANT: `proxmox_pci_passthrough` cleans stale vfio bindings on non-router
+hosts. If WiFi was previously bound to vfio-pci, the role removes
+`blacklist-wifi.conf` and `vfio-pci.conf`, unbinds devices, and reloads
+drivers. Without this cleanup, WiFi PHYs are invisible to the mesh role.
+Previous bug: mesh1 WiFi was bound to vfio-pci from a prior test cycle.
+`/sys/class/ieee80211/` was empty despite the hardware being present.
+
+Container networking follows host topology:
+- LAN hosts (`router_nodes`, `lan_hosts`) → OpenWrt LAN subnet, LAN bridge.
+- WAN hosts → `proxmox_wan_bridge`, `ansible_default_ipv4` subnet, DNS `8.8.8.8`.
+- IP offset +200 for WAN containers to avoid collisions with LAN containers.
 
 ## Permanent diagnostics
 

@@ -23,26 +23,8 @@
       {{ 'Proceeding with mesh enhancements.' if _wifi_present | bool
          else 'Skipping mesh enhancements (no WiFi hardware).' }}
 
-# ── Install Dawn for 802.11k/v/r steering ──────────────────────
-
-- name: Update opkg package lists for mesh packages
-  ansible.builtin.raw: opkg update
-  register: _opkg_update_mesh
-  changed_when: false
-  retries: 3
-  delay: 5
-  until: _opkg_update_mesh.rc == 0
-  when: _wifi_present | bool
-
-- name: Install Dawn
-  ansible.builtin.raw: opkg install dawn
-  register: _dawn_install
-  retries: 3
-  delay: 5
-  until: _dawn_install.rc == 0
-  when: _wifi_present | bool
-
-# ── Configure Dawn via UCI ──────────────────────────────────────
+# ── Configure Dawn for 802.11k/v/r steering ────────────────────
+# dawn is pre-installed in the custom router image (build-images.sh).
 
 - name: Configure Dawn RSSI threshold
   ansible.builtin.raw: >-

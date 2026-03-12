@@ -35,10 +35,6 @@ _netmask_cidr_map:
   "255.255.255.248": "29"
   "255.255.255.252": "30"
 
-openwrt_wifi_driver_packages:
-  - kmod-iwlwifi
-  - iwlwifi-firmware-iwl8265
-
 openwrt_mesh_enabled: true
 openwrt_mesh_id: "vm-builds-mesh"
 openwrt_mesh_key: "{{ lookup('env', 'MESH_KEY') | default('changeme', true) }}"

@@ -1,0 +1,123 @@
+---
+- name: Reconstruct wireguard dynamic group
+  hosts: vpn_nodes
+  gather_facts: false
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_wireguard_group.yml
+
+- name: Verify WireGuard LXC container
+  hosts: vpn_nodes
+  gather_facts: false
+  vars:
+    wireguard_ct_id: 101
+  tasks:
+    - name: Check container is running
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct status {{ wireguard_ct_id }} | grep -c running
+        executable: /bin/bash
+      register: _wg_running
+      changed_when: false
+
+    - name: Assert container is running
+      ansible.builtin.assert:
+        that: (_wg_running.stdout | trim | int) > 0
+        fail_msg: "Container {{ wireguard_ct_id }} is not running"
+
+    - name: Check onboot setting
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ wireguard_ct_id }} | grep -oP '^onboot:\s*\K.*'
+        executable: /bin/bash
+      register: _wg_onboot
+      changed_when: false
+
+    - name: Assert onboot is enabled
+      ansible.builtin.assert:
+        that: (_wg_onboot.stdout | trim) == '1'
+        fail_msg: "onboot={{ _wg_onboot.stdout | trim }}, expected 1"
+
+    - name: Check nesting feature
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ wireguard_ct_id }} | grep -oP '^features:\s*\K.*'
+        executable: /bin/bash
+      register: _wg_features
+      changed_when: false
+
+    - name: Assert nesting is enabled
+      ansible.builtin.assert:
+        that: "'nesting=1' in _wg_features.stdout"
+        fail_msg: "Missing nesting=1: {{ _wg_features.stdout | trim }}"
+
+    - name: Check wireguard module loaded on host
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          lsmod | grep -c '^wireguard'
+        executable: /bin/bash
+      register: _wg_mod
+      changed_when: false
+
+    - name: Assert wireguard module loaded
+      ansible.builtin.assert:
+        that: (_wg_mod.stdout | trim | int) > 0
+        fail_msg: "wireguard kernel module not loaded"
+
+    - name: Check wg0 interface in container
+      ansible.builtin.command:
+        cmd: pct exec {{ wireguard_ct_id }} -- ip link show wg0
+      register: _wg_iface
+      changed_when: false
+      failed_when: false
+
+    - name: Assert wg0 exists
+      ansible.builtin.assert:
+        that: _wg_iface.rc == 0
+        fail_msg: "wg0 interface missing in container"
+
+    - name: Check wg-quick@wg0 enabled
+      ansible.builtin.command:
+        cmd: pct exec {{ wireguard_ct_id }} -- systemctl is-enabled wg-quick@wg0
+      register: _wg_svc
+      changed_when: false
+
+    - name: Assert service is enabled
+      ansible.builtin.assert:
+        that: "'enabled' in _wg_svc.stdout"
+        fail_msg: "wg-quick@wg0 not enabled: {{ _wg_svc.stdout | trim }}"
+
+    - name: Check IP forwarding
+      ansible.builtin.command:
+        cmd: pct exec {{ wireguard_ct_id }} -- sysctl -n net.ipv4.ip_forward
+      register: _wg_fwd
+      changed_when: false
+
+    - name: Assert IP forwarding enabled
+      ansible.builtin.assert:
+        that: (_wg_fwd.stdout | trim) == '1'
+        fail_msg: "IP forwarding disabled: {{ _wg_fwd.stdout | trim }}"
+
+    - name: Check NAT rule
+      ansible.builtin.command:
+        cmd: pct exec {{ wireguard_ct_id }} -- iptables -t nat -L POSTROUTING -n
+      register: _wg_nat
+      changed_when: false
+
+    - name: Assert MASQUERADE present
+      ansible.builtin.assert:
+        that: "'MASQUERADE' in _wg_nat.stdout"
+        fail_msg: "MASQUERADE missing: {{ _wg_nat.stdout }}"
+
+    - name: Report per-feature verification
+      ansible.builtin.debug:
+        msg: >-
+          WireGuard per-feature verify passed:
+          ct={{ wireguard_ct_id }}, running=yes,
+          wg0={{ 'up' if _wg_iface.rc == 0 else 'missing' }},
+          fwd={{ _wg_fwd.stdout | trim }},
+          nat={{ 'present' if 'MASQUERADE' in _wg_nat.stdout else 'absent' }}

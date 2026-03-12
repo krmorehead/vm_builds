@@ -1,0 +1,9 @@
+---
+wireguard_private_key: "{{ lookup('env', 'WIREGUARD_PRIVATE_KEY') | default('', true) }}"
+wireguard_client_address: "{{ lookup('env', 'WIREGUARD_CLIENT_ADDRESS') | default('10.0.0.2/24', true) }}"
+wireguard_server_public_key: "{{ lookup('env', 'WIREGUARD_SERVER_PUBLIC_KEY') | default('', true) }}"
+wireguard_server_endpoint: "{{ lookup('env', 'WIREGUARD_SERVER_ENDPOINT') | default('198.51.100.1:51820', true) }}"
+wireguard_allowed_ips: "{{ lookup('env', 'WIREGUARD_ALLOWED_IPS') | default('10.0.0.0/24', true) }}"
+wireguard_preshared_key: "{{ lookup('env', 'WIREGUARD_PRESHARED_KEY') | default('', true) }}"
+wireguard_dns: "{{ lookup('env', 'WIREGUARD_DNS') | default('', true) }}"
+wireguard_keepalive: 25

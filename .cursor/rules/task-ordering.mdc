@@ -1,0 +1,82 @@
+---
+description: Task dependency ordering for Ansible playbooks and project plans
+globs: "**/*.yml"
+alwaysApply: false
+---
+
+# Task Ordering — Dependencies First
+
+## Principle
+
+Every task has prerequisites. When building a playbook or writing a project
+plan, resolve dependencies top-down before writing any implementation tasks.
+This applies at every level: project plans, site.yml plays, role task files,
+and individual tasks within a file.
+
+## Ordering rules for Ansible task files
+
+1. **System state fixes before package installation.** If the base image or
+   template has broken package state, fix it FIRST. apt will refuse all
+   operations when dpkg has broken packages.
+2. **Package installation before using package commands.** Install
+   `wireguard-tools` before calling `wg genkey`. Install `iptables` before
+   calling `iptables -t nat`. Install `curl` before calling `curl`.
+3. **Key/credential generation before configuration.** Generate keys before
+   templating config files that reference them.
+4. **Configuration before service start.** Write config files before
+   `systemctl enable/start`. A service started with a missing config fails.
+5. **Service start before runtime verification.** Start `wg-quick@wg0`
+   before checking `wg show wg0`.
+6. **Network configuration before dependent services.** Configure bridges,
+   IPs, and routes before starting services that bind to specific addresses.
+7. **Kernel module loading before dependent features.** Load `wireguard`
+   module on the host before `wg-quick` in the container.
+
+## Ordering rules for site.yml plays
+
+1. **Shared infrastructure before service provisioning.** `proxmox_bridges`,
+   `proxmox_pci_passthrough`, `proxmox_igpu` run BEFORE any VM/LXC creation.
+2. **Provisioning before configuration.** `<type>_lxc`/`<type>_vm` before
+   `<type>_configure`.
+3. **Network services before dependent services.** OpenWrt (VMID 100) before
+   WireGuard (101) before Pi-hole (102). Startup order mirrors this.
+4. **deploy_stamp as the LAST role in every provision play.** Records that
+   the play completed successfully.
+
+## Ordering rules for project plans
+
+1. **Milestone 0 establishes test infrastructure.** Before any feature work.
+2. **Self-contained milestones before blocked milestones.** Ship what can
+   ship now.
+3. **Each milestone's task list follows the same dependency ordering** as
+   Ansible task files (fix state → install → generate → configure → start →
+   verify).
+4. **Verify sections come after all tasks.** They assert the final state,
+   not intermediate states.
+5. **Rollback is the inverse of the task order.** Stop services → remove
+   config → remove packages → restore state.
+
+## Common ordering mistakes
+
+- **Package command before install**: `wg genkey` fails with ENOENT because
+  `wireguard-tools` isn't installed yet.
+  Previous bug: key generation tasks ran before package installation in the
+  WireGuard configure role.
+
+- **apt install before fixing broken state**: `apt-get install` returns
+  rc=100 because a broken metapackage blocks ALL apt operations.
+  Previous bug: Proxmox Debian 12 LXC template ships with broken
+  `linux-image-rt-amd64` dependency. Must be fixed at the provisioning
+  level (in `proxmox_lxc`), not in each service's configure role.
+
+- **Service start before config**: `systemctl start wg-quick@wg0` fails
+  because `/etc/wireguard/wg0.conf` doesn't exist yet.
+
+- **Runtime check before service start**: `wg show wg0` returns "No such
+  device" because the service hasn't created the interface yet.
+
+## How to apply this rule
+
+When writing a new task file or reviewing a project plan, mentally walk
+through each task and ask: "What must already exist for this to succeed?"
+If the answer isn't "nothing" or "everything above me," reorder.

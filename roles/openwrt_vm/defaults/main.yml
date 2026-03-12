@@ -1,5 +1,5 @@
 ---
-openwrt_tmp_image: /tmp/openwrt.img
+openwrt_tmp_image_dir: /tmp
 
 openwrt_bootstrap_gw: 192.168.1.1
 openwrt_bootstrap_ip: 192.168.1.2

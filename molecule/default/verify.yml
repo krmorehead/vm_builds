@@ -1,12 +1,281 @@
 ---
-- name: Verify Proxmox and OpenWrt state
+# ── Play 1: Common infrastructure (all Proxmox hosts) ────────────
+
+- name: Verify common Proxmox infrastructure
   hosts: proxmox
+  gather_facts: false
+  tasks:
+    # ── Bridge discovery ──────────────────────────────────────────
+
+    - name: List physical-NIC-backed bridges
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          for br in /sys/class/net/vmbr*/; do
+            brname=$(basename "$br")
+            for iface in $(ls "$br/brif/" 2>/dev/null); do
+              if [ -e "/sys/class/net/$iface/device" ]; then
+                echo "$brname"
+                break
+              fi
+            done
+          done
+        executable: /bin/bash
+      register: bridge_list
+      changed_when: false
+
+    - name: Assert at least one physical bridge exists
+      ansible.builtin.assert:
+        that: bridge_list.stdout_lines | length >= 1
+        fail_msg: >-
+          Expected at least 1 physical-NIC bridge, found
+          {{ bridge_list.stdout_lines | length }}
+
+    # ── IOMMU ─────────────────────────────────────────────────────
+
+    - name: Check IOMMU status
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          dmesg | grep -i -c 'IOMMU enabled\|DMAR.*IOMMU\|Adding to iommu group'
+        executable: /bin/bash
+      register: iommu_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Report IOMMU status
+      ansible.builtin.debug:
+        msg: >-
+          IOMMU {{ 'active' if (iommu_verify.stdout | int) > 0
+          else 'not active (no WiFi passthrough)' }}
+
+    # ── iGPU detection (Intel or AMD) ──────────────────────────────
+
+    - name: Check for Intel iGPU
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          lspci -nn | grep -ic 'VGA compatible controller.*Intel'
+        executable: /bin/bash
+      register: _intel_igpu_count
+      changed_when: false
+      failed_when: false
+
+    - name: Check for AMD iGPU
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          lspci -nn | grep -icE 'VGA compatible controller.*(AMD|ATI)|Display controller.*(AMD|ATI)'
+        executable: /bin/bash
+      register: _amd_igpu_count
+      changed_when: false
+      failed_when: false
+
+    - name: Set iGPU vendor fact for verify
+      ansible.builtin.set_fact:
+        _verify_igpu_vendor: >-
+          {{ 'intel' if (_intel_igpu_count.stdout | trim | int) > 0
+             else ('amd' if (_amd_igpu_count.stdout | trim | int) > 0
+             else 'none') }}
+        _verify_igpu_present: >-
+          {{ (_intel_igpu_count.stdout | trim | int) > 0
+             or (_amd_igpu_count.stdout | trim | int) > 0 }}
+
+    - name: Assert an iGPU is present
+      ansible.builtin.assert:
+        that: _verify_igpu_present | bool
+        fail_msg: "No iGPU (Intel or AMD) found on {{ inventory_hostname }}"
+
+    - name: Verify GPU driver loaded (Intel i915)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          lsmod | grep -c '^i915'
+        executable: /bin/bash
+      register: _i915_loaded
+      changed_when: false
+      when: _verify_igpu_vendor == 'intel'
+
+    - name: Assert i915 is loaded
+      ansible.builtin.assert:
+        that: (_i915_loaded.stdout | trim | int) > 0
+        fail_msg: "Intel iGPU detected but i915 driver is not loaded"
+      when: _verify_igpu_vendor == 'intel'
+
+    - name: Verify GPU driver loaded (AMD amdgpu)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          lsmod | grep -c '^amdgpu'
+        executable: /bin/bash
+      register: _amdgpu_loaded
+      changed_when: false
+      when: _verify_igpu_vendor == 'amd'
+
+    - name: Assert amdgpu is loaded
+      ansible.builtin.assert:
+        that: (_amdgpu_loaded.stdout | trim | int) > 0
+        fail_msg: "AMD iGPU detected but amdgpu driver is not loaded"
+      when: _verify_igpu_vendor == 'amd'
+
+    - name: Verify render device exists
+      ansible.builtin.stat:
+        path: /dev/dri/renderD128
+      register: render_dev
+      when: _verify_igpu_present | bool
+
+    - name: Assert render device exists
+      ansible.builtin.assert:
+        that: render_dev.stat.exists
+        fail_msg: "/dev/dri/renderD128 missing despite iGPU and loaded driver"
+      when: _verify_igpu_present | bool
+
+    - name: Verify vainfo is installed
+      ansible.builtin.command:
+        cmd: which vainfo
+      changed_when: false
+      when: _verify_igpu_present | bool
+
+    - name: Verify enterprise repos are disabled
+      ansible.builtin.stat:
+        path: /etc/apt/sources.list.d/pve-enterprise.sources
+      register: enterprise_repo
+
+    - name: Assert enterprise repo is disabled
+      ansible.builtin.assert:
+        that: not enterprise_repo.stat.exists
+        fail_msg: "pve-enterprise.sources still active"
+
+    - name: Report iGPU status
+      ansible.builtin.debug:
+        msg: >-
+          iGPU: vendor={{ _verify_igpu_vendor }},
+          {{ 'driver loaded, vainfo installed'
+          if _verify_igpu_present | bool
+          else 'not detected' }}
+
+    # ── Backup manifest ────────────────────────────────────────
+
+    - name: Check backup manifest exists
+      ansible.builtin.stat:
+        path: /var/lib/ansible-backup/manifest.json
+      register: backup_manifest
+
+    - name: Assert backup manifest was created
+      ansible.builtin.assert:
+        that: backup_manifest.stat.exists
+        fail_msg: "Backup manifest not found at /var/lib/ansible-backup/manifest.json"
+
+    - name: Read backup manifest
+      ansible.builtin.slurp:
+        src: /var/lib/ansible-backup/manifest.json
+      register: backup_manifest_raw
+
+    - name: Parse backup manifest
+      ansible.builtin.set_fact:
+        backup_data: "{{ backup_manifest_raw.content | b64decode | from_json }}"
+
+    - name: Assert backup manifest has required fields
+      ansible.builtin.assert:
+        that:
+          - backup_data.timestamp is defined
+          - backup_data.project_version is defined
+          - backup_data.host is defined
+          - backup_data.host_config is defined
+        fail_msg: >-
+          Backup manifest missing required fields.
+          Contents: {{ backup_data }}
+
+    - name: Check host config archive exists
+      ansible.builtin.stat:
+        path: "{{ backup_data.host_config }}"
+      register: host_config_archive
+
+    - name: Assert host config archive exists
+      ansible.builtin.assert:
+        that: host_config_archive.stat.exists
+        fail_msg: >-
+          Host config archive {{ backup_data.host_config }} referenced
+          in manifest but not found on disk
+
+    - name: Report backup status
+      ansible.builtin.debug:
+        msg: >-
+          Backup: timestamp={{ backup_data.timestamp }},
+          host={{ backup_data.host }},
+          VMs={{ backup_data.vm_ids | default([]) | join(', ') | default('none') }},
+          archive={{ backup_data.host_config }}
+
+    # ── Deployment tracking ─────────────────────────────────────
+
+    - name: Check deploy_stamp fact file exists
+      ansible.builtin.stat:
+        path: /etc/ansible/facts.d/vm_builds.fact
+      register: stamp_file
+
+    - name: Assert deploy_stamp was written
+      ansible.builtin.assert:
+        that: stamp_file.stat.exists
+        fail_msg: "/etc/ansible/facts.d/vm_builds.fact not found"
+
+    - name: Read deploy_stamp fact file
+      ansible.builtin.slurp:
+        src: /etc/ansible/facts.d/vm_builds.fact
+      register: stamp_raw
+
+    - name: Parse deploy_stamp
+      ansible.builtin.set_fact:
+        stamp: "{{ stamp_raw.content | b64decode | from_json }}"
+
+    - name: Assert stamp contains project_version
+      ansible.builtin.assert:
+        that: stamp.project_version is defined
+        fail_msg: "deploy_stamp missing project_version"
+
+    - name: Assert stamp contains common plays
+      ansible.builtin.assert:
+        that:
+          - "'backup' in stamp.plays"
+          - "'infrastructure' in stamp.plays"
+        fail_msg: "deploy_stamp missing common play entries: {{ stamp.plays.keys() | list }}"
+
+    - name: Assert stamp contains openwrt_vm (router nodes only)
+      ansible.builtin.assert:
+        that: "'openwrt_vm' in stamp.plays"
+        fail_msg: "deploy_stamp missing openwrt_vm entry: {{ stamp.plays.keys() | list }}"
+      when: "'router_nodes' in group_names"
+
+    - name: Assert stamp contains wireguard_lxc (vpn nodes only)
+      ansible.builtin.assert:
+        that: "'wireguard_lxc' in stamp.plays"
+        fail_msg: "deploy_stamp missing wireguard_lxc entry: {{ stamp.plays.keys() | list }}"
+      when: "'vpn_nodes' in group_names"
+
+    - name: Assert stamp contains openwrt_mesh_lxc (mesh wifi nodes only)
+      ansible.builtin.assert:
+        that: "'openwrt_mesh_lxc' in stamp.plays"
+        fail_msg: "deploy_stamp missing openwrt_mesh_lxc entry: {{ stamp.plays.keys() | list }}"
+      when:
+        - "'wifi_nodes' in group_names"
+        - "'router_nodes' not in group_names"
+
+    - name: Report deploy_stamp contents
+      ansible.builtin.debug:
+        msg: >-
+          deploy_stamp: version={{ stamp.project_version }},
+          plays={{ stamp.plays.keys() | list | join(', ') }},
+          last_run={{ stamp.last_run }}
+
+# ── Play 2: Router node assertions (home-specific) ────────────────
+
+- name: Verify router node state
+  hosts: router_nodes
   gather_facts: false
   vars:
     openwrt_vm_id: 100
     proxmox_lan_mgmt_ip_offset: 2
   tasks:
-    # ── Bridge discovery ──────────────────────────────────────────
+    # ── Bridge topology ──────────────────────────────────────────
 
     - name: List physical-NIC-backed bridges
       ansible.builtin.shell:
@@ -133,8 +402,6 @@
           VM net0 is on {{ vm_net0_bridge.stdout | trim }},
           expected WAN bridge {{ wan_bridge }}
 
-    # ── WAN MAC address cloning (checked later via openwrt_ssh) ────
-
     # ── Proxmox LAN management IP ────────────────────────────────
 
     - name: Check Proxmox LAN management IP on LAN bridge
@@ -196,7 +463,7 @@
         port: 8006
         timeout: 10
 
-    - name: Check bridge has auto directive for boot persistence
+    - name: Check bridge has auto directive for boot persistence  # noqa command-instead-of-shell
       ansible.builtin.shell:
         cmd: >-
           grep -c 'auto {{ lan_bridge }}' /etc/network/interfaces.d/ansible-bridges.conf
@@ -217,89 +484,6 @@
           bridge_auto=yes, DHCP_config=yes,
           GUI port 8006=accessible,
           OpenWrt LAN IP={{ openwrt_lan_ip }}
-
-    # ── IOMMU ─────────────────────────────────────────────────────
-
-    - name: Check IOMMU status
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          dmesg | grep -i -c 'IOMMU enabled\|DMAR.*IOMMU\|Adding to iommu group'
-        executable: /bin/bash
-      register: iommu_verify
-      changed_when: false
-      failed_when: false
-
-    - name: Report IOMMU status
-      ansible.builtin.debug:
-        msg: >-
-          IOMMU {{ 'active' if (iommu_verify.stdout | int) > 0
-          else 'not active (no WiFi passthrough)' }}
-
-    # ── iGPU detection (spot-check from proxmox_igpu role) ────────
-
-    - name: Check if Intel iGPU is present
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          lspci -nn | grep -ic 'VGA compatible controller.*Intel'
-        executable: /bin/bash
-      register: igpu_present
-      changed_when: false
-      failed_when: false
-
-    - name: Verify i915 driver loaded when iGPU present
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          lsmod | grep -c '^i915'
-        executable: /bin/bash
-      register: i915_loaded
-      changed_when: false
-      when: (igpu_present.stdout | trim | int) > 0
-
-    - name: Assert i915 is loaded
-      ansible.builtin.assert:
-        that: (i915_loaded.stdout | trim | int) > 0
-        fail_msg: "Intel iGPU detected but i915 driver is not loaded"
-      when: (igpu_present.stdout | trim | int) > 0
-
-    - name: Verify render device exists when iGPU present
-      ansible.builtin.stat:
-        path: /dev/dri/renderD128
-      register: render_dev
-      when: (igpu_present.stdout | trim | int) > 0
-
-    - name: Assert render device exists
-      ansible.builtin.assert:
-        that: render_dev.stat.exists
-        fail_msg: "/dev/dri/renderD128 missing despite iGPU and i915"
-      when: (igpu_present.stdout | trim | int) > 0
-
-    - name: Verify vainfo is installed when iGPU present
-      ansible.builtin.command:
-        cmd: which vainfo
-      changed_when: false
-      when: (igpu_present.stdout | trim | int) > 0
-
-    - name: Verify enterprise repos are disabled when iGPU present
-      ansible.builtin.stat:
-        path: /etc/apt/sources.list.d/pve-enterprise.sources
-      register: enterprise_repo
-      when: (igpu_present.stdout | trim | int) > 0
-
-    - name: Assert enterprise repo is disabled
-      ansible.builtin.assert:
-        that: not enterprise_repo.stat.exists
-        fail_msg: "pve-enterprise.sources still active after proxmox_igpu"
-      when: (igpu_present.stdout | trim | int) > 0
-
-    - name: Report iGPU status
-      ansible.builtin.debug:
-        msg: >-
-          iGPU: {{ 'present, i915 loaded, vainfo installed'
-          if (igpu_present.stdout | trim | int) > 0
-          else 'not detected (skipped)' }}
 
     # ── OpenWrt connectivity and configuration ────────────────────
 
@@ -332,7 +516,7 @@
         that: wan_info.stdout | trim | length > 0
         fail_msg: "WAN interface has no IPv4 address"
 
-    - name: Check OpenWrt LAN IP
+    - name: Check OpenWrt LAN IP  # noqa command-instead-of-shell
       ansible.builtin.shell:
         cmd: >-
           {{ openwrt_ssh }} "uci get network.lan.ipaddr"
@@ -362,7 +546,7 @@
 
     # ── DHCP configuration ──────────────────────────────────────
 
-    - name: Check OpenWrt DHCP start
+    - name: Check OpenWrt DHCP start  # noqa command-instead-of-shell
       ansible.builtin.shell:
         cmd: >-
           {{ openwrt_ssh }} "uci get dhcp.lan.start"
@@ -374,7 +558,7 @@
         that: (dhcp_start.stdout | trim | int) > 0
         fail_msg: "DHCP start not set or zero: {{ dhcp_start.stdout | trim }}"
 
-    - name: Check OpenWrt DHCP limit
+    - name: Check OpenWrt DHCP limit  # noqa command-instead-of-shell
       ansible.builtin.shell:
         cmd: >-
           {{ openwrt_ssh }} "uci get dhcp.lan.limit"
@@ -386,7 +570,7 @@
         that: (dhcp_limit.stdout | trim | int) > 0
         fail_msg: "DHCP limit not set or zero: {{ dhcp_limit.stdout | trim }}"
 
-    - name: Check OpenWrt DHCP leasetime
+    - name: Check OpenWrt DHCP leasetime  # noqa command-instead-of-shell
       ansible.builtin.shell:
         cmd: >-
           {{ openwrt_ssh }} "uci get dhcp.lan.leasetime"
@@ -398,7 +582,7 @@
         that: (dhcp_leasetime.stdout | trim | length) > 0
         fail_msg: "DHCP leasetime not set"
 
-    - name: Get Proxmox LAN bridge MAC for reservation check
+    - name: Get Proxmox LAN bridge MAC for reservation check  # noqa command-instead-of-shell
       ansible.builtin.shell:
         cmd: cat /sys/class/net/{{ lan_bridge }}/address
       register: lan_bridge_mac_raw
@@ -596,99 +780,6 @@
           found {{ mesh_iface_count.stdout | trim }}
       when: (radio_count.stdout | trim | int) > 0
 
-    # ── Backup manifest ────────────────────────────────────────
-
-    - name: Check backup manifest exists
-      ansible.builtin.stat:
-        path: /var/lib/ansible-backup/manifest.json
-      register: backup_manifest
-
-    - name: Assert backup manifest was created
-      ansible.builtin.assert:
-        that: backup_manifest.stat.exists
-        fail_msg: "Backup manifest not found at /var/lib/ansible-backup/manifest.json"
-
-    - name: Read backup manifest
-      ansible.builtin.slurp:
-        src: /var/lib/ansible-backup/manifest.json
-      register: backup_manifest_raw
-
-    - name: Parse backup manifest
-      ansible.builtin.set_fact:
-        backup_data: "{{ backup_manifest_raw.content | b64decode | from_json }}"
-
-    - name: Assert backup manifest has required fields
-      ansible.builtin.assert:
-        that:
-          - backup_data.timestamp is defined
-          - backup_data.project_version is defined
-          - backup_data.host is defined
-          - backup_data.host_config is defined
-        fail_msg: >-
-          Backup manifest missing required fields.
-          Contents: {{ backup_data }}
-
-    - name: Check host config archive exists
-      ansible.builtin.stat:
-        path: "{{ backup_data.host_config }}"
-      register: host_config_archive
-
-    - name: Assert host config archive exists
-      ansible.builtin.assert:
-        that: host_config_archive.stat.exists
-        fail_msg: >-
-          Host config archive {{ backup_data.host_config }} referenced
-          in manifest but not found on disk
-
-    - name: Report backup status
-      ansible.builtin.debug:
-        msg: >-
-          Backup: timestamp={{ backup_data.timestamp }},
-          host={{ backup_data.host }},
-          VMs={{ backup_data.vm_ids | default([]) | join(', ') | default('none') }},
-          archive={{ backup_data.host_config }}
-
-    # ── Deployment tracking ─────────────────────────────────────
-
-    - name: Check deploy_stamp fact file exists
-      ansible.builtin.stat:
-        path: /etc/ansible/facts.d/vm_builds.fact
-      register: stamp_file
-
-    - name: Assert deploy_stamp was written
-      ansible.builtin.assert:
-        that: stamp_file.stat.exists
-        fail_msg: "/etc/ansible/facts.d/vm_builds.fact not found"
-
-    - name: Read deploy_stamp fact file
-      ansible.builtin.slurp:
-        src: /etc/ansible/facts.d/vm_builds.fact
-      register: stamp_raw
-
-    - name: Parse deploy_stamp
-      ansible.builtin.set_fact:
-        stamp: "{{ stamp_raw.content | b64decode | from_json }}"
-
-    - name: Assert stamp contains project_version
-      ansible.builtin.assert:
-        that: stamp.project_version is defined
-        fail_msg: "deploy_stamp missing project_version"
-
-    - name: Assert stamp recorded expected plays
-      ansible.builtin.assert:
-        that:
-          - "'backup' in stamp.plays"
-          - "'infrastructure' in stamp.plays"
-          - "'openwrt_vm' in stamp.plays"
-        fail_msg: "deploy_stamp missing expected play entries: {{ stamp.plays.keys() | list }}"
-
-    - name: Report deploy_stamp contents
-      ansible.builtin.debug:
-        msg: >-
-          deploy_stamp: version={{ stamp.project_version }},
-          plays={{ stamp.plays.keys() | list | join(', ') }},
-          last_run={{ stamp.last_run }}
-
     # ── Host address state file ───────────────────────────────────
 
     - name: Check state file exists on controller
@@ -729,16 +820,477 @@
           State file: host={{ state_data.host }},
           IPs={{ state_data.ips | join(', ') }}
 
+    # ── Generated env file: LAN subnet output ──────────────────────
+
+    - name: Check test.env.generated contains LAN subnet
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          grep -c '^LAN_GATEWAY=' "{{ playbook_dir }}/../../test.env.generated"
+        executable: /bin/bash
+      register: _lan_gw_check
+      delegate_to: localhost
+      changed_when: false
+
+    - name: Assert LAN_GATEWAY was written to generated env
+      ansible.builtin.assert:
+        that: (_lan_gw_check.stdout | trim | int) > 0
+        fail_msg: "test.env.generated missing LAN_GATEWAY entry"
+
+    - name: Read LAN_GATEWAY value from generated env  # noqa command-instead-of-shell
+      ansible.builtin.shell:
+        cmd: grep '^LAN_GATEWAY=' "{{ playbook_dir }}/../../test.env.generated" | cut -d= -f2
+      register: _generated_lan_gw
+      delegate_to: localhost
+      changed_when: false
+
+    - name: Assert generated LAN_GATEWAY matches OpenWrt LAN IP
+      ansible.builtin.assert:
+        that: (_generated_lan_gw.stdout | trim) == (lan_ip.stdout | trim)
+        fail_msg: >-
+          Generated LAN_GATEWAY={{ _generated_lan_gw.stdout | trim }}
+          does not match OpenWrt LAN IP={{ lan_ip.stdout | trim }}
+
     # ── Final report ──────────────────────────────────────────────
 
-    - name: Report verification results
+    - name: Report router verification results
       ansible.builtin.debug:
         msg: >-
-          Verification passed:
+          Router verification passed:
           WAN bridge={{ wan_bridge }}, LAN bridge={{ lan_bridge }},
           VM net0={{ vm_net0_bridge.stdout | trim }},
           Proxmox LAN IP={{ proxmox_lan_ip }},
           WAN={{ wan_info.stdout | trim }},
           LAN={{ lan_ip.stdout | trim }},
           WiFi radios={{ radio_count.stdout | trim }},
-          Mesh={{ mesh_iface_count.stdout | default('0') | trim }}
+          Mesh={{ mesh_iface_count.stdout | default('0') | trim }},
+          LAN_GATEWAY(generated)={{ _generated_lan_gw.stdout | trim }}
+
+# ── Play 3: WireGuard assertions (all vpn_nodes) ─────────────────
+
+- name: Verify WireGuard LXC on VPN nodes
+  hosts: vpn_nodes
+  gather_facts: false
+  tasks:
+    # ── WireGuard container ────────────────────────────────────────
+
+    - name: Check WireGuard container is running
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct status {{ wireguard_ct_id }} | grep -c running
+        executable: /bin/bash
+      register: wg_ct_running
+      changed_when: false
+
+    - name: Assert WireGuard container is running
+      ansible.builtin.assert:
+        that: (wg_ct_running.stdout | trim | int) > 0
+        fail_msg: "Container {{ wireguard_ct_id }} is not running on {{ inventory_hostname }}"
+
+    - name: Get WireGuard container onboot setting
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ wireguard_ct_id }} | grep -oP '^onboot:\s*\K.*'
+        executable: /bin/bash
+      register: wg_ct_onboot
+      changed_when: false
+
+    - name: Assert WireGuard container starts on boot
+      ansible.builtin.assert:
+        that: (wg_ct_onboot.stdout | trim) == '1'
+        fail_msg: >-
+          Container {{ wireguard_ct_id }} on {{ inventory_hostname }}
+          onboot={{ wg_ct_onboot.stdout | trim }}, expected 1
+
+    - name: Get WireGuard container startup order
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ wireguard_ct_id }} | grep -oP '^startup:\s*order=\K\d+'
+        executable: /bin/bash
+      register: wg_ct_startup
+      changed_when: false
+
+    - name: Assert WireGuard container has startup order 2
+      ansible.builtin.assert:
+        that: (wg_ct_startup.stdout | trim) == '2'
+        fail_msg: >-
+          Container {{ wireguard_ct_id }} on {{ inventory_hostname }}
+          startup order={{ wg_ct_startup.stdout | trim }}, expected 2
+
+    - name: Get WireGuard container features
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ wireguard_ct_id }} | grep -oP '^features:\s*\K.*'
+        executable: /bin/bash
+      register: wg_ct_features
+      changed_when: false
+
+    - name: Assert WireGuard container has nesting enabled
+      ansible.builtin.assert:
+        that: "'nesting=1' in wg_ct_features.stdout"
+        fail_msg: >-
+          Container {{ wireguard_ct_id }} on {{ inventory_hostname }}
+          missing nesting=1 in features: {{ wg_ct_features.stdout | trim }}
+
+    # ── Kernel module on host ──────────────────────────────────────
+
+    - name: Check wireguard kernel module on host
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          lsmod | grep -c '^wireguard'
+        executable: /bin/bash
+      register: wg_module_loaded
+      changed_when: false
+
+    - name: Assert wireguard kernel module is loaded
+      ansible.builtin.assert:
+        that: (wg_module_loaded.stdout | trim | int) > 0
+        fail_msg: "wireguard kernel module is not loaded on {{ inventory_hostname }}"
+
+    - name: Check wireguard module persistence file
+      ansible.builtin.stat:
+        path: /etc/modules-load.d/wireguard.conf
+      register: wg_module_conf
+
+    - name: Assert wireguard module persistence exists
+      ansible.builtin.assert:
+        that: wg_module_conf.stat.exists
+        fail_msg: "/etc/modules-load.d/wireguard.conf missing on {{ inventory_hostname }}"
+
+    # ── WireGuard configuration (inside container via pct exec) ────
+
+    - name: Check wg0 interface exists in container
+      ansible.builtin.command:
+        cmd: pct exec {{ wireguard_ct_id }} -- ip link show wg0
+      register: wg_iface
+      changed_when: false
+      failed_when: false
+
+    - name: Assert wg0 interface exists
+      ansible.builtin.assert:
+        that: wg_iface.rc == 0
+        fail_msg: "wg0 interface does not exist in container {{ wireguard_ct_id }} on {{ inventory_hostname }}"
+
+    - name: Check wg0 config file permissions
+      ansible.builtin.command:
+        cmd: pct exec {{ wireguard_ct_id }} -- stat -c '%a' /etc/wireguard/wg0.conf
+      register: wg_conf_perms
+      changed_when: false
+
+    - name: Assert wg0 config has correct permissions
+      ansible.builtin.assert:
+        that: (wg_conf_perms.stdout | trim) == '600'
+        fail_msg: >-
+          /etc/wireguard/wg0.conf has mode {{ wg_conf_perms.stdout | trim }},
+          expected 600
+
+    - name: Check wg show output
+      ansible.builtin.command:
+        cmd: pct exec {{ wireguard_ct_id }} -- wg show wg0
+      register: wg_show
+      changed_when: false
+      failed_when: false
+
+    - name: Assert wg show reports endpoint
+      ansible.builtin.assert:
+        that: "'endpoint' in wg_show.stdout or 'peer' in wg_show.stdout"
+        fail_msg: "wg show wg0 missing endpoint/peer info: {{ wg_show.stdout }}"
+      when: wg_show.rc == 0
+
+    - name: Check wg-quick@wg0 service is enabled
+      ansible.builtin.command:
+        cmd: pct exec {{ wireguard_ct_id }} -- systemctl is-enabled wg-quick@wg0
+      register: wg_service_enabled
+      changed_when: false
+
+    - name: Assert wg-quick@wg0 is enabled
+      ansible.builtin.assert:
+        that: "'enabled' in wg_service_enabled.stdout"
+        fail_msg: >-
+          wg-quick@wg0 is not enabled on {{ inventory_hostname }}:
+          {{ wg_service_enabled.stdout | trim }}
+
+    - name: Check IP forwarding is active
+      ansible.builtin.command:
+        cmd: pct exec {{ wireguard_ct_id }} -- sysctl -n net.ipv4.ip_forward
+      register: wg_ip_forward
+      changed_when: false
+
+    - name: Assert IP forwarding is enabled
+      ansible.builtin.assert:
+        that: (wg_ip_forward.stdout | trim) == '1'
+        fail_msg: "IP forwarding is not enabled on {{ inventory_hostname }}: {{ wg_ip_forward.stdout | trim }}"
+
+    - name: Check IP forwarding persistence
+      ansible.builtin.command:
+        cmd: pct exec {{ wireguard_ct_id }} -- test -f /etc/sysctl.d/99-wireguard.conf
+      register: wg_sysctl_file
+      changed_when: false
+      failed_when: false
+
+    - name: Assert IP forwarding sysctl file exists
+      ansible.builtin.assert:
+        that: wg_sysctl_file.rc == 0
+        fail_msg: "/etc/sysctl.d/99-wireguard.conf missing in container on {{ inventory_hostname }}"
+
+    - name: Check NAT MASQUERADE rule
+      ansible.builtin.command:
+        cmd: pct exec {{ wireguard_ct_id }} -- iptables -t nat -L POSTROUTING -n
+      register: wg_nat_rules
+      changed_when: false
+
+    - name: Assert MASQUERADE rule present on wg0
+      ansible.builtin.assert:
+        that: "'MASQUERADE' in wg_nat_rules.stdout"
+        fail_msg: "MASQUERADE rule missing from POSTROUTING chain on {{ inventory_hostname }}: {{ wg_nat_rules.stdout }}"
+
+    # ── Generated env file (controller, check once) ────────────────
+
+    - name: Check test.env.generated exists on controller
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../../test.env.generated"
+      register: env_generated
+      delegate_to: localhost
+      run_once: true
+
+    - name: Assert test.env.generated was written (auto-generated keys)
+      ansible.builtin.assert:
+        that: env_generated.stat.exists
+        fail_msg: "test.env.generated not found on controller"
+      when: lookup('env', 'WIREGUARD_PRIVATE_KEY') | length == 0
+      run_once: true
+
+    - name: Read test.env.generated for public key check
+      ansible.builtin.slurp:
+        src: "{{ playbook_dir }}/../../test.env.generated"
+      register: env_generated_content
+      delegate_to: localhost
+      when:
+        - lookup('env', 'WIREGUARD_PRIVATE_KEY') | length == 0
+        - env_generated.stat.exists
+      run_once: true
+
+    - name: Assert test.env.generated contains client public key
+      ansible.builtin.assert:
+        that: "'WIREGUARD_PUBLIC_KEY=' in (env_generated_content.content | b64decode)"
+        fail_msg: "test.env.generated missing WIREGUARD_PUBLIC_KEY entry"
+      when:
+        - lookup('env', 'WIREGUARD_PRIVATE_KEY') | length == 0
+        - env_generated.stat.exists
+      run_once: true
+
+    - name: Report WireGuard verification
+      ansible.builtin.debug:
+        msg: >-
+          WireGuard verification passed on {{ inventory_hostname }}:
+          container={{ wireguard_ct_id }}, running=yes,
+          onboot={{ wg_ct_onboot.stdout | trim }},
+          order={{ wg_ct_startup.stdout | trim }},
+          nesting={{ wg_ct_features.stdout | trim }},
+          wg0={{ 'present' if wg_iface.rc == 0 else 'absent' }},
+          ip_forward={{ wg_ip_forward.stdout | trim }},
+          nat={{ 'present' if 'MASQUERADE' in wg_nat_rules.stdout else 'absent' }}
+
+# ── Play 4: LAN host assertions (mesh1-specific) ─────────────────
+
+- name: Verify LAN satellite hosts
+  hosts: lan_hosts
+  gather_facts: false
+  tasks:
+    - name: Check Proxmox API is responsive
+      ansible.builtin.command:
+        cmd: pvesh get /version --output-format json
+      register: pve_version
+      changed_when: false
+
+    - name: Assert PVE API returned valid response
+      ansible.builtin.assert:
+        that: (pve_version.stdout | from_json).version is defined
+        fail_msg: "Proxmox API not responsive on {{ inventory_hostname }}: {{ pve_version.stdout }}"
+
+    - name: Check IOMMU status on LAN host
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          dmesg | grep -i -c 'IOMMU enabled\|DMAR.*IOMMU\|Adding to iommu group'
+        executable: /bin/bash
+      register: lan_iommu
+      changed_when: false
+      failed_when: false
+
+    - name: Report LAN host IOMMU
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} IOMMU: {{ 'active' if (lan_iommu.stdout | int) > 0 else 'not active' }}
+
+    - name: Check WiFi PCI devices
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          lspci -nn | grep -ic 'Network controller.*Intel'
+        executable: /bin/bash
+      register: lan_wifi_count
+      changed_when: false
+      failed_when: false
+
+    - name: Report LAN host WiFi
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} WiFi devices: {{ lan_wifi_count.stdout | trim }}
+
+    - name: Report LAN host verification
+      ansible.builtin.debug:
+        msg: >-
+          LAN host {{ inventory_hostname }} verification passed:
+          PVE API=responsive,
+          IOMMU={{ 'active' if (lan_iommu.stdout | int) > 0 else 'inactive' }},
+          WiFi={{ lan_wifi_count.stdout | trim }} devices
+
+# ── Play 5: Mesh WiFi LXC assertions (wifi_nodes except router_nodes) ──
+
+- name: Verify OpenWrt Mesh LXC on satellite nodes
+  hosts: wifi_nodes:!router_nodes
+  gather_facts: false
+  tasks:
+    - name: Check mesh WiFi container is running
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct status {{ meshwifi_ct_id }} | grep -c running
+        executable: /bin/bash
+      register: mesh_ct_running
+      changed_when: false
+
+    - name: Assert mesh WiFi container is running
+      ansible.builtin.assert:
+        that: (mesh_ct_running.stdout | trim | int) > 0
+        fail_msg: "Container {{ meshwifi_ct_id }} is not running on {{ inventory_hostname }}"
+
+    - name: Get mesh container onboot setting
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ meshwifi_ct_id }} | grep -oP '^onboot:\s*\K.*'
+        executable: /bin/bash
+      register: mesh_ct_onboot
+      changed_when: false
+
+    - name: Assert mesh container starts on boot
+      ansible.builtin.assert:
+        that: (mesh_ct_onboot.stdout | trim) == '1'
+        fail_msg: >-
+          Container {{ meshwifi_ct_id }} on {{ inventory_hostname }}
+          onboot={{ mesh_ct_onboot.stdout | trim }}, expected 1
+
+    - name: Get mesh container unprivileged setting
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ meshwifi_ct_id }} | grep -oP '^unprivileged:\s*\K.*' || echo '0'
+        executable: /bin/bash
+      register: mesh_ct_unpriv
+      changed_when: false
+
+    - name: Assert mesh container is privileged (unprivileged=0)
+      ansible.builtin.assert:
+        that: (mesh_ct_unpriv.stdout | trim) == '0'
+        fail_msg: >-
+          Container {{ meshwifi_ct_id }} on {{ inventory_hostname }}
+          unprivileged={{ mesh_ct_unpriv.stdout | trim }}, expected 0
+          (privileged is required for WiFi PHY namespace move)
+
+    - name: Check WiFi PHY hookscript exists
+      ansible.builtin.stat:
+        path: "/var/lib/vz/snippets/mesh-wifi-phy-{{ meshwifi_ct_id }}.sh"
+      register: mesh_hookscript
+
+    - name: Assert WiFi PHY hookscript is deployed
+      ansible.builtin.assert:
+        that: mesh_hookscript.stat.exists
+        fail_msg: "Hookscript mesh-wifi-phy-{{ meshwifi_ct_id }}.sh not found"
+
+    - name: Check hookscript is attached to container
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ meshwifi_ct_id }} | grep -c 'hookscript'
+        executable: /bin/bash
+      register: mesh_hookscript_attached
+      changed_when: false
+      failed_when: false
+
+    - name: Assert hookscript is attached
+      ansible.builtin.assert:
+        that: (mesh_hookscript_attached.stdout | trim | int) > 0
+        fail_msg: "No hookscript attached to container {{ meshwifi_ct_id }}"
+
+    - name: Check WiFi radios visible inside mesh container
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ meshwifi_ct_id }} -- /bin/sh -c 'iw phy 2>/dev/null | sed -n "s/^Wiphy //p"'
+        executable: /bin/bash
+      register: mesh_radios_inside
+      changed_when: false
+      failed_when: false
+
+    - name: Assert WiFi radios are visible inside container
+      ansible.builtin.assert:
+        that:
+          - mesh_radios_inside.rc == 0
+          - mesh_radios_inside.stdout_lines | select('match', '^phy') | list | length > 0
+        fail_msg: >-
+          No WiFi radios visible inside mesh container {{ meshwifi_ct_id }}
+          on {{ inventory_hostname }}. PHY namespace move may have failed.
+          Output: {{ mesh_radios_inside.stdout | default('empty') }}
+
+    - name: Check mesh interface configuration inside container
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ meshwifi_ct_id }} -- /bin/sh -c "cat /etc/config/wireless 2>/dev/null | grep -c \"mode 'mesh'\""
+        executable: /bin/bash
+      register: mesh_iface_config
+      changed_when: false
+      failed_when: false
+
+    - name: Assert mesh interfaces are configured
+      ansible.builtin.assert:
+        that: (mesh_iface_config.stdout | trim | int) > 0
+        fail_msg: >-
+          No mesh interfaces configured inside container {{ meshwifi_ct_id }}
+          on {{ inventory_hostname }}
+      when: mesh_radios_inside.rc == 0
+
+    - name: Check wpad-mesh-openssl is installed
+      ansible.builtin.shell:
+        cmd: |
+          pct exec {{ meshwifi_ct_id }} -- /bin/sh -c 'opkg list-installed wpad-mesh-openssl'
+        executable: /bin/bash
+      register: mesh_wpad_installed
+      changed_when: false
+      failed_when: false
+
+    - name: Assert wpad-mesh-openssl is installed
+      ansible.builtin.assert:
+        that: mesh_wpad_installed.stdout | trim | length > 0
+        fail_msg: "wpad-mesh-openssl not installed in mesh container on {{ inventory_hostname }}"
+
+    - name: Assert mesh container has deploy_stamp
+      ansible.builtin.assert:
+        that: "'openwrt_mesh_lxc' in stamp.plays"
+        fail_msg: "deploy_stamp missing openwrt_mesh_lxc entry: {{ stamp.plays.keys() | list }}"
+
+    - name: Report mesh LXC verification
+      ansible.builtin.debug:
+        msg: >-
+          Mesh LXC verification passed on {{ inventory_hostname }}:
+          container={{ meshwifi_ct_id }}, running=yes,
+          privileged=yes, hookscript=deployed,
+          radios_inside={{ mesh_radios_inside.stdout_lines | select('match', '^phy') | list | length }},
+          mesh_ifaces={{ mesh_iface_config.stdout | default('0') | trim }}

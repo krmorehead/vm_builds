@@ -59,10 +59,10 @@
       -o PubkeyAuthentication=no -o ConnectTimeout=10
       root@10.10.10.1
 
-- name: Get MAC address of {{ _lan_host_name }}
+- name: Get MAC address of {{ _lan_host_name }}  # noqa command-instead-of-shell
   ansible.builtin.shell:
     cmd: >-
-      {{ _lan_ssh }} "ip link show | grep -A1 'state UP' | grep ether | awk '{print $2}' | head -1"
+      {{ _lan_ssh }} "ip link show | grep -A1 'state UP' | grep ether | awk '{print \$2}' | head -1"
   register: _lan_host_mac_raw
   changed_when: false
 

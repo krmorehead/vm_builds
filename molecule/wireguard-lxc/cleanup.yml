@@ -1,0 +1,42 @@
+---
+- name: Destroy WireGuard container
+  hosts: vpn_nodes
+  gather_facts: false
+  vars:
+    wireguard_ct_id: 101
+  tasks:
+    - name: Stop WireGuard container
+      ansible.builtin.command:
+        cmd: pct stop {{ wireguard_ct_id }}
+      failed_when: false
+      changed_when: true
+
+    - name: Wait for container to stop
+      ansible.builtin.pause:
+        seconds: 2
+
+    - name: Destroy WireGuard container
+      ansible.builtin.command:
+        cmd: pct destroy {{ wireguard_ct_id }} --purge
+      failed_when: false
+      changed_when: true
+
+    - name: Remove wireguard module persistence
+      ansible.builtin.file:
+        path: /etc/modules-load.d/wireguard.conf
+        state: absent
+
+    - name: Unload wireguard kernel module
+      ansible.builtin.command:
+        cmd: modprobe -r wireguard
+      failed_when: false
+      changed_when: true
+
+    - name: Remove generated env files from controller
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ playbook_dir }}/../../.env.generated"
+        - "{{ playbook_dir }}/../../test.env.generated"
+      delegate_to: localhost

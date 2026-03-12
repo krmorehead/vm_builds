@@ -24,7 +24,7 @@ verify criteria, rollback procedures, and dependency tracking — leading to
 7. NEVER defer all testing to a final milestone. Each milestone owns its own assertions.
 8. Blocked milestones SHOULD still be fully specified — they're ready to implement the moment the blocker is resolved.
 9. Every feature milestone MUST include an **implementation pattern** note specifying: which task file to create, which plays to add to `site.yml`, which tags to use, and which molecule scenario to create. NEVER leave "how it integrates" as an open question.
-10. Every feature milestone that installs packages MUST note retries/delay requirements by referencing the relevant skill rule (e.g., "with retries per openwrt-build rule 4").
+10. Per the project's "Bake, don't configure at runtime" principle (`project-structure.mdc`): every package belongs in the image build, NOT at runtime. If a plan proposes `opkg install` or `apt install` during converge, reject it. Configure roles only do host-specific topology changes.
 11. Rollback MUST fully restore the baseline state, including auth credentials and connection methods. If a milestone changes how Ansible connects to a target (e.g., password → key auth), the rollback MUST reverse the connection method too.
 12. When a milestone changes the auth/connection method for a dynamic group, the plan MUST specify how subsequent plays and per-feature scenarios detect and adapt to the new auth method.
 13. Every plan MUST include a **Milestone Dependency Graph** (ASCII tree) showing the ordering and blocking relationships at a glance.
@@ -145,6 +145,47 @@ implemented as task files + site.yml plays + cleanup.yml rollback
 plays, then had to be removed entirely because they belonged in their
 respective downstream projects.
 
+## Task ordering within milestones
+
+Every milestone's task list MUST follow dependency order. Walk through each
+task and ask: "What must already exist for this to succeed?"
+
+Canonical ordering for a configure milestone:
+1. Fix system baseline state (broken packages, missing modules)
+2. Install packages
+3. Generate keys/credentials (requires package tools like `wg genkey`)
+4. Template configuration files (requires generated keys)
+5. Start/enable services (requires config files)
+6. Configure runtime state (firewall rules, sysctl, NAT — requires services)
+7. Persist runtime state (save iptables rules, write generated env file)
+
+For a provisioning milestone:
+1. Load host-side kernel modules (LXC shares host kernel)
+2. Upload images/templates
+3. Create VM/container
+4. Configure auto-start
+5. Start VM/container
+6. Clean template baseline (fix broken packages in LXC)
+7. Register in dynamic inventory
+
+NEVER put key generation before package installation. NEVER put service
+start before configuration. NEVER install packages before fixing broken
+system state.
+
+See: `task-ordering` rule for the full ordering reference and common mistakes.
+
+## Secret generation in milestones
+
+When a milestone generates secrets (keys, tokens, PSKs):
+1. Document which env vars are auto-generated and which require user input
+2. Specify the generated file: `test.env.generated` (test) or
+   `.env.generated` (production), auto-detected via `env_generated_path`
+3. Include a verify assertion checking the generated file exists and
+   contains the expected keys
+4. Include cleanup of the generated file in rollback
+
+See: `secret-generation` rule for the full pattern.
+
 ## Milestone sizing
 
 Each milestone should be completable in a single focused session
@@ -153,7 +194,9 @@ it. If it has fewer than 3, merge it with an adjacent milestone.
 
 ## Plan review checklist
 
-Before considering a plan ready for execution, verify each item:
+Before considering a plan ready for execution, verify each item.
+
+### Structural checks
 
 1. **Dynamic group persistence**: Do any plays target dynamic groups
    (`openwrt`, `pihole`, etc.)? If so, every entry point that runs as a
@@ -178,9 +221,84 @@ Before considering a plan ready for execution, verify each item:
    `deploy_stamp` pairing? Ambiguity here causes inconsistent implementations.
 6. **Molecule scenario**: Does every feature milestone that adds testable
    behavior also create a per-feature molecule scenario?
+7. **No fallback paths**: Does the plan introduce any "try X, fall back to Y"
+   logic? If so, reject it. One tested path per feature. Missing prerequisites
+   should fail with an actionable error message, not silently degrade.
 7. **Verify from the right host**: Do verify assertions run on the Proxmox
    host (via `qm`, shell commands) or inside the VM (via dynamic group)?
    If inside the VM, the verify needs group reconstruction too.
+
+### Container/VM capability checks
+
+8. **LXC features and capabilities**: If the plan provisions an LXC
+   container, verify that required features are declared:
+   - `nesting=1`: needed for iptables/nftables inside unprivileged containers
+   - `mount=cgroup`: needed for cgroup mounts (systemd containers)
+   - `keyctl=1`: needed for kernel key management
+   Previous bug: WireGuard plan omitted `nesting=1`. The `iptables -t nat
+   MASQUERADE` command in M2 would have failed with "Permission denied"
+   at runtime.
+9. **Bake, don't configure at runtime** (per `project-structure.mdc`): if
+   the plan mentions runtime package installation (`opkg install`,
+   `apt install`), reject it. Packages belong in the image build. Configure
+   roles only apply host-specific topology. If a service truly needs a
+   runtime exception, document why explicitly.
+10. **Kernel module host-side loading**: If the service needs kernel modules
+    (WireGuard, VFIO, GPU drivers), verify the plan loads them on the
+    Proxmox HOST (not inside the container — LXC shares the host kernel).
+    Include persistence via `/etc/modules-load.d/` and cleanup removal of
+    both the config file and `modprobe -r`.
+
+11. **WiFi PHY namespace move**: If the plan provisions an LXC container
+    that needs WiFi access, verify:
+    - Container is privileged (`unprivileged: false`) — namespace moves
+      require CAP_NET_ADMIN
+    - `--ostype unmanaged` for OpenWrt containers (Proxmox can't auto-detect)
+    - `lxc_ct_skip_debian_cleanup: true` for non-Debian containers
+    - WiFi driver loading on the host before PHY detection
+    - Hard-fail if no WiFi PHY found (all wifi_nodes must have WiFi)
+    - Hookscript for PHY persistence across container restarts
+    - `proxmox_pci_passthrough` must clean stale vfio-pci bindings on
+      non-router hosts before the mesh role runs
+    Previous bug: mesh1 WiFi was invisible because stale vfio-pci.conf
+    and blacklist-wifi.conf from a prior run kept iwlwifi blacklisted
+    and the device bound to vfio-pci.
+
+### Cross-reference checks
+
+11. **Prerequisite verification**: Grep the codebase to confirm claimed
+    prerequisites actually exist: VMIDs in `group_vars/all.yml`, flavor
+    groups in `inventory/hosts.yml`, dynamic groups in inventory, platform
+    groups in `molecule/default/molecule.yml`.
+12. **site.yml play ordering**: Verify the proposed play position doesn't
+    conflict with existing plays. Count the actual play numbers. Clarify
+    positioning relative to `never`-tagged per-feature plays. If the new
+    plays are NOT tagged `never`, explicitly state they run during normal
+    converge.
+13. **Tag collision**: Verify proposed tags don't collide with existing
+    tags in `site.yml` or `cleanup.yml`.
+14. **Cleanup parity**: Verify that files deployed by the new roles are
+    added to BOTH `molecule/default/cleanup.yml` AND `playbooks/cleanup.yml`.
+    Also verify `playbooks/cleanup.yml` gets rollback tags if the service
+    supports per-feature rollback.
+15. **Architecture doc consistency**: Verify the plan's plays, tags, and
+    resource allocations match `overview.md`'s target site.yml and VM
+    table. Flag any discrepancies.
+
+### Completeness checks
+
+16. **Gitignore coverage**: If the plan creates new generated or state
+    files (e.g., `.env.generated`, `.state/`), verify they are already in
+    `.gitignore`. Don't add redundant task items for files already covered.
+17. **Predictable IP for consumers**: If the service will be consumed by
+    other services (routing, DNS forwarding, log collection), verify the
+    plan addresses how consumers discover a stable IP (static lease, DNS,
+    etc.). Document this even if the solution is deferred to a downstream
+    project.
+18. **Future integration notes**: If the service introduces a new pattern
+    (e.g., `.env.generated` accumulation, NAT routing), add a "Future
+    Integration Considerations" section documenting how downstream
+    projects should interact with it.
 
 ## Cross-references
 

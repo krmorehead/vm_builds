@@ -1,0 +1,13 @@
+---
+dependencies: []
+
+galaxy_info:
+  author: kyle
+  license: proprietary
+  role_name: wireguard_configure
+  description: Configure WireGuard VPN client with key generation, NAT, and IP forwarding
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm

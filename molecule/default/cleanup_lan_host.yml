@@ -1,0 +1,162 @@
+---
+# Per-LAN-host cleanup tasks, included by cleanup.yml for each lan_hosts member.
+# Runs on a router_node — cleans the LAN host via SSH.
+#
+# Required vars:
+#   _lan_host_ip   – LAN IP of the target (e.g. 10.10.10.210)
+#   _lan_host_name – inventory hostname (e.g. mesh1)
+
+- name: Check if LAN host is reachable
+  ansible.builtin.command:
+    cmd: >-
+      ssh -o ConnectTimeout=5
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+      -o BatchMode=yes -o PasswordAuthentication=no
+      root@{{ _lan_host_ip }} hostname
+  register: _key_check
+  failed_when: false
+  changed_when: false
+
+- name: Set reachability fact
+  ansible.builtin.set_fact:
+    _host_reachable: "{{ _key_check.rc == 0 }}"
+    _cleanup_ssh: >-
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+      -o ConnectTimeout=10 root@{{ _lan_host_ip }}
+
+- name: Skip cleanup if LAN host is unreachable
+  ansible.builtin.debug:
+    msg: "{{ _lan_host_name }} is unreachable -- skipping cleanup (nothing to clean)"
+  when: not (_host_reachable | bool)
+
+- name: Stop and destroy containers on LAN host  # noqa command-instead-of-shell
+  ansible.builtin.shell:
+    cmd: >-
+      {{ _cleanup_ssh }} "
+      for ct in \$(pct list 2>/dev/null | awk 'NR>1 {print \$1}'); do
+        pct stop \$ct 2>/dev/null || true;
+        sleep 2;
+        pct destroy \$ct --purge 2>/dev/null || true;
+      done"
+  when: _host_reachable | bool
+  changed_when: true
+  failed_when: false
+
+- name: Remove ansible-managed files on LAN host  # noqa command-instead-of-shell
+  ansible.builtin.shell:
+    cmd: >-
+      {{ _cleanup_ssh }} "rm -f
+      /etc/network/interfaces.d/ansible-bridges.conf
+      /etc/network/interfaces.d/ansible-proxmox-lan.conf
+      /etc/network/interfaces.d/ansible-temp-lan.conf
+      /etc/modprobe.d/blacklist-wifi.conf
+      /etc/modprobe.d/vfio-pci.conf
+      /etc/ansible/facts.d/vm_builds.fact
+      /etc/apt/sources.list.d/pve-no-subscription.sources
+      /etc/modules-load.d/wireguard.conf"
+  when: _host_reachable | bool
+  changed_when: true
+  failed_when: false
+
+- name: Remove cached LXC templates on LAN host  # noqa command-instead-of-shell
+  ansible.builtin.shell:
+    cmd: >-
+      {{ _cleanup_ssh }} "rm -f /var/lib/vz/template/cache/debian-*.tar.zst /var/lib/vz/template/cache/openwrt-*.tar.gz"
+  when: _host_reachable | bool
+  changed_when: true
+  failed_when: false
+
+- name: Remove mesh WiFi PHY hookscripts on LAN host  # noqa command-instead-of-shell
+  ansible.builtin.shell:
+    cmd: >-
+      {{ _cleanup_ssh }} "rm -f /var/lib/vz/snippets/mesh-wifi-phy-*.sh"
+  when: _host_reachable | bool
+  changed_when: true
+  failed_when: false
+
+- name: Unbind vfio-pci devices on LAN host  # noqa command-instead-of-shell
+  ansible.builtin.shell:
+    cmd: >-
+      {{ _cleanup_ssh }} "
+      for dev in /sys/bus/pci/drivers/vfio-pci/0000:*/; do
+        [ -d \"\$dev\" ] || continue;
+        addr=\$(basename \"\$dev\");
+        echo \"\$addr\" > /sys/bus/pci/drivers/vfio-pci/unbind 2>/dev/null || true;
+      done"
+  when: _host_reachable | bool
+  changed_when: true
+  failed_when: false
+
+- name: Re-enable enterprise repos on LAN host  # noqa command-instead-of-shell
+  ansible.builtin.shell:
+    cmd: >-
+      {{ _cleanup_ssh }} "
+      for f in /etc/apt/sources.list.d/pve-enterprise.sources.disabled
+               /etc/apt/sources.list.d/ceph.sources.disabled; do
+        [ -f \"\$f\" ] && mv \"\$f\" \"\${f%.disabled}\";
+      done; true"
+  when: _host_reachable | bool
+  changed_when: true
+  failed_when: false
+
+- name: Tear down stale bridges on LAN host  # noqa command-instead-of-shell
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      {{ _cleanup_ssh }} "
+      for br in \$(ip -o link show type bridge | awk -F': ' '{print \$2}'); do
+        grep -q \"auto \$br\" /etc/network/interfaces 2>/dev/null && continue;
+        ip link set \"\$br\" down 2>/dev/null || true;
+        ip link delete \"\$br\" 2>/dev/null || true;
+      done"
+    executable: /bin/bash
+  when: _host_reachable | bool
+  changed_when: true
+  failed_when: false
+
+- name: Reload kernel modules and rescan PCI on LAN host  # noqa command-instead-of-shell
+  ansible.builtin.shell:
+    cmd: >-
+      {{ _cleanup_ssh }} "
+      modprobe -r wireguard 2>/dev/null || true;
+      modprobe -r iwlmvm iwlwifi 2>/dev/null || true;
+      modprobe iwlwifi 2>/dev/null || true;
+      echo 1 > /sys/bus/pci/rescan 2>/dev/null || true"
+  when: _host_reachable | bool
+  changed_when: true
+  failed_when: false
+
+- name: Bring up original interfaces on LAN host  # noqa command-instead-of-shell
+  ansible.builtin.shell:
+    cmd: >-
+      {{ _cleanup_ssh }} "ifup --all --force 2>/dev/null || true"
+  when: _host_reachable | bool
+  changed_when: true
+  failed_when: false
+
+- name: Check if OpenWrt is running (for DHCP lease cleanup)
+  ansible.builtin.command:
+    cmd: qm status 100
+  register: _vm_status
+  changed_when: false
+  failed_when: false
+
+- name: Remove DHCP lease from OpenWrt for LAN host  # noqa command-instead-of-shell
+  ansible.builtin.shell:
+    cmd: |
+      sshpass -p '' ssh \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o PubkeyAuthentication=no -o ConnectTimeout=10 \
+        root@10.10.10.1 "
+      changed=0;
+      while uci show dhcp 2>/dev/null | grep -q \"name='{{ _lan_host_name }}'\"; do
+        idx=\$(uci show dhcp | grep \"name='{{ _lan_host_name }}'\" | head -1 | grep -oP 'dhcp\.@host\[\\K[0-9]+');
+        [ -z \"\$idx\" ] && break;
+        uci delete dhcp.@host[\$idx];
+        changed=1;
+      done;
+      [ \"\$changed\" = '1' ] && uci commit dhcp && /etc/init.d/dnsmasq restart;
+      echo done"
+  when: "'running' in (_vm_status.stdout | default(''))"
+  changed_when: true
+  failed_when: false

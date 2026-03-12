@@ -98,11 +98,27 @@ Relocated to other projects:
 - ~~iGPU detection for media containers.~~ Done.
 - ~~Flavor groups and build profiles in inventory.~~ Done.
 
+### `2026-03-09-02` WireGuard VPN Client ✓
+
+First LXC container in the project. Lightweight container running a WireGuard
+client that maintains a persistent VPN tunnel. Other services route through
+this tunnel for remote access.
+
+Delivered:
+- `wireguard_lxc` role (thin wrapper around `proxmox_lxc`, host-side kernel module)
+- `wireguard_configure` role (key auto-generation, `.env.generated` pattern, wg0
+  config, IP forwarding, iptables NAT/MASQUERADE)
+- Per-feature molecule scenario (`wireguard-lxc`)
+- `tasks/reconstruct_wireguard_group.yml` for dynamic group reconstruction
+- Rollback plays in `playbooks/cleanup.yml` (`wireguard-rollback` tag)
+- Full verify coverage: container state, auto-start, nesting, kernel module,
+  wg0 interface, service enabled, IP forwarding, NAT, `.env.generated`
+
 ## Medium-Term Goals
 
 ### Additional VM/LXC Types
 - The project name is `vm_builds` (plural) — the architecture supports multiple service types.
-- Near-term candidates: WireGuard VPN, Pi-hole, rsyslog, Netdata.
+- Near-term candidates: Pi-hole, rsyslog, Netdata.
 - Each service type gets its own role pair: `<type>_lxc` + `<type>_configure` (or `<type>_vm`).
 - VMID ranges pre-allocated: 100s network, 200s services, 300s media, 400s desktop, 500s observability, 600s gaming.
 - See `docs/architecture/overview.md` for the full target architecture and `.cursor/skills/vm-lifecycle/SKILL.md` for implementation patterns.

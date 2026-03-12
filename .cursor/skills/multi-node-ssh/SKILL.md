@@ -145,19 +145,32 @@ Called from the primary host (`router_nodes`):
 3. **Creates API token** on the LAN host (if missing)
 4. **Saves token** to `test.env` on the controller
 
+## Default test includes LAN nodes
+
+The default `molecule test` scenario exercises BOTH `home` (primary) and
+`mesh1` (LAN satellite). `site.yml` is phased so LAN hosts are only
+contacted after OpenWrt creates the LAN:
+
+1. Phase 1: backup + infra + OpenWrt on `proxmox:!lan_hosts` (home only)
+2. Phase 2: bootstrap + backup + infra on `lan_hosts` (mesh1)
+3. Phase 3: services on flavor groups spanning both (e.g., `vpn_nodes`)
+
+The separate `mesh1-infra` scenario is still available for quick iteration
+on mesh1 hardware issues without running the full ~10 minute default suite.
+
 ## Baseline workflow for LAN nodes
 
 LAN nodes (mesh1) are ONLY reachable when the OpenWrt baseline is running.
 Prefer keeping the baseline up between test runs:
 
 ```bash
-molecule converge                  # build/update baseline (idempotent)
-molecule verify                    # verify baseline
-molecule converge -s mesh1-infra   # run layered scenario
-molecule verify -s mesh1-infra     # verify mesh1
+molecule converge                  # build/update baseline (idempotent, both nodes)
+molecule verify                    # verify both nodes
+molecule converge -s mesh1-infra   # infra-only on mesh1 (quick iteration)
+molecule verify -s mesh1-infra     # verify mesh1 infra only
 
 # Clean-state validation only when needed:
-molecule test                      # destroys everything
+molecule test                      # full pipeline — destroys everything
 molecule converge                  # restore baseline for further work
 ```
 

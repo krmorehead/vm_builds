@@ -84,41 +84,102 @@ There is NO `lint` phase in the Molecule config. Run `ansible-lint` and `yamllin
 
 ## Architecture
 
-- **Driver**: `delegated` (real Proxmox hardware, not Docker)
-- **Platform**: test machine IP from `PRIMARY_HOST` env var
-- **Platform groups**: `proxmox` + all flavor groups (e.g., `router_nodes`)
-- **Provisioner**: `playbooks/site.yml`
-- **Cleanup**: `playbooks/cleanup.yml --tags clean`
+- **Driver**: `default` with `managed: false` (real Proxmox hardware, not Docker)
+- **Platforms**: 4 nodes — `home` (primary), `ai` and `mesh2` (directly reachable), `mesh1` (LAN satellite via ProxyJump)
+- **Platform groups**: `home` gets `proxmox` + all primary flavor groups (including `wifi_nodes`); `ai` gets `proxmox`, `vpn_nodes`; `mesh2` gets `proxmox`, `vpn_nodes`, `wifi_nodes`; `mesh1` gets `proxmox`, `lan_hosts`, `vpn_nodes`, `wifi_nodes`
+- **Provisioner**: `playbooks/site.yml` (phased: primary hosts → LAN bootstrap → services)
+- **Cleanup**: two-play cleanup — `proxmox:!lan_hosts` for primary, `router_nodes` for LAN hosts via SSH
 - **Config**: `molecule/default/molecule.yml`
+
+### 4-node topology
+
+```
+ISP Router (192.168.86.x supernet)
+  |
+Switch
+  |            |                  |
+Home          AI Node          Mesh2
+(primary)     192.168.86.220   192.168.86.211
+  |
+  |-- OpenWrt VM (10.10.10.1)
+  |     |
+  |     LAN bridge (10.10.10.x)
+  |       |
+  |     Mesh1 (10.10.10.210)
+```
+
+- **home**, **ai**, **mesh2**: directly reachable on the supernet (no ProxyJump)
+- **mesh1**: behind home's OpenWrt, reachable via ProxyJump through home
+- All 4 nodes are in `vpn_nodes` — WireGuard containers deploy on all 4 in parallel
+- `mesh1` and `mesh2` are also in `wifi_nodes` — OpenWrt Mesh LXC deploys on both
+- `home` is the only `router_nodes` member (runs OpenWrt)
+- `mesh1` is the only `lan_hosts` member (requires OpenWrt to be running)
+
+### Parallelism within plays
+
+With 4 nodes in `vpn_nodes`, Ansible's linear strategy runs tasks on all
+4 hosts concurrently within each play. No molecule-level parallelization
+is needed — the parallelism is automatic. Each host gets its own WireGuard
+container provisioned and configured simultaneously. Similarly, the
+`wifi_nodes:!router_nodes` play runs mesh LXC provisioning on mesh1 and
+mesh2 in parallel.
+
+### Phased site.yml
+
+`site.yml` runs in three phases to respect host reachability dependencies:
+
+1. **Phase 1 (Primary hosts)**: `proxmox:!lan_hosts` — backup, infra, OpenWrt VM, OpenWrt configure
+2. **Phase 2 (LAN satellites)**: After OpenWrt creates the LAN, bootstrap LAN hosts from `router_nodes`, then run backup + infra on `lan_hosts`
+3. **Phase 3 (Services)**: Flavor groups that span both primary and LAN hosts (e.g., `vpn_nodes` includes home + mesh1) — runs in parallel across both hosts
+
+This ordering is correct for both test and production. LAN hosts are only
+reachable after OpenWrt provisions the LAN bridge.
 
 ## Baseline testing model
 
 The **baseline** is the state after `molecule/default` converges successfully:
-router VM running, WAN/LAN configured, DHCP serving, firewall active. All
-per-feature molecule scenarios start from this baseline and only converge/revert
-their own changes.
+router VM running, WAN/LAN configured, DHCP serving, firewall active, all 4
+nodes reachable. All per-feature molecule scenarios start from this baseline
+and only converge/revert their own changes.
+
+**CRITICAL: The OpenWrt baseline stays up.** Only tear down the specific
+containers being tested. Full `molecule test` is reserved for final
+validation only.
 
 ```
 Scenario Hierarchy
-├── molecule/default/              Full integration (rebuild everything)
-│   ├── converge.yml               imports site.yml
-│   ├── verify.yml                 ALL baseline + feature assertions
-│   └── cleanup.yml                full cleanup (destroy VMs, restore host)
+├── molecule/default/              Full integration (home, mesh1, ai, mesh2 — 4-node)
+│   ├── converge.yml               imports site.yml (phased: primary → LAN → services)
+│   ├── verify.yml                 Multi-play: common infra, router, WireGuard, LAN host, mesh LXC
+│   ├── cleanup.yml                Two-play: primary hosts + LAN hosts via SSH
+│   └── cleanup_lan_host.yml       Per-LAN-host cleanup tasks (included by cleanup.yml)
 │
 ├── molecule/openwrt-security/     Per-feature (assumes baseline exists)
 │   ├── converge.yml               runs only security plays via tags
 │   ├── verify.yml                 security-specific assertions only
 │   └── cleanup.yml                runs security rollback only
 │
-├── molecule/openwrt-vlans/        Per-feature
-│   ├── converge.yml               runs only VLAN plays via tags
-│   ├── verify.yml                 VLAN-specific assertions only
-│   └── cleanup.yml                runs VLAN rollback only
+├── molecule/wireguard-lxc/        Per-feature (WireGuard standalone)
+│   ├── converge.yml               WireGuard provision + configure
+│   ├── verify.yml                 WireGuard-specific assertions
+│   └── cleanup.yml                destroy container + unload module
+│
+├── molecule/mesh1-infra/          Lightweight infra-only on mesh1
+│   └── ...                        (partially redundant with default, kept for quick iteration)
 │
 └── ...
 ```
 
-**Why:** Full `molecule test` takes 4-5 minutes. Per-feature scenarios take
+**Primary workflow:** Per-feature scenarios are the main test loop:
+1. `molecule converge` (once) — build the full baseline with all 4 nodes
+2. `molecule converge -s wireguard-lxc` + `molecule verify -s wireguard-lxc` — iterate
+3. Each per-feature scenario tears down only its own containers, verifies, then cleans up
+4. Baseline (OpenWrt, bridges, PCI, iGPU) is assumed to exist and left running
+
+**Final validation only:** `molecule test` runs the full clean-state pipeline and
+destroys everything at the end. Use only before committing or for CI.
+
+Full `molecule test` takes 4-5 minutes. Per-feature scenarios take
 30-60 seconds. During development, iterate with per-feature scenarios.
 Run full integration before committing.
 
@@ -141,8 +202,8 @@ that build on top of existing VM/container state.
 
 Previous learning: the `proxmox-lxc` and `proxmox-igpu` scenarios were
 developed independently of the default integration test. This allowed
-rapid iteration on iGPU driver issues (4+ fix cycles in one session)
-without waiting for the full 4-minute default test each time.
+rapid iteration on iGPU driver/vendor issues (Intel and AMD; 4+ fix cycles
+in one session) without waiting for the full 4-minute default test each time.
 
 ### Per-feature scenario setup
 
@@ -454,8 +515,9 @@ path resolved from `molecule/proxmox-lxc/` instead of the project root.
 
 1. Source test env: `set -a; source test.env; set +a`
 2. Verify SSH: `ssh root@$PRIMARY_HOST hostname`
-3. Verify images exist: `ls images/openwrt.img images/*.tar.zst`
-4. If previous run left host in bad state, power-cycle the machine
+3. Build custom images (required): `./build-images.sh`
+4. Verify images exist: `ls images/openwrt-router-*.img.gz images/openwrt-mesh-lxc-*-rootfs.tar.gz images/debian-*.tar.zst`
+5. If previous run left host in bad state, power-cycle the machine
 
 ## Molecule platform groups
 
@@ -468,11 +530,37 @@ platforms:
   - name: home
     groups:
       - proxmox
-      - router_nodes       # targets OpenWrt provision plays
-      # - service_nodes    # add when service VM types are created
+      - router_nodes
+      - vpn_nodes
+      - dns_nodes
+      - wifi_nodes
+      - monitoring_nodes
+      - service_nodes
+      - media_nodes
+      - desktop_nodes
+  - name: mesh1
+    groups:
+      - proxmox
+      - lan_hosts
+      - vpn_nodes
+      - wifi_nodes
+  - name: ai
+    groups:
+      - proxmox
+      - vpn_nodes
+  - name: mesh2
+    groups:
+      - proxmox
+      - vpn_nodes
+      - wifi_nodes
 ```
 
-Without this, provision plays targeting flavor groups will skip the test host.
+All 4 hosts are tested in the default scenario. `home` runs all services.
+`ai` and `mesh2` are directly reachable on the supernet (no ProxyJump).
+`mesh1` is behind OpenWrt (requires ProxyJump). All 4 are in `vpn_nodes` —
+WireGuard deploys on all 4 in parallel within the same play.
+
+Without this, provision plays targeting flavor groups will skip hosts.
 
 ## Cleanup requirements for repeatable runs
 
@@ -539,8 +627,8 @@ directly against VMs in verify — use raw commands instead.
 NEVER add "graceful skip" logic for hardware expected on every host. Silent
 skips mask fixable problems (wrong BIOS settings, missing drivers).
 
-- **iGPU**: REQUIRED. `proxmox_igpu` hard-fails if absent. Every modern Intel
-  CPU has one.
+- **iGPU**: REQUIRED. `proxmox_igpu` hard-fails if absent. Supports both Intel
+  (i915) and AMD (amdgpu). Never assume Intel-only.
 - **WiFi + VT-d/IOMMU**: REQUIRED for passthrough. `proxmox_pci_passthrough`
   hard-fails if IOMMU is not active or groups are invalid.
 - **NIC count**: OK to handle dynamically — hardware legitimately varies.
@@ -556,24 +644,26 @@ skips mask fixable problems (wrong BIOS settings, missing drivers).
 - NEVER remove ANY credential the operator created manually. Apply this test to EVERY cleanup task: "Did the converge/playbook create this?" If no → do not touch it.
 - Previous bug: mesh1-infra cleanup removed both authorized_keys and the API token from a LAN satellite node, permanently locking out all SSH and API access.
 
-When a role writes a new file to the Proxmox host, ALWAYS add it to the removal list in BOTH:
-- `molecule/default/cleanup.yml` (test cleanup)
-- `playbooks/cleanup.yml` (production cleanup)
+When a role writes a new file to the Proxmox host, ALWAYS add it to the removal list in:
+- `molecule/default/cleanup.yml` (test cleanup — primary hosts play)
+- `molecule/default/cleanup_lan_host.yml` (test cleanup — LAN hosts tasks)
+- `tasks/cleanup_lan_host.yml` (production cleanup — LAN hosts tasks)
+- `playbooks/cleanup.yml` (production cleanup — primary hosts play)
 
 When a role writes a local state file (e.g., `.state/addresses.json`), ALWAYS add a `delegate_to: localhost` cleanup task to remove it.
 
-**Parity rule:** The two cleanup playbooks MUST remove the same set of files.
-When adding a file to one, ALWAYS add it to the other. Periodically diff
-the removal lists to catch drift. Current managed files:
+**Parity rule:** All cleanup paths MUST remove the same set of files.
+When adding a file to one, ALWAYS add it to all others. Current managed files:
 
 - Host config: `ansible-bridges.conf`, `ansible-proxmox-lan.conf` (legacy),
   `ansible-temp-lan.conf` (test workaround)
-- Module config: `blacklist-wifi.conf`, `vfio-pci.conf`
+- Module config: `blacklist-wifi.conf`, `vfio-pci.conf`, `wireguard.conf`
 - Apt repos: `pve-no-subscription.sources` (added by igpu), enterprise
   repos (renamed to `.disabled`, restored on cleanup)
-- Templates/images: `/tmp/openwrt.img`, `/var/lib/vz/template/cache/debian-*.tar.zst`
+- Templates/images: `/tmp/openwrt-upload*`, `/var/lib/vz/template/cache/debian-*.tar.zst`, `/var/lib/vz/template/cache/openwrt-*.tar.gz`
+- Hookscripts: `/var/lib/vz/snippets/mesh-wifi-phy-*.sh`
 - Facts: `vm_builds.fact`
-- Local: `.state/addresses.json`
+- Local: `.state/addresses.json`, `.env.generated`, `test.env.generated`
 
 Previous bug: `ansible-proxmox-lan.conf` was deployed by `openwrt_configure` but not removed by cleanup, causing stale LAN management IPs on subsequent test runs.
 

@@ -1,0 +1,5 @@
+---
+openwrt_mesh_id: "vm-builds-mesh"
+openwrt_mesh_key: "{{ lookup('env', 'MESH_KEY') | default('changeme', true) }}"
+openwrt_mesh_channel: auto
+openwrt_mesh_encryption: sae

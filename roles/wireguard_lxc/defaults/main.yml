@@ -1,0 +1,14 @@
+---
+wireguard_ct_hostname: wireguard
+wireguard_ct_memory: 128
+wireguard_ct_cores: 1
+wireguard_ct_disk: "1"
+wireguard_ct_template: "{{ proxmox_lxc_default_template }}"
+wireguard_ct_onboot: true
+wireguard_ct_startup_order: 2
+wireguard_ct_features:
+  - "nesting=1"
+
+# Base offset for WireGuard container IPs within the LAN subnet.
+# Each host in vpn_nodes gets base_ip_offset + its index (e.g., .3, .4, .5, .6).
+wireguard_ct_ip_offset: 3

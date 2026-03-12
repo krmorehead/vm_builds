@@ -1,0 +1,19 @@
+---
+- name: Provision WireGuard LXC container
+  hosts: vpn_nodes
+  gather_facts: false
+  roles:
+    - wireguard_lxc
+
+- name: Reconstruct wireguard dynamic group
+  hosts: vpn_nodes
+  gather_facts: false
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_wireguard_group.yml
+
+- name: Configure WireGuard
+  hosts: wireguard
+  gather_facts: true
+  roles:
+    - wireguard_configure

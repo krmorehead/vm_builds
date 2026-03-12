@@ -48,6 +48,23 @@
     openwrt_lan_netmask: "{{ _selected_lan.netmask }}"
   when: _selected_lan is defined
 
+# ── Write LAN subnet to generated env file ──────────────────────
+# Downstream roles (wireguard_lxc, etc.) read these values to compute
+# static IPs for LXC containers without hardcoding the subnet.
+
+- name: Write LAN subnet to generated env file
+  ansible.builtin.blockinfile:
+    path: "{{ env_generated_path }}"
+    create: true
+    mode: "0600"
+    marker: "# {mark} LAN Subnet (auto-detected)"
+    block: |
+      LAN_GATEWAY={{ openwrt_lan_ip }}
+      LAN_NETMASK={{ openwrt_lan_netmask }}
+      LAN_CIDR={{ _netmask_cidr_map[openwrt_lan_netmask] | default('24') }}
+      LAN_DHCP_START={{ openwrt_dhcp_start }}
+  delegate_to: localhost
+
 # ── Phase 1: Configure WAN and LAN ports, restart for connectivity ──
 # Keep LAN at default 192.168.1.1 so SSH stays alive through restart
 
@@ -153,42 +170,16 @@
   ansible.builtin.debug:
     var: _phase1_diag.stdout_lines
 
-# ── WiFi driver installation (needs WAN internet) ──────────────
-
-- name: Switch opkg feeds to HTTP for SSL-less images
-  ansible.builtin.raw: >-
-    sed -i 's|https://|http://|g' /etc/opkg/distfeeds.conf
-  changed_when: true
-  when:
-    - openwrt_mesh_enabled | bool
-    - openwrt_wifi_driver_packages | default([]) | length > 0
-
-- name: Update opkg package lists
-  ansible.builtin.raw: opkg update
-  register: _opkg_update
-  changed_when: false
-  retries: 3
-  delay: 5
-  until: _opkg_update.rc == 0
-  when:
-    - openwrt_mesh_enabled | bool
-    - openwrt_wifi_driver_packages | default([]) | length > 0
-
-- name: Install WiFi driver packages
-  ansible.builtin.raw: opkg install {{ item }}
-  loop: "{{ openwrt_wifi_driver_packages | default([]) }}"
-  when:
-    - openwrt_mesh_enabled | bool
-    - openwrt_wifi_driver_packages | default([]) | length > 0
+# ── WiFi driver loading ───────────────────────────────────────────
+# WiFi packages are pre-installed in the custom image (build-images.sh).
+# We only need to load the kernel modules here.
 
 - name: Load WiFi kernel modules
   ansible.builtin.raw: >-
     for mod in iwlwifi ath9k ath10k_pci mt76; do
     modprobe "$mod" 2>/dev/null; done; sleep 3
   changed_when: true
-  when:
-    - openwrt_mesh_enabled | bool
-    - openwrt_wifi_driver_packages | default([]) | length > 0
+  when: openwrt_mesh_enabled | bool
 
 # ── 802.11s Mesh networking ────────────────────────────────────
 
@@ -203,20 +194,6 @@
   ansible.builtin.set_fact:
     wifi_radios: "{{ wifi_radios_raw.stdout_lines | default([]) | select('match', '^phy') | list }}"
   when: openwrt_mesh_enabled | bool
-
-- name: Remove default wpad packages
-  ansible.builtin.raw: >-
-    opkg list-installed | grep -q wpad-basic && opkg remove wpad-basic-wolfssl wpad-basic-openssl wpad-basic-mbedtls wpad-basic wpad-mini 2>/dev/null; true
-  changed_when: false
-  when:
-    - openwrt_mesh_enabled | bool
-    - wifi_radios | default([]) | length > 0
-
-- name: Install wpad-mesh-openssl
-  ansible.builtin.raw: opkg install wpad-mesh-openssl
-  when:
-    - openwrt_mesh_enabled | bool
-    - wifi_radios | default([]) | length > 0
 
 - name: Enable each WiFi radio
   ansible.builtin.raw: uci set wireless.radio{{ idx }}.disabled='0'

@@ -1,0 +1,14 @@
+---
+openwrt_mesh_ct_hostname: openwrt-mesh
+openwrt_mesh_ct_memory: 128
+openwrt_mesh_ct_cores: 1
+openwrt_mesh_ct_disk: "1"
+
+openwrt_mesh_ct_onboot: true
+openwrt_mesh_ct_startup_order: 4
+openwrt_mesh_ct_features:
+  - "nesting=1"
+
+# IP offset within the LAN subnet. Each wifi_nodes host that is NOT in
+# router_nodes gets lan_prefix + offset + group_index (e.g., .20, .21).
+openwrt_mesh_ct_ip_offset: 20

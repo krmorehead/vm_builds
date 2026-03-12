@@ -71,7 +71,75 @@
     msg: "No WiFi PCIe devices detected on this host. Skipping PCI passthrough."
   when: wifi_pci_devices | length == 0
 
-# ── IOMMU setup ───────────────────────────────────────────────
+- name: Skip vfio binding on non-router hosts (WiFi used via PHY namespace move)
+  ansible.builtin.debug:
+    msg: >-
+      WiFi detected ({{ wifi_pci_devices | join(', ') }}) but host is not in
+      router_nodes. Skipping PCIe passthrough — WiFi will be available for
+      LXC PHY namespace move.
+  when:
+    - wifi_pci_devices | length > 0
+    - "'router_nodes' not in group_names"
+
+# ── Clean stale vfio bindings on non-router hosts ─────────────
+# A previous run may have bound WiFi to vfio-pci when this host was
+# in router_nodes (or before the role skipped non-router hosts).
+# Unbind and restore the original driver so WiFi PHY is available.
+
+- name: Check for stale vfio-pci config on non-router host
+  ansible.builtin.stat:
+    path: /etc/modprobe.d/vfio-pci.conf
+  register: _stale_vfio_conf
+  when: "'router_nodes' not in group_names"
+
+- name: Clean stale vfio-pci bindings on non-router host
+  when:
+    - "'router_nodes' not in group_names"
+    - _stale_vfio_conf.stat.exists | default(false)
+  block:
+    - name: Remove stale WiFi driver blacklist
+      ansible.builtin.file:
+        path: /etc/modprobe.d/blacklist-wifi.conf
+        state: absent
+
+    - name: Remove stale vfio-pci config
+      ansible.builtin.file:
+        path: /etc/modprobe.d/vfio-pci.conf
+        state: absent
+
+    - name: Unbind WiFi devices from vfio-pci
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          for dev in /sys/bus/pci/drivers/vfio-pci/0000:*; do
+            [ -e "$dev" ] && echo "$(basename $dev)" > /sys/bus/pci/drivers/vfio-pci/unbind 2>/dev/null || true
+          done
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Reload common WiFi kernel modules
+      ansible.builtin.shell:
+        cmd: |
+          for mod in iwlwifi ath9k ath10k_pci mt76 mt7921e rtw88_pci rtw89_pci; do
+            modprobe "$mod" 2>/dev/null || true
+          done
+          sleep 2
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Rescan PCI bus after vfio cleanup
+      ansible.builtin.shell:
+        cmd: echo 1 > /sys/bus/pci/rescan
+      changed_when: true
+
+    - name: Update initramfs after removing stale vfio config
+      ansible.builtin.command:
+        cmd: update-initramfs -u -k all
+      changed_when: true
+
+# ── IOMMU setup (router_nodes only) ──────────────────────────
+# Non-router hosts with WiFi skip IOMMU/vfio entirely. Their WiFi
+# stays on the host driver for PHY namespace move into LXC containers.
 
 - name: Check if IOMMU is active
   ansible.builtin.shell:
@@ -82,12 +150,16 @@
   register: iommu_check
   changed_when: false
   failed_when: false
-  when: wifi_pci_devices | length > 0
+  when:
+    - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
 
 - name: Set IOMMU status fact
   ansible.builtin.set_fact:
     iommu_active: "{{ (iommu_check.stdout | default('0') | int) > 0 }}"
-  when: wifi_pci_devices | length > 0
+  when:
+    - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
 
 - name: Detect CPU vendor for IOMMU parameter
   ansible.builtin.shell:
@@ -99,6 +171,7 @@
   changed_when: false
   when:
     - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
     - not iommu_active | bool
 
 - name: Set IOMMU kernel parameter
@@ -106,6 +179,7 @@
     _iommu_param: "{{ 'intel_iommu=on' if 'Intel' in cpu_vendor.stdout | default('') else 'amd_iommu=on' }}"
   when:
     - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
     - not iommu_active | bool
 
 - name: Add IOMMU to GRUB cmdline
@@ -116,6 +190,7 @@
     backup: true
   when:
     - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
     - not iommu_active | bool
   notify: Update grub
 
@@ -130,6 +205,7 @@
     - vfio_pci
   when:
     - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
     - not iommu_active | bool
   notify: Update initramfs
 
@@ -137,6 +213,7 @@
   ansible.builtin.meta: flush_handlers
   when:
     - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
     - not iommu_active | bool
 
 - name: Fail if reboot is needed but not allowed
@@ -147,6 +224,7 @@
       the Proxmox node manually and re-run.
   when:
     - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
     - not iommu_active | bool
     - not pci_passthrough_allow_reboot | bool
 
@@ -155,6 +233,7 @@
     reboot_timeout: 300
   when:
     - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
     - not iommu_active | bool
     - pci_passthrough_allow_reboot | bool
 
@@ -168,6 +247,7 @@
   changed_when: false
   when:
     - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
     - not iommu_active | bool
     - pci_passthrough_allow_reboot | bool
 
@@ -176,6 +256,7 @@
     iommu_active: "{{ (iommu_recheck.stdout | default('0') | int) > 0 }}"
   when:
     - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
     - iommu_recheck is not skipped
 
 - name: Fail if IOMMU is still not active after reboot
@@ -185,9 +266,10 @@
       passthrough requires VT-d (Intel) or AMD-Vi enabled in BIOS/UEFI.
   when:
     - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
     - not iommu_active | bool
 
-# ── IOMMU group isolation check ───────────────────────────────
+# ── IOMMU group isolation check (router_nodes only) ──────────
 
 - name: Read IOMMU group for each WiFi device
   ansible.builtin.shell:
@@ -198,7 +280,9 @@
   loop: "{{ wifi_pci_devices }}"
   register: wifi_iommu_groups
   changed_when: false
-  when: wifi_pci_devices | length > 0
+  when:
+    - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
 
 - name: Validate IOMMU group assignments are numeric
   ansible.builtin.set_fact:
@@ -208,7 +292,9 @@
          | map('trim')
          | reject('match', '^\d+$')
          | list | length == 0 }}
-  when: wifi_pci_devices | length > 0
+  when:
+    - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
 
 - name: Fail if IOMMU groups are not properly assigned
   ansible.builtin.fail:
@@ -220,6 +306,7 @@
       pcie_acs_override=downstream,multifunction to GRUB_CMDLINE_LINUX_DEFAULT.
   when:
     - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
     - not (_iommu_groups_valid | default(false) | bool)
 
 - name: Count devices in each IOMMU group
@@ -231,7 +318,9 @@
   loop: "{{ wifi_iommu_groups.results | default([]) }}"
   register: iommu_group_sizes
   changed_when: false
-  when: wifi_pci_devices | length > 0
+  when:
+    - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
 
 - name: Fail if any WiFi device shares an IOMMU group with other devices
   ansible.builtin.fail:
@@ -245,9 +334,10 @@
   loop: "{{ iommu_group_sizes.results | default([]) }}"
   when:
     - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
     - (item.stdout | default('0') | trim | int) > 1
 
-# ── Bind vfio-pci ─────────────────────────────────────────────
+# ── Bind vfio-pci (router_nodes only) ────────────────────────
 
 - name: Blacklist WiFi drivers on the host
   ansible.builtin.template:
@@ -256,7 +346,9 @@
     owner: root
     group: root
     mode: "0644"
-  when: wifi_pci_devices | length > 0
+  when:
+    - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
   notify: Update initramfs
 
 - name: Get vendor and device IDs for WiFi cards
@@ -268,7 +360,9 @@
   loop: "{{ wifi_pci_devices }}"
   register: wifi_vd_ids
   changed_when: false
-  when: wifi_pci_devices | length > 0
+  when:
+    - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
 
 - name: Configure vfio-pci device binding
   ansible.builtin.template:
@@ -277,12 +371,18 @@
     owner: root
     group: root
     mode: "0644"
-  when: wifi_pci_devices | length > 0
+  when:
+    - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
   notify: Update initramfs
 
 - name: Flush handlers after vfio configuration
   ansible.builtin.meta: flush_handlers
-  when: wifi_pci_devices | length > 0
+  when:
+    - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
+
+# ── Export WiFi fact (all hosts) ──────────────────────────────
 
 - name: Export WiFi PCI devices as cacheable fact
   ansible.builtin.set_fact:

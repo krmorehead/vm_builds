@@ -1,0 +1,101 @@
+---
+# OpenWrt mesh satellite configuration.
+# Runs inside the container via pct_remote. All commands use raw
+# because OpenWrt has no Python.
+#
+# Requires the custom mesh LXC image (build-images.sh). The image has
+# WiFi packages pre-installed and firewall/routing stripped — this role
+# only configures 802.11s mesh interfaces.
+#
+# CRITICAL: pct_remote runs commands via `pct exec <id> -- <cmd>`.
+# The entire command string is interpreted by the Proxmox HOST's bash
+# before reaching pct exec. Semicolons, pipes, redirections, and
+# variable expansions are all parsed at the HOST level.
+#
+# To run shell commands inside the container, wrap them in:
+#   /bin/sh -c '...'
+# The single quotes protect the payload from host bash. Inside the
+# container, busybox ash has PATH=/sbin:/usr/sbin:/bin:/usr/bin.
+#
+# NEVER use `export` — lxc-attach tries to exec it as a binary.
+
+# ── Detect WiFi radios ───────────────────────────────────────────
+# WiFi kernel modules are loaded on the HOST by openwrt_mesh_lxc
+# before the PHY namespace move. Do NOT modprobe inside the container.
+#
+# Detection uses `iw phy` (netlink) instead of `/sys/class/ieee80211/`
+# because LXC containers bind-mount the host's sysfs, which doesn't
+# reflect network-namespace-aware entries.
+
+- name: Detect WiFi radios inside container
+  ansible.builtin.raw: >-
+    /bin/sh -c
+    'iw phy 2>/dev/null | grep -c "^Wiphy " || true'
+  register: _mesh_radio_count
+  changed_when: false
+  retries: 10
+  delay: 5
+  until: (_mesh_radio_count.stdout | default('0') | trim | int) > 0
+
+- name: Get WiFi radio names
+  ansible.builtin.raw: >-
+    /bin/sh -c
+    'iw phy 2>/dev/null | sed -n "s/^Wiphy //p"'
+  register: _mesh_radios_raw
+  changed_when: false
+
+- name: Set WiFi radio list
+  ansible.builtin.set_fact:
+    _mesh_radios: "{{ _mesh_radios_raw.stdout_lines | default([]) | select('match', '^phy') | list }}"
+
+- name: Fail if no WiFi radios visible in container
+  ansible.builtin.fail:
+    msg: >-
+      No WiFi radios found inside the mesh container after retries.
+      The PHY namespace move may have failed. Check that
+      'iw phy set netns' succeeded in openwrt_mesh_lxc.
+  when: _mesh_radios | length == 0
+
+# ── Mesh WiFi configuration ─────────────────────────────────────
+
+- name: Enable each WiFi radio
+  ansible.builtin.raw: >-
+    /bin/sh -c
+    'uci set wireless.radio{{ idx }}.disabled=0'
+  loop: "{{ _mesh_radios }}"
+  loop_control:
+    index_var: idx
+
+- name: Set WiFi radio channel
+  ansible.builtin.raw: >-
+    /bin/sh -c
+    'uci set wireless.radio{{ idx }}.channel={{ openwrt_mesh_channel }}'
+  loop: "{{ _mesh_radios }}"
+  loop_control:
+    index_var: idx
+  when: openwrt_mesh_channel != 'auto'
+
+- name: Create mesh interface for each radio
+  ansible.builtin.raw: >-
+    /bin/sh -c
+    'uci set wireless.mesh{{ idx }}=wifi-iface &&
+    uci set wireless.mesh{{ idx }}.device="radio{{ idx }}" &&
+    uci set wireless.mesh{{ idx }}.network="lan" &&
+    uci set wireless.mesh{{ idx }}.mode="mesh" &&
+    uci set wireless.mesh{{ idx }}.mesh_id="{{ openwrt_mesh_id }}" &&
+    uci set wireless.mesh{{ idx }}.encryption="{{ openwrt_mesh_encryption }}" &&
+    uci set wireless.mesh{{ idx }}.key="{{ openwrt_mesh_key }}" &&
+    uci set wireless.mesh{{ idx }}.mesh_fwding="1" &&
+    uci set wireless.mesh{{ idx }}.mesh_rssi_threshold="0"'
+  loop: "{{ _mesh_radios }}"
+  loop_control:
+    index_var: idx
+
+# ── Commit and apply ─────────────────────────────────────────────
+
+- name: Commit wireless configuration
+  ansible.builtin.raw: /bin/sh -c 'uci commit wireless'
+
+- name: Restart wireless
+  ansible.builtin.raw: /bin/sh -c 'wifi reload'
+  changed_when: true

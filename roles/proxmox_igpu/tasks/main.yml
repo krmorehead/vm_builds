@@ -1,13 +1,13 @@
 ---
-# Detect Intel iGPU, ensure the driver is loaded, verify Quick Sync
-# (VA-API), and export facts for LXC containers (bind mount) and VMs
+# Detect iGPU (Intel or AMD), ensure the driver is loaded, verify
+# VA-API, and export facts for LXC containers (bind mount) and VMs
 # (hostpci passthrough).
 #
-# Fails if no Intel iGPU is detected — every host in this project
-# is expected to have one.
+# Fails if no iGPU is detected — every host in this project is
+# expected to have one.
 # Deliberately separate from proxmox_pci_passthrough: the iGPU stays
-# on the host driver (i915, shared) rather than being bound to
-# vfio-pci (exclusive).
+# on the host driver (i915/amdgpu, shared) rather than being bound
+# to vfio-pci (exclusive).
 
 # ── Detection ─────────────────────────────────────────────────────
 
@@ -17,69 +17,101 @@
       set -o pipefail
       lspci -nn | grep -i 'VGA compatible controller.*Intel' | head -1
     executable: /bin/bash
-  register: _igpu_lspci
+  register: _intel_igpu_lspci
   changed_when: false
   failed_when: false
 
-- name: Set iGPU availability flag
-  ansible.builtin.set_fact:
-    igpu_available: "{{ _igpu_lspci.rc == 0 and _igpu_lspci.stdout | length > 0 }}"
+- name: Detect AMD VGA controller via lspci
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      lspci -nn | grep -iE 'VGA compatible controller.*(AMD|ATI)|Display controller.*(AMD|ATI)' | head -1
+    executable: /bin/bash
+  register: _amd_igpu_lspci
+  changed_when: false
+  failed_when: false
 
-- name: Fail if no Intel iGPU detected
+- name: Set iGPU vendor and availability
+  ansible.builtin.set_fact:
+    igpu_available: >-
+      {{ (_intel_igpu_lspci.rc == 0 and _intel_igpu_lspci.stdout | length > 0)
+         or (_amd_igpu_lspci.rc == 0 and _amd_igpu_lspci.stdout | length > 0) }}
+    igpu_vendor: >-
+      {{ 'intel' if (_intel_igpu_lspci.rc == 0 and _intel_igpu_lspci.stdout | length > 0)
+         else ('amd' if (_amd_igpu_lspci.rc == 0 and _amd_igpu_lspci.stdout | length > 0)
+         else 'none') }}
+
+- name: Fail if no iGPU detected
   ansible.builtin.fail:
     msg: >-
-      No Intel iGPU found on {{ inventory_hostname }}. Every Proxmox host
-      in this project is expected to have an Intel iGPU for Quick Sync
-      transcoding and LXC GPU passthrough.
+      No iGPU found on {{ inventory_hostname }}. Every Proxmox host
+      in this project is expected to have an Intel or AMD iGPU for
+      VA-API transcoding and LXC GPU access.
   when: not (igpu_available | bool)
+
+- name: Set iGPU lspci output reference
+  ansible.builtin.set_fact:
+    _igpu_lspci_stdout: >-
+      {{ _intel_igpu_lspci.stdout if igpu_vendor == 'intel'
+         else _amd_igpu_lspci.stdout }}
 
 - name: Extract iGPU PCI address
   ansible.builtin.set_fact:
     igpu_pci_address: >-
-      {{ _igpu_lspci.stdout.split(' ')[0] | default('') }}
+      {{ _igpu_lspci_stdout.split(' ')[0] | default('') }}
   when: igpu_available | bool
 
-# ── Ensure i915 driver is loaded ─────────────────────────────────
+# ── Vendor-specific driver names ──────────────────────────────────
 
-- name: Check i915 driver is loaded
+- name: Set vendor-specific driver and package facts
+  ansible.builtin.set_fact:
+    _igpu_driver: "{{ 'i915' if igpu_vendor == 'intel' else 'amdgpu' }}"
+    _igpu_vaapi_packages: >-
+      {{ ['vainfo', 'intel-media-va-driver'] if igpu_vendor == 'intel'
+         else ['vainfo', 'mesa-va-drivers'] }}
+    _igpu_libva_driver: "{{ 'iHD' if igpu_vendor == 'intel' else 'radeonsi' }}"
+
+# ── Ensure GPU driver is loaded ───────────────────────────────────
+
+- name: Check GPU driver is loaded
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
-      lsmod | grep -c '^i915'
+      lsmod | grep -c '^{{ _igpu_driver }}'
     executable: /bin/bash
-  register: _i915_check
+  register: _gpu_driver_check
   changed_when: false
   failed_when: false
   when: igpu_available | bool
 
-- name: Remove any i915 blacklist entries
+- name: Remove any driver blacklist entries
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
-      grep -rl 'blacklist i915' /etc/modprobe.d/ 2>/dev/null | \
-        xargs -r sed -i '/blacklist i915/d'
+      grep -rl 'blacklist {{ _igpu_driver }}' /etc/modprobe.d/ 2>/dev/null | \
+        xargs -r sed -i '/blacklist {{ _igpu_driver }}/d'
     executable: /bin/bash
   changed_when: true
   failed_when: false
   when:
     - igpu_available | bool
-    - _i915_check.rc != 0
+    - _gpu_driver_check.rc != 0
 
-- name: Load i915 kernel module
+- name: Load GPU kernel module
   community.general.modprobe:
-    name: i915
+    name: "{{ _igpu_driver }}"
     state: present
   when:
     - igpu_available | bool
-    - _i915_check.rc != 0
+    - _gpu_driver_check.rc != 0
 
-- name: Wait for DRI devices to appear after i915 load
+- name: Wait for DRI devices to appear after driver load
   ansible.builtin.wait_for:
     path: /dev/dri/renderD128
     timeout: 10
   when:
     - igpu_available | bool
-    - _i915_check.rc != 0
+    - _gpu_driver_check.rc != 0
 
 # ── Device node detection (dynamic, not hardcoded) ────────────────
 
@@ -89,7 +121,7 @@
   register: _render_stat
   when: igpu_available | bool
 
-- name: Find card device by matching i915 driver
+- name: Find card device by matching GPU driver
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
@@ -98,7 +130,7 @@
         num=$(basename "$card" | sed 's/card//')
         driver=$(readlink -f "/sys/class/drm/card${num}/device/driver" \
                  2>/dev/null | xargs basename 2>/dev/null)
-        if [ "$driver" = "i915" ]; then
+        if [ "$driver" = "{{ _igpu_driver }}" ]; then
           echo "$card"
           exit 0
         fi
@@ -125,11 +157,11 @@
       - igpu_render_device | length > 0
       - igpu_card_device | length > 0
     fail_msg: >-
-      iGPU detected at {{ igpu_pci_address }} and i915 loaded,
+      iGPU detected at {{ igpu_pci_address }} and {{ _igpu_driver }} loaded,
       but DRI devices are missing.
       render={{ igpu_render_device }},
       card={{ igpu_card_device }}.
-      Check dmesg for i915 errors.
+      Check dmesg for {{ _igpu_driver }} errors.
   when: igpu_available | bool
 
 # ── Render and video group GIDs ───────────────────────────────────
@@ -220,19 +252,67 @@
   changed_when: false
   when: igpu_available | bool
 
-# ── Quick Sync verification via vainfo ────────────────────────────
+# ── Sync system clock before apt operations ───────────────────────
+# Clock skew causes GPG signature verification to fail ("Not live
+# until" errors). Force NTP sync before any apt cache update.
 
-- name: Install vainfo and intel-media-va-driver for Quick Sync
+- name: Force NTP time sync
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      synced=false
+
+      # Method 1: chrony (Proxmox default) — restart, burst, then step
+      if command -v chronyc >/dev/null 2>&1; then
+        systemctl restart chronyd 2>/dev/null || true
+        chronyc -a 'burst 4/4' 2>/dev/null || true
+        sleep 6
+        chronyc -a makestep 2>/dev/null && synced=true
+      fi
+
+      # Method 2: ntpdate one-shot
+      if [ "$synced" = false ] && command -v ntpdate >/dev/null 2>&1; then
+        ntpdate -b pool.ntp.org 2>/dev/null && synced=true
+      fi
+
+      # Method 3: systemd-timesyncd
+      if [ "$synced" = false ] && command -v timedatectl >/dev/null 2>&1; then
+        timedatectl set-ntp true 2>/dev/null || true
+        sleep 5
+        synced=true
+      fi
+
+      # Method 4: HTTP header fallback (works without NTP packages)
+      if [ "$synced" = false ]; then
+        http_date=$(wget -qS --spider http://google.com/ 2>&1 | grep -i '^ *Date:' | head -1 | sed 's/^ *[Dd]ate: //')
+        if [ -n "$http_date" ]; then
+          date -s "$http_date" 2>/dev/null && synced=true
+        fi
+      fi
+
+      echo "Clock after sync: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    executable: /bin/bash
+  register: _clock_sync
+  changed_when: false
+  failed_when: false
+  when: igpu_available | bool
+
+- name: Display clock sync result
+  ansible.builtin.debug:
+    msg: "{{ _clock_sync.stdout | default('no output') }}"
+  when: igpu_available | bool
+
+# ── VA-API verification ──────────────────────────────────────────
+
+- name: Install VA-API packages
   ansible.builtin.apt:
-    name:
-      - vainfo
-      - intel-media-va-driver
+    name: "{{ _igpu_vaapi_packages }}"
     state: present
     update_cache: true
     cache_valid_time: 3600
   when: igpu_available | bool
 
-- name: Run vainfo to verify VA-API / Quick Sync
+- name: Run vainfo to verify VA-API
   ansible.builtin.command:
     cmd: vainfo
   register: _vainfo
@@ -241,7 +321,7 @@
   when: igpu_available | bool
   environment:
     DISPLAY: ""
-    LIBVA_DRIVER_NAME: "iHD"
+    LIBVA_DRIVER_NAME: "{{ _igpu_libva_driver }}"
 
 - name: Display vainfo output
   ansible.builtin.debug:
@@ -254,7 +334,7 @@
   ansible.builtin.debug:
     msg: >-
       WARNING: vainfo failed (rc={{ _vainfo.rc }}).
-      Quick Sync may not be available.
+      VA-API transcoding may not be available.
       stderr: {{ _vainfo.stderr | default('') }}
   when:
     - igpu_available | bool
@@ -269,6 +349,7 @@
     igpu_card_device: ""
     igpu_render_gid: ""
     igpu_video_gid: ""
+    igpu_vendor: "none"
   when: not igpu_available | bool
 
 # ── Summary ───────────────────────────────────────────────────────
@@ -278,10 +359,11 @@
     msg: |
       iGPU Detection Summary:
         available:     {{ igpu_available }}
+        vendor:        {{ igpu_vendor }}
         pci_address:   {{ igpu_pci_address }}
         render_device: {{ igpu_render_device }}
         card_device:   {{ igpu_card_device }}
         render_gid:    {{ igpu_render_gid }}
         video_gid:     {{ igpu_video_gid }}
-        i915_loaded:   {{ (igpu_available | bool) and (_i915_check.rc | default(1)) == 0 }}
+        driver:        {{ _igpu_driver | default('n/a') }}
         vainfo_ok:     {{ (_vainfo.rc | default(1)) == 0 }}

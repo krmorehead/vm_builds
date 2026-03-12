@@ -1,0 +1,217 @@
+---
+# ── Release WiFi PHY from stale containers ────────────────────────
+# If a mesh container from a previous run still holds the WiFi PHY
+# in its network namespace, stop it first so the PHY returns to
+# the host. This happens when cleanup can't reach LAN hosts.
+
+- name: Check if mesh container exists from a previous run
+  ansible.builtin.command:
+    cmd: pct status {{ meshwifi_ct_id }}
+  register: _stale_mesh_ct
+  changed_when: false
+  failed_when: false
+
+- name: Stop stale mesh container to release WiFi PHY
+  ansible.builtin.command:
+    cmd: pct stop {{ meshwifi_ct_id }}
+  when:
+    - _stale_mesh_ct.rc == 0
+    - "'running' in (_stale_mesh_ct.stdout | default(''))"
+  changed_when: true
+
+- name: Destroy stale mesh container
+  ansible.builtin.command:
+    cmd: pct destroy {{ meshwifi_ct_id }} --purge
+  when: _stale_mesh_ct.rc == 0
+  changed_when: true
+  failed_when: false
+
+- name: Wait for WiFi PHY to return to host namespace
+  ansible.builtin.pause:
+    seconds: 3
+  when: _stale_mesh_ct.rc == 0
+
+# ── Detect and load WiFi drivers on the host ──────────────────────
+
+- name: Attempt to load common WiFi kernel modules
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      for mod in iwlwifi ath9k ath10k_pci mt76 mt7921e rtw88_pci rtw89_pci; do
+        modprobe "$mod" 2>/dev/null || true
+      done
+      sleep 2
+    executable: /bin/bash
+  changed_when: false
+
+- name: Detect WiFi PHY devices on host
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      ls /sys/class/ieee80211/ 2>/dev/null
+    executable: /bin/bash
+  register: _host_wifi_phys
+  changed_when: false
+  failed_when: false
+
+- name: Set WiFi PHY list
+  ansible.builtin.set_fact:
+    _wifi_phys: "{{ _host_wifi_phys.stdout_lines | default([]) | select('match', '^phy') | list }}"
+
+- name: Fail if no WiFi PHY found on mesh node
+  ansible.builtin.fail:
+    msg: >-
+      No WiFi PHY found on {{ inventory_hostname }} after loading drivers.
+      Mesh nodes require WiFi hardware for 802.11s. Check that the WiFi
+      driver is loaded and not bound to vfio-pci (stale PCI passthrough).
+      Run: lspci -k | grep -A2 'Network controller'
+  when: _wifi_phys | length == 0
+
+# ── Ensure iw is available on the Proxmox host ───────────────────
+
+- name: Install iw on Proxmox host
+  ansible.builtin.apt:
+    name: iw
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# ── Determine container network based on host topology ───────────
+
+- name: Read LAN gateway from generated env
+  ansible.builtin.set_fact:
+    _lan_gateway: >-
+      {{ lookup('pipe', 'grep "^LAN_GATEWAY=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
+         | default('10.10.10.1', true) }}
+    _lan_cidr: >-
+      {{ lookup('pipe', 'grep "^LAN_CIDR=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
+         | default('24', true) }}
+
+- name: Build mesh node host list
+  ansible.builtin.set_fact:
+    _mesh_hosts: >-
+      {{ groups['wifi_nodes'] | default([])
+         | difference(groups['router_nodes'] | default([])) | sort }}
+
+- name: Determine if host is on the OpenWrt LAN
+  ansible.builtin.set_fact:
+    _host_on_openwrt_lan: >-
+      {{ 'router_nodes' in group_names or 'lan_hosts' in group_names }}
+
+- name: Set container network for OpenWrt LAN hosts
+  ansible.builtin.set_fact:
+    _mesh_gateway: "{{ _lan_gateway }}"
+    _mesh_cidr: "{{ _lan_cidr }}"
+    _mesh_ct_ip: >-
+      {{ _lan_gateway.split('.')[0:3] | join('.') }}.{{
+         openwrt_mesh_ct_ip_offset + _mesh_hosts.index(inventory_hostname) }}
+    _mesh_nameserver: "{{ _lan_gateway }}"
+  when: _host_on_openwrt_lan | bool
+
+- name: Set container network for WAN-connected hosts
+  ansible.builtin.set_fact:
+    _mesh_gateway: "{{ ansible_default_ipv4.gateway }}"
+    _mesh_cidr: "{{ ansible_default_ipv4.prefix }}"
+    _mesh_ct_ip: >-
+      {{ ansible_default_ipv4.network.split('.')[0:3] | join('.') }}.{{
+         openwrt_mesh_ct_ip_offset + 200 + _mesh_hosts.index(inventory_hostname) }}
+    _mesh_nameserver: "8.8.8.8"
+  when: not (_host_on_openwrt_lan | bool)
+
+- name: Report mesh container IP assignment
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: mesh LXC IP={{ _mesh_ct_ip }}/{{ _mesh_cidr }}
+      gw={{ _mesh_gateway }} ({{ 'OpenWrt LAN' if (_host_on_openwrt_lan | bool) else 'WAN subnet' }})
+
+# ── Verify custom LXC image exists ────────────────────────────────
+
+- name: Check mesh LXC image exists
+  ansible.builtin.stat:
+    path: "{{ project_root }}/{{ openwrt_lxc_template_path }}"
+  register: _mesh_lxc_stat
+  delegate_to: localhost
+
+- name: Fail if mesh LXC image is missing
+  ansible.builtin.fail:
+    msg: >-
+      Custom mesh LXC image not found: {{ openwrt_lxc_template_path }}.
+      Run ./build-images.sh to build it.
+  when: not (_mesh_lxc_stat.stat.exists | default(false))
+
+# ── Provision LXC container ──────────────────────────────────────
+
+- name: Provision OpenWrt mesh LXC container
+  ansible.builtin.include_role:
+    name: proxmox_lxc
+  vars:
+    lxc_ct_id: "{{ meshwifi_ct_id }}"
+    lxc_ct_hostname: "{{ openwrt_mesh_ct_hostname }}"
+    lxc_ct_dynamic_group: openwrt_mesh
+    lxc_ct_memory: "{{ openwrt_mesh_ct_memory }}"
+    lxc_ct_cores: "{{ openwrt_mesh_ct_cores }}"
+    lxc_ct_disk: "{{ openwrt_mesh_ct_disk }}"
+    lxc_ct_onboot: "{{ openwrt_mesh_ct_onboot }}"
+    lxc_ct_startup_order: "{{ openwrt_mesh_ct_startup_order }}"
+    lxc_ct_features: "{{ openwrt_mesh_ct_features }}"
+    lxc_ct_unprivileged: false
+    lxc_ct_template: "{{ openwrt_lxc_template }}"
+    lxc_ct_template_path: "{{ openwrt_lxc_template_path }}"
+    lxc_ct_skip_debian_cleanup: true
+    lxc_ct_ostype: unmanaged
+    lxc_ct_bridge: "{{ proxmox_wan_bridge if not (_host_on_openwrt_lan | bool) else proxmox_all_bridges[1] | default('vmbr0') }}"
+    lxc_ct_ip: "{{ _mesh_ct_ip }}/{{ _mesh_cidr }}"
+    lxc_ct_gateway: "{{ _mesh_gateway }}"
+    lxc_ct_nameserver: "{{ _mesh_nameserver }}"
+
+# ── Move WiFi PHY into container namespace ───────────────────────
+
+- name: Move WiFi PHY devices into container namespace
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pid=$(lxc-info -n {{ meshwifi_ct_id }} 2>/dev/null | awk '/^PID:/{print $2}')
+      if [ -z "$pid" ] || [ "$pid" = "-1" ]; then
+        echo "ERROR: cannot determine PID for container {{ meshwifi_ct_id }}" >&2
+        exit 1
+      fi
+      for phy in {{ _wifi_phys | join(' ') }}; do
+        iw phy "$phy" set netns "$pid"
+      done
+    executable: /bin/bash
+  changed_when: true
+
+# ── Deploy hookscript for PHY persistence across reboots ─────────
+
+- name: Ensure snippets directory exists
+  ansible.builtin.file:
+    path: /var/lib/vz/snippets
+    state: directory
+    mode: "0755"
+
+- name: Deploy mesh PHY hookscript
+  ansible.builtin.copy:
+    content: |
+      #!/bin/bash
+      # Proxmox hookscript: move WiFi PHYs into OpenWrt mesh container
+      # after it starts. Deployed by openwrt_mesh_lxc role.
+      CT_ID="$1"
+      PHASE="$2"
+
+      if [ "$PHASE" != "post-start" ]; then
+        exit 0
+      fi
+
+      sleep 2
+      pid=$(lxc-info -n "$CT_ID" 2>/dev/null | awk '/^PID:/{print $2}')
+      [ -z "$pid" ] || [ "$pid" = "-1" ] && exit 0
+      for phy in $(ls /sys/class/ieee80211/ 2>/dev/null); do
+        iw phy "$phy" set netns "$pid" 2>/dev/null || true
+      done
+    dest: "/var/lib/vz/snippets/mesh-wifi-phy-{{ meshwifi_ct_id }}.sh"
+    mode: "0755"
+
+- name: Attach hookscript to container
+  ansible.builtin.command:
+    cmd: "pct set {{ meshwifi_ct_id }} --hookscript local:snippets/mesh-wifi-phy-{{ meshwifi_ct_id }}.sh"
+  changed_when: true

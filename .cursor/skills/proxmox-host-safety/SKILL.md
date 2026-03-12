@@ -96,7 +96,7 @@ Current ansible-managed files that must be cleaned:
 - `/etc/modprobe.d/vfio-pci.conf` (PCI passthrough config)
 - `/etc/ansible/facts.d/vm_builds.fact` (deploy stamp tracking)
 - `/etc/apt/sources.list.d/pve-no-subscription.sources` (added by `proxmox_igpu`)
-- `/tmp/openwrt.img` (left behind if build fails mid-upload)
+- `/tmp/openwrt-router-*.img*` (left behind if build fails mid-upload)
 - `/var/lib/vz/template/cache/debian-*.tar.zst` (LXC templates)
 - Enterprise repos: restore `pve-enterprise.sources.disabled` → `.sources` and `ceph.sources.disabled` → `.sources`
 

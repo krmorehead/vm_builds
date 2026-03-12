@@ -1,0 +1,49 @@
+---
+description: Review checklist for project plans before execution
+globs: docs/projects/**/project_plan.md
+alwaysApply: false
+---
+
+# Project Plan Review
+
+When editing or reviewing a project plan, ALWAYS run through the review
+checklist in the `project-planning` skill before considering the plan
+ready for execution.
+
+## Trigger
+
+This rule activates when opening or editing any `project_plan.md` in
+`docs/projects/`. Read the `project-planning` skill and apply its
+"Plan review checklist" section.
+
+## Quick reference (full checklist in skill)
+
+1. **Dynamic group persistence**: every separate `ansible-playbook` invocation
+   that targets a dynamic group MUST reconstruct it first.
+2. **Auth transitions**: if a milestone changes connection method, specify
+   ordering, re-registration, detection, and rollback.
+3. **Rollback completeness**: every rollback undoes everything the milestone
+   changed (UCI, packages, files, auth, cron, services).
+4. **LXC features**: unprivileged containers needing iptables/nftables MUST
+   declare `nesting=1`. Missing features cause silent runtime failures.
+5. **Internet connectivity**: roles that download packages must document how
+   the VM/container reaches the internet and resolves DNS.
+6. **Prerequisite verification**: grep the codebase to confirm claimed
+   prerequisites exist (VMIDs, groups, molecule platforms, .gitignore entries).
+7. **site.yml play ordering**: clarify positioning relative to `never`-tagged
+   plays. State whether the new tag runs during normal converge or is opt-in.
+8. **Cleanup parity**: files deployed by roles must appear in BOTH cleanup
+   playbooks. Rollback tags must appear in `playbooks/cleanup.yml`.
+9. **Cross-reference architecture docs**: verify plays, tags, and resources
+   match `overview.md`, `roles.md`, `build-profiles.md`, and `roadmap.md`.
+10. **Bake, don't configure at runtime**: if the plan calls for runtime
+   package installation, reject it. Packages belong in the image build.
+   See Design principles in `project-structure.mdc`.
+11. **One path, no fallbacks**: if the plan adds "try X, fall back to Y"
+   logic, reject it. See Design principles in `project-structure.mdc`.
+
+## Previous bugs caught by plan review
+
+- WireGuard plan omitted `nesting=1` — iptables MASQUERADE would fail at runtime
+- WireGuard plan added `.env.generated` to `.gitignore` but it was already there
+- OpenWrt plan had SSH auth transition gaps and dynamic group persistence issues

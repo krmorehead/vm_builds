@@ -1,0 +1,38 @@
+#!/bin/sh
+# First-boot UCI defaults for mesh LXC containers.
+# Strips routing/firewall/WAN config — this is a bridged container, not a router.
+
+# --- Network: single eth0 on DHCP, no WAN/switch ---
+uci batch <<'UCI'
+delete network.wan
+delete network.wan6
+delete network.globals
+delete network.@device[0]
+set network.lan=interface
+set network.lan.device='eth0'
+set network.lan.proto='dhcp'
+delete network.lan.ipaddr
+delete network.lan.netmask
+delete network.lan.ip6assign
+UCI
+
+# Remove loopback if re-created by default config
+uci -q get network.loopback >/dev/null 2>&1 || {
+  uci set network.loopback=interface
+  uci set network.loopback.device='lo'
+  uci set network.loopback.proto='static'
+  uci set network.loopback.ipaddr='127.0.0.1'
+  uci set network.loopback.netmask='255.0.0.0'
+}
+
+# --- Disable IPv6 (reduces attack surface, avoids DAD issues in containers) ---
+uci set network.lan.ipv6='0'
+
+# --- Switch opkg feeds to HTTP (minimal image has no TLS certs) ---
+if [ -f /etc/opkg/distfeeds.conf ]; then
+  sed -i 's|https://|http://|g' /etc/opkg/distfeeds.conf
+fi
+
+uci commit network
+
+exit 0

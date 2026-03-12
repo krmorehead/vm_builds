@@ -1,26 +1,8 @@
 ---
 # Encrypted DNS via https-dns-proxy (Milestone 3)
 #
-# Installs https-dns-proxy for DNS-over-HTTPS upstream resolution.
-# The package auto-configures dnsmasq on install; UCI commands below
-# make the config explicit for idempotency and customization.
-
-# ── Install https-dns-proxy ─────────────────────────────────────
-
-- name: Update opkg package lists for DNS packages
-  ansible.builtin.raw: opkg update
-  register: _opkg_update_dns
-  changed_when: false
-  retries: 3
-  delay: 5
-  until: _opkg_update_dns.rc == 0
-
-- name: Install https-dns-proxy
-  ansible.builtin.raw: opkg install https-dns-proxy
-  register: _hdp_install
-  retries: 3
-  delay: 5
-  until: _hdp_install.rc == 0
+# https-dns-proxy is pre-installed in the custom router image
+# (build-images.sh). UCI commands below configure dnsmasq to use it.
 
 # ── Configure dnsmasq to forward to https-dns-proxy ─────────────
 

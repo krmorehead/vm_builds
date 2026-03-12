@@ -8,34 +8,97 @@ alwaysApply: true
 ## What this project is
 An Ansible project that automates VM and LXC container provisioning on Proxmox VE. Currently deploys an OpenWrt router VM with shared LXC infrastructure ready for service containers.
 
+## Design principles
+
+These apply to EVERY service, VM, and container in this project — not just
+OpenWrt. They govern how we build images, write roles, and plan features.
+
+### Bake, don't configure at runtime
+Every VM and container starts from a purpose-built image with its packages
+and base configuration already baked in. The image arrives ready to run.
+Ansible's job is ONLY to apply host-specific config that depends on runtime
+topology (IPs, bridges, subnets, peer keys).
+
+- NEVER install packages (`opkg install`, `apt install`, `pip install`)
+  during converge/configure. Runtime installation is fragile (network down,
+  repo 404, version drift, DNS failure) and slow.
+- When a new package is needed, add it to the service's image build and
+  rebuild. Currently `build-images.sh` for OpenWrt; future services will
+  have their own (Dockerfiles, Packer templates, debootstrap scripts, etc.).
+- Configure roles contain ZERO `opkg install`, `apt-get install`, or
+  equivalent commands. If you're writing one, stop — the package belongs
+  in the image.
+- This applies equally to firmware images (OpenWrt), LXC rootfs tarballs,
+  VM disk images, and any other deployable artifact.
+
+### One path, no fallbacks
+Every deployment scenario has exactly one tested code path. NEVER add
+"try X, fall back to Y" logic. Fallbacks create:
+- Dead code that's never exercised in normal testing
+- Two configurations to maintain, debug, and reason about
+- Silent degradation that masks fixable problems
+
+If a prerequisite is missing (image not built, hardware not present, config
+not set), FAIL with a clear message telling the operator exactly how to fix
+it. This applies to images, hardware detection, network topology, and every
+other dependency.
+
+### Follow community standards
+Before writing custom automation, check if the upstream project already has
+an official tool or recommended approach for exactly this use case. Use it.
+
+Custom workarounds age poorly — they miss upstream fixes, confuse
+contributors who know the standard pattern, and create maintenance burden
+that compounds with every service we add. The community has already solved
+most of these problems. Our job is to compose their solutions, not reinvent
+them.
+
 ## Architecture pattern: two-role per service
 Every service type has exactly two roles:
 - `<type>_vm` + `<type>_configure` — for VMs (KVM/QEMU): provision via qm, configure via SSH
 - `<type>_lxc` + `<type>_configure` — for containers: provision via `include_role: proxmox_lxc`, configure via `community.proxmox.proxmox_pct_remote`
+- `<type>_mesh_lxc` + `<type>_mesh_configure` — for LXC containers with host device namespace move (e.g., WiFi PHY)
 
 Shared infrastructure roles run once per host before any service roles:
 - `proxmox_backup` — tar host config + vzdump existing VMs
 - `proxmox_bridges` — discover NICs, create virtual bridges, export `proxmox_all_bridges` fact
 - `proxmox_pci_passthrough` — IOMMU/vfio-pci for WiFi, export `wifi_pci_devices` fact (requires VT-d in BIOS)
-- `proxmox_igpu` — detect Intel iGPU, verify Quick Sync, export `igpu_*` facts (hard-fails if no iGPU)
+- `proxmox_igpu` — detect iGPU (Intel or AMD), verify VA-API, export `igpu_*` facts (hard-fails if no iGPU)
 - `proxmox_lxc` — shared LXC provisioning helper (consumed via `include_role`, not standalone)
 
-## Playbook execution order (site.yml)
+## Playbook execution order (site.yml) — phased
 ```
-Play 0: proxmox_backup             (targets: proxmox, tag: backup)
-         deploy_stamp: backup
-Play 1: proxmox_bridges            (targets: proxmox — shared infra)
-         proxmox_pci_passthrough
-         proxmox_igpu
-         deploy_stamp: infrastructure
-Play 2: openwrt_vm                 (targets: router_nodes — VM provision)
-         deploy_stamp: openwrt_vm
-Play 3: openwrt_configure          (targets: openwrt — dynamic group)
-Play 4: Bootstrap cleanup          (targets: proxmox — remove temp IPs)
+Phase 1: Primary hosts (proxmox:!lan_hosts — directly reachable)
+  Play 0: proxmox_backup                  tag: backup
+           deploy_stamp: backup
+  Play 1: proxmox_bridges, pci_passthrough, igpu   tag: infra
+           deploy_stamp: infrastructure
+  Play 2: openwrt_vm (router_nodes)       tag: openwrt
+           deploy_stamp: openwrt_vm
+  Play 3: openwrt_configure (openwrt)     tag: openwrt
+
+Phase 2: LAN satellites (reachable after OpenWrt creates the LAN)
+  Play 4: Bootstrap LAN hosts (router_nodes)      tag: lan-satellite
+  Play 5: proxmox_backup (lan_hosts)              tag: lan-satellite, backup
+           deploy_stamp: backup
+  Play 6: proxmox_bridges, pci_passthrough, igpu (lan_hosts) tag: lan-satellite, infra
+           deploy_stamp: infrastructure
+
+Phase 3: Services (flavor groups span both primary + LAN hosts)
+  Play 7: wireguard_lxc (vpn_nodes)       tag: wireguard
+           deploy_stamp: wireguard_lxc
+  Play 8: wireguard_configure (wireguard) tag: wireguard
+  Play 9: openwrt_mesh_lxc (wifi_nodes:!router_nodes) tag: mesh-wifi
+           deploy_stamp: openwrt_mesh_lxc
+  Play 10: openwrt_mesh_configure (openwrt_mesh) tag: mesh-wifi
+
+Per-feature plays (opt-in via --tags, tagged with [never])
+Bootstrap cleanup (proxmox:!lan_hosts)    tag: cleanup
 ```
 When adding a new VM type, add a new provision play targeting the appropriate
 flavor group, add a configure play targeting the dynamic group, and include
-`deploy_stamp` in the provision play.
+`deploy_stamp` in the provision play. Service plays go in Phase 3 so they
+run on both primary and LAN hosts.
 
 Post-baseline features are added as separate task files in the configure role
 (e.g., `roles/openwrt_configure/tasks/security.yml`). Each feature gets a
@@ -47,20 +110,39 @@ runs as a separate `ansible-playbook` invocation (per-feature molecule
 converge/verify, cleanup/rollback) MUST reconstruct the group first.
 Extract reconstruction into `tasks/reconstruct_<type>_group.yml`.
 
+## Network topology
+```
+ISP Router (192.168.86.x supernet)
+  |
+Switch
+  |            |                  |
+Home          AI Node          Mesh2
+(primary)     192.168.86.220   192.168.86.211
+  |
+  |-- OpenWrt VM (10.10.10.1)
+  |     |
+  |     LAN bridge (10.10.10.x)
+  |       |
+  |     Mesh1 (10.10.10.210)
+```
+
+- **home**, **ai**, **mesh2**: directly reachable on the supernet (no ProxyJump)
+- **mesh1**: behind home's OpenWrt, reachable via ProxyJump through home
+
 ## Device flavors (inventory groups)
 Hosts belong to child groups under `proxmox` that determine which services they receive.
 Shared infrastructure (backup, bridges, PCI, iGPU) targets `proxmox` and runs on every host.
 Service-specific provision plays target flavor groups.
-- `router_nodes` — OpenWrt router VM
-- `vpn_nodes` — WireGuard VPN
+- `router_nodes` — OpenWrt router VM (home only)
+- `vpn_nodes` — WireGuard VPN (home, mesh1, ai, mesh2 — all 4 nodes)
 - `dns_nodes` — Pi-hole
-- `wifi_nodes` — Mesh WiFi Controller
+- `wifi_nodes` — Mesh WiFi Controller (router_nodes on primary); OpenWrt Mesh LXC on wifi_nodes:!router_nodes (mesh1, mesh2)
 - `monitoring_nodes` — Netdata, rsyslog
 - `service_nodes` — Home Assistant
 - `media_nodes` — Jellyfin, Kodi, Moonlight
 - `desktop_nodes` — Desktop VM, UX Kiosk
 - `gaming_nodes` — Gaming VM (separate physical machine)
-- `lan_hosts` — Satellite Proxmox nodes behind the OpenWrt router (accessed via ProxyJump)
+- `lan_hosts` — Satellite Proxmox nodes behind the OpenWrt router (accessed via ProxyJump; mesh1 only)
 A host can belong to multiple flavor groups.
 
 ## Deployment tracking
@@ -81,10 +163,12 @@ All VMIDs defined in `group_vars/all.yml`.
 
 ## Variable scoping
 - **Required secrets**: `.env` file → `lookup('env', 'VAR_NAME')` in `group_vars/proxmox.yml`
-- **API tokens**: `<HOSTNAME>_API_TOKEN` in `.env`/`test.env` (e.g., `HOME_API_TOKEN`, `MESH1_API_TOKEN`). `group_vars/proxmox.yml` resolves dynamically via `(inventory_hostname | upper | replace('-', '_')) + '_API_TOKEN'`.
+- **API tokens**: `<HOSTNAME>_API_TOKEN` in `.env`/`test.env` (e.g., `HOME_API_TOKEN`, `MESH1_API_TOKEN`, `AI_API_TOKEN`, `MESH2_API_TOKEN`). `group_vars/proxmox.yml` resolves dynamically via `(inventory_hostname | upper | replace('-', '_')) + '_API_TOKEN'`.
 - **Primary host**: `PRIMARY_HOST` in `.env`/`test.env` — the entry point IP that `build.py` probes.
+- **Additional host IPs**: `AI_HOST`, `MESH_2_HOST` in `.env`/`test.env` for directly reachable nodes.
 - **Optional env vars**: `.env` file → `lookup('env', 'VAR_NAME') | default('', true)` in role `defaults/main.yml` (e.g., `WAN_MAC`)
-- **Shared VM params**: `group_vars/all.yml` (VMID, image path, storage)
+- **Generated secrets and dynamic config**: Auto-generated during runs → written to `{{ env_generated_path }}` on the controller via `blockinfile`. Resolves to `test.env.generated` under Molecule, `.env.generated` in production. Includes auto-generated keys (WireGuard) and dynamic runtime config (LAN_GATEWAY, LAN_CIDR). See `secret-generation` rule.
+- **Shared VM params**: `group_vars/all.yml` (VMID, image path, storage, `project_root`, `env_generated_path`)
 - **Proxmox connection**: `group_vars/proxmox.yml` (API auth, SSH settings)
 - **Per-host overrides**: `host_vars/<hostname>.yml` (IP, reboot policy)
 - **LAN host SSH**: `group_vars/lan_hosts.yml` (ProxyJump through primary host)
@@ -98,55 +182,66 @@ All VMIDs defined in `group_vars/all.yml`.
 | `setup.sh` | Bootstrap .venv + pip + ansible-galaxy |
 | `run.sh` | Convenience wrapper — delegates to `build.py` |
 | `cleanup.sh` | Restore / full-restore / clean / rollback — delegates to `build.py` |
+| `build-images.sh` | Builds custom OpenWrt images via Image Builder (mesh LXC + router VM) |
 | `test.env` | Test machine config (committed, IP: 192.168.86.201) |
 | `.env` | Production secrets (gitignored) |
+| `test.env.generated` | Auto-generated secrets during test runs (gitignored) |
+| `.env.generated` | Auto-generated secrets during production runs (gitignored) |
 | `.state/addresses.json` | Cached host IPs for cross-run discovery (gitignored) |
 | `tasks/reconstruct_openwrt_group.yml` | Reusable dynamic group reconstruction for per-feature scenarios and rollback |
+| `tasks/reconstruct_wireguard_group.yml` | Reusable dynamic group reconstruction for WireGuard |
 | `tasks/bootstrap_lan_host.yml` | Reusable bootstrap for LAN hosts (DHCP lease + API token) |
-| `molecule/default/` | Integration tests against test machine |
+| `tasks/cleanup_lan_host.yml` | Reusable per-LAN-host cleanup (SSH from primary host) |
+| `molecule/default/` | Full integration tests (home, mesh1, ai, mesh2 — 4-node) |
+| `molecule/default/cleanup_lan_host.yml` | Per-LAN-host cleanup tasks for test scenarios |
 | `molecule/openwrt-*/` | Per-feature scenarios (security, vlans, dns, mesh) |
-| `molecule/mesh1-infra/` | Shared infrastructure on secondary LAN node |
+| `molecule/wireguard-lxc/` | Per-feature scenario for WireGuard VPN container |
+| `molecule/mesh1-infra/` | Lightweight infra-only on mesh1 (quick iteration) |
 
 ## Adding a new LXC service — checklist
-1. Create `roles/<type>_lxc/tasks/main.yml` that uses `include_role: proxmox_lxc` with service-specific vars
-2. Create `roles/<type>_configure/defaults/main.yml` and `roles/<type>_configure/tasks/main.yml`
-3. VMID already defined in `group_vars/all.yml` (`<type>_ct_id`)
-4. Add a provision play in `site.yml` targeting the flavor group
-5. Include `deploy_stamp` as the last role in the provision play
-6. Add a configure play targeting the dynamic group (`ansible_connection: community.proxmox.proxmox_pct_remote`)
-7. Dynamic group and flavor group already exist in `inventory/hosts.yml`
-8. Flavor group already in `molecule/default/molecule.yml` platform groups
-9. Create `molecule/<type>-lxc/` per-feature scenario (converge + verify + cleanup)
-10. Extend `molecule/default/verify.yml` with assertions for the new service
-11. Update `docs/architecture/` with a `<type>-build.md`
-12. Add a CHANGELOG entry under `[Unreleased]`
+1. **Build the image first.** Add the service's image build to `build-images.sh` (or create a new build script). All packages baked in. Define the image path in `group_vars/all.yml`.
+2. Create `roles/<type>_lxc/tasks/main.yml` that uses `include_role: proxmox_lxc` with service-specific vars. Add an image existence check that hard-fails if missing. Container networking MUST match host topology.
+3. Create `roles/<type>_configure/defaults/main.yml` and `roles/<type>_configure/tasks/main.yml`. ZERO package installs — only host-specific config.
+4. VMID already defined in `group_vars/all.yml` (`<type>_ct_id`)
+5. Add a provision play in `site.yml` targeting the flavor group
+6. Include `deploy_stamp` as the last role in the provision play
+7. Add a configure play targeting the dynamic group (`ansible_connection: community.proxmox.proxmox_pct_remote`)
+8. Dynamic group and flavor group already exist in `inventory/hosts.yml`
+9. Flavor group already in `molecule/default/molecule.yml` platform groups
+10. Create `molecule/<type>-lxc/` per-feature scenario (converge + verify + cleanup)
+11. Extend `molecule/default/verify.yml` with assertions for the new service
+12. Update `docs/architecture/` with a `<type>-build.md`
+13. Add a CHANGELOG entry under `[Unreleased]`
 
 ## Adding a new VM type — checklist
-1. Create `roles/<type>_vm/defaults/main.yml` and `roles/<type>_vm/tasks/main.yml`
-2. Create `roles/<type>_configure/defaults/main.yml` and `roles/<type>_configure/tasks/main.yml`
-3. VMID already defined in `group_vars/all.yml` (`<type>_vm_id`)
-4. Add a provision play in `site.yml` targeting the flavor group
-5. Include `deploy_stamp` as the last role in the provision play
-6. Add a configure play targeting the dynamic group
-7. Dynamic group and flavor group already exist in `inventory/hosts.yml`
-8. Flavor group already in `molecule/default/molecule.yml` platform groups
-9. Create `molecule/<type>-vm/` per-feature scenario
-10. Extend `molecule/default/verify.yml` with assertions for the new VM
-11. Update `docs/architecture/` with a `<type>-build.md`
-12. Add a CHANGELOG entry under `[Unreleased]`
+1. **Build the image first.** Add the service's image build to `build-images.sh` (or create a new build script). All packages baked in. Define the image path in `group_vars/all.yml`.
+2. Create `roles/<type>_vm/defaults/main.yml` and `roles/<type>_vm/tasks/main.yml`. Add an image existence check that hard-fails if missing.
+3. Create `roles/<type>_configure/defaults/main.yml` and `roles/<type>_configure/tasks/main.yml`. ZERO package installs — only host-specific config.
+4. VMID already defined in `group_vars/all.yml` (`<type>_vm_id`)
+5. Add a provision play in `site.yml` targeting the flavor group
+6. Include `deploy_stamp` as the last role in the provision play
+7. Add a configure play targeting the dynamic group
+8. Dynamic group and flavor group already exist in `inventory/hosts.yml`
+9. Flavor group already in `molecule/default/molecule.yml` platform groups
+10. Create `molecule/<type>-vm/` per-feature scenario
+11. Extend `molecule/default/verify.yml` with assertions for the new VM
+12. Update `docs/architecture/` with a `<type>-build.md`
+13. Add a CHANGELOG entry under `[Unreleased]`
 
 ## Image and template management
-- ALL images and templates are stored locally in `images/` (gitignored) and uploaded to Proxmox during provisioning. NEVER depend on remote downloads from the Proxmox host.
-- VM images: uploaded to `/tmp/`, imported via `qm importdisk`, then deleted.
+- Per the Design principles above: every VM and container uses a purpose-built image with all packages baked in. Images are REQUIRED — provision roles verify existence and hard-fail if missing. Configure roles NEVER install packages at runtime.
+- ALL images are stored locally in `images/` (gitignored) and uploaded to Proxmox during provisioning. NEVER depend on remote downloads from the Proxmox host.
+- `build-images.sh` is the current image build script (OpenWrt via Image Builder). Future services will have their own build steps (Dockerfiles, Packer, debootstrap, etc.).
+- VM images: uploaded to `/tmp/`, decompressed if `.gz`, imported via `qm importdisk`, then deleted.
 - LXC templates: uploaded to `/var/lib/vz/template/cache/` via `ansible.builtin.copy`.
 - NEVER use `pveam download` — the host may lack internet (router VM destroyed) or have unreachable enterprise repos (no subscription).
-- Image paths are defined in `group_vars/all.yml` (e.g., `openwrt_image_path`, `proxmox_lxc_template_path`).
+- Image paths are defined in `group_vars/all.yml` (e.g., `openwrt_image_path`, `openwrt_lxc_template_path`). Roles verify the image exists and fail with a clear message pointing to `./build-images.sh` if missing.
 - ALWAYS use `role_path` for source paths in tasks. Bare relative paths break when Molecule runs from non-default scenarios.
 - See `vm-lifecycle` skill, Image management section, for the full pattern.
 
 ## Hardware detection: hard-fail over graceful degradation
 - ALWAYS prefer hard-fail when expected hardware is missing. Graceful degradation masks real problems.
-- iGPU: REQUIRED on every host. `proxmox_igpu` hard-fails if absent. Every modern Intel CPU has an iGPU.
+- iGPU: REQUIRED on every host. `proxmox_igpu` hard-fails if absent. Supports both Intel (i915) and AMD (amdgpu).
 - WiFi + VT-d/IOMMU: REQUIRED for PCI passthrough. `proxmox_pci_passthrough` hard-fails if IOMMU is not active after reboot or if IOMMU groups are invalid.
 - NIC count: OK to handle dynamically — hardware legitimately varies (1 NIC on mesh satellites, 3+ on router nodes). The 2-bridge minimum is gated on `router_nodes` group membership.
 - Previous bug: `proxmox_pci_passthrough` "gracefully skipped" WiFi passthrough when IOMMU groups were invalid. The real cause was VT-d disabled in BIOS on mesh1. The silent skip masked a fixable BIOS setting for an entire test cycle.

@@ -12,7 +12,7 @@ Ansible project for provisioning and configuring VMs on Proxmox VE. Currently de
  │         │──────SSH─────▶│          │  vmbr2 ────│ eth2 LAN │
  └────────┘               └──────────┘  PCIe  ────│ wlan0    │
       │                                            └──────────┘
-      │       images/openwrt.img                     802.11s
+      │       images/ (custom, via build-images.sh)    802.11s
       └──────▶ (local to project root)                mesh
 ```
 
@@ -153,10 +153,11 @@ Grab the **combined ext4** or **combined squashfs** `.img.gz` for the
 path:
 
 ```bash
-mkdir -p images
-gunzip openwrt-*-combined-ext4.img.gz
-cp openwrt-*-combined-ext4.img images/openwrt.img
+./build-images.sh
 ```
+
+This downloads the OpenWrt Image Builder (once, cached) and produces custom
+images with all required packages pre-installed in `images/`.
 
 ### 8. Run
 
@@ -231,7 +232,7 @@ molecule test        # full pipeline: cleanup -> syntax -> converge -> verify ->
 | Variable | Default | Description |
 |---|---|---|
 | `project_version` | `1.0.0` | Project version stamped on managed hosts after each run |
-| `openwrt_image_path` | `images/openwrt.img` | Path to the OpenWrt disk image (relative to project root, or absolute) |
+| `openwrt_image_path` | `images/openwrt-router-24.10.0-x86-64-combined.img.gz` | Path to the custom OpenWrt router image (built by `build-images.sh`) |
 | `openwrt_vm_id` | `100` | Proxmox VM ID |
 | `openwrt_vm_name` | `openwrt-router` | VM display name |
 | `openwrt_vm_memory` | `512` | RAM in MB |
@@ -265,7 +266,7 @@ molecule test        # full pipeline: cleanup -> syntax -> converge -> verify ->
 
 | Variable | Default | Description |
 |---|---|---|
-| `openwrt_tmp_image` | `/tmp/openwrt.img` | Temp upload path on the Proxmox node |
+| `openwrt_tmp_image_dir` | `/tmp` | Temp upload directory on the Proxmox node |
 | `openwrt_bootstrap_gw` | `192.168.1.1` | OpenWrt factory-default LAN IP (used for initial SSH) |
 | `openwrt_bootstrap_ip` | `192.168.1.2` | Temp IP assigned to a Proxmox bridge for bootstrap |
 | `openwrt_bootstrap_cidr` | `24` | Netmask for the bootstrap subnet |
@@ -284,7 +285,6 @@ molecule test        # full pipeline: cleanup -> syntax -> converge -> verify ->
 | `openwrt_dhcp_start` | `100` | DHCP pool start offset |
 | `openwrt_dhcp_limit` | `150` | DHCP pool size |
 | `openwrt_dhcp_leasetime` | `12h` | DHCP lease duration |
-| `openwrt_wifi_driver_packages` | `[kmod-iwlwifi, ...]` | WiFi kernel modules and firmware packages to install |
 | `openwrt_mesh_enabled` | `true` | Enable 802.11s mesh on detected WiFi radios |
 | `openwrt_mesh_id` | `vm-builds-mesh` | Mesh network identifier (must match across nodes) |
 | `openwrt_mesh_key` | *(from MESH_KEY env)* | WPA3-SAE passphrase for mesh encryption |

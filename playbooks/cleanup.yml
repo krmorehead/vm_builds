@@ -114,10 +114,83 @@
         uci commit
       changed_when: true
 
+# ── Per-feature rollback: WireGuard VPN ───────────────────────────
+
+- name: Reconstruct wireguard dynamic group for rollback
+  hosts: vpn_nodes
+  gather_facts: false
+  tags: [wireguard-rollback, never]
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: ../tasks/reconstruct_wireguard_group.yml
+
+- name: Rollback WireGuard VPN
+  hosts: vpn_nodes
+  gather_facts: false
+  tags: [wireguard-rollback, never]
+  tasks:
+    - name: Stop and destroy WireGuard container
+      ansible.builtin.shell:
+        cmd: |
+          pct stop {{ wireguard_ct_id }} 2>/dev/null || true
+          sleep 2
+          pct destroy {{ wireguard_ct_id }} --purge 2>/dev/null || true
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Remove wireguard module persistence
+      ansible.builtin.file:
+        path: /etc/modules-load.d/wireguard.conf
+        state: absent
+
+    - name: Unload wireguard kernel module
+      ansible.builtin.command:
+        cmd: modprobe -r wireguard
+      failed_when: false
+      changed_when: true
+
+    - name: Remove generated env files from controller
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ env_generated_path }}"
+        - "{{ project_root }}/.env.generated"
+        - "{{ project_root }}/test.env.generated"
+      delegate_to: localhost
+
+# ── Per-feature rollback: mesh WiFi LXC ────────────────────────
+
+- name: Rollback mesh WiFi LXC
+  hosts: wifi_nodes:!router_nodes
+  gather_facts: false
+  tags: [mesh-wifi-rollback, never]
+  tasks:
+    - name: Stop and destroy mesh WiFi container
+      ansible.builtin.shell:
+        cmd: |
+          pct stop {{ meshwifi_ct_id }} 2>/dev/null || true
+          sleep 2
+          pct destroy {{ meshwifi_ct_id }} --purge 2>/dev/null || true
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Remove mesh WiFi PHY hookscript
+      ansible.builtin.file:
+        path: "/var/lib/vz/snippets/mesh-wifi-phy-{{ meshwifi_ct_id }}.sh"
+        state: absent
+
+    - name: Remove cached OpenWrt LXC template
+      ansible.builtin.shell:
+        cmd: rm -f /var/lib/vz/template/cache/openwrt-*.tar.gz
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
 # ── Full host restore (existing) ────────────────────────────────
 
 - name: Restore Proxmox host from backup
-  hosts: proxmox
+  hosts: proxmox:!lan_hosts
   gather_facts: false
   vars:
     backup_dir: /var/lib/ansible-backup
@@ -257,12 +330,22 @@
         - /etc/modprobe.d/vfio-pci.conf
         - /etc/ansible/facts.d/vm_builds.fact
         - /etc/apt/sources.list.d/pve-no-subscription.sources
-        - /tmp/openwrt.img
+        - /etc/modules-load.d/wireguard.conf
+        - /tmp/openwrt-router-24.10.0-x86-64-combined.img.gz
+        - /tmp/openwrt-router-24.10.0-x86-64-combined.img
       tags: [restore, full-restore, clean]
 
     - name: Remove cached LXC templates
       ansible.builtin.shell:
-        cmd: rm -f /var/lib/vz/template/cache/debian-*.tar.zst
+        cmd: rm -f /var/lib/vz/template/cache/debian-*.tar.zst /var/lib/vz/template/cache/openwrt-*.tar.gz
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+      tags: [full-restore, clean]
+
+    - name: Remove mesh WiFi PHY hookscripts
+      ansible.builtin.shell:
+        cmd: rm -f /var/lib/vz/snippets/mesh-wifi-phy-*.sh
         executable: /bin/bash
       changed_when: true
       failed_when: false
@@ -345,3 +428,18 @@
           Host config: restored from {{ manifest.host_config }}.
           VMs backed up: {{ manifest.vm_ids | default([]) | join(', ') | default('none') }}.
       tags: [restore, full-restore, clean]
+
+# ── LAN host cleanup (runs from router_nodes via SSH) ─────────────
+
+- name: Clean up LAN satellite hosts
+  hosts: router_nodes
+  gather_facts: false
+  tags: [restore, full-restore, clean]
+  tasks:
+    - name: Process each LAN host
+      ansible.builtin.include_tasks: ../tasks/cleanup_lan_host.yml
+      vars:
+        _lan_host_ip: "{{ hostvars[item].ansible_host }}"
+        _lan_host_name: "{{ item }}"
+      loop: "{{ groups['lan_hosts'] | default([]) }}"
+      when: groups['lan_hosts'] | default([]) | length > 0

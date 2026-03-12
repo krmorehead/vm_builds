@@ -80,12 +80,14 @@ Decisions
 │   ├── LXC containers share the host kernel — no in-container module loading
 │   ├── modprobe wireguard on host before container starts wg-quick
 │   ├── Persist via /etc/modules-load.d/wireguard.conf for reboots
-│   └── Unprivileged LXC containers can create wg interfaces with host module loaded
+│   ├── Unprivileged LXC containers can create wg interfaces with host module loaded
+│   └── iptables MASQUERADE for NAT requires features: nesting=1 on the container
 │
 ├── Container networking: LAN bridge with DHCP
 │   ├── proxmox_lxc defaults to proxmox_all_bridges[1] (first LAN bridge)
 │   ├── Container gets IP from OpenWrt DHCP on the LAN
 │   ├── wg0 tunnel interface runs inside the container
+│   ├── features: nesting=1 required for iptables/nftables inside unprivileged container
 │   └── No special bridge needed — standard LAN connectivity
 │
 ├── Routing strategy: NAT on wg0, selective routing by consuming services
@@ -121,6 +123,23 @@ Decisions
     ├── NEVER add to REQUIRED_ENV in build.py (VPN is flavor-specific)
     └── Generated values stored in .env.generated for user to harvest
 ```
+
+---
+
+## Future Integration Considerations
+
+- **Predictable IP for downstream consumers**: When services like rsyslog and
+  Netdata route traffic through this container, they need a stable IP. Add a
+  DHCP static reservation on OpenWrt (same pattern as the Proxmox LAN
+  management IP) in the downstream project that first consumes the tunnel.
+  Until then, DHCP is sufficient.
+- **`.env.generated` accumulation**: The pattern is designed to accumulate
+  entries from multiple services. Each service appends its section with a
+  header comment and timestamp. Downstream services that auto-generate
+  credentials follow the same convention.
+- **Full-tunnel mode**: `AllowedIPs 0.0.0.0/0` routes ALL container traffic
+  through the tunnel. This is supported but not the default. Document the
+  trade-offs (latency, bandwidth, privacy) when a downstream project needs it.
 
 ---
 
@@ -163,6 +182,7 @@ See: `vm-lifecycle` skill (LXC provisioning pattern, deploy_stamp).
   - `wireguard_ct_memory: 128`, `wireguard_ct_cores: 1`, `wireguard_ct_disk: "1"`
   - `wireguard_ct_template: "{{ proxmox_lxc_default_template }}"`
   - `wireguard_ct_onboot: true`, `wireguard_ct_startup_order: 2`
+  - `wireguard_ct_features: ["nesting=1"]` (required for iptables NAT inside container)
 - [ ] Create `roles/wireguard_lxc/tasks/main.yml`:
   - Load `wireguard` kernel module on Proxmox host (`ansible.builtin.command:
     modprobe wireguard`, delegated to inventory_hostname since the play
@@ -171,13 +191,16 @@ See: `vm-lifecycle` skill (LXC provisioning pattern, deploy_stamp).
   - Include `proxmox_lxc` role with service-specific vars:
     `lxc_ct_id: "{{ wireguard_ct_id }}"`, `lxc_ct_hostname: wireguard`,
     `lxc_ct_dynamic_group: wireguard`, `lxc_ct_memory`, `lxc_ct_cores`,
-    `lxc_ct_disk`, `lxc_ct_onboot`, `lxc_ct_startup_order`
+    `lxc_ct_disk`, `lxc_ct_onboot`, `lxc_ct_startup_order`,
+    `lxc_ct_features: "{{ wireguard_ct_features }}"`
 - [ ] Create `roles/wireguard_lxc/meta/main.yml` with required metadata
   (`author`, `license: proprietary`, `role_name`, `description`,
   `min_ansible_version`, `platforms`)
 - [ ] Add provision play to `site.yml` targeting `vpn_nodes`, tagged
-  `[wireguard]`, with `wireguard_lxc` role and `deploy_stamp` (Play 4,
-  after Configure OpenWrt, before cleanup)
+  `[wireguard]`, with `wireguard_lxc` role and `deploy_stamp`.
+  Insert after Configure OpenWrt (play 3), before per-feature
+  `[never]`-tagged plays. Tag is NOT `never` — WireGuard runs during
+  normal converge for hosts in `vpn_nodes`
 - [ ] Verify Debian 12 LXC template exists in `images/` directory
   (prerequisite — document download URL in setup instructions)
 
@@ -188,6 +211,7 @@ See: `vm-lifecycle` skill (LXC provisioning pattern, deploy_stamp).
 - [ ] `pct_remote` connection works: `ansible.builtin.ping` succeeds
 - [ ] Auto-start configured: `pct config 101` shows `onboot: 1`,
   `startup: order=2`
+- [ ] Container features: `pct config 101` shows `features: nesting=1`
 - [ ] Idempotent: re-run skips creation, container still running
 - [ ] `wireguard` kernel module loaded on host: `lsmod` shows `wireguard`
 - [ ] `/etc/modules-load.d/wireguard.conf` exists on host
@@ -268,7 +292,8 @@ When auto-generating:
   - **Configuration phase** (runs always, using provided or generated values):
     - Install `wireguard-tools` via `apt-get update && apt-get install -y
       wireguard-tools` (with `retries: 3` and `delay: 5` — container apt
-      may need time for initial package list fetch)
+      may need time for initial package list fetch). Container has internet
+      via OpenWrt LAN DHCP; DNS provided by dnsmasq
     - Template `/etc/wireguard/wg0.conf` from `templates/wg0.conf.j2`
       with `mode: '0600'`:
       `[Interface]` with PrivateKey, Address, optional DNS;
@@ -285,7 +310,9 @@ When auto-generating:
 - [ ] Create `roles/wireguard_configure/templates/wg0.conf.j2`
 - [ ] Create `roles/wireguard_configure/meta/main.yml` with required metadata
 - [ ] Add configure play to `site.yml` targeting `wireguard` dynamic group,
-  tagged `[wireguard]`, `gather_facts: true`, after the provision play
+  tagged `[wireguard]`, `gather_facts: true`, immediately after the
+  provision play. `gather_facts: true` works via pct_remote (runs setup
+  module inside the container)
 - [ ] Ensure idempotency: all tasks safe to re-run (key generation skipped
   when env vars present, iptables check-before-add, systemctl enable is
   idempotent, template overwrite is safe, sysctl write is idempotent)
@@ -332,7 +359,7 @@ auto-generated during converge and cleaned up afterwards.
 See: `ansible-testing` skill (per-feature scenario setup, verify
 completeness, fact scoping).
 
-- [ ] Add `.env.generated` to `.gitignore`
+- [x] `.env.generated` already in `.gitignore` (verified)
 - [ ] Add `WIREGUARD_PRIVATE_KEY` and other WireGuard vars to molecule
   provisioner env in `molecule/default/molecule.yml` (empty values —
   triggers auto-generation):
@@ -352,6 +379,13 @@ completeness, fact scoping).
   (cleanup completeness rule)
 - [ ] Add `.env.generated` cleanup to `molecule/default/cleanup.yml`
   (delegate_to: localhost, remove file)
+- [ ] Add `wireguard-rollback` tagged plays to `playbooks/cleanup.yml`:
+  - Reconstruction play: discover container 101, register in `wireguard`
+    group (tagged `[wireguard-rollback, never]`)
+  - Rollback play targeting Proxmox host: `pct stop 101 && pct destroy 101`,
+    remove `/etc/modules-load.d/wireguard.conf`, `modprobe -r wireguard`
+    (tagged `[wireguard-rollback, never]`)
+  - Update `cleanup.sh` rollback mapping in `build.py` for `wireguard`
 - [ ] Create `tasks/reconstruct_wireguard_group.yml`:
   - Verify container 101 is running (`pct status {{ wireguard_ct_id }}`)
   - Register via `add_host` with:

@@ -55,7 +55,7 @@
   ansible.builtin.set_fact:
     _lxc_net0: >-
       name=eth0,bridge={{ lxc_ct_bridge
-      }}{{ ',ip=' + lxc_ct_ip if lxc_ct_ip != 'dhcp'
+      }},firewall=0{{ ',ip=' + lxc_ct_ip if lxc_ct_ip != 'dhcp'
       else ',ip=dhcp'
       }}{{ ',gw=' + lxc_ct_gateway
       if lxc_ct_gateway | default('') | length > 0
@@ -80,6 +80,8 @@
       if lxc_ct_unprivileged else '--unprivileged 0' }}
       {{ '--features ' + (lxc_ct_features | join(','))
       if lxc_ct_features | length > 0 else '' }}
+      {{ '--ostype ' + lxc_ct_ostype
+      if lxc_ct_ostype | default('') | length > 0 else '' }}
       --start false
   when: not lxc_exists | bool
 
@@ -112,6 +114,25 @@
       --startup order={{ lxc_ct_startup_order }}
   changed_when: true
 
+# ── Bridge netfilter bypass (required for LXC DHCP) ──────────
+# br_netfilter routes bridge traffic through iptables FORWARD chain.
+# If FORWARD policy is DROP, DHCP responses from the router never reach
+# the container. Disabling bridge-nf-call-iptables lets bridge L2 traffic
+# pass without iptables filtering.
+
+- name: Check if br_netfilter is loaded
+  ansible.builtin.stat:
+    path: /proc/sys/net/bridge/bridge-nf-call-iptables
+  register: _br_nf_stat
+
+- name: Disable iptables filtering on bridge traffic
+  ansible.posix.sysctl:
+    name: net.bridge.bridge-nf-call-iptables
+    value: "0"
+    sysctl_set: true
+    reload: true
+  when: _br_nf_stat.stat.exists
+
 # ── Start container ───────────────────────────────────────────────
 
 - name: Start container
@@ -121,23 +142,62 @@
 
 - name: Wait for container to be ready
   ansible.builtin.command:
-    cmd: pct exec {{ lxc_ct_id }} -- hostname
-  register: _ct_hostname
+    cmd: pct exec {{ lxc_ct_id }} -- ls /
+  register: _ct_ready
   retries: 10
   delay: 3
-  until: _ct_hostname.rc == 0
+  until: _ct_ready.rc == 0
   changed_when: false
+
+- name: Wait for container networking
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct exec {{ lxc_ct_id }} -- ip -o -4 addr show eth0 2>/dev/null | grep -c "inet "
+    executable: /bin/bash
+  register: _ct_addr
+  retries: 15
+  delay: 4
+  until: (_ct_addr.stdout | default('0') | trim | int) > 0
+  changed_when: false
+
+# ── Ensure clean apt baseline ────────────────────────────────────
+# Proxmox standard templates may ship with broken kernel metapackages
+# (e.g., linux-image-rt-amd64 with missing dependencies). Kernel
+# packages are useless in LXC (shared host kernel) and block all
+# apt operations. Remove them from the dpkg database to start clean.
+
+- name: Purge broken kernel packages from LXC template
+  ansible.builtin.command:
+    cmd: >-
+      pct exec {{ lxc_ct_id }} -- sh -c
+      'for pkg in $(dpkg -l "linux-image*" 2>/dev/null | grep "^[a-z]" | awk "{print \$2}"); do
+        rm -f /var/lib/dpkg/info/${pkg}.*;
+        sed -i "/^Package: ${pkg}$/,/^$/d" /var/lib/dpkg/status;
+      done;
+      dpkg --configure -a 2>/dev/null || true'
+  changed_when: true
+  when:
+    - not lxc_exists | bool
+    - not (lxc_ct_skip_debian_cleanup | bool)
 
 # ── Register in dynamic inventory ─────────────────────────────────
 
-- name: Add container to dynamic inventory group
+- name: Add containers to dynamic inventory group
   ansible.builtin.add_host:
-    name: "{{ lxc_ct_hostname }}"
+    name: "{{ lxc_ct_hostname }}-{{ item }}"
     groups: "{{ lxc_ct_dynamic_group }}"
     ansible_connection: community.proxmox.proxmox_pct_remote
-    ansible_host: "{{ ansible_host }}"
+    ansible_host: "{{ hostvars[item].ansible_host }}"
     ansible_user: root
     proxmox_vmid: "{{ lxc_ct_id }}"
+    ansible_paramiko_host_key_checking: false
+    ansible_paramiko_proxy_command: >-
+      {{ 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@'
+         + lookup('env', 'PRIMARY_HOST')
+         if 'lan_hosts' in (hostvars[item].group_names | default([]))
+         else omit }}
+  loop: "{{ ansible_play_hosts }}"
 
 # ── Post-provision diagnostics ────────────────────────────────────
 

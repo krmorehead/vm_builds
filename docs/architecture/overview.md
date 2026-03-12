@@ -35,7 +35,7 @@ interaction, no SSH-and-paste workflows, no guesswork.
 
 ### Home Entertainment Box (Primary Build)
 
-Small-form-factor PC, Intel CPU (iGPU for Quick Sync), 8 GB RAM, 2+ ethernet
+Small-form-factor PC, Intel or AMD CPU (iGPU for VA-API transcoding), 8 GB RAM, 2+ ethernet
 ports. All containers and VMs run directly on the Proxmox host as siblings.
 
 ```
@@ -101,7 +101,7 @@ the primary Proxmox host. See the `multi-node-ssh` skill for details.
 
 ```
 Build Profiles
-├── Home Entertainment Box (home, primary — directly reachable)
+├── Home Entertainment Box (home, primary — directly reachable, 192.168.86.201)
 │   ├── router_nodes       → OpenWrt
 │   ├── vpn_nodes          → WireGuard
 │   ├── dns_nodes          → Pi-hole
@@ -111,8 +111,17 @@ Build Profiles
 │   ├── media_nodes        → Jellyfin, Kodi, Moonlight
 │   └── desktop_nodes      → Debian Desktop, UX Kiosk
 │
-├── LAN Satellite (mesh1 — via ProxyJump, requires OpenWrt running)
-│   └── lan_hosts          → ProxyJump SSH config (group_vars/lan_hosts.yml)
+├── AI Node (ai — directly reachable, 192.168.86.220)
+│   └── vpn_nodes          → WireGuard
+│
+├── Mesh Node 2 (mesh2 — directly reachable, 192.168.86.211)
+│   ├── vpn_nodes          → WireGuard
+│   └── wifi_nodes         → OpenWrt Mesh LXC (WiFi PHY namespace move)
+│
+├── LAN Satellite (mesh1 — via ProxyJump through home, requires OpenWrt running)
+│   ├── lan_hosts          → ProxyJump SSH config (group_vars/lan_hosts.yml)
+│   ├── vpn_nodes          → WireGuard (same service as primary host)
+│   └── wifi_nodes         → OpenWrt Mesh LXC (WiFi PHY namespace move)
 │
 ├── Minimal Router
 │   ├── router_nodes       → OpenWrt
@@ -166,7 +175,7 @@ Boot Sequence (Home Entertainment Box)
 
 ## Display Output & iGPU Sharing
 
-The Intel iGPU serves two distinct purposes on the home entertainment box:
+The iGPU (Intel or AMD) serves two distinct purposes on the home entertainment box:
 
 ```
 iGPU Usage
@@ -193,7 +202,7 @@ iGPU Usage
 iGPU Access Model
 ├── LXC Containers (Kiosk, Kodi, Moonlight, Jellyfin)
 │   ├── Access via /dev/dri/* device bind mount
-│   ├── Host keeps i915 driver loaded
+│   ├── Host keeps i915/amdgpu driver loaded
 │   ├── Multiple containers share renderD128 simultaneously (transcode)
 │   └── Only one container drives the physical display at a time
 │
@@ -218,10 +227,10 @@ Display-Exclusive State Machine
 │
 └── Start Desktop VM
     ├── 1. Stop Kiosk, Kodi, Moonlight
-    ├── 2. iGPU unbound from i915, bound to vfio-pci
+    ├── 2. iGPU unbound from i915/amdgpu, bound to vfio-pci
     ├── 3. Desktop VM gets exclusive GPU
     ├── 4. Jellyfin switches to software transcoding
-    └── 5. On stop → iGPU returns to i915, Kiosk restarts
+    └── 5. On stop → iGPU returns to i915/amdgpu, Kiosk restarts
 ```
 
 Managed by Proxmox hookscripts on the host, with Ansible pre-tasks
@@ -232,17 +241,19 @@ as enforcement during playbook runs.
 ```
 PCI Device Handling (separate roles)
 ├── proxmox_pci_passthrough
-│   ├── Purpose: Exclusive device passthrough (WiFi, discrete GPU)
-│   ├── Method: Unbind from host driver, bind to vfio-pci
-│   ├── Exports: wifi_pci_devices (future: gpu_pci_devices for discrete GPUs)
-│   └── Consumer: openwrt_vm (WiFi); future: gaming_vm (discrete GPU)
+│   ├── Purpose: WiFi detection on all hosts; exclusive vfio-pci binding on router_nodes only
+│   ├── Method: Detect WiFi interfaces + PCI addresses on all hosts;
+│   │          unbind from host driver and bind to vfio-pci only on router_nodes
+│   │          (non-router hosts keep the host WiFi driver for PHY namespace move)
+│   ├── Exports: wifi_pci_devices (all hosts with WiFi)
+│   └── Consumer: openwrt_vm (WiFi passthrough); openwrt_mesh_lxc (WiFi PHY list)
 │
 └── proxmox_igpu
     ├── Purpose: iGPU detection, driver/VA-API setup, fact export for containers and VMs
-    ├── Requirement: Intel iGPU MUST be present on every host (hard fail if absent)
-    ├── Method: Keep host i915 driver loaded, install vainfo, export device paths
-    ├── Exports: igpu_available, igpu_pci_address, igpu_render_device, igpu_card_device,
-    │           igpu_render_gid, igpu_video_gid
+    ├── Requirement: iGPU MUST be present (Intel or AMD; hard fail if absent)
+    ├── Method: Keep host driver loaded (i915/amdgpu), install VA-API tools, export device paths
+    ├── Exports: igpu_available, igpu_vendor, igpu_pci_address, igpu_render_device,
+    │           igpu_card_device, igpu_render_gid, igpu_video_gid
     ├── LXC consumers (shared bind mount): jellyfin_lxc, kodi_lxc, moonlight_lxc, kiosk_lxc
     └── VM consumer (exclusive hostpci): desktop_vm (takes GPU from host when running)
 ```
@@ -251,11 +262,43 @@ PCI Device Handling (separate roles)
 
 ## Network Topology
 
+### Physical Layout
+
+```
+ISP Router (192.168.86.x supernet)
+  |
+Switch
+  |            |                  |
+Home          AI Node          Mesh2
+(primary)     192.168.86.220   192.168.86.211
+192.168.86.201
+  |
+  |-- OpenWrt VM (10.10.10.1)
+  |     |
+  |     LAN bridge (10.10.10.x)
+  |       |
+  |     Mesh1 (10.10.10.210)
+```
+
+- **home**, **ai**, **mesh2**: directly reachable on the supernet (no ProxyJump)
+- **mesh1**: behind home's OpenWrt, reachable via ProxyJump through home
+- All 4 nodes run shared infrastructure (backup, bridges, PCI, iGPU)
+- All 4 nodes are in `vpn_nodes` — WireGuard containers deploy on all 4
+
+### Logical Layout
+
 ```
 Internet
 └── Upstream ISP Router
     └── WAN (DHCP)
-        └── OpenWrt VM (VMID 100)
+        ├── Proxmox Host "ai" (192.168.86.220, directly reachable)
+        │   └── WireGuard VPN (VMID 101)
+        │
+        ├── Proxmox Host "mesh2" (192.168.86.211, directly reachable)
+        │   ├── WireGuard VPN (VMID 101)
+        │   └── OpenWrt Mesh LXC (VMID 103, WiFi PHY namespace move)
+        │
+        └── OpenWrt VM on "home" (VMID 100)
             ├── eth0 ← auto-detected WAN bridge (bridge with default route)
             ├── eth1..N ← remaining bridges (LAN)
             ├── wlan0 ← PCIe passthrough (802.11s mesh)
@@ -263,9 +306,10 @@ Internet
             └── LAN Network (all other services connect here)
                 ├── Proxmox Host "home" (LAN management IP on LAN bridge, 10.10.10.2)
                 ├── Proxmox Host "mesh1" (LAN node, 10.10.10.210, via ProxyJump)
-                │   └── SSH: controller → home (.201) → mesh1 (.210 via LAN bridge)
+                │   ├── SSH: controller → home (.201) → mesh1 (.210 via LAN bridge)
+                │   └── OpenWrt Mesh LXC (VMID 103, WiFi PHY namespace move)
                 │
-                ├── WireGuard VPN (VMID 101)
+                ├── WireGuard VPN (VMID 101, on home and mesh1)
                 │   └── wg0 tunnel → home server
                 │       ├── rsyslog forwards logs through tunnel
                 │       ├── Netdata streams metrics through tunnel
@@ -337,6 +381,27 @@ conflicting device is removed — no manual intervention needed.
 
 Omit `WAN_MAC` entirely to use the auto-generated virtio MAC (default).
 
+### WiFi Strategy: VM Passthrough vs LXC PHY Namespace Move
+
+The project supports two WiFi strategies, selected by group membership:
+
+| Strategy | Target hosts | Method | Requirements |
+|----------|-------------|--------|-------------|
+| PCIe passthrough | `router_nodes` | `vfio-pci` binding, full device isolation | VT-d/IOMMU in BIOS, q35 machine type |
+| PHY namespace move | `wifi_nodes:!router_nodes` | `iw phy set netns` into LXC container | Privileged container, `iw` tool on host |
+
+**PCIe passthrough** (router nodes): The WiFi PCI device is unbound from the host
+driver and bound to `vfio-pci`. The OpenWrt VM gets exclusive access. This is the
+full router build with WAN/LAN routing, DHCP, firewall, and mesh root.
+
+**PHY namespace move** (mesh satellite nodes): The host WiFi driver stays loaded.
+After the OpenWrt LXC container starts, the WiFi PHY is moved into the container's
+network namespace via `iw phy <phy> set netns <pid>`. The container sees the radio
+and configures 802.11s mesh interfaces via UCI. No routing — mesh peer only.
+
+A Proxmox hookscript (`/var/lib/vz/snippets/mesh-wifi-phy-<CT_ID>.sh`) re-does the
+PHY move after container restart, ensuring persistence across host reboots.
+
 ### Bridge Mapping (dynamic)
 
 | Bridge | Role | OpenWrt interface |
@@ -344,7 +409,12 @@ Omit `WAN_MAC` entirely to use the auto-generated virtio MAC (default).
 | `proxmox_wan_bridge` (auto-detected) | WAN | `eth0` |
 | All other bridges | LAN | `eth1..N` |
 
-All LXC containers and VMs (except OpenWrt) attach to a LAN bridge.
+### LXC Container Networking (host topology)
+
+LXC container networking must match host topology:
+
+- **Hosts behind OpenWrt** (`router_nodes`, `lan_hosts`): Containers use the LAN bridge (second bridge) and OpenWrt LAN subnet (gateway from `env_generated_path`).
+- **Hosts directly on WAN** (e.g., `ai`, `mesh2`): Containers use `proxmox_wan_bridge` and the host's WAN subnet (`ansible_default_ipv4.gateway`/prefix). IP offset +200 avoids collisions with LAN containers. DNS: `8.8.8.8`.
 
 ---
 
@@ -353,27 +423,46 @@ All LXC containers and VMs (except OpenWrt) attach to a LAN bridge.
 The playbook (`playbooks/site.yml`) runs plays in sequence. Plays targeting
 flavor groups the host doesn't belong to are automatically skipped.
 
-### Current (v1.2)
+### Current (v1.4) — Phased Multi-Node
 
 ```
-site.yml (current)
-├── Play 0:  proxmox        [backup]               proxmox_backup, deploy_stamp
-├── Play 1:  proxmox        [infra]                proxmox_bridges, proxmox_pci_passthrough, proxmox_igpu, deploy_stamp
-├── Play 2:  router_nodes   [openwrt]              openwrt_vm, deploy_stamp
-├── Play 3:  openwrt        [openwrt]              openwrt_configure
+site.yml (current — phased for multi-node)
+│
+├── Phase 1: Primary hosts (proxmox:!lan_hosts — directly reachable)
+│   ├── Play 0:  proxmox:!lan_hosts  [backup]     proxmox_backup, deploy_stamp
+│   ├── Play 1:  proxmox:!lan_hosts  [infra]      pre_tasks: NTP clock sync; proxmox_bridges, proxmox_pci_passthrough, proxmox_igpu, deploy_stamp
+│   ├── Play 2:  router_nodes        [openwrt]    openwrt_vm, deploy_stamp
+│   └── Play 3:  openwrt             [openwrt]    openwrt_configure
+│
+├── Phase 2: LAN satellites (reachable after OpenWrt creates the LAN)
+│   ├── Play 4:  router_nodes        [lan-satellite]  bootstrap_lan_host (loop lan_hosts)
+│   ├── Play 5:  lan_hosts           [lan-satellite]  proxmox_backup, deploy_stamp
+│   └── Play 6:  lan_hosts           [lan-satellite]  pre_tasks: NTP clock sync; proxmox_bridges, proxmox_pci_passthrough, proxmox_igpu, deploy_stamp
+│
+├── Phase 3: Services (flavor groups span primary + LAN hosts)
+│   ├── Play 7:  vpn_nodes           [wireguard]  wireguard_lxc, deploy_stamp
+│   ├── Play 8:  wireguard           [wireguard]  wireguard_configure
+│   ├── Play 9:  wifi_nodes:!router_nodes [mesh-wifi]  openwrt_mesh_lxc, deploy_stamp
+│   └── Play 10: openwrt_mesh        [mesh-wifi]  openwrt_mesh_configure
 │
 ├── Per-feature plays (opt-in via --tags <name>, tagged with [never]):
-│   ├── Play 4:  openwrt        [openwrt-security]   include_role: openwrt_configure/security.yml
-│   ├── Play 5:  router_nodes   [openwrt-security]   deploy_stamp (openwrt_security)
-│   ├── Play 6:  openwrt        [openwrt-vlans]      include_role: openwrt_configure/vlans.yml
-│   ├── Play 7:  router_nodes   [openwrt-vlans]      deploy_stamp (openwrt_vlans)
-│   ├── Play 8:  openwrt        [openwrt-dns]        include_role: openwrt_configure/dns.yml
-│   ├── Play 9:  router_nodes   [openwrt-dns]        deploy_stamp (openwrt_dns)
-│   ├── Play 10: openwrt        [openwrt-mesh]       include_role: openwrt_configure/mesh.yml
-│   └── Play 11: router_nodes   [openwrt-mesh]       deploy_stamp (openwrt_mesh)
+│   ├── Play 11: openwrt             [openwrt-security]   include_role: openwrt_configure/security.yml
+│   ├── Play 12: router_nodes        [openwrt-security]   deploy_stamp (openwrt_security)
+│   ├── Play 13: openwrt             [openwrt-vlans]      include_role: openwrt_configure/vlans.yml
+│   ├── Play 14: router_nodes        [openwrt-vlans]      deploy_stamp (openwrt_vlans)
+│   ├── Play 15: openwrt             [openwrt-dns]        include_role: openwrt_configure/dns.yml
+│   ├── Play 16: router_nodes        [openwrt-dns]        deploy_stamp (openwrt_dns)
+│   ├── Play 17: openwrt             [openwrt-mesh]       include_role: openwrt_configure/mesh.yml
+│   └── Play 18: router_nodes        [openwrt-mesh]       deploy_stamp (openwrt_mesh)
 │
-└── Play 12: proxmox        [cleanup]              Remove bootstrap IP
+└── Play 19: proxmox:!lan_hosts      [cleanup]    Remove bootstrap IP
 ```
+
+The phased approach ensures LAN hosts (behind the OpenWrt router) are only
+contacted after the router is provisioned and the LAN bridge exists. Service
+plays in Phase 3 use flavor groups that span all hosts (e.g., `vpn_nodes`
+includes `home`, `mesh1`, `ai`, and `mesh2`), so Ansible runs tasks on all
+4 hosts in parallel within each play.
 
 Future integration plays (added by downstream projects when implemented):
 - `openwrt-pihole-dns` — added by Pi-hole LXC project
@@ -476,14 +565,14 @@ Shared Roles (run once per host, before any service roles)
 │
 ├── proxmox_igpu
 │   ├── Runs on: proxmox
-│   ├── Purpose: Detect Intel iGPU, load i915, install VA-API, export device info
-│   ├── Requirement: Intel iGPU MUST be present (hard fail if absent)
-│   └── Exports: igpu_available, igpu_pci_address, igpu_render_device,
+│   ├── Purpose: Detect iGPU (Intel or AMD), load driver, install VA-API, export device info
+│   ├── Requirement: iGPU MUST be present — Intel (i915) or AMD (amdgpu) (hard fail if absent)
+│   └── Exports: igpu_available, igpu_vendor, igpu_pci_address, igpu_render_device,
 │                igpu_card_device, igpu_render_gid, igpu_video_gid
 │
 ├── proxmox_lxc (helper -- included by other roles, not a standalone play)
 │   ├── Purpose: Template download, pct create, networking, start, add_host
-│   ├── Parameterized: ct_id, ct_memory, ct_cores, ct_disk, ct_bridge, etc.
+│   ├── Parameterized: ct_id, ct_memory, ct_cores, ct_disk, ct_bridge, lxc_ct_ostype, etc.
 │   └── Consumed by: every <type>_lxc role via include_role
 │
 └── deploy_stamp
@@ -500,7 +589,8 @@ Service Roles
 │   ├── openwrt_vm / openwrt_configure           VM   VMID 100   router_nodes   → openwrt
 │   ├── wireguard_lxc / wireguard_configure       LXC  VMID 101   vpn_nodes      → wireguard
 │   ├── pihole_lxc / pihole_configure             LXC  VMID 102   dns_nodes      → pihole
-│   └── meshwifi_lxc / meshwifi_configure         LXC  VMID 103   wifi_nodes     → meshwifi
+│   ├── meshwifi_lxc / meshwifi_configure         LXC  VMID 103   wifi_nodes     → meshwifi
+│   └── openwrt_mesh_lxc / openwrt_mesh_configure  LXC  VMID 103   wifi_nodes:!router_nodes → openwrt_mesh
 │
 ├── Observability Tier
 │   ├── netdata_lxc / netdata_configure           LXC  VMID 500   monitoring_nodes → netdata
@@ -612,7 +702,9 @@ vm_builds/
 │   │   └── lan_hosts.yml         ProxyJump SSH config for LAN-reachable hosts
 │   └── host_vars/
 │       ├── home.yml              Per-host overrides (primary node, direct SSH)
-│       └── mesh1.yml             LAN node (10.10.10.210, ProxyJump via home)
+│       ├── mesh1.yml             LAN node (10.10.10.210, ProxyJump via home)
+│       ├── ai.yml                AI node (192.168.86.220, direct SSH)
+│       └── mesh2.yml             Mesh node 2 (192.168.86.211, direct SSH)
 │
 ├── playbooks/
 │   ├── site.yml                  Main orchestration playbook
@@ -635,7 +727,9 @@ vm_builds/
 │   │   ├── pihole_lxc/
 │   │   ├── pihole_configure/
 │   │   ├── meshwifi_lxc/
-│   │   └── meshwifi_configure/
+│   │   ├── meshwifi_configure/
+│   │   ├── openwrt_mesh_lxc/
+│   │   └── openwrt_mesh_configure/
 │   │
 │   ├── Observability Tier
 │   │   ├── rsyslog_lxc/
@@ -666,18 +760,24 @@ vm_builds/
 │       └── gaming_configure/
 │
 ├── tasks/
-│   ├── reconstruct_openwrt_group.yml   Reusable dynamic group reconstruction
-│   └── bootstrap_lan_host.yml         SSH key check, DHCP lease, API token for LAN nodes
+│   ├── reconstruct_openwrt_group.yml     Reusable dynamic group reconstruction (OpenWrt)
+│   ├── reconstruct_wireguard_group.yml   Reusable dynamic group reconstruction (WireGuard)
+│   ├── bootstrap_lan_host.yml           SSH key check, DHCP lease, API token for LAN nodes
+│   └── cleanup_lan_host.yml             Reusable per-LAN-host cleanup (SSH from primary)
 │
 ├── molecule/
-│   ├── default/                   Full integration tests (home only)
+│   ├── default/                   Full integration tests (home, mesh1, ai, mesh2 — 4-node)
 │   ├── openwrt-security/          Per-feature: security hardening
 │   ├── openwrt-vlans/             Per-feature: VLAN segmentation
 │   ├── openwrt-dns/               Per-feature: encrypted DNS
 │   ├── openwrt-mesh/              Per-feature: mesh enhancements
-│   └── mesh1-infra/               Cross-hardware: shared infra on mesh1 (LAN node)
+│   ├── wireguard-lxc/             Per-feature: WireGuard VPN container
+│   └── mesh1-infra/               Lightweight infra-only on mesh1 (quick iteration)
 │
-├── images/                        VM disk images (gitignored)
+├── images/                        VM/LXC images (gitignored, built by build-images.sh)
+│
+├── image-builder/                 OpenWrt Image Builder config
+│   └── files-mesh-lxc/           UCI defaults baked into mesh LXC rootfs
 │
 ├── docs/
 │   ├── architecture/              Design documentation

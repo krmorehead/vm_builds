@@ -33,5 +33,12 @@ lxc_ct_startup_order: 5
 # Dynamic inventory group for the configure play
 lxc_ct_dynamic_group: ""
 
+# Skip dpkg kernel cleanup for non-Debian templates (e.g., OpenWrt rootfs)
+lxc_ct_skip_debian_cleanup: false
+
+# OS type for pct create (auto-detected by default, set to "unmanaged" for
+# non-standard templates like OpenWrt that Proxmox can't identify)
+lxc_ct_ostype: ""
+
 # Storage pool
 lxc_ct_storage: "{{ proxmox_storage | default('local-lvm') }}"

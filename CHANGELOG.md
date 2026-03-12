@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **WireGuard VPN client** -- first LXC container in the project. Lightweight
+  container (VMID 101, 128 MB RAM, 1 GB disk) running a WireGuard client
+  with persistent tunnel, IP forwarding, and iptables NAT/MASQUERADE. All
+  credentials optional with auto-generation fallback via `.env.generated`.
+  `wireguard_lxc` role provisions the container and loads the host kernel
+  module; `wireguard_configure` role installs wireguard-tools, templates
+  wg0.conf, and configures networking. Per-feature molecule scenario
+  (`wireguard-lxc`), rollback tag (`wireguard-rollback`), and reusable
+  group reconstruction (`tasks/reconstruct_wireguard_group.yml`).
 - **OpenWrt security hardening** (M1) -- root password, SSH key-only auth,
   banIP intrusion prevention, SYN flood protection, invalid packet drop,
   LAN-only SSH access. All configurable via env vars (`OPENWRT_ROOT_PASSWORD`,
@@ -43,13 +52,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Scalable env var convention** — renamed `PROXMOX_HOST` → `PRIMARY_HOST`,
   `PROXMOX_API_TOKEN_SECRET` → `HOME_API_TOKEN`. API tokens follow
   `<HOSTNAME>_API_TOKEN` convention with dynamic lookup in `group_vars/proxmox.yml`.
+- **Four-node test topology** — `home` (primary router), `mesh1` (LAN
+  satellite via ProxyJump), `ai` and `mesh2` (WAN-connected). Topology-aware
+  LXC container networking (WAN vs LAN subnet, bridge, DNS).
 
 - **`proxmox_lxc` role** -- reusable LXC container provisioning with
   parameterized resources, networking, features, mount entries, auto-start,
   and dynamic group registration via `community.proxmox.proxmox_pct_remote`.
-- **`proxmox_igpu` role** -- Intel iGPU detection, i915 driver management,
-  Quick Sync (VA-API) verification via `vainfo`, and fact export for
-  containers/VMs needing GPU access.
+- **`proxmox_igpu` role** -- iGPU detection for Intel (i915) and AMD (amdgpu),
+  vendor-specific VA-API driver installation, and fact export (`igpu_vendor`,
+  `igpu_pci_address`, `igpu_render_device`, etc.) for containers/VMs needing
+  GPU access. NTP clock sync before apt operations to prevent GPG failures.
+- **OpenWrt Mesh LXC** -- `openwrt_mesh_lxc` role provisions a privileged
+  OpenWrt LXC container on mesh satellite nodes (`wifi_nodes:!router_nodes`).
+  WiFi PHY namespace move gives the container exclusive radio access without
+  PCIe passthrough. Hookscript for persistence across reboots.
+  `openwrt_mesh_configure` installs WiFi drivers, `wpad-mesh-openssl`, and
+  configures 802.11s mesh interfaces. Gracefully skips hosts without WiFi.
+- **Custom OpenWrt images** -- `build-images.sh` uses the OpenWrt Image
+  Builder to create pre-configured images. Mesh LXC rootfs strips firewall/
+  routing and pre-installs WiFi packages. Router VM image pre-installs
+  mesh, security, DNS, and diagnostic packages. All roles have fallback
+  logic (custom → stock image). Eliminates EPERM/opkg failures in LXC
+  containers and reduces converge time by ~2-3 minutes.
 - **Self-hosted LXC templates** -- templates stored in `images/` and
   uploaded to Proxmox during provisioning (no external download needed).
 - **VMID allocation scheme** -- 100-series network, 200-series services,

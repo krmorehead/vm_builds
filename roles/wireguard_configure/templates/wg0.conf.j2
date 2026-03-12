@@ -1,0 +1,15 @@
+[Interface]
+PrivateKey = {{ _wg_private_key }}
+Address = {{ wireguard_client_address }}
+{% if wireguard_dns | length > 0 %}
+DNS = {{ wireguard_dns }}
+{% endif %}
+
+[Peer]
+PublicKey = {{ _wg_server_pubkey }}
+Endpoint = {{ wireguard_server_endpoint }}
+AllowedIPs = {{ wireguard_allowed_ips }}
+PersistentKeepalive = {{ wireguard_keepalive }}
+{% if wireguard_preshared_key | length > 0 %}
+PresharedKey = {{ wireguard_preshared_key }}
+{% endif %}

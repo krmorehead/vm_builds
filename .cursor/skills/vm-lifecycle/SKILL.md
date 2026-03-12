@@ -29,6 +29,11 @@ This project manages multiple VM and LXC container types on Proxmox. Each servic
 16. Feature plays that target dynamic groups MUST be paired with a `deploy_stamp` play targeting the flavor group (Proxmox host). The VM doesn't store `vm_builds.fact` — the host does.
 17. Post-baseline features are implemented as separate task files in the configure role, NOT as separate roles. This avoids cross-role variable dependencies and keeps the configure role as the single owner of VM configuration.
 18. Every entry point that targets a dynamic group as a separate `ansible-playbook` invocation (per-feature converge, verify, cleanup/rollback) MUST reconstruct the group first. `add_host` state is ephemeral.
+19. LXC container networking MUST match the host's actual topology. Hosts behind OpenWrt (`router_nodes`, `lan_hosts`) use the OpenWrt LAN subnet. Hosts directly on WAN use `ansible_default_ipv4.gateway/prefix`. NEVER hardcode all containers to the OpenWrt LAN subnet.
+20. `add_host` loops in `proxmox_lxc` MUST use `ansible_play_hosts` (not `ansible_play_hosts_all`). The latter includes hosts that failed in earlier plays, creating phantom container registrations.
+21. **Bake, don't configure at runtime** (see `project-structure.mdc` Design principles). Custom images are REQUIRED. Provision roles verify the image exists and hard-fail if missing. Configure roles NEVER install packages — all packages are baked into the image. To add a package, update the image build script and rebuild.
+22. **One path, no fallbacks** (see `project-structure.mdc` Design principles). NEVER add stock/generic image fallback logic. One tested code path per feature. Missing prerequisites fail with an actionable error message.
+23. **Follow community standards** (see `project-structure.mdc` Design principles). Check upstream tooling before writing custom workarounds.
 
 ## Playbook execution order (site.yml)
 
@@ -200,7 +205,9 @@ service's `<type>_lxc` role is a thin wrapper:
 
 The `proxmox_lxc` role handles: template upload, `pct create`, networking,
 device bind mounts, auto-start, container start, readiness wait, and
-`add_host` registration.
+`add_host` registration. For readiness: use `ls /` not `hostname` (BusyBox
+containers may lack it). For OpenWrt LXC: use `--ostype unmanaged`. See
+proxmox-safety rule.
 
 ### LXC configure connection
 
@@ -220,6 +227,10 @@ IP needed inside the container.
 
 The `add_host` in `proxmox_lxc` sets `ansible_connection`,
 `ansible_host`, and `proxmox_vmid` automatically.
+
+For OpenWrt containers (no Python), use `ansible.builtin.raw` with commands
+wrapped in `/bin/sh -c '...'`. See the `openwrt-build` skill section
+"Shell syntax and PATH through pct_remote" for quoting rules.
 
 ### LXC template management
 
@@ -255,9 +266,10 @@ the available list. Switching to local hosting eliminated the dependency.
 ### Directory layout
 
 ```
-images/                                    (gitignored)
-├── openwrt.img                            VM disk image (qcow2/raw)
-├── debian-12-standard_12.12-1_amd64.tar.zst  LXC template
+images/                                              (gitignored)
+├── openwrt-router-24.10.0-x86-64-combined.img.gz   Custom router VM (build-images.sh)
+├── openwrt-mesh-lxc-24.10.0-x86-64-rootfs.tar.gz   Custom mesh LXC (build-images.sh)
+├── debian-12-standard_12.12-1_amd64.tar.zst         LXC template
 └── ...future images...
 ```
 
@@ -265,16 +277,26 @@ NEVER commit images to git. The `images/` directory is listed in `.gitignore`.
 Document the expected image filename and download URL in role defaults and
 in `docs/architecture/`.
 
-### Image path variables
+### Custom images via Image Builder
 
-Each service defines its image path in `group_vars/all.yml`:
+`build-images.sh` uses the OpenWrt Image Builder to create pre-configured
+images with packages pre-installed and UCI defaults baked in. This eliminates
+runtime `opkg install` and resolves firewall/networking conflicts in LXC
+containers.
+
+Per the project's "Bake, don't configure at runtime" principle
+(`project-structure.mdc`), custom images are REQUIRED. Provision roles
+verify the image exists and hard-fail with an actionable message if missing:
 
 ```yaml
-openwrt_image_path: images/openwrt.img
-proxmox_lxc_template_path: images/debian-12-standard_12.12-1_amd64.tar.zst
+- name: Fail if image is missing
+  ansible.builtin.fail:
+    msg: "Image not found: {{ image_path }}. Run ./build-images.sh to build it."
+  when: not (image_stat.stat.exists | default(false))
 ```
 
-Roles reference these variables, not hardcoded paths.
+Image paths are defined in `group_vars/all.yml`. When adding a new service,
+define its image path there and add an existence check in the provision role.
 
 ### Upload pattern for VMs
 
@@ -282,9 +304,16 @@ Roles reference these variables, not hardcoded paths.
 - name: Upload image to Proxmox
   ansible.builtin.copy:
     src: "{{ openwrt_image_path }}"
-    dest: "/tmp/{{ openwrt_image_path | basename }}"
+    dest: "/tmp/openwrt-upload"
     mode: "0644"
   when: not vm_exists | bool
+
+- name: Decompress gzip image
+  ansible.builtin.command:
+    cmd: gunzip -f /tmp/openwrt-upload
+  when:
+    - not vm_exists | bool
+    - openwrt_image_path.endswith('.gz')
 
 # ... qm importdisk, then clean up /tmp file
 ```
@@ -329,9 +358,11 @@ Each LXC service gets a `molecule/<type>-lxc/` scenario that:
 
 The WAN bridge is auto-detected by `proxmox_bridges` via the host's default route (`proxmox_wan_bridge` fact). All physical-NIC-backed bridges are exported as `proxmox_all_bridges`.
 
-Different VM types consume bridges differently:
+Different VM/container types consume bridges differently:
 - **Router VMs** (OpenWrt): ALL bridges — WAN on `net0`, remaining as LAN ports
 - **Service VMs**: typically ONE LAN bridge — `proxmox_all_bridges[1]` (first non-WAN)
+- **LXC containers on LAN hosts** (`router_nodes`, `lan_hosts`): `proxmox_all_bridges[1]` (LAN bridge)
+- **LXC containers on WAN hosts**: `proxmox_wan_bridge` — NEVER use `proxmox_all_bridges[1]` here; the second bridge may not have internet
 - **Isolated VMs**: a dedicated bridge if network isolation is required
 
 ## VMs that need internet during configure
@@ -343,10 +374,11 @@ If the configure role needs to download packages:
 
 ## Host-level apt prerequisites
 
-Roles that install packages on the Proxmox HOST (not inside VMs/containers) must handle two prerequisites:
+Roles that install packages on the Proxmox HOST (not inside VMs/containers) must handle three prerequisites:
 
-1. **DNS**: After cleanup destroys the router VM, `/etc/resolv.conf` may point to a dead IP (`10.10.10.1`). Check DNS with `getent hosts deb.debian.org` and fall back to `8.8.8.8` / `1.1.1.1`.
-2. **Enterprise repos**: `pve-enterprise.sources` and `ceph.sources` require a subscription. Without it, `apt-get update` hangs. Rename both to `.disabled` and add the `pve-no-subscription` repo. ALWAYS restore them in cleanup.
+1. **Clock sync**: Sync via NTP before `apt-get update`. GPG verification fails with "Not live until" when the clock is behind. Use `chronyc -a 'burst 4/4'` + `sleep 6` + `chronyc -a makestep` (or `ntpdate -b pool.ntp.org` if chrony unavailable).
+2. **DNS**: After cleanup destroys the router VM, `/etc/resolv.conf` may point to a dead IP (`10.10.10.1`). Check DNS with `getent hosts deb.debian.org` and fall back to `8.8.8.8` / `1.1.1.1`.
+3. **Enterprise repos**: `pve-enterprise.sources` and `ceph.sources` require a subscription. Without it, `apt-get update` hangs. Rename both to `.disabled` and add the `pve-no-subscription` repo. ALWAYS restore them in cleanup.
    - NEVER use `sed` or `Enabled: no` in deb822 files — unreliable.
    - ALWAYS rename with `mv` (e.g., `mv pve-enterprise.sources pve-enterprise.sources.disabled`).
    - The `proxmox_igpu` role implements this pattern — reference it.
@@ -481,6 +513,32 @@ IOMMU groups were invalid. Root cause was VT-d disabled in BIOS — a
 - Cleanup destroys ALL VMs via `qm list` iteration — not hardcoded VMIDs.
 - Reproduce production bugs on the test machine first (`test.env`). Only involve production when the test machine cannot reproduce.
 - Use TDD: write the verify assertion first, confirm it fails, implement the fix, confirm it passes.
+
+## LXC package management
+
+- ALWAYS use `install_recommends: false` when installing packages in LXC
+  containers. Many packages Recommend kernel-related metapackages that pull
+  in 70+ MB kernel images, filling the small LXC disk.
+- Broken apt in an LXC container means the baseline is wrong. The fix
+  belongs in `proxmox_lxc` (shared provisioning), NOT in individual
+  configure roles. See the `clean-baselines` rule.
+- The shared `proxmox_lxc` role removes broken kernel packages from the
+  dpkg database after creating a container. This ensures every container
+  starts with working apt regardless of template issues.
+- Previous bug: `wireguard-tools` Recommends `wireguard` metapackage which
+  depends on `linux-image-rt-amd64`. Without `install_recommends: false`,
+  apt pulled in a 70MB kernel image that filled the 1GB container disk
+  (No space left on device).
+
+## Secret generation
+
+- When a configure role generates secrets (keys, tokens), write them to
+  `{{ env_generated_path }}` on the controller via `delegate_to: localhost`.
+- The path auto-detects: `test.env.generated` under Molecule,
+  `.env.generated` in production. NEVER hardcode the path.
+- Use `ansible.builtin.blockinfile` with a service-specific marker so
+  multiple services can accumulate in the same file.
+- See the `secret-generation` rule for the full pattern.
 
 ## Documentation accuracy
 

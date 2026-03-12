@@ -10,13 +10,63 @@
   ansible.builtin.set_fact:
     vm_exists: "{{ vm_status.rc == 0 }}"
 
+# ── Verify custom image exists ─────────────────────────────────────
+
+- name: Resolve OpenWrt image source path
+  ansible.builtin.set_fact:
+    _openwrt_image_src: >-
+      {{ openwrt_image_path
+         if openwrt_image_path.startswith('/')
+         else (project_root + '/' + openwrt_image_path) }}
+  when: not vm_exists | bool
+
+- name: Check OpenWrt image exists
+  ansible.builtin.stat:
+    path: "{{ _openwrt_image_src }}"
+  register: _openwrt_image_stat
+  delegate_to: localhost
+  when: not vm_exists | bool
+
+- name: Fail if OpenWrt image is missing
+  ansible.builtin.fail:
+    msg: >-
+      OpenWrt image not found: {{ openwrt_image_path }}.
+      Run ./build-images.sh to build it.
+  when:
+    - not vm_exists | bool
+    - not (_openwrt_image_stat.stat.exists | default(false))
+
 # ── Image upload & VM creation ───────────────────────────────────
+
+- name: Set upload destination path
+  ansible.builtin.set_fact:
+    _openwrt_tmp_upload: "{{ openwrt_tmp_image_dir }}/{{ _openwrt_image_src | basename }}"
+  when: not vm_exists | bool
 
 - name: Upload OpenWrt image to Proxmox node
   ansible.builtin.copy:
-    src: "{{ openwrt_image_path if openwrt_image_path.startswith('/') else (playbook_dir + '/../' + openwrt_image_path) }}"
-    dest: "{{ openwrt_tmp_image }}"
+    src: "{{ _openwrt_image_src }}"
+    dest: "{{ _openwrt_tmp_upload }}"
     mode: "0644"
+  when: not vm_exists | bool
+
+- name: Decompress gzip image on Proxmox node
+  ansible.builtin.command:
+    cmd: gunzip -f {{ _openwrt_tmp_upload }}
+  register: _gunzip_result
+  failed_when:
+    - _gunzip_result.rc != 0
+    - "'decompression OK' not in (_gunzip_result.stderr | default(''))"
+  when:
+    - not vm_exists | bool
+    - _openwrt_image_src.endswith('.gz')
+
+- name: Set final image path after optional decompression
+  ansible.builtin.set_fact:
+    _openwrt_disk_image: >-
+      {{ _openwrt_tmp_upload | regex_replace('\.gz$', '')
+         if _openwrt_image_src.endswith('.gz')
+         else _openwrt_tmp_upload }}
   when: not vm_exists | bool
 
 - name: Create OpenWrt VM shell (no disk)
@@ -45,7 +95,7 @@
   ansible.builtin.command:
     cmd: >-
       qm importdisk {{ openwrt_vm_id }}
-      {{ openwrt_tmp_image }}
+      {{ _openwrt_disk_image }}
       {{ proxmox_storage }}
   register: disk_import
   when: not vm_exists | bool
@@ -133,8 +183,12 @@
 
 - name: Clean up uploaded image
   ansible.builtin.file:
-    path: "{{ openwrt_tmp_image }}"
+    path: "{{ item }}"
     state: absent
+  loop:
+    - "{{ _openwrt_tmp_upload | default('') }}"
+    - "{{ _openwrt_disk_image | default('') }}"
+  when: item | length > 0
 
 # ── Start VM ─────────────────────────────────────────────────────
 

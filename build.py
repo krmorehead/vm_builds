@@ -38,6 +38,7 @@ Available tags (site.yml plays):
     backup      Back up Proxmox host config and VMs before changes
     infra       Shared infrastructure (bridges, PCI passthrough)
     openwrt     OpenWrt VM provisioning and configuration
+    wireguard   WireGuard VPN LXC container provisioning and configuration
     cleanup     Remove temporary bootstrap networking
 
     Tags are independent. If a play depends on another (e.g., openwrt
@@ -228,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Execute an Ansible build against a Proxmox host.",
         epilog=(
             "Any arguments after -- are passed directly to ansible-playbook.\n\n"
-            "Available tags: backup, infra, openwrt, cleanup"
+            "Available tags: backup, infra, openwrt, wireguard, cleanup"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

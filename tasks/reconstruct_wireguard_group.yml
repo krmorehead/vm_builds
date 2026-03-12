@@ -1,0 +1,45 @@
+---
+# Reusable task file: reconstruct the wireguard dynamic group.
+#
+# Consumed by:
+#   - Per-feature molecule converge.yml (wireguard-lxc scenario)
+#   - Per-feature molecule verify.yml
+#   - playbooks/cleanup.yml (rollback plays)
+#
+# Must run on a host in the vpn_nodes/proxmox group.
+# Simpler than OpenWrt reconstruction: pct_remote is always the
+# connection method (no SSH auth detection needed).
+
+- name: Verify WireGuard container is running
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct status {{ wireguard_ct_id | default(101) }} | grep -c running
+    executable: /bin/bash
+  register: _wg_ct_status
+  changed_when: false
+  failed_when: (_wg_ct_status.stdout | trim | int) == 0
+
+- name: Add WireGuard containers to dynamic group
+  ansible.builtin.add_host:
+    name: "wireguard-{{ item }}"
+    groups: wireguard
+    ansible_connection: community.proxmox.proxmox_pct_remote
+    ansible_host: "{{ hostvars[item].ansible_host }}"
+    ansible_user: root
+    proxmox_vmid: "{{ wireguard_ct_id | default(101) }}"
+    ansible_paramiko_host_key_checking: false
+    ansible_paramiko_proxy_command: >-
+      {{ 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@'
+         + lookup('env', 'PRIMARY_HOST')
+         if 'lan_hosts' in (hostvars[item].group_names | default([]))
+         else omit }}
+  loop: "{{ ansible_play_hosts }}"
+
+- name: Report reconstructed wireguard group
+  ansible.builtin.debug:
+    msg: >-
+      Reconstructed wireguard group: host=wireguard-{{ inventory_hostname }},
+      proxmox_host={{ ansible_host }},
+      vmid={{ wireguard_ct_id | default(101) }},
+      connection=pct_remote

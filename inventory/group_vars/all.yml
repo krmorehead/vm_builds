@@ -1,6 +1,21 @@
 ---
 project_version: "1.2.0"
 
+# ── Project paths ─────────────────────────────────────────────────
+# Auto-detect project root: Molecule sets MOLECULE_PROJECT_DIRECTORY,
+# production runs from playbooks/ (one level below root).
+project_root: >-
+  {{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY')
+     | default(playbook_dir + '/..', true) }}
+
+# Generated secrets file: test.env.generated under Molecule,
+# .env.generated in production.
+env_generated_path: >-
+  {{ project_root }}/{{
+     'test.env.generated'
+     if lookup('env', 'MOLECULE_PROJECT_DIRECTORY') | length > 0
+     else '.env.generated' }}
+
 # ── Storage ───────────────────────────────────────────────────────
 proxmox_storage: local-lvm
 
@@ -9,8 +24,16 @@ proxmox_lxc_default_template: debian-12-standard_12.12-1_amd64.tar.zst
 proxmox_lxc_template_storage: local
 proxmox_lxc_template_path: images/debian-12-standard_12.12-1_amd64.tar.zst
 
+# ── OpenWrt LXC (mesh satellite nodes) ────────────────────────────
+# Custom image built by build-images.sh: no firewall, WiFi drivers baked in.
+# Run ./build-images.sh before first deploy.
+openwrt_lxc_template: openwrt-mesh-lxc-24.10.0-x86-64-rootfs.tar.gz
+openwrt_lxc_template_path: images/openwrt-mesh-lxc-24.10.0-x86-64-rootfs.tar.gz
+
 # ── OpenWrt Router (VM) ──────────────────────────────────────────
-openwrt_image_path: images/openwrt.img
+# Custom image built by build-images.sh: mesh/security/DNS packages baked in.
+# Run ./build-images.sh before first deploy.
+openwrt_image_path: images/openwrt-router-24.10.0-x86-64-combined.img.gz
 openwrt_vm_id: 100
 openwrt_vm_name: openwrt-router
 openwrt_vm_memory: 512

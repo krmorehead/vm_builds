@@ -1,6 +1,8 @@
 ---
-- name: Back up current Proxmox state
-  hosts: proxmox
+# ── Phase 1: Primary host (directly reachable) ──────────────────
+
+- name: Back up primary Proxmox hosts
+  hosts: proxmox:!lan_hosts
   gather_facts: true
   tags: [backup]
   roles:
@@ -9,10 +11,26 @@
       vars:
         deploy_stamp_play: backup
 
-- name: Configure shared Proxmox infrastructure
-  hosts: proxmox
+- name: Configure shared infrastructure on primary hosts
+  hosts: proxmox:!lan_hosts
   gather_facts: true
   tags: [infra]
+  pre_tasks:
+    - name: Force NTP clock sync before infrastructure setup
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          if command -v chronyc >/dev/null 2>&1; then
+            systemctl restart chronyd 2>/dev/null || true
+            chronyc -a 'burst 4/4' 2>/dev/null || true
+            sleep 6
+            chronyc -a makestep 2>/dev/null || true
+          elif command -v ntpdate >/dev/null 2>&1; then
+            ntpdate -b pool.ntp.org 2>/dev/null || true
+          fi
+        executable: /bin/bash
+      changed_when: false
+      failed_when: false
   roles:
     - proxmox_bridges
     - proxmox_pci_passthrough
@@ -37,6 +55,95 @@
   tags: [openwrt]
   roles:
     - openwrt_configure
+
+# ── Phase 2: LAN satellites (reachable after OpenWrt) ───────────
+
+- name: Bootstrap LAN satellite hosts
+  hosts: router_nodes
+  gather_facts: true
+  tags: [lan-satellite]
+  tasks:
+    - name: Bootstrap each LAN host
+      ansible.builtin.include_tasks: ../tasks/bootstrap_lan_host.yml
+      vars:
+        _lan_host_ip: "{{ hostvars[item].ansible_host }}"
+        _lan_host_name: "{{ item }}"
+      loop: "{{ groups['lan_hosts'] | default([]) }}"
+      when: groups['lan_hosts'] | default([]) | length > 0
+
+- name: Back up LAN satellite hosts
+  hosts: lan_hosts
+  gather_facts: true
+  tags: [lan-satellite, backup]
+  roles:
+    - proxmox_backup
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: backup
+
+- name: Configure shared infrastructure on LAN satellites
+  hosts: lan_hosts
+  gather_facts: true
+  tags: [lan-satellite, infra]
+  pre_tasks:
+    - name: Force NTP clock sync before infrastructure setup
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          if command -v chronyc >/dev/null 2>&1; then
+            systemctl restart chronyd 2>/dev/null || true
+            chronyc -a 'burst 4/4' 2>/dev/null || true
+            sleep 6
+            chronyc -a makestep 2>/dev/null || true
+          elif command -v ntpdate >/dev/null 2>&1; then
+            ntpdate -b pool.ntp.org 2>/dev/null || true
+          fi
+        executable: /bin/bash
+      changed_when: false
+      failed_when: false
+  roles:
+    - proxmox_bridges
+    - proxmox_pci_passthrough
+    - proxmox_igpu
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: infrastructure
+
+# ── Phase 3: Services (flavor groups span all hosts) ─────────────
+
+- name: Provision WireGuard LXC
+  hosts: vpn_nodes
+  gather_facts: false
+  tags: [wireguard]
+  roles:
+    - wireguard_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: wireguard_lxc
+
+- name: Configure WireGuard
+  hosts: wireguard
+  gather_facts: true
+  tags: [wireguard]
+  roles:
+    - wireguard_configure
+
+- name: Provision OpenWrt Mesh LXC
+  hosts: wifi_nodes:!router_nodes
+  gather_facts: false
+  tags: [mesh-wifi]
+  roles:
+    - openwrt_mesh_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: openwrt_mesh_lxc
+
+- name: Configure OpenWrt Mesh
+  hosts: openwrt_mesh
+  gather_facts: false
+  tags: [mesh-wifi]
+  roles:
+    - openwrt_mesh_configure
 
 # ── Per-feature plays (opt-in via tags + never) ─────────────────
 
@@ -117,7 +224,7 @@
         deploy_stamp_play: openwrt_mesh
 
 - name: Clean up bootstrap networking
-  hosts: proxmox
+  hosts: proxmox:!lan_hosts
   gather_facts: false
   tags: [cleanup]
   vars:

@@ -1,0 +1,64 @@
+---
+description: Ensure every node starts from a clean, working baseline
+globs: "**/*.yml"
+alwaysApply: false
+---
+
+# Clean Baselines — Never Accept Broken State
+
+## Principle
+
+If apt, dpkg, or any system service is in a broken state on a node, something
+is wrong and you are not at the correct baseline. NEVER paper over broken
+state in individual service roles. Fix it at the layer that creates the
+baseline.
+
+## Rules
+
+1. **apt must work on every node.** If `apt-get update` or `apt-get install`
+   fails with unmet dependencies, the node's baseline is broken. Fix the
+   baseline, don't add workarounds to service roles.
+
+2. **Fix template issues in the provisioning role, not the configure role.**
+   If a Proxmox LXC template ships with broken packages, the fix belongs in
+   `proxmox_lxc` (the shared provisioning role), not in `wireguard_configure`
+   or `pihole_configure`. Every container created from that template gets the
+   fix automatically.
+
+3. **Kernel packages are never needed in LXC containers.** LXC shares the
+   host kernel. If the template includes kernel image packages, remove them
+   during provisioning. They waste disk space and create broken dependency
+   chains.
+
+4. **ALWAYS use `install_recommends: false` in LXC containers.** Many
+   packages Recommend kernel-related metapackages (e.g., `wireguard-tools`
+   Recommends `wireguard` which depends on `linux-image-rt-amd64`). These
+   fill the small LXC disk and cause "No space left on device" failures.
+
+5. **Verify the baseline before adding features.** If a service role fails
+   on a basic operation (apt install, systemctl start), check the baseline
+   before debugging the role. Common baseline failures:
+   - Broken dpkg database (template issue → fix in `proxmox_lxc`)
+   - Missing kernel modules (host issue → fix in `<type>_lxc`)
+   - No network connectivity (bridge issue → fix in `proxmox_bridges`)
+   - DNS resolution failure (router issue → fix in `openwrt_configure`)
+
+6. **The shared `proxmox_lxc` role cleans up template issues.** After
+   creating and starting a container, it removes broken kernel packages
+   from the dpkg database. This runs once at creation time and ensures
+   every container starts with a working apt.
+
+## Previous bugs
+
+- Proxmox Debian 12 standard template (`debian-12-standard_12.12-1`) ships
+  with `linux-image-rt-amd64` installed but its dependency
+  `linux-image-6.1.0-43-rt-amd64` missing. This breaks ALL apt operations
+  in every container created from the template.
+
+- The fix was initially added to `wireguard_configure` (wrong layer). Each
+  new service role would have needed the same workaround. Moved to
+  `proxmox_lxc` so it runs once for all containers.
+
+- `wireguard-tools` Recommends `wireguard` metapackage which depends on
+  `linux-image-rt-amd64` (70+ MB). Without `install_recommends: false`,
+  apt pulled in 417 MB of kernel packages, filling the 1 GB container disk.

@@ -1,0 +1,73 @@
+---
+- name: Load wireguard kernel module on Proxmox host
+  ansible.builtin.command:
+    cmd: modprobe wireguard
+  changed_when: true
+
+- name: Persist wireguard module across reboots
+  ansible.builtin.copy:
+    content: "wireguard\n"
+    dest: /etc/modules-load.d/wireguard.conf
+    mode: "0644"
+
+# ── Determine container network based on host topology ───────────
+# Hosts behind OpenWrt (router_nodes, lan_hosts) use the OpenWrt LAN
+# subnet. Hosts directly on the WAN (ai, mesh2) use their own subnet.
+
+- name: Read LAN gateway from generated env
+  ansible.builtin.set_fact:
+    _lan_gateway: >-
+      {{ lookup('pipe', 'grep "^LAN_GATEWAY=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
+         | default('10.10.10.1', true) }}
+    _lan_cidr: >-
+      {{ lookup('pipe', 'grep "^LAN_CIDR=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
+         | default('24', true) }}
+
+- name: Determine if host is on the OpenWrt LAN
+  ansible.builtin.set_fact:
+    _host_on_openwrt_lan: >-
+      {{ 'router_nodes' in group_names or 'lan_hosts' in group_names }}
+
+- name: Set container network for OpenWrt LAN hosts
+  ansible.builtin.set_fact:
+    _wg_gateway: "{{ _lan_gateway }}"
+    _wg_cidr: "{{ _lan_cidr }}"
+    _wg_ct_ip: >-
+      {{ _lan_gateway.split('.')[0:3] | join('.') }}.{{
+         wireguard_ct_ip_offset + groups['vpn_nodes'].index(inventory_hostname) }}
+    _wg_nameserver: "{{ _lan_gateway }}"
+  when: _host_on_openwrt_lan | bool
+
+- name: Set container network for WAN-connected hosts
+  ansible.builtin.set_fact:
+    _wg_gateway: "{{ ansible_default_ipv4.gateway }}"
+    _wg_cidr: "{{ ansible_default_ipv4.prefix }}"
+    _wg_ct_ip: >-
+      {{ ansible_default_ipv4.network.split('.')[0:3] | join('.') }}.{{
+         wireguard_ct_ip_offset + 200 + groups['vpn_nodes'].index(inventory_hostname) }}
+    _wg_nameserver: "8.8.8.8"
+  when: not (_host_on_openwrt_lan | bool)
+
+- name: Report WireGuard container IP assignment
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: wireguard IP={{ _wg_ct_ip }}/{{ _wg_cidr }}
+      gw={{ _wg_gateway }} ({{ 'OpenWrt LAN' if (_host_on_openwrt_lan | bool) else 'WAN subnet' }})
+
+- name: Provision WireGuard LXC container
+  ansible.builtin.include_role:
+    name: proxmox_lxc
+  vars:
+    lxc_ct_id: "{{ wireguard_ct_id }}"
+    lxc_ct_hostname: "{{ wireguard_ct_hostname }}"
+    lxc_ct_dynamic_group: wireguard
+    lxc_ct_memory: "{{ wireguard_ct_memory }}"
+    lxc_ct_cores: "{{ wireguard_ct_cores }}"
+    lxc_ct_disk: "{{ wireguard_ct_disk }}"
+    lxc_ct_onboot: "{{ wireguard_ct_onboot }}"
+    lxc_ct_startup_order: "{{ wireguard_ct_startup_order }}"
+    lxc_ct_features: "{{ wireguard_ct_features }}"
+    lxc_ct_ip: "{{ _wg_ct_ip }}/{{ _wg_cidr }}"
+    lxc_ct_gateway: "{{ _wg_gateway }}"
+    lxc_ct_nameserver: "{{ _wg_nameserver }}"
+    lxc_ct_bridge: "{{ proxmox_wan_bridge if not (_host_on_openwrt_lan | bool) else proxmox_all_bridges[1] | default('vmbr0') }}"

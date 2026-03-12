@@ -1,6 +1,8 @@
 ---
-- name: Clean reset test Proxmox host
-  hosts: proxmox
+# ── Play 1: Primary hosts (directly reachable) ───────────────────
+
+- name: Clean reset primary Proxmox hosts
+  hosts: proxmox:!lan_hosts
   gather_facts: false
   vars:
     backup_dir: /var/lib/ansible-backup
@@ -104,11 +106,20 @@
         - /etc/modprobe.d/vfio-pci.conf
         - /etc/ansible/facts.d/vm_builds.fact
         - /etc/apt/sources.list.d/pve-no-subscription.sources
-        - /tmp/openwrt.img
+        - /etc/modules-load.d/wireguard.conf
+        - /tmp/openwrt-router-24.10.0-x86-64-combined.img.gz
+        - /tmp/openwrt-router-24.10.0-x86-64-combined.img
 
     - name: Remove cached LXC templates
       ansible.builtin.shell:
-        cmd: rm -f /var/lib/vz/template/cache/debian-*.tar.zst
+        cmd: rm -f /var/lib/vz/template/cache/debian-*.tar.zst /var/lib/vz/template/cache/openwrt-*.tar.gz
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Remove mesh WiFi PHY hookscripts
+      ansible.builtin.shell:
+        cmd: rm -f /var/lib/vz/snippets/mesh-wifi-phy-*.sh
         executable: /bin/bash
       changed_when: true
       failed_when: false
@@ -169,8 +180,37 @@
       changed_when: true
       failed_when: false
 
+    - name: Unload wireguard kernel module
+      ansible.builtin.command:
+        cmd: modprobe -r wireguard
+      failed_when: false
+      changed_when: true
+
     - name: Remove local state file from controller
       ansible.builtin.file:
         path: "{{ playbook_dir }}/../../.state/addresses.json"
         state: absent
       delegate_to: localhost
+
+    - name: Remove generated env files from controller
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ playbook_dir }}/../../.env.generated"
+        - "{{ playbook_dir }}/../../test.env.generated"
+      delegate_to: localhost
+
+# ── Play 2: LAN hosts (cleaned via SSH from primary host) ─────────
+
+- name: Clean up LAN satellite hosts
+  hosts: router_nodes
+  gather_facts: false
+  tasks:
+    - name: Process each LAN host
+      ansible.builtin.include_tasks: cleanup_lan_host.yml
+      vars:
+        _lan_host_ip: "{{ hostvars[item].ansible_host }}"
+        _lan_host_name: "{{ item }}"
+      loop: "{{ groups['lan_hosts'] | default([]) }}"
+      when: groups['lan_hosts'] | default([]) | length > 0

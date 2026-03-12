@@ -3,6 +3,7 @@
 
 # Auto-generated secrets (key generation during playbook runs)
 .env.generated
+test.env.generated
 
 # Python virtual environment
 .venv/
@@ -20,6 +21,9 @@ images/
 # Ansible
 *.retry
 collections/
+
+# OpenWrt Image Builder cache (~500MB)
+.image-builder-cache/
 
 # Runtime state (auto-detected host IPs)
 .state/

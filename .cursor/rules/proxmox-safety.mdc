@@ -99,6 +99,11 @@ alwaysApply: true
 - When writing a new cleanup playbook, apply this test to EVERY task: "Did the converge/playbook create this? If no, do not touch it."
 - Previous bug: mesh1-infra cleanup removed `/root/.ssh/authorized_keys` AND the API token from mesh1, permanently locking out both SSH and API access. Required the operator to physically access the Proxmox GUI to restore both credentials.
 
+## Shell variable escaping in SSH commands
+- ALWAYS escape `$` as `\$` inside double-quoted strings that are passed as remote SSH commands. In shell, single quotes inside double quotes do NOT protect `$` from expansion.
+- Example: `ssh host "... awk '{print \$2}' ..."` — the `\$2` prevents the local shell from expanding `$2` to empty.
+- Previous bug: `awk '{print $2}'` inside `ssh ... "..."` expanded `$2` to empty on the local shell. The remote `awk` received `{print }` and printed the entire line instead of field 2. This caused a MAC address to be stored as `link/ether 00:23:24:54:23:fa brd ff:ff:ff:ff:ff:ff` instead of `00:23:24:54:23:fa`, which crashed dnsmasq with "bad DHCP host name."
+
 ## Shell pipeline safety
 - ALWAYS use `set -o pipefail` in any `ansible.builtin.shell` task that contains a pipeline (`|`). Without it, failures in earlier commands are silently swallowed.
 - ALWAYS set `executable: /bin/bash` on these tasks. The default shell may be `/bin/sh`, which doesn't support `pipefail`.
@@ -143,6 +148,13 @@ alwaysApply: true
 - Previous bug: `/dev/dri/card0` was assumed to be the Intel iGPU, but on a system with multiple GPUs (or after a kernel update), `card0` was the discrete GPU. The sysfs-based detection finds the correct device regardless of probe order.
 - Same principle applies to PCI devices, network interfaces, and any hardware that can appear in variable order.
 
+## LXC container readiness check
+- Use `ls /` (or `test -f /etc/os-release`) for container readiness, NOT `hostname`. BusyBox-based containers (e.g., OpenWrt LXC) may not have `hostname` in PATH or may return unexpected output.
+- Previous bug: readiness wait used `hostname` which failed or hung on OpenWrt LXC templates.
+
+## OpenWrt LXC ostype
+- Proxmox cannot auto-detect OpenWrt as an LXC guest type. ALWAYS pass `--ostype unmanaged` when creating OpenWrt LXC containers via `pct create`. Without it, Proxmox may misdetect the OS and apply wrong defaults.
+
 ## LXC pct_remote connection
 - The `community.proxmox.proxmox_pct_remote` connection plugin requires the `paramiko` Python package on the controller.
 - ALWAYS add `paramiko` to `requirements.txt` when using `pct_remote`.
@@ -155,11 +167,53 @@ alwaysApply: true
 - Use `vzdump` for VM backups, tar for host config.
 - Never destroy VMs without a backup manifest confirming they were backed up.
 
-## Cleanup must never destroy access credentials
-- NEVER remove SSH authorized_keys from a Proxmox host during cleanup. SSH keys are operator prerequisites set up manually (via GUI or ssh-copy-id), not playbook artifacts.
-- NEVER remove Proxmox API tokens (`pveum user token remove`) during cleanup. API tokens are created by the operator and referenced in .env files.
-- Cleanup ONLY removes files and state that the playbook itself deploys: bridge configs, modprobe configs, facts files, repo overrides, vfio-pci bindings, DHCP leases.
-- Previous bug: mesh1-infra cleanup removed `/root/.ssh/authorized_keys` and the API token from mesh1, permanently locking out SSH and API access. Required the operator to manually restore both via the Proxmox GUI.
+## Clock synchronization before apt operations
+- ALWAYS sync the system clock via NTP before running `apt-get update`. GPG signature verification fails with "Not live until" errors when the node's clock is behind.
+- Infrastructure plays MUST have a `pre_tasks` NTP sync step. The `proxmox_igpu` role also has a built-in sync as defense in depth.
+- Use `chronyc -a 'burst 4/4'` + `sleep 6` + `chronyc -a makestep` for Proxmox (chrony is the default). Fall back to `ntpdate -b pool.ntp.org` if chrony is unavailable.
+- Previous bug: `ai` and `mesh2` nodes had clock skew after reboot. `apt-get update` inside `proxmox_igpu` failed GPG verification. The signatures were timestamped minutes into the future relative to the node's stale clock.
+
+## iGPU vendor support (Intel and AMD)
+- NEVER assume all hosts have Intel iGPUs. The `proxmox_igpu` role supports both Intel (i915) and AMD (amdgpu).
+- Intel: driver `i915`, VA-API packages `intel-media-va-driver` + `vainfo`, LIBVA_DRIVER_NAME `iHD`.
+- AMD: driver `amdgpu`, VA-API packages `mesa-va-drivers` + `vainfo`, LIBVA_DRIVER_NAME `radeonsi`.
+- The role exports `igpu_vendor` (`intel`, `amd`, or `none`) so downstream roles can branch on GPU vendor.
+- Previous bug: `proxmox_igpu` only detected Intel VGA controllers. The `ai` node had an AMD iGPU and hard-failed with "No Intel iGPU found." Mixed hardware fleets require vendor-agnostic detection.
+
+## LXC container networking must match host topology
+- NEVER hardcode all containers to use the OpenWrt LAN subnet. Hosts directly on the WAN (not behind OpenWrt) need containers on the WAN subnet with the main router as gateway.
+- Hosts in `router_nodes` or `lan_hosts` → containers use OpenWrt LAN (e.g., 10.10.10.0/24, gateway 10.10.10.1) on the LAN bridge (`proxmox_all_bridges[1]`).
+- All other hosts → containers use `ansible_default_ipv4.gateway/prefix` on the WAN bridge (`proxmox_wan_bridge`).
+- For WAN-connected hosts, offset container IPs by +200 to avoid collisions with LAN containers (e.g., .203 instead of .3).
+- WAN-connected containers MUST use `proxmox_wan_bridge` as their bridge. The default bridge (`proxmox_all_bridges[1]`) is the SECOND bridge, which on multi-NIC WAN hosts is typically connected to a different physical NIC than the management interface.
+- Previous bug: `wireguard-ai` container was on `vmbr1` (connected to `nic0`) but the host's internet was on `vmbr0` (connected to `nic1`). The container had a correct IP and route but zero L2 connectivity to the gateway.
+
+## Dynamic inventory and failed hosts
+- ALWAYS use `ansible_play_hosts` (not `ansible_play_hosts_all`) in `add_host` loops that register containers. `ansible_play_hosts_all` includes hosts that failed in earlier plays, leading to phantom container registrations for containers that were never created.
+- Previous bug: `ai` failed in infrastructure (clock skew → apt failure). The `proxmox_lxc` `add_host` loop used `ansible_play_hosts_all`, registering `wireguard-ai` even though no container existed. The `Configure WireGuard` play then failed with UNREACHABLE.
+
+## Stale vfio-pci bindings on non-router hosts
+- When a host's role changes (e.g., removed from `router_nodes`), leftover vfio-pci config from a previous run keeps WiFi bound to vfio-pci. The WiFi card becomes invisible to `/sys/class/ieee80211/` and `/sys/class/net/*/wireless`.
+- `proxmox_pci_passthrough` MUST clean stale vfio-pci bindings on non-router hosts: remove `blacklist-wifi.conf` and `vfio-pci.conf`, unbind devices, reload WiFi drivers, rescan PCI bus, and update initramfs.
+- The cleanup runs automatically during infrastructure setup (no manual intervention needed).
+- Previous bug: mesh1's WiFi card (Intel Centrino Wireless-N 105) was bound to vfio-pci from a prior test cycle. The `openwrt_mesh_lxc` role saw no WiFi PHYs and failed. Root cause was stale `/etc/modprobe.d/blacklist-wifi.conf` (blacklisting iwlwifi) and `/etc/modprobe.d/vfio-pci.conf` (binding 8086:0895 to vfio-pci).
+
+## Container PID retrieval
+- NEVER use `pct pid` — it does not exist in Proxmox VE. Use `lxc-info -n <vmid>` and parse the PID line with `awk '/^PID:/{print $2}'`.
+- Previous bug: `openwrt_mesh_lxc` used `pct pid 103` to get the container PID for WiFi PHY namespace move. It failed with "ERROR: unknown command 'pct pid'".
+
+## WiFi PHY namespace moves and kernel modules
+- NEVER run `modprobe` for WiFi drivers inside an LXC container via `pct_remote` or `pct exec`. LXC containers share the host kernel. `modprobe` inside the container operates on the HOST's kernel modules, and a module reload creates the new PHY in the HOST namespace — undoing the `iw phy set netns` move.
+- WiFi kernel modules MUST be loaded on the HOST by the provisioning role (`openwrt_mesh_lxc`) BEFORE the container is created and the PHY is moved. The configure role (`openwrt_mesh_configure`) MUST NOT load modules.
+- Previous bug: `modprobe iwlwifi` ran inside the container via `pct_remote` after the PHY was already moved. The module reload created a new PHY in the host namespace. WiFi detection inside the container found zero radios.
+
+## Shell syntax through pct_remote
+- `pct_remote` builds `/usr/sbin/pct exec <vmid> -- <cmd>` and sends it as a single string via SSH to the Proxmox host. The HOST's bash interprets the entire string before `pct exec` runs.
+- Semicolons (`;`), pipes (`|`), and `&&`/`||` are parsed by the HOST bash, NOT inside the container. Semicolons split commands — only the first runs in the container.
+- NEVER use `export` in `raw:` commands via `pct_remote`. `lxc-attach` tries to exec it as a binary, failing with "No such file or directory".
+- ALWAYS wrap `raw:` commands that need shell features (semicolons, pipes, redirections) in `/bin/sh -c '...'`. Single quotes protect the payload from host bash. Busybox ash provides `PATH=/sbin:/usr/sbin:/bin:/usr/bin`.
+- Exception: `[ -x /path ] && echo yes || echo no` works WITHOUT sh -c because `[` is exec'd by lxc-attach, and `&&`/`||` chain at the host level (the echo output is captured by Ansible either way).
+- Previous bugs: (1) `for ... do ... done` via `pct_remote` caused syntax error — host bash can't parse compound commands passed to `pct exec`. (2) `export PATH="..."; opkg update` caused `lxc-attach: Failed to exec "export"` — export is a builtin, not a binary. The semicolon split meant `opkg update` ran on the HOST, not in the container.
 
 ## Documentation accuracy
 - When changing a role's exported facts, bridge names, device paths, or connection patterns, ALWAYS update `docs/architecture/` in the same commit.
