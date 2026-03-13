@@ -129,11 +129,27 @@ Delivered:
 - Pi-hole image build section in `build-images.sh` (Debian 12 + Pi-hole baked in)
 - Full verify coverage: container state, auto-start, nesting, FTL, web admin, DNS, ad blocking
 
+### `2026-03-09-04` rsyslog Log Collector ✓
+
+Minimal LXC container running rsyslog as a centralized log collector.
+All containers and VMs forward their logs here. Supports optional forwarding
+to a home server via WireGuard tunnel.
+
+Delivered:
+- `rsyslog_lxc` role (thin wrapper around `proxmox_lxc`, topology-aware networking)
+- `rsyslog_configure` role (optional forwarding via `RSYSLOG_HOME_SERVER`, disk-assisted queue)
+- Custom Debian 12 template with rsyslog TCP receiver pre-configured (built by `build-images.sh`)
+- `openwrt_configure/tasks/syslog.yml` (UCI log_ip/log_port/log_proto forwarding)
+- Per-feature molecule scenarios (`rsyslog-lxc`, `openwrt-syslog`)
+- `tasks/reconstruct_rsyslog_group.yml` for dynamic group reconstruction
+- Rollback plays in `playbooks/cleanup.yml` (`rsyslog-rollback`, `openwrt-syslog-rollback`)
+- Full verify coverage: container state, auto-start, service, TCP listener, spool dir, log reception
+
 ## Medium-Term Goals
 
 ### Additional VM/LXC Types
 - The project name is `vm_builds` (plural) — the architecture supports multiple service types.
-- Near-term candidates: rsyslog, Netdata.
+- Near-term candidates: Netdata.
 - Each service type gets its own role pair: `<type>_lxc` + `<type>_configure` (or `<type>_vm`).
 - VMID ranges pre-allocated: 100s network, 200s services, 300s media, 400s desktop, 500s observability, 600s gaming.
 - See `docs/architecture/overview.md` for the full target architecture and `.cursor/skills/vm-lifecycle/SKILL.md` for implementation patterns.

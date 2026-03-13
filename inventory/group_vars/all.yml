@@ -37,6 +37,14 @@ pihole_lxc_template: pihole-debian-12-amd64.tar.zst
 pihole_lxc_template_path: images/pihole-debian-12-amd64.tar.zst
 pihole_ct_ip_offset: 10
 
+# ── rsyslog LXC ─────────────────────────────────────────────────
+# Custom image built by build-images.sh: Debian 12 + rsyslog pre-configured
+# for TCP log reception, spool directory, and logrotate.
+# Run ./build-images.sh before first deploy.
+rsyslog_lxc_template: rsyslog-debian-12-amd64.tar.zst
+rsyslog_lxc_template_path: images/rsyslog-debian-12-amd64.tar.zst
+rsyslog_ct_ip_offset: 12
+
 # ── OpenWrt Router (VM) ──────────────────────────────────────────
 # Custom image built by build-images.sh: mesh/security/DNS packages baked in.
 # Run ./build-images.sh before first deploy.

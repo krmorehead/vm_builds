@@ -27,7 +27,7 @@ LXC container
 
 ## Build Profiles
 
-- Home Entertainment Box: yes
+- Home Entertainment Box: yes (`media_nodes`)
 - Minimal Router: no
 - Gaming Rig: no
 
@@ -43,12 +43,27 @@ LXC container
 - Shared infrastructure: `proxmox_igpu` role (project 00, milestone 2)
 - OpenWrt router operational (network)
 - Media storage accessible (NFS/SMB mount or local disk)
+- `jellyfin_ct_id: 300` already in `group_vars/all.yml`
+- `media_nodes` flavor group and `jellyfin` dynamic group already in `inventory/hosts.yml`
+- `media_nodes` already in `molecule/default/molecule.yml` platform groups
+- `proxmox_lxc` role operational with `pct_remote` connection support
+- `proxmox_igpu` exports `igpu_render_device`, `igpu_render_gid`, `igpu_vendor` (hard-fails if absent)
+- Debian 12 standard template in `images/` (base for custom image build)
+
+## Network topology assumption
+
+`media_nodes` hosts are always behind OpenWrt (`router_nodes` or `lan_hosts`).
+Jellyfin containers always use the OpenWrt LAN subnet on the LAN bridge.
+There is no WAN-connected case — media services only run on the Home
+Entertainment Box profile, which always has OpenWrt. If `media_nodes` ever
+includes a WAN-connected host, add the WireGuard-style topology branching
+at that time.
 
 ## Skills
 
 | Skill | When to use |
 |-------|-------------|
-| `vm-lifecycle` | Two-role pattern, LXC provisioning via `proxmox_lxc`, deploy_stamp, cleanup completeness |
+| `vm-lifecycle` | Two-role pattern, LXC provisioning via `proxmox_lxc`, deploy_stamp, cleanup completeness, image management |
 | `ansible-testing` | Molecule scenarios, verify assertions, per-feature scenario setup, baseline workflow |
 | `rollback-patterns` | Per-feature rollback tags, deploy_stamp tracking, cleanup.yml conventions |
 | `proxmox-host-safety` | iGPU hard-fail detection, safe host commands, shell pipefail |
@@ -57,11 +72,12 @@ LXC container
 
 ## iGPU Hard-Fail Requirement
 
-**CRITICAL:** `proxmox_igpu` hard-fails if no Intel iGPU is found. Jellyfin depends on
-iGPU facts (`igpu_render_device`, `igpu_render_gid`) from the infrastructure play.
-If `proxmox_igpu` fails, Jellyfin provisioning must never run. This is enforced by
-play ordering in `site.yml`: the infrastructure play (Play 1: `proxmox_igpu`) runs
-before `media_nodes` provision plays. Media plays only execute when infrastructure
+**CRITICAL:** `proxmox_igpu` hard-fails if no iGPU is found (Intel or AMD).
+Jellyfin depends on iGPU facts (`igpu_render_device`, `igpu_render_gid`,
+`igpu_vendor`) from the infrastructure play. If `proxmox_igpu` fails,
+Jellyfin provisioning must never run. This is enforced by play ordering in
+`site.yml`: the infrastructure play (Play 1: `proxmox_igpu`) runs before
+`media_nodes` provision plays. Media plays only execute when infrastructure
 succeeds.
 
 ## Env Variables
@@ -70,15 +86,6 @@ succeeds.
 |----------|----------|---------|-------|
 | `JELLYFIN_ADMIN_PASSWORD` | Production: yes | Admin user password | Auto-generated for testing when empty |
 | `jellyfin_media_path` | — | Host-side media mount path | `group_vars/all.yml` (e.g., `/mnt/media`) |
-
-## iGPU Device Mount
-
-- Device: `/dev/dri/renderD128` (path from `igpu_render_device` fact)
-- Cgroup allowlist: `c 226:128 rwm` (major:minor for renderD128)
-- GID mapping: `igpu_render_gid` from `proxmox_igpu` facts — create `render` group
-  inside container with matching GID, add `jellyfin` user to group
-- Unprivileged container: device bind mount via `lxc_ct_mount_entries`, cgroup
-  allowlist in container config
 
 ---
 
@@ -89,11 +96,26 @@ Decisions
 ├── Media server: Jellyfin
 │   └── FOSS, no license, good VA-API support, active development
 │
+├── LXC base: Custom Debian 12 template with Jellyfin + VA-API baked in
+│   ├── "Bake, don't configure at runtime" — Jellyfin packages and VA-API drivers baked into image
+│   └── Configure role only applies host-specific settings (admin user, media paths, transcoding toggle)
+│
+├── Image build: Debian 12 standard + Jellyfin + VA-API in build-images.sh
+│   ├── Remote build on Proxmox via pct create/exec/vzdump (same as Pi-hole, rsyslog)
+│   ├── Installs Jellyfin from official Debian repo (GPG key + apt source)
+│   ├── Installs VA-API packages: vendor-specific (intel-media-va-driver or mesa-va-drivers)
+│   │   └── Build includes BOTH Intel and AMD VA-API packages for portability
+│   └── Pre-configures: web port 8096, hardware transcoding default, logging
+│
 ├── Container privileges: unprivileged with device passthrough
 │   └── More secure; /dev/dri/renderD128 via cgroup allowlist + GID mapping
 │
 ├── iGPU access: device bind mount (shared) via proxmox_igpu facts
-│   └── NOT full PCI passthrough; iGPU stays on host i915 driver; multiple containers share
+│   └── NOT full PCI passthrough; iGPU stays on host i915/amdgpu driver; multiple containers share
+│
+├── LXC features: none required
+│   └── Jellyfin is a standard userspace daemon — no nesting, no iptables
+│   └── Device passthrough handled by cgroup allowlist + bind mount, not LXC features
 │
 └── Media storage: NFS mount from home server / NAS
     └── Large libraries don't fit on local disk; NFS is transparent to Jellyfin
@@ -101,34 +123,153 @@ Decisions
 
 ---
 
+## Testing Strategy
+
+### Parallelism in `molecule/default` (full integration)
+
+`molecule/default` converges all 4 nodes (home, mesh1, ai, mesh2). In
+Phase 3 of `site.yml`, Jellyfin provisions on `media_nodes` (currently
+`home` only). It runs alongside other Phase 3 plays. Jellyfin, Kodi, and
+Moonlight share the `[media]` tag and provision in the same play on
+`media_nodes`.
+
+### Per-feature scenarios (fast iteration)
+
+Day-to-day development uses `molecule/jellyfin-lxc/` which only touches
+VMID 300. The OpenWrt baseline and other containers stay running.
+
+```
+Scenario Hierarchy (Jellyfin additions)
+├── molecule/default/                 Full integration (4-node, ~4-5 min)
+│   └── Runs everything including Jellyfin provision + configure
+│
+└── molecule/jellyfin-lxc/           Jellyfin container only (~30-60s)
+    ├── converge: provision + configure Jellyfin container
+    ├── verify: Jellyfin-specific assertions
+    └── cleanup: destroy container 300 only (baseline untouched)
+```
+
+### Day-to-day workflow
+
+```bash
+# 1. Build baseline once (or restore after molecule test)
+molecule converge                             # ~4-5 min, all 4 nodes
+
+# 2. Iterate on Jellyfin container (only touches VMID 300)
+molecule converge -s jellyfin-lxc             # ~30s, provision + configure
+molecule verify -s jellyfin-lxc               # ~10s, assertions only
+molecule converge -s jellyfin-lxc             # ~30s, re-converge
+
+# 3. Clean up per-feature changes (baseline stays)
+molecule cleanup -s jellyfin-lxc              # destroys container 300 only
+
+# 4. Final validation before commit
+molecule test                                 # full clean-state, ~4-5 min
+molecule converge                             # restore baseline for next task
+```
+
+### What each scenario tears down
+
+| Scenario | Creates | Destroys | Baseline impact |
+|----------|---------|----------|-----------------|
+| `default` (test) | Everything | Everything | Full rebuild required after |
+| `default` (converge) | Everything | Nothing | Baseline preserved |
+| `jellyfin-lxc` | Container 300 | Container 300 only | None — OpenWrt, WireGuard, etc. untouched |
+
+---
+
 ## Milestone Dependency Graph
 
 ```
-M1: LXC Provisioning ─────── blocked on: proxmox_igpu (infra play)
- └── M2: Jellyfin Config ── depends on M1
-      └── M3: Integration ─ depends on M1+M2
-           └── M4: Testing ─ depends on M1–M3
-                └── M5: Docs ─ depends on M1–M4
+M0: Image Build ─────── self-contained (blocked on: proxmox_igpu for VA-API driver selection)
+ └── M1: Provisioning ── depends on M0, proxmox_igpu (igpu_render_device)
+      └── M2: Configuration ── depends on M1
+           └── M3: Testing & Integration ── depends on M1–M2
+                └── M4: Documentation ── depends on M1–M3
 ```
 
 ---
 
 ## Milestones
 
-### Milestone 1: LXC Provisioning
+### Milestone 0: Image Build
 
-_Blocked on: infrastructure play (proxmox_igpu) — Play 1 in site.yml runs first.
-If proxmox_igpu hard-fails (no iGPU), this play never runs._
+_Self-contained. No external dependencies._
 
-Create the `jellyfin_lxc` role as a thin wrapper around `proxmox_lxc`, add the
-provision play to `site.yml`, and verify the container runs with iGPU device
-mount and media bind mount.
+Build a custom Debian 12 LXC template with Jellyfin and VA-API drivers
+pre-installed. Per the project's "Bake, don't configure at runtime"
+principle, all packages belong in the image. The configure role (M2) only
+applies host-specific settings (admin user, media paths, transcoding toggle).
+
+See: `vm-lifecycle` skill (image management section).
+
+**Implementation pattern:**
+- Script: add Jellyfin image build section to `build-images.sh`
+- Template path: `images/jellyfin-debian-12-amd64.tar.zst`
+- Template vars: `jellyfin_lxc_template` and `jellyfin_lxc_template_path`
+  in `group_vars/all.yml`
+
+**Build approach:**
+Remote build on Proxmox via `pct create` + `pct exec` + `vzdump` (same
+pattern as Pi-hole and rsyslog). Steps:
+1. Create temp container (VMID 998) from Debian 12 standard template
+2. Add Jellyfin official repo (GPG key + apt source)
+3. Install Jellyfin server and web packages
+4. Install VA-API drivers — include BOTH Intel (`intel-media-va-driver`)
+   and AMD (`mesa-va-drivers`) packages for build portability. At runtime,
+   only the matching driver loads based on the actual GPU.
+5. Install `vainfo` for transcoding verification
+6. Pre-configure: web port 8096, hardware transcoding defaults
+7. Clean apt caches, stop container
+8. Export via `vzdump` and download template
+
+**VA-API driver note:** Package names depend on Debian release. ALWAYS
+verify with `apt-cache search` before adding to the build script. Previous
+bug: `intel-media-va-driver-non-free` does not exist on newer Debian
+releases; correct package is `intel-media-va-driver`.
+
+- [ ] Add Jellyfin template build section to `build-images.sh`
+  (follow Pi-hole/rsyslog pattern: `build_jellyfin_lxc` function)
+- [ ] Add `jellyfin_lxc_template` and `jellyfin_lxc_template_path` to
+  `group_vars/all.yml`
+- [ ] Add `jellyfin_ct_ip_offset: 15` to `group_vars/all.yml`
+  (after homeassistant at 14; see IP allocation table in project-structure)
+- [ ] Add `jellyfin_media_path: /mnt/media` to `group_vars/all.yml`
+- [ ] Build template and place in `images/` (gitignored)
+- [ ] Document build prerequisites in `docs/architecture/jellyfin-build.md`
+
+**Verify:**
+
+- [ ] Template file exists at the configured path
+- [ ] Template contains Jellyfin packages pre-installed
+- [ ] Template contains VA-API drivers (Intel + AMD)
+- [ ] `vainfo` binary present in template
+- [ ] Template is usable by `pct create` without errors
+
+**Rollback:**
+
+Delete the template file from `images/` and remove the vars from
+`group_vars/all.yml`. Revert via git.
+
+---
+
+### Milestone 1: Provisioning
+
+_Depends on M0 (template must be built). Blocked on: infrastructure play
+(proxmox_igpu) — Play 1 in site.yml runs first. If proxmox_igpu hard-fails
+(no iGPU), this play never runs._
+
+Create the `jellyfin_lxc` role as a thin wrapper around `proxmox_lxc`,
+add the provision and configure plays to `site.yml`, and verify the
+container runs with iGPU device mount and media bind mount. Integration
+with `site.yml` is consolidated here.
 
 See: `vm-lifecycle` skill (LXC provisioning pattern, deploy_stamp, device mounts).
 
 **Implementation pattern:**
 - Role: `roles/jellyfin_lxc/defaults/main.yml`, `tasks/main.yml`, `meta/main.yml`
-- site.yml: provision play targeting `media_nodes`, tagged `[media]` or `[jellyfin]`
+- site.yml: provision play targeting `media_nodes`, tagged `[media]`,
+  in Phase 3 (combined with Kodi and Moonlight when those exist)
 - deploy_stamp included as last role in the provision play
 - Dynamic group `jellyfin` populated by `proxmox_lxc` via `add_host`
 - iGPU device: `igpu_render_device` from proxmox_igpu facts; cgroup allowlist
@@ -141,25 +282,41 @@ See: `vm-lifecycle` skill (LXC provisioning pattern, deploy_stamp, device mounts
 - `proxmox_lxc` role operational with `pct_remote` connection support
 - `proxmox_igpu` exports `igpu_render_device`, `igpu_render_gid` (hard-fails if absent)
 
-- [ ] Add `jellyfin_media_path: /mnt/media` to `group_vars/all.yml`
 - [ ] Create `roles/jellyfin_lxc/defaults/main.yml`:
   - `jellyfin_ct_hostname: jellyfin`
   - `jellyfin_ct_memory: 2048`, `jellyfin_ct_cores: 2`, `jellyfin_ct_disk: "8"`
-  - `jellyfin_ct_template: "{{ proxmox_lxc_default_template }}"`
+  - `jellyfin_ct_template: "{{ jellyfin_lxc_template }}"` (custom Jellyfin image)
+  - `jellyfin_ct_template_path: "{{ jellyfin_lxc_template_path }}"`
   - `jellyfin_ct_onboot: true`, `jellyfin_ct_startup_order: 5`
-  - `jellyfin_ct_ip` (static, e.g., from host_vars or computed)
+  - `jellyfin_ct_ip_offset: "{{ jellyfin_ct_ip_offset | default(15) }}"`
+  - No `lxc_ct_features` needed (Jellyfin is standard userspace)
 - [ ] Create `roles/jellyfin_lxc/tasks/main.yml`:
+  - Verify template exists, hard-fail with message pointing to `./build-images.sh`
+  - Compute container IP from LAN prefix + offset (LAN-only, no WAN branching)
   - Include `proxmox_lxc` with:
     - `lxc_ct_mount_entries`: iGPU device (`{{ igpu_render_device }},mp={{ igpu_render_device }}`),
       media bind mount (`{{ jellyfin_media_path }},mp=/media`)
     - `lxc_ct_features` or raw config for cgroup allowlist `c 226:128 rwm`
-    - `lxc_ct_id: "{{ jellyfin_ct_id }}"`, `lxc_ct_hostname: jellyfin`,
-      `lxc_ct_dynamic_group: jellyfin`, `lxc_ct_memory`, `lxc_ct_cores`,
-      `lxc_ct_disk`, `lxc_ct_onboot`, `lxc_ct_startup_order`
+    - All standard vars: `lxc_ct_id`, `lxc_ct_hostname`, `lxc_ct_dynamic_group`,
+      memory, cores, disk, onboot, startup_order
 - [ ] Create `roles/jellyfin_lxc/meta/main.yml` with required metadata
-- [ ] Add provision play to `site.yml` targeting `media_nodes`, tagged
-  `[media]` or `[jellyfin]`, with `jellyfin_lxc` role and `deploy_stamp`
+- [ ] Add provision play to `site.yml` Phase 3, targeting `media_nodes`,
+  tagged `[media]`, with `jellyfin_lxc` role and `deploy_stamp`
   (after infrastructure play, after OpenWrt configure)
+- [ ] Add configure play to `site.yml` Phase 3, targeting `jellyfin` dynamic
+  group, tagged `[media]`, `gather_facts: true`, after provision play
+- [ ] Create `tasks/reconstruct_jellyfin_group.yml`:
+  - Verify container 300 is running (`pct status {{ jellyfin_ct_id }}`)
+  - Register via `add_host` with:
+    `ansible_connection: community.proxmox.proxmox_pct_remote`,
+    `ansible_host: {{ ansible_host }}` (Proxmox host IP),
+    `proxmox_vmid: {{ jellyfin_ct_id }}`,
+    `ansible_user: root`
+
+**Note on `[media]` tag:** This tag is shared with Kodi and Moonlight (per
+the target site.yml architecture, all three provision in the same play on
+`media_nodes`). Configure plays remain separate since they target different
+dynamic groups (`jellyfin`, `kodi`, `moonlight`).
 
 **Verify:**
 
@@ -169,6 +326,7 @@ See: `vm-lifecycle` skill (LXC provisioning pattern, deploy_stamp, device mounts
 - [ ] Auto-start configured: `pct config 300` shows `onboot: 1`, `startup: order=5`
 - [ ] iGPU device mounted: `pct exec 300 -- ls -la /dev/dri/renderD128` succeeds
 - [ ] Media path mounted: `pct exec 300 -- ls /media` succeeds (or path exists)
+- [ ] Correct static IP matches computed offset
 - [ ] Idempotent: re-run skips creation, container still running
 - [ ] deploy_stamp contains `jellyfin_lxc` play entry
 
@@ -181,12 +339,14 @@ host-side files (no kernel modules, no host config). Container cleanup is generi
 
 ---
 
-### Milestone 2: Jellyfin Configuration
+### Milestone 2: Configuration
 
-_Self-contained. Depends on M1 (container must be running)._
+_Depends on M1 (container must be running)._
 
-Configure the running container with Jellyfin from official Debian repo,
-VA-API transcoding, admin user, and log forwarding.
+Configure the running container with host-specific settings: admin user,
+media paths, iGPU render group mapping, and transcoding toggle. Jellyfin
+packages and VA-API drivers are already baked into the image (M0). This
+role only applies host-specific configuration.
 
 See: `vm-lifecycle` skill (LXC configure connection, pct_remote pattern).
 
@@ -194,14 +354,13 @@ See: `vm-lifecycle` skill (LXC configure connection, pct_remote pattern).
 - Role: `roles/jellyfin_configure/defaults/main.yml`, `tasks/main.yml`,
   `templates/` (if needed), `meta/main.yml`
 - site.yml: configure play targeting `jellyfin` dynamic group, tagged
-  `[media]` or `[jellyfin]`, after the provision play
+  `[media]`, after the provision play
 - Connection: `community.proxmox.proxmox_pct_remote` (pct exec from Proxmox host)
 
 - [ ] Create `roles/jellyfin_configure/defaults/main.yml`:
   - `JELLYFIN_ADMIN_PASSWORD` via `lookup('env', 'JELLYFIN_ADMIN_PASSWORD') | default('', true)`
   - Auto-generate password when empty (testing)
-- [ ] Create `roles/jellyfin_configure/tasks/main.yml`:
-  - Install Jellyfin from official Debian repo (add GPG key + apt source)
+- [ ] Create `roles/jellyfin_configure/tasks/main.yml` (via `pct_remote`):
   - Configure iGPU: create `render` group with GID from `igpu_render_gid`,
     add `jellyfin` user to group, verify `vainfo` succeeds
   - Template server config: VA-API transcode, media paths (`/media`),
@@ -209,8 +368,12 @@ See: `vm-lifecycle` skill (LXC configure connection, pct_remote pattern).
   - Set admin user from env (`JELLYFIN_ADMIN_PASSWORD`) or generated value
   - Configure log forwarding to rsyslog (if rsyslog project complete)
 - [ ] Create `roles/jellyfin_configure/meta/main.yml` with required metadata
-- [ ] Add configure play to `site.yml` targeting `jellyfin` dynamic group,
-  tagged `[media]` or `[jellyfin]`, `gather_facts: true`, after the provision play
+
+**What is NOT in this role (baked into image M0):**
+- Jellyfin packages and service — baked
+- VA-API drivers (Intel + AMD) — baked
+- `vainfo` binary — baked
+- Base web port 8096 configuration — baked
 
 **Verify:**
 
@@ -225,93 +388,140 @@ See: `vm-lifecycle` skill (LXC configure connection, pct_remote pattern).
 **Rollback:**
 
 - Stop and disable service: `pct exec 300 -- systemctl disable --now jellyfin-server`
-- Remove Jellyfin packages and config: `apt-get remove -y jellyfin jellyfin-server`
-- Remove `/etc/jellyfin` if present
+- Remove Jellyfin config: `pct exec 300 -- rm -rf /etc/jellyfin`
 - Full container destruction is the escape hatch (M1 rollback)
 
 ---
 
-### Milestone 3: Integration
+### Milestone 3: Testing & Integration
 
-_Self-contained. Depends on M1 and M2._
+_Depends on M1–M2._
 
-Wire up site.yml plays, ensure dynamic group reconstruction for per-feature
-scenarios, and add `jellyfin_media_path` to group_vars.
+Create per-feature molecule scenario for fast Jellyfin-only iteration,
+extend `molecule/default/verify.yml` for full integration, add rollback
+plays to `playbooks/cleanup.yml`, and run final validation.
 
-See: `vm-lifecycle` skill (site.yml play structure, deploy_stamp pairing).
+See: `ansible-testing` skill (verify completeness, per-feature scenario
+setup, baseline workflow), `rollback-patterns` skill (cleanup completeness).
 
-- [ ] Add `jellyfin_lxc` provision play to `site.yml` targeting `media_nodes`
-  (combined with kodi + moonlight when those exist)
-- [ ] Add `jellyfin_configure` play targeting `jellyfin` dynamic group
-- [ ] Include `deploy_stamp` in provision play
-- [ ] Ensure `jellyfin_media_path` in `group_vars/all.yml`
-- [ ] Create `tasks/reconstruct_jellyfin_group.yml`:
-  - Verify container 300 is running (`pct status {{ jellyfin_ct_id }}`)
-  - Register via `add_host` with:
-    `ansible_connection: community.proxmox.proxmox_pct_remote`,
-    `ansible_host: {{ ansible_host }}` (Proxmox host IP),
-    `proxmox_vmid: {{ jellyfin_ct_id }}`,
-    `ansible_user: root`
-  - Required for per-feature molecule scenarios and any standalone
-    ansible-playbook invocation (converge, verify, cleanup)
+#### 3a. Per-feature scenario: `molecule/jellyfin-lxc/`
 
-**Verify:**
+Covers container provisioning + configuration. Only touches VMID 300.
+Assumes baseline exists (OpenWrt running, LAN bridge up).
 
-- [ ] Full `ansible-playbook playbooks/site.yml --tags jellyfin` runs end-to-end
-- [ ] Dynamic group `jellyfin` populated after provision
-- [ ] `reconstruct_jellyfin_group.yml` successfully re-registers container
+- [ ] Create `molecule/jellyfin-lxc/molecule.yml`:
+  ```yaml
+  platforms:
+    - name: home
+      groups:
+        - proxmox
+        - media_nodes
+  provisioner:
+    env:
+      HOME_API_TOKEN: ${HOME_API_TOKEN}
+      PRIMARY_HOST: ${PRIMARY_HOST}
+      JELLYFIN_ADMIN_PASSWORD: ${JELLYFIN_ADMIN_PASSWORD:-}
+  scenario:
+    test_sequence:
+      - dependency
+      - syntax
+      - converge
+      - verify
+      - cleanup
+  ```
 
-**Rollback:** N/A — integration wiring; revert via git.
+- [ ] Create `molecule/jellyfin-lxc/converge.yml`:
+  ```yaml
+  - name: Provision Jellyfin LXC container
+    hosts: media_nodes
+    gather_facts: false
+    roles:
+      - jellyfin_lxc
 
----
+  - name: Reconstruct jellyfin dynamic group
+    hosts: media_nodes
+    gather_facts: false
+    tasks:
+      - name: Include group reconstruction
+        ansible.builtin.include_tasks: ../../tasks/reconstruct_jellyfin_group.yml
 
-### Milestone 4: Testing
+  - name: Configure Jellyfin
+    hosts: jellyfin
+    gather_facts: true
+    roles:
+      - jellyfin_configure
+  ```
 
-_Self-contained. Depends on M1, M2, M3._
+- [ ] Create `molecule/jellyfin-lxc/verify.yml`:
+  Jellyfin-specific assertions. Runs on `media_nodes` via `pct exec`.
 
-Extend molecule verify and cleanup. Container cleanup is generic; host-side
-cleanup: none.
+- [ ] Create `molecule/jellyfin-lxc/cleanup.yml`:
+  Destroys only container 300.
 
-See: `ansible-testing` skill (verify completeness, per-feature scenario setup).
+#### 3b. Full integration (`molecule/default/`)
 
-- [ ] Extend `molecule/default/verify.yml`:
-  - Container 300 running, Jellyfin active, web on port 8096
+- [ ] Extend `molecule/default/verify.yml` with Jellyfin assertions:
+  - Container 300 running, onboot=1, startup order=5
+  - Jellyfin service active, web on port 8096
   - `/dev/dri/renderD128` exists, `vainfo` succeeds
   - Media path mounted
-  - Auto-start configured
-- [ ] Verify generic container cleanup in `molecule/default/cleanup.yml`
-  handles VMID 300 (already iterates `pct list` — confirm)
-- [ ] Host-side cleanup: **none** — Jellyfin does not deploy host files
-- [ ] Create `molecule/jellyfin-lxc/` per-feature scenario (optional):
-  - `molecule.yml`: same platform as default, `media_nodes` in groups
-  - `converge.yml`: reconstruct jellyfin group, run jellyfin_configure
-  - `verify.yml`: reconstruct jellyfin group, run Jellyfin assertions
-  - `cleanup.yml`: destroy container 300 (generic LXC cleanup)
-- [ ] Run `molecule test` — must pass with exit code 0
+  - deploy_stamp contains `jellyfin_lxc` entry
 
-**Verify:**
+- [ ] Verify generic container cleanup handles VMID 300
 
-- [ ] Full `molecule test` passes with exit code 0
-- [ ] Verify assertions cover: container state, auto-start, iGPU device,
-  vainfo, media path, Jellyfin service, web port
-- [ ] Cleanup leaves no Jellyfin artifacts on host (none expected)
+#### 3c. Rollback plays in `playbooks/cleanup.yml`
+
+- [ ] Add `jellyfin-rollback` play:
+  ```yaml
+  - name: Rollback Jellyfin container
+    hosts: media_nodes
+    gather_facts: false
+    tags: [jellyfin-rollback, never]
+    tasks:
+      - name: Stop and destroy Jellyfin container
+        ansible.builtin.shell:
+          cmd: |
+            pct stop {{ jellyfin_ct_id }} 2>/dev/null || true
+            sleep 2
+            pct destroy {{ jellyfin_ct_id }} --purge 2>/dev/null || true
+          executable: /bin/bash
+        changed_when: true
+  ```
+
+#### 3d. Molecule env passthrough
+
+- [ ] Add `JELLYFIN_ADMIN_PASSWORD` to `molecule/default/molecule.yml`
+  `provisioner.env` (optional, empty for tests)
+
+#### 3e. Final validation
+
+- [ ] Run `molecule test` — full 4-node integration passes with exit code 0
+- [ ] Run `molecule test -s jellyfin-lxc` — per-feature cycle passes
+- [ ] `ansible-lint && yamllint .` passes with no new warnings
+- [ ] Cleanup leaves no Jellyfin artifacts on host or controller
 
 **Rollback:** N/A — test infrastructure only; revert via git.
 
 ---
 
-### Milestone 5: Documentation
+### Milestone 4: Documentation
 
-_Self-contained. Run after all implemented milestones._
+_Depends on M1–M3._
 
 - [ ] Create `docs/architecture/jellyfin-build.md`:
+  - Image build process (build-images.sh section)
   - Requirements, design decisions, env variables
   - iGPU shared mount, cgroup allowlist `c 226:128 rwm`, GID mapping
-  - Media storage, software fallback when iGPU unavailable
+  - VA-API driver package name caveat (Debian release-dependent)
+  - Media storage, software fallback when Desktop VM takes iGPU
+  - Baked config vs runtime config split
   - Test vs production workflow (JELLYFIN_ADMIN_PASSWORD)
 - [ ] Update `docs/architecture/overview.md`:
   - site.yml diagram: add Jellyfin provision + configure plays
   - Role catalog: jellyfin_lxc, jellyfin_configure
+- [ ] Update `docs/architecture/roles.md`:
+  - Add `jellyfin_lxc` role documentation (purpose, key variables, iGPU device mount)
+  - Add `jellyfin_configure` role documentation (purpose, env vars, GID mapping)
 - [ ] Update `docs/architecture/roadmap.md`:
   - Add Jellyfin project to Active Projects section
 - [ ] Add CHANGELOG entry under `[Unreleased]`
@@ -321,6 +531,26 @@ _Self-contained. Run after all implemented milestones._
 - [ ] `ansible-lint && yamllint .` passes with no new warnings
 - [ ] Documentation matches implemented behavior
 - [ ] iGPU hard-fail requirement documented
+- [ ] VA-API package name caveat documented
 - [ ] All env variables documented
 
 **Rollback:** N/A — documentation-only milestone.
+
+---
+
+## Future Integration Considerations
+
+- **Kodi JellyCon**: Kodi (project 09) uses JellyCon add-on to connect to
+  Jellyfin for media library access. Kodi's configure role templates the
+  JellyCon connection settings using Jellyfin's container IP.
+- **Moonlight**: Moonlight (project 10) is a game streaming client, not
+  related to Jellyfin. Both share `media_nodes` and the `[media]` tag.
+- **rsyslog**: Jellyfin logs can be forwarded to the rsyslog collector.
+  The configure role templates a syslog forwarding snippet when rsyslog
+  is available.
+- **Desktop VM impact**: When the Desktop VM (project 11) starts, it takes
+  exclusive iGPU access. Jellyfin falls back to software transcoding
+  automatically — no action needed from this project.
+- **iGPU vendor expansion**: The image includes both Intel and AMD VA-API
+  drivers. At runtime, only the matching driver loads. This supports mixed
+  hardware fleets.

@@ -332,7 +332,7 @@ Before considering a plan ready for execution, verify each item.
     hosts both behind OpenWrt (LAN) and directly on WAN, the plan MUST
     specify the topology branching strategy (bridge, subnet, gateway,
     DNS). A "Network topology assumption" section is required for all
-    LXC container plans.
+    LXC container and VM plans.
     Previous bug: rsyslog plan only said "static IP on LAN bridge" but
     `monitoring_nodes` appears in ALL build profiles including Gaming
     Rig (no OpenWrt). WAN-connected hosts need different bridge, gateway,
@@ -340,8 +340,9 @@ Before considering a plan ready for execution, verify each item.
 25. **Container IP offset allocation**: If the service uses static IPs
     computed from an offset, verify the offset is defined in
     `group_vars/all.yml` and doesn't collide with existing allocations.
-    Current allocations: WireGuard 3–6, Pi-hole 10. WAN offsets add +200.
-    Check WAN offset against physical host IPs on the supernet.
+    Current allocations: WireGuard 3–6, Pi-hole 10, rsyslog 11, Netdata
+    12, MeshWiFi 13, HA 14, Jellyfin 15. WAN offsets add +200. Check WAN
+    offset against physical host IPs on the supernet.
 26. **Milestone consolidation**: Are any milestones redundant? Provisioning
     and site.yml integration should be in the SAME milestone (not split).
     Per-feature rollback plays in cleanup.yml should be in the testing
@@ -353,6 +354,40 @@ Before considering a plan ready for execution, verify each item.
     cleanup.yml, and task files create dead code.
     Previous bug: OpenWrt M5-M7 stubs (pihole_dns, syslog, monitoring)
     were implemented then removed because they belonged downstream.
+28. **Testing Strategy section**: Every plan MUST include a "Testing
+    Strategy" section with: (a) parallelism in `molecule/default`, (b)
+    per-feature scenario hierarchy, (c) day-to-day workflow (bash
+    commands), (d) teardown table showing what each scenario creates and
+    destroys and its baseline impact.
+29. **Documented exceptions to bake principle**: Three documented
+    exceptions exist. Plans using these MUST explicitly state the
+    exception and rationale:
+    - **Docker pull of pinned image tag**: deterministic, versioned,
+      idempotent (e.g., Home Assistant pre-pulls HA container image)
+    - **Desktop VMs via cloud image + apt**: full desktop environments
+      are too large and hardware-dependent for pre-built images; cloud
+      image + cloud-init is the VM community standard
+    - **Windows VMs via ISO + autounattend.xml**: install-from-ISO IS
+      the bake approach for Windows — deterministic, unattended, with
+      drivers pre-injected
+    Any OTHER runtime package installation is still rejected.
+30. **Cross-cutting milestone ownership**: If the plan deploys shared
+    infrastructure (e.g., display-exclusive hookscript), identify which
+    project OWNS the deployment and which projects only ATTACH. Only one
+    project deploys; others reference it. Document the owning project
+    explicitly.
+    Previous bug: Kodi, Moonlight, and Desktop VM plans all had tasks to
+    deploy the display-exclusive hookscript. Consolidated ownership to
+    the Kiosk project.
+31. **Separate hardware topology**: If the service runs on separate
+    physical hardware (e.g., Gaming Rig), the plan MUST document the
+    hardware topology separately. Separate hardware may lack OpenWrt,
+    may use a different build profile, and may require hardware-dependent
+    testing strategies (skip when hardware unavailable).
+32. **VA-API driver portability**: Image builds for services that use
+    iGPU (Jellyfin, Kodi, Moonlight) SHOULD include BOTH Intel and AMD
+    VA-API driver packages. At runtime, only the matching driver loads.
+    This avoids rebuilding images when hardware changes.
 
 ## Cross-references
 

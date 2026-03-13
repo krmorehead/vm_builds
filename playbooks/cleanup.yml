@@ -13,6 +13,7 @@
     - openwrt-dns-rollback
     - openwrt-mesh-rollback
     - openwrt-pihole-dns-rollback
+    - openwrt-syslog-rollback
     - never
   tasks:
     - name: Include group reconstruction
@@ -190,6 +191,38 @@
         - "{{ project_root }}/.env.generated"
         - "{{ project_root }}/test.env.generated"
       delegate_to: localhost
+
+# ── Per-feature rollback: rsyslog container ──────────────────────
+
+- name: Rollback rsyslog container
+  hosts: monitoring_nodes
+  gather_facts: false
+  tags: [rsyslog-rollback, never]
+  tasks:
+    - name: Stop and destroy rsyslog container
+      ansible.builtin.shell:
+        cmd: |
+          pct stop {{ rsyslog_ct_id }} 2>/dev/null || true
+          sleep 2
+          pct destroy {{ rsyslog_ct_id }} --purge 2>/dev/null || true
+        executable: /bin/bash
+      changed_when: true
+
+# ── Per-feature rollback: OpenWrt syslog forwarding ──────────────
+
+- name: Rollback OpenWrt syslog forwarding
+  hosts: openwrt
+  gather_facts: false
+  tags: [openwrt-syslog-rollback, never]
+  tasks:
+    - name: Remove syslog remote settings
+      ansible.builtin.raw: |
+        uci delete system.@system[0].log_ip 2>/dev/null
+        uci delete system.@system[0].log_port 2>/dev/null
+        uci delete system.@system[0].log_proto 2>/dev/null
+        uci commit system
+        /etc/init.d/log restart
+      changed_when: true
 
 # ── Per-feature rollback: mesh WiFi LXC ────────────────────────
 
@@ -369,7 +402,7 @@
 
     - name: Remove cached LXC templates
       ansible.builtin.shell:
-        cmd: rm -f /var/lib/vz/template/cache/debian-*.tar.zst /var/lib/vz/template/cache/openwrt-*.tar.gz /var/lib/vz/template/cache/pihole-*.tar.zst
+        cmd: rm -f /var/lib/vz/template/cache/debian-*.tar.zst /var/lib/vz/template/cache/openwrt-*.tar.gz /var/lib/vz/template/cache/pihole-*.tar.zst /var/lib/vz/template/cache/rsyslog-*.tar.zst
         executable: /bin/bash
       changed_when: true
       failed_when: false

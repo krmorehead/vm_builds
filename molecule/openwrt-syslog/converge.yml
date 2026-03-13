@@ -1,0 +1,23 @@
+---
+- name: Reconstruct openwrt dynamic group
+  hosts: router_nodes
+  gather_facts: true
+  tasks:
+    - name: Verify OpenWrt VM is running
+      ansible.builtin.command:
+        cmd: qm status {{ openwrt_vm_id }}
+      register: _vm_status
+      changed_when: false
+      failed_when: "'running' not in _vm_status.stdout"
+
+    - name: Include reusable group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_openwrt_group.yml
+
+- name: Apply syslog forwarding
+  hosts: openwrt
+  gather_facts: false
+  tasks:
+    - name: Include syslog tasks
+      ansible.builtin.include_role:
+        name: openwrt_configure
+        tasks_from: syslog.yml

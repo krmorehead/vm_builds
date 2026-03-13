@@ -1,0 +1,68 @@
+---
+# OpenWrt syslog forwarding to rsyslog collector (post-baseline feature)
+#
+# Configures the OpenWrt system log daemon to forward logs via TCP
+# to the rsyslog container on the local Proxmox host. The container IP
+# is queried directly from Proxmox to avoid index computation drift.
+
+# ── Get rsyslog container IP from Proxmox ──────────────────────
+
+- name: Get rsyslog container IP from Proxmox config
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct config {{ rsyslog_ct_id }} | grep -oP 'ip=\K[^/,]+'
+    executable: /bin/bash
+  register: _rsyslog_ip_query
+  changed_when: false
+  delegate_to: "{{ groups['router_nodes'][0] }}"
+
+- name: Fail if rsyslog container IP not found
+  ansible.builtin.fail:
+    msg: >-
+      Could not determine rsyslog container IP from pct config on
+      {{ groups['router_nodes'][0] }}. Is the rsyslog container (VMID
+      {{ rsyslog_ct_id }}) provisioned?
+  when: (_rsyslog_ip_query.stdout | trim) | length == 0
+
+- name: Set rsyslog static IP
+  ansible.builtin.set_fact:
+    rsyslog_static_ip: "{{ _rsyslog_ip_query.stdout | trim }}"
+
+- name: Report syslog forwarding target
+  ansible.builtin.debug:
+    msg: "Configuring OpenWrt syslog to forward to rsyslog at {{ rsyslog_static_ip }}:514"
+
+# ── Configure syslog forwarding ──────────────────────────────────
+
+- name: Set syslog remote IP
+  ansible.builtin.raw: uci set system.@system[0].log_ip='{{ rsyslog_static_ip }}'
+
+- name: Set syslog remote port
+  ansible.builtin.raw: uci set system.@system[0].log_port='514'
+
+- name: Set syslog protocol to TCP
+  ansible.builtin.raw: uci set system.@system[0].log_proto='tcp'
+
+- name: Commit system changes and restart log daemon
+  ansible.builtin.raw: |
+    uci commit system
+    /etc/init.d/log restart
+
+- name: Wait for log daemon to stabilize
+  ansible.builtin.pause:
+    seconds: 2
+
+# ── Verify ───────────────────────────────────────────────────────
+
+- name: Read back syslog settings
+  ansible.builtin.raw: >-
+    echo "log_ip=$(uci get system.@system[0].log_ip 2>/dev/null)
+    log_port=$(uci get system.@system[0].log_port 2>/dev/null)
+    log_proto=$(uci get system.@system[0].log_proto 2>/dev/null)"
+  register: _syslog_verify
+  changed_when: false
+
+- name: Report syslog configuration
+  ansible.builtin.debug:
+    msg: "OpenWrt syslog config: {{ _syslog_verify.stdout | trim }}"

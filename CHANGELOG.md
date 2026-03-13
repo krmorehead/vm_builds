@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **rsyslog centralized logging** -- LXC container (VMID 501, 64 MB RAM, 1 GB
+  disk) running rsyslog as a centralized log collector. Custom Debian 12
+  template with rsyslog pre-configured for TCP reception on port 514, disk-
+  assisted spooling, RFC 1918 sender restriction, per-hostname log separation,
+  and logrotate (built by `build-images.sh`). `rsyslog_lxc` role provisions the
+  container with topology-aware networking (LAN or WAN bridge depending on host
+  position); `rsyslog_configure` role deploys optional forwarding rules when
+  `RSYSLOG_HOME_SERVER` is set (disk-assisted queue survives WireGuard tunnel
+  outages). `openwrt_configure/tasks/syslog.yml` configures OpenWrt to forward
+  system logs to the rsyslog container via UCI. Per-feature molecule scenarios
+  (`rsyslog-lxc`, `openwrt-syslog`), rollback tags (`rsyslog-rollback`,
+  `openwrt-syslog-rollback`), and reusable group reconstruction
+  (`tasks/reconstruct_rsyslog_group.yml`).
 - **Pi-hole DNS filtering** -- LXC container (VMID 102, 256 MB RAM, 2 GB disk)
   running Pi-hole for network-wide DNS-level ad and tracker blocking. Custom
   Debian 12 template with Pi-hole pre-installed (built by `build-images.sh`).

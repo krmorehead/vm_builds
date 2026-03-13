@@ -442,25 +442,30 @@ site.yml (current — phased for multi-node)
 ├── Phase 3: Services (flavor groups span primary + LAN hosts)
 │   ├── Play 7:  dns_nodes           [pihole]     pihole_lxc, deploy_stamp
 │   ├── Play 8:  pihole              [pihole]     pihole_configure
-│   ├── Play 9:  vpn_nodes           [wireguard]  wireguard_lxc, deploy_stamp
-│   ├── Play 10: wireguard           [wireguard]  wireguard_configure
-│   ├── Play 11: wifi_nodes:!router_nodes [mesh-wifi]  openwrt_mesh_lxc, deploy_stamp
-│   └── Play 12: openwrt_mesh        [mesh-wifi]  openwrt_mesh_configure
+│   ├── Play 9:  monitoring_nodes    [monitoring]  rsyslog_lxc, deploy_stamp
+│   ├── Play 10: rsyslog             [monitoring]  rsyslog_configure
+│   ├── Play 11: vpn_nodes           [wireguard]  wireguard_lxc, deploy_stamp
+│   ├── Play 12: wireguard           [wireguard]  wireguard_configure
+│   ├── Play 13: wifi_nodes:!router_nodes [mesh-wifi]  openwrt_mesh_lxc, deploy_stamp
+│   └── Play 14: openwrt_mesh        [mesh-wifi]  openwrt_mesh_configure
 │
 ├── Per-feature plays (opt-in via --tags <name>, tagged with [never]):
-│   ├── Play 13: openwrt             [openwrt-security]   include_role: openwrt_configure/security.yml
-│   ├── Play 14: router_nodes        [openwrt-security]   deploy_stamp (openwrt_security)
-│   ├── Play 15: openwrt             [openwrt-vlans]      include_role: openwrt_configure/vlans.yml
-│   ├── Play 16: router_nodes        [openwrt-vlans]      deploy_stamp (openwrt_vlans)
-│   ├── Play 17: openwrt             [openwrt-dns]        include_role: openwrt_configure/dns.yml
-│   ├── Play 18: router_nodes        [openwrt-dns]        deploy_stamp (openwrt_dns)
-│   ├── Play 19: openwrt             [openwrt-mesh]       include_role: openwrt_configure/mesh.yml
-│   ├── Play 20: router_nodes        [openwrt-mesh]       deploy_stamp (openwrt_mesh)
-│   ├── Play 21: router_nodes        [openwrt-pihole-dns] reconstruct openwrt group
-│   ├── Play 22: openwrt             [openwrt-pihole-dns] include_role: openwrt_configure/pihole_dns.yml
-│   └── Play 23: router_nodes        [openwrt-pihole-dns] deploy_stamp (openwrt_pihole_dns)
+│   ├── Play 15: openwrt             [openwrt-security]   include_role: openwrt_configure/security.yml
+│   ├── Play 16: router_nodes        [openwrt-security]   deploy_stamp (openwrt_security)
+│   ├── Play 17: openwrt             [openwrt-vlans]      include_role: openwrt_configure/vlans.yml
+│   ├── Play 18: router_nodes        [openwrt-vlans]      deploy_stamp (openwrt_vlans)
+│   ├── Play 19: openwrt             [openwrt-dns]        include_role: openwrt_configure/dns.yml
+│   ├── Play 20: router_nodes        [openwrt-dns]        deploy_stamp (openwrt_dns)
+│   ├── Play 21: openwrt             [openwrt-mesh]       include_role: openwrt_configure/mesh.yml
+│   ├── Play 22: router_nodes        [openwrt-mesh]       deploy_stamp (openwrt_mesh)
+│   ├── Play 23: router_nodes        [openwrt-syslog]     reconstruct openwrt group
+│   ├── Play 24: openwrt             [openwrt-syslog]     include_role: openwrt_configure/syslog.yml
+│   ├── Play 25: router_nodes        [openwrt-syslog]     deploy_stamp (openwrt_syslog)
+│   ├── Play 26: router_nodes        [openwrt-pihole-dns] reconstruct openwrt group
+│   ├── Play 27: openwrt             [openwrt-pihole-dns] include_role: openwrt_configure/pihole_dns.yml
+│   └── Play 28: router_nodes        [openwrt-pihole-dns] deploy_stamp (openwrt_pihole_dns)
 │
-└── Play 24: proxmox:!lan_hosts      [cleanup]    Remove bootstrap IP
+└── Play 29: proxmox:!lan_hosts      [cleanup]    Remove bootstrap IP
 ```
 
 The phased approach ensures LAN hosts (behind the OpenWrt router) are only
@@ -470,7 +475,6 @@ includes `home`, `mesh1`, `ai`, and `mesh2`), so Ansible runs tasks on all
 4 hosts in parallel within each play.
 
 Future integration plays (added by downstream projects when implemented):
-- `openwrt-syslog` — added by rsyslog LXC project
 - `openwrt-monitoring` — added by monitoring project
 
 ### Target (Full Build)
@@ -767,6 +771,7 @@ vm_builds/
 │   ├── reconstruct_openwrt_group.yml     Reusable dynamic group reconstruction (OpenWrt)
 │   ├── reconstruct_wireguard_group.yml   Reusable dynamic group reconstruction (WireGuard)
 │   ├── reconstruct_pihole_group.yml      Reusable dynamic group reconstruction (Pi-hole)
+│   ├── reconstruct_rsyslog_group.yml     Reusable dynamic group reconstruction (rsyslog)
 │   ├── bootstrap_lan_host.yml           SSH key check, DHCP lease, API token for LAN nodes
 │   └── cleanup_lan_host.yml             Reusable per-LAN-host cleanup (SSH from primary)
 │
@@ -779,6 +784,8 @@ vm_builds/
 │   ├── wireguard-lxc/             Per-feature: WireGuard VPN container
 │   ├── pihole-lxc/                Per-feature: Pi-hole DNS container
 │   ├── openwrt-pihole-dns/        Per-feature: OpenWrt DNS forwarding to Pi-hole
+│   ├── rsyslog-lxc/               Per-feature: rsyslog log collector container
+│   ├── openwrt-syslog/            Per-feature: OpenWrt syslog forwarding to rsyslog
 │   └── mesh1-infra/               Lightweight infra-only on mesh1 (quick iteration)
 │
 ├── images/                        VM/LXC images (gitignored, built by build-images.sh)

@@ -1,0 +1,2 @@
+---
+rsyslog_home_server: "{{ lookup('env', 'RSYSLOG_HOME_SERVER') | default('', true) }}"

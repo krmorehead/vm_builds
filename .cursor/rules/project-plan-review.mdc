@@ -57,13 +57,24 @@ This rule activates when opening or editing any `project_plan.md` in
     specify the branching strategy (bridge, subnet, gateway, DNS).
 14. **Container IP offset**: verify the offset is defined in
     `group_vars/all.yml` and doesn't collide with existing allocations
-    (WireGuard 3–6, Pi-hole 10). Check WAN offset (+200) against
-    physical host IPs.
+    (WireGuard 3–6, Pi-hole 10, rsyslog 11, Netdata 12, MeshWiFi 13,
+    HA 14, Jellyfin 15). Check WAN offset (+200) against physical host IPs.
 15. **Milestone consolidation**: provisioning + site.yml integration
     should be one milestone. Blocked stubs should be deferred to
     downstream projects, not kept as dead code.
 16. **Future integration notes**: document how downstream projects
     interact with the new service.
+17. **Testing Strategy section**: every plan needs parallelism, per-feature
+    scenarios, day-to-day workflow, and teardown table.
+18. **Documented exceptions to bake principle**: Docker pull (pinned tag),
+    desktop VM (cloud image + apt), Windows VM (ISO + autounattend) are
+    documented exceptions. Everything else rejected.
+19. **Cross-cutting ownership**: shared infrastructure (hookscript, etc.)
+    has ONE owning project. Other plans only attach/reference.
+20. **Separate hardware topology**: gaming rig and similar separate-hardware
+    services need different network, testing, and build profile docs.
+21. **VA-API driver portability**: iGPU image builds include BOTH Intel
+    and AMD driver packages for hardware portability.
 
 ## Previous bugs caught by plan review
 
@@ -77,3 +88,14 @@ This rule activates when opening or editing any `project_plan.md` in
   build profiles including WAN-connected hosts without OpenWrt
 - rsyslog plan split provisioning and site.yml integration into two milestones
 - rsyslog plan kept log client pattern as stubs instead of deferring downstream
+- All 9 remaining plans installed packages at runtime (apt/pip/opkg) in configure
+  roles instead of baking them into images
+- All 9 plans used `proxmox_lxc_default_template` instead of custom template vars
+- All 9 plans had a separate Integration milestone that duplicated provisioning work
+- All 9 plans were missing Testing Strategy sections (parallelism, scenarios, workflow)
+- All 9 plans were missing rollback plays in `playbooks/cleanup.yml`
+- Jellyfin/Kodi/Moonlight plans didn't declare "no LXC features required"
+- Kodi/Moonlight/Desktop VM plans each deployed the display-exclusive hookscript —
+  consolidated ownership to Kiosk project
+- Desktop VM plan had no documented exception for cloud image + apt install
+- MeshWiFi plan had no documented exception for opkg on OpenWrt nodes

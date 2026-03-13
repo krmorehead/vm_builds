@@ -1,0 +1,4 @@
+---
+- name: Rollback syslog forwarding
+  ansible.builtin.import_playbook: ../../playbooks/cleanup.yml
+  tags: [openwrt-syslog-rollback]

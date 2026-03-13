@@ -1,0 +1,45 @@
+---
+# Reusable task file: reconstruct the rsyslog dynamic group.
+#
+# Consumed by:
+#   - Per-feature molecule converge.yml (rsyslog-lxc scenario)
+#   - Per-feature molecule verify.yml
+#   - playbooks/cleanup.yml (rollback plays)
+#
+# Must run on a host in the monitoring_nodes/proxmox group.
+# Same pattern as pihole reconstruction: pct_remote is always the
+# connection method (no SSH auth detection needed).
+
+- name: Verify rsyslog container is running
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct status {{ rsyslog_ct_id }} | grep -c running
+    executable: /bin/bash
+  register: _rsyslog_ct_status
+  changed_when: false
+  failed_when: (_rsyslog_ct_status.stdout | trim | int) == 0
+
+- name: Add rsyslog containers to dynamic group
+  ansible.builtin.add_host:
+    name: "rsyslog-{{ item }}"
+    groups: rsyslog
+    ansible_connection: community.proxmox.proxmox_pct_remote
+    ansible_host: "{{ hostvars[item].ansible_host }}"
+    ansible_user: root
+    proxmox_vmid: "{{ rsyslog_ct_id }}"
+    ansible_paramiko_host_key_checking: false
+    ansible_paramiko_proxy_command: >-
+      {{ 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@'
+         + lookup('env', 'PRIMARY_HOST')
+         if 'lan_hosts' in (hostvars[item].group_names | default([]))
+         else omit }}
+  loop: "{{ ansible_play_hosts }}"
+
+- name: Report reconstructed rsyslog group
+  ansible.builtin.debug:
+    msg: >-
+      Reconstructed rsyslog group: host=rsyslog-{{ inventory_hostname }},
+      proxmox_host={{ ansible_host }},
+      vmid={{ rsyslog_ct_id }},
+      connection=pct_remote

@@ -1,0 +1,14 @@
+# Forward all received logs to the home server via WireGuard tunnel.
+# Disk-assisted queue ensures no log loss during tunnel outages.
+*.* action(type="omfwd"
+    target="{{ rsyslog_home_server }}"
+    port="514"
+    protocol="tcp"
+    queue.type="disk"
+    queue.filename="home_fwd"
+    queue.maxDiskSpace="32m"
+    queue.saveOnShutdown="on"
+    queue.size="5000"
+    queue.discardMark="4750"
+    queue.discardSeverity="8"
+    action.resumeRetryCount="-1")

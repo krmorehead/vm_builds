@@ -1,0 +1,19 @@
+---
+- name: Provision rsyslog LXC container
+  hosts: monitoring_nodes
+  gather_facts: false
+  roles:
+    - rsyslog_lxc
+
+- name: Reconstruct rsyslog dynamic group
+  hosts: monitoring_nodes
+  gather_facts: false
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_rsyslog_group.yml
+
+- name: Configure rsyslog
+  hosts: rsyslog
+  gather_facts: true
+  roles:
+    - rsyslog_configure

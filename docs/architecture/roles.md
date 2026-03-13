@@ -182,6 +182,8 @@ with `tasks_from:` in a dedicated `site.yml` play.
 | `vlans.yml` | M2 | `openwrt-vlans` | `openwrt_vlan_iot_id`, `openwrt_vlan_guest_id`, subnet/IP defaults |
 | `dns.yml` | M3 | `openwrt-dns` | `openwrt_dns_doh_primary`, `openwrt_dns_doh_secondary` |
 | `mesh.yml` | M4 | `openwrt-mesh` | `openwrt_dawn_rssi_threshold`, `openwrt_dawn_steering_mode` |
+| `pihole_dns.yml` | M3 (Pi-hole) | `openwrt-pihole-dns` | `pihole_ct_ip_offset` |
+| `syslog.yml` | M3 (rsyslog) | `openwrt-syslog` | `rsyslog_ct_ip_offset` |
 
 ---
 
@@ -382,3 +384,106 @@ Unlike read-only detection roles, `proxmox_igpu` modifies host state:
 - May update `/etc/resolv.conf` if DNS is broken
 
 Cleanup restores enterprise repos and removes the no-subscription file.
+
+---
+
+## pihole_lxc
+
+**Purpose:** Provision a Pi-hole DNS filtering LXC container on Proxmox via the shared `proxmox_lxc` role.
+
+### Key Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `pihole_ct_hostname` | `pihole` | Container hostname |
+| `pihole_ct_memory` | `256` | RAM in MB |
+| `pihole_ct_cores` | `1` | CPU cores |
+| `pihole_ct_disk` | `"2"` | Root disk size in GB |
+| `pihole_ct_template` | `pihole_lxc_template` | Custom Pi-hole template (built by `build-images.sh`) |
+| `pihole_ct_onboot` | `true` | Start on host boot |
+| `pihole_ct_startup_order` | `3` | Boot priority |
+| `pihole_ct_features` | `["nesting=1"]` | Container features |
+
+### Exported Facts
+
+| Fact | Type | Description |
+|------|------|-------------|
+| `pihole_static_ip` | string | Computed container IP for downstream DNS config |
+
+---
+
+## pihole_configure
+
+**Purpose:** Configure Pi-hole DNS filtering with host-specific settings (web password, upstream DNS, gravity update) via pihole-FTL CLI.
+
+### Key Variables
+
+| Variable | Env Var | Default | Description |
+|----------|---------|---------|-------------|
+| `pihole_web_password` | `PIHOLE_WEB_PASSWORD` | `""` | Web admin password |
+| `pihole_upstream_dns_1` | -- | `1.1.1.1` | Primary upstream DNS |
+| `pihole_upstream_dns_2` | -- | `1.0.0.1` | Secondary upstream DNS |
+| `pihole_query_logging_days` | -- | `7` | Query log retention days |
+
+---
+
+## rsyslog_lxc
+
+**Purpose:** Provision an rsyslog centralized log collector LXC container on Proxmox via the shared `proxmox_lxc` role.
+
+### How It Works
+
+1. Verifies the custom rsyslog template exists on the controller (hard-fails if missing).
+2. Reads LAN gateway/CIDR from `env_generated_path`.
+3. Branches on host topology: LAN hosts (behind OpenWrt) use the LAN bridge and OpenWrt LAN subnet; WAN hosts use `proxmox_wan_bridge` and the host's WAN subnet with IP offset +200.
+4. Delegates to `proxmox_lxc` with service-specific vars: VMID 501, hostname `rsyslog`, 64 MB RAM, 1 core, 1 GB disk, auto-start priority 3.
+5. `proxmox_lxc` handles template upload, `pct create`, start, and `add_host` registration in the `rsyslog` dynamic group with `pct_remote` connection.
+
+No special LXC features required — rsyslog is a pure userspace daemon.
+
+### Key Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `rsyslog_ct_hostname` | `rsyslog` | Container hostname |
+| `rsyslog_ct_memory` | `64` | RAM in MB |
+| `rsyslog_ct_cores` | `1` | CPU cores |
+| `rsyslog_ct_disk` | `"1"` | Root disk size in GB |
+| `rsyslog_ct_template` | `rsyslog_lxc_template` | Custom rsyslog template (built by `build-images.sh`) |
+| `rsyslog_ct_onboot` | `true` | Start on host boot |
+| `rsyslog_ct_startup_order` | `3` | Boot priority |
+
+### Exported Facts
+
+| Fact | Type | Description |
+|------|------|-------------|
+| `rsyslog_static_ip` | string | Computed container IP for downstream syslog config |
+
+### Host State Changes
+
+None — rsyslog is pure userspace. No kernel modules, no host config files.
+
+---
+
+## rsyslog_configure
+
+**Purpose:** Configure rsyslog with host-specific forwarding rules. Base config (TCP listener, spool directory, logrotate) is baked into the image.
+
+### How It Works
+
+1. When `RSYSLOG_HOME_SERVER` is set: templates `/etc/rsyslog.d/20-forward.conf` inside the container with disk-assisted queue for reliable delivery during WireGuard tunnel outages.
+2. When `RSYSLOG_HOME_SERVER` is empty: ensures `20-forward.conf` is absent. rsyslog operates in local collection + buffer mode only.
+3. Restarts rsyslog if config changed.
+
+### Key Variables
+
+| Variable | Env Var | Default | Description |
+|----------|---------|---------|-------------|
+| `rsyslog_home_server` | `RSYSLOG_HOME_SERVER` | `""` | Forward logs to this IP (optional; empty = local only) |
+
+### What Is NOT in This Role (Baked in Image)
+
+- TCP listener (`/etc/rsyslog.d/10-receive.conf`) — imtcp module + template
+- Remote routing (`/etc/rsyslog.d/50-remote-route.conf`) — per-hostname file write + stop
+- Spool directory (`/var/spool/rsyslog/`)
+- Logrotate config for remote logs

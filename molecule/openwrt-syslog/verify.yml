@@ -1,0 +1,101 @@
+---
+- name: Reconstruct openwrt dynamic group
+  hosts: router_nodes
+  gather_facts: true
+  tasks:
+    - name: Include reusable group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_openwrt_group.yml
+
+- name: Verify syslog forwarding
+  hosts: openwrt
+  gather_facts: false
+  tasks:
+    - name: Get rsyslog container IP from Proxmox config
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ rsyslog_ct_id }} | grep -oP 'ip=\K[^/,]+'
+        executable: /bin/bash
+      register: _rsyslog_ip_query
+      changed_when: false
+      delegate_to: "{{ groups['router_nodes'][0] }}"
+
+    - name: Fail if rsyslog container IP not found
+      ansible.builtin.fail:
+        msg: >-
+          rsyslog container (VMID {{ rsyslog_ct_id }}) not provisioned
+          on {{ groups['router_nodes'][0] }}. Run rsyslog-lxc scenario first.
+      when: (_rsyslog_ip_query.stdout | trim) | length == 0
+
+    - name: Set expected rsyslog IP
+      ansible.builtin.set_fact:
+        _expected_rsyslog_ip: "{{ _rsyslog_ip_query.stdout | trim }}"
+
+    - name: Check syslog log_ip setting
+      ansible.builtin.raw: uci get system.@system[0].log_ip 2>/dev/null
+      register: _syslog_log_ip
+      changed_when: false
+
+    - name: Assert log_ip matches rsyslog container
+      ansible.builtin.assert:
+        that: "(_syslog_log_ip.stdout | trim) == _expected_rsyslog_ip"
+        fail_msg: >-
+          log_ip={{ _syslog_log_ip.stdout | trim }},
+          expected {{ _expected_rsyslog_ip }}
+
+    - name: Check syslog log_port setting
+      ansible.builtin.raw: uci get system.@system[0].log_port 2>/dev/null
+      register: _syslog_log_port
+      changed_when: false
+
+    - name: Assert log_port is 514
+      ansible.builtin.assert:
+        that: "(_syslog_log_port.stdout | trim) == '514'"
+        fail_msg: "log_port={{ _syslog_log_port.stdout | trim }}, expected 514"
+
+    - name: Check syslog log_proto setting
+      ansible.builtin.raw: uci get system.@system[0].log_proto 2>/dev/null
+      register: _syslog_log_proto
+      changed_when: false
+
+    - name: Assert log_proto is tcp
+      ansible.builtin.assert:
+        that: "(_syslog_log_proto.stdout | trim) == 'tcp'"
+        fail_msg: "log_proto={{ _syslog_log_proto.stdout | trim }}, expected tcp"
+
+    # ── Verify log daemon is running ─────────────────────────────
+
+    - name: Check logd is running
+      ansible.builtin.raw: /etc/init.d/log status 2>/dev/null || echo stopped
+      register: _logd_status
+      changed_when: false
+
+    - name: Assert logd is running
+      ansible.builtin.assert:
+        that: "'running' in _logd_status.stdout"
+        fail_msg: "logd is not running after syslog configuration"
+
+    # ── Verify idempotency (settings persist across reads) ──────
+
+    - name: Re-read log_ip to verify persistence
+      ansible.builtin.raw: uci get system.@system[0].log_ip 2>/dev/null
+      register: _syslog_recheck
+      changed_when: false
+
+    - name: Assert log_ip persisted correctly
+      ansible.builtin.assert:
+        that: "(_syslog_recheck.stdout | trim) == _expected_rsyslog_ip"
+        fail_msg: >-
+          UCI setting did not persist:
+          got={{ _syslog_recheck.stdout | trim }},
+          expected={{ _expected_rsyslog_ip }}
+
+    - name: Report syslog forwarding verification
+      ansible.builtin.debug:
+        msg: >-
+          OpenWrt syslog forwarding verified:
+          log_ip={{ _syslog_log_ip.stdout | trim }},
+          log_port={{ _syslog_log_port.stdout | trim }},
+          log_proto={{ _syslog_log_proto.stdout | trim }},
+          logd=running,
+          persistence=verified

@@ -29,7 +29,7 @@ VM (KVM/QEMU)
 
 ## Build Profiles
 
-- Home Entertainment Box: yes
+- Home Entertainment Box: yes (`desktop_nodes`)
 - Minimal Router: no
 - Gaming Rig: no
 
@@ -46,6 +46,38 @@ VM (KVM/QEMU)
   hookscript (deployed by Kiosk project `2026-03-09-12`)
 - OpenWrt router operational (network, SSH via ProxyJump)
 - Physical display connected to host HDMI/DP
+- `desktop_vm_id: 400` already in `group_vars/all.yml`
+- `desktop_nodes` flavor group and `desktop` dynamic group already in `inventory/hosts.yml`
+- `desktop_nodes` already in `molecule/default/molecule.yml` platform groups
+
+## Network topology assumption
+
+`desktop_nodes` hosts are always behind OpenWrt (`router_nodes` or `lan_hosts`).
+Desktop VMs always use the OpenWrt LAN subnet on the LAN bridge. There is
+no WAN-connected case — desktop services only run on the Home Entertainment
+Box profile, which always has OpenWrt.
+
+## Documented exception: cloud image + apt install
+
+**Desktop VMs are the exception to the "bake, don't configure at runtime"
+principle.** Full desktop environments (KDE, GNOME, Firefox, etc.) are too
+large and hardware-dependent for generic pre-built images. The practical
+approach for desktop VMs is:
+
+1. Start from a Debian 12 cloud image (lightweight, cloud-init enabled)
+2. Install desktop packages at configure time via `apt`
+
+This is documented as an exception because:
+- Desktop environments total 2-4 GB of packages — impractical for a
+  pre-built image that must be portable across hardware
+- GPU driver selection depends on the actual GPU vendor (Intel vs AMD),
+  known only at runtime via `igpu_vendor`
+- The cloud image approach is the community standard for VM provisioning
+  (Packer, Terraform, cloud-init all use this pattern)
+
+If pre-building becomes practical (e.g., one dedicated hardware platform),
+add a `build_desktop_vm` function to `build-images.sh` and switch to the
+standard bake pattern.
 
 ## Skills
 
@@ -69,6 +101,7 @@ Decisions
 │
 ├── Base image: Debian cloud image + cloud-init for bootstrap
 │   └── No interactive installer; cloud-init sets user, SSH keys, network at first boot
+│   └── DOCUMENTED EXCEPTION to bake principle (see above)
 │
 ├── VM provisioning: qm create (not proxmox_lxc)
 │   └── This is a VM, not an LXC container — full KVM/QEMU stack
@@ -80,7 +113,7 @@ Decisions
 │   └── Required for modern GPU passthrough; legacy BIOS incompatible
 │
 ├── iGPU access: exclusive passthrough via hostpci (vfio-pci)
-│   └── VM needs full GPU driver stack (i915 in guest); only option for display-out from VM
+│   └── VM needs full GPU driver stack (i915/amdgpu in guest); only option for display-out from VM
 │   └── Most disruptive display-exclusive service — takes entire GPU from host
 │   └── proxmox_igpu hard-fails if absent; Desktop VM depends on igpu_pci_address
 │
@@ -100,16 +133,70 @@ Decisions
 
 ---
 
+## Testing Strategy
+
+### Parallelism in `molecule/default` (full integration)
+
+`molecule/default` converges all 4 nodes (home, mesh1, ai, mesh2). In
+Phase 3 of `site.yml`, Desktop VM provisions on `desktop_nodes` (currently
+`home` only). It runs after all media services since it's the most
+disruptive display-exclusive service. Desktop VM uses the `[desktop]` tag.
+
+### Per-feature scenarios (fast iteration)
+
+Day-to-day development uses `molecule/desktop-vm/` which only touches
+VMID 400. The OpenWrt baseline and LXC containers stay running (Kiosk
+will be stopped by the hookscript when the Desktop VM starts).
+
+```
+Scenario Hierarchy (Desktop VM additions)
+├── molecule/default/                 Full integration (4-node, ~4-5 min)
+│   └── Runs everything including Desktop VM provision + configure
+│
+└── molecule/desktop-vm/             Desktop VM only (~2-3 min)
+    ├── converge: provision + configure Desktop VM
+    ├── verify: Desktop VM assertions (SSH, packages, GPU)
+    └── cleanup: destroy VM 400 + PCI cleanup (restore iGPU to host)
+```
+
+### Day-to-day workflow
+
+```bash
+# 1. Build baseline once (or restore after molecule test)
+molecule converge                             # ~4-5 min, all 4 nodes
+
+# 2. Iterate on Desktop VM (only touches VMID 400)
+molecule converge -s desktop-vm               # ~2-3 min, provision + configure
+molecule verify -s desktop-vm                 # ~15s, assertions only
+molecule converge -s desktop-vm               # ~2-3 min, re-converge
+
+# 3. Clean up per-feature changes (baseline stays, iGPU returns to host)
+molecule cleanup -s desktop-vm                # destroys VM 400, PCI cleanup
+
+# 4. Final validation before commit
+molecule test                                 # full clean-state, ~4-5 min
+molecule converge                             # restore baseline for next task
+```
+
+### What each scenario tears down
+
+| Scenario | Creates | Destroys | Baseline impact |
+|----------|---------|----------|-----------------|
+| `default` (test) | Everything | Everything | Full rebuild required after |
+| `default` (converge) | Everything | Nothing | Baseline preserved |
+| `desktop-vm` | VM 400, vfio-pci binding | VM 400, vfio-pci unbind, driver reload | iGPU returns to host; Kiosk restarts |
+
+---
+
 ## Milestone Dependency Graph
 
 ```
 M1: Image Preparation ───── self-contained
  └── M2: VM Provisioning ── depends on M1, proxmox_igpu (igpu_pci_address)
-      └── M3: Configuration ─ depends on M2
+      └── M3: Configuration ─ depends on M2 (cloud image + apt = documented exception)
            └── M4: Polish ──── depends on M3
-                └── M5: Integration ─ depends on M1–M4
-                     └── M6: Testing ─ depends on M1–M5
-                          └── M7: Docs ─ depends on M1–M6
+                └── M5: Testing & Integration ── depends on M2–M4
+                     └── M6: Documentation ── depends on M2–M5
 ```
 
 ---
@@ -152,18 +239,27 @@ _Blocked on: M1 (image), `proxmox_igpu` role (provides `igpu_pci_address`)._
 
 Create the `desktop_vm` role using `qm create`, UEFI (OVMF), q35 machine type,
 cloud-init for bootstrap, and exclusive iGPU passthrough via `hostpci0`. Attach
-display-exclusive hookscript (deployed by Kiosk project 2026-03-09-12).
+display-exclusive hookscript (deployed by Kiosk project 2026-03-09-12). Add
+the provision and configure plays to `site.yml`. Integration with `site.yml`
+is consolidated here.
 
 See: `vm-lifecycle` skill (two-role pattern, qm create, add_host), `proxmox-host-safety`
 skill (iGPU hard-fail, exclusive passthrough, PCI address from proxmox_igpu).
 
 **Implementation pattern:**
 - Role: `roles/desktop_vm/defaults/main.yml`, `tasks/main.yml`, `meta/main.yml`
-- site.yml: provision play targeting `desktop_nodes`, tagged `[desktop]`
+- site.yml: provision play targeting `desktop_nodes`, tagged `[desktop]`,
+  in Phase 3 (after media tier)
 - deploy_stamp included as last role in the provision play
 - Dynamic group `desktop` populated via `add_host` (SSH connection, not pct_remote)
 - Hookscript: `qm set --hookscript local:snippets/display-exclusive.sh` (script
   deployed by Kiosk project; Desktop VM only attaches)
+
+**Already complete** (from shared infrastructure / inventory):
+- `desktop_vm_id: 400` in `group_vars/all.yml`
+- `desktop_nodes` flavor group and `desktop` dynamic group in `inventory/hosts.yml`
+- `desktop_nodes` in `molecule/default/molecule.yml` platform groups
+- `proxmox_igpu` exports `igpu_pci_address`, `igpu_vendor` (hard-fails if absent)
 
 - [ ] Create `roles/desktop_vm/defaults/main.yml`:
   - `desktop_vm_id: "{{ desktop_vm_id }}"`, `desktop_vm_memory: 1024`,
@@ -184,10 +280,26 @@ skill (iGPU hard-fail, exclusive passthrough, PCI address from proxmox_igpu).
   - Register in `desktop` dynamic group via `add_host` with
     `ansible_connection: ansible.builtin.ssh`, `ansible_host` (VM LAN IP),
     ProxyJump through Proxmox host
-- [ ] Add provision play to `site.yml` targeting `desktop_nodes`, tagged
-  `[desktop]`, with `desktop_vm` role and `deploy_stamp`
-- [ ] Verify `desktop_vm_id: 400` in `group_vars/all.yml` (already defined)
-- [ ] Verify `desktop_nodes` and `desktop` groups in `inventory/hosts.yml`
+- [ ] Create `roles/desktop_vm/meta/main.yml` with required metadata
+- [ ] Add provision play to `site.yml` Phase 3, targeting `desktop_nodes`,
+  tagged `[desktop]`, with `desktop_vm` role and `deploy_stamp`
+  (after media tier)
+- [ ] Add configure play to `site.yml` Phase 3, targeting `desktop` dynamic
+  group, tagged `[desktop]`, `gather_facts: true`, after provision play
+- [ ] Create `tasks/reconstruct_desktop_group.yml`:
+  - Verify VM 400 is running: `qm status {{ desktop_vm_id }}`
+  - Get VM LAN IP (from OpenWrt DHCP lease via VM MAC, or cloud-init metadata)
+  - Register via `add_host` with:
+    `ansible_connection: ansible.builtin.ssh`,
+    `ansible_host: <vm_lan_ip>`,
+    `ansible_ssh_common_args: -o ProxyJump=root@{{ ansible_host }} -o ServerAliveInterval=15 -o ServerAliveCountMax=4`,
+    `ansible_user: <desktop_user>`
+  - See: `multi-node-ssh` skill (ProxyJump keepalives)
+
+**Note on `[desktop]` tag:** This tag is separate from `[kiosk]`. Desktop VM
+is significantly more disruptive (exclusive iGPU passthrough) than Kiosk
+(shared iGPU bind mount). Separate tags allow deploying Kiosk without
+triggering the Desktop VM's heavy GPU unbind/rebind cycle.
 
 **Verify:**
 
@@ -210,10 +322,12 @@ config, reload original drivers, rescan PCI bus. Detach hookscript before destro
 
 ### Milestone 3: Configuration
 
-_Blocked on: M2 (VM must be running, SSH accessible)._
+_Blocked on: M2 (VM must be running, SSH accessible). Uses cloud image + apt
+install (documented exception to bake principle)._
 
 Configure the running VM via SSH + ProxyJump: install KDE, GNOME, SDDM,
-Intel GPU drivers, base applications, and user setup from `.env`.
+GPU drivers (vendor-specific via `igpu_vendor`), base applications, and
+user setup from `.env`.
 
 See: `vm-lifecycle` skill (configure via SSH, dynamic group), `multi-node-ssh`
 skill (ProxyJump for LAN nodes).
@@ -241,18 +355,19 @@ skill (ProxyJump for LAN nodes).
   - Install GNOME: `task-gnome-desktop`
   - Install SDDM display manager, configure as default
   - User setup: create user from `DESKTOP_USER`, add to `video`, `render`, `audio`
-  - Install Intel GPU drivers: `xserver-xorg-video-intel`, `mesa-vulkan-drivers`
+  - Install GPU drivers: vendor-specific via `igpu_vendor` fact
+    - Intel: `xserver-xorg-video-intel`, `mesa-vulkan-drivers`
+    - AMD: `xserver-xorg-video-amdgpu`, `mesa-vulkan-drivers`
   - Install base applications: Firefox, file manager, terminal
   - Configure log forwarding to rsyslog
-- [ ] Add configure play to `site.yml` targeting `desktop` dynamic group,
-  tagged `[desktop]`, after provision play
+- [ ] Create `roles/desktop_configure/meta/main.yml` with required metadata
 
 **Verify:**
 
 - [ ] KDE and GNOME packages installed: `dpkg -l | grep -E 'task-kde|task-gnome'`
 - [ ] SDDM installed and default: `systemctl get-default` or equivalent
 - [ ] User exists with correct groups: `id {{ desktop_user }}` shows video, render, audio
-- [ ] Intel drivers installed: `dpkg -l | grep xserver-xorg-video-intel`
+- [ ] GPU drivers installed (vendor-appropriate package)
 - [ ] Firefox and base apps present
 - [ ] Idempotent: re-run does not fail
 
@@ -293,107 +408,116 @@ See: `vm-lifecycle` skill (configure role task files).
 
 ---
 
-### Milestone 5: Integration
+### Milestone 5: Testing & Integration
 
-_Blocked on: M1–M4._
+_Depends on M2–M4._
 
-Wire `desktop_vm` and `desktop_configure` into `site.yml`, ensure correct
-play order (after media tier), add dynamic group and VMID to inventory.
-
-See: `vm-lifecycle` skill (site.yml play order, deploy_stamp pairing).
-
-**Implementation pattern:**
-- site.yml: provision play targets `desktop_nodes`, configure play targets
-  `desktop` dynamic group
-- Order: Desktop play AFTER media tier (Jellyfin, Kodi, Moonlight)
-- deploy_stamp on `desktop_nodes` after provision play
-
-- [ ] Add `desktop_vm` provision play to `site.yml` targeting `desktop_nodes`
-- [ ] Add `desktop_configure` play targeting `desktop` dynamic group
-- [ ] Include `deploy_stamp` in provision play
-- [ ] Order play AFTER media tier
-- [ ] Verify `desktop_nodes` in `molecule/default/molecule.yml` platform groups
-
-**Verify:**
-
-- [ ] Full `ansible-playbook site.yml` runs without error (when targeting
-  desktop_nodes host)
-- [ ] deploy_stamp written on Proxmox host for desktop_vm play
-- [ ] Play order correct: desktop after media services
-
-**Rollback:** Remove plays from site.yml. deploy_stamp will show stale state
-until next full run.
-
----
-
-### Milestone 6: Testing
-
-_Blocked on: M1–M5._
-
-Extend molecule verify and cleanup, create `reconstruct_desktop_group.yml`
-for per-feature scenarios, add VM 400 and PCI cleanup to cleanup playbooks.
+Create per-feature molecule scenario for fast Desktop VM-only iteration,
+extend `molecule/default/verify.yml` for full integration, add rollback
+plays to `playbooks/cleanup.yml`, add VM and PCI cleanup to both cleanup
+playbooks, and run final validation.
 
 See: `ansible-testing` skill (verify completeness, per-feature scenario,
 baseline workflow), `proxmox-host-safety` skill (PCI cleanup after VM destroy).
 
-**Implementation pattern:**
-- `tasks/reconstruct_desktop_group.yml`: verify VM 400 running, `add_host` with
-  SSH + ProxyJump connection (ansible_connection, ansible_host, ProxyJump)
-- `molecule/default/verify.yml`: add Desktop VM assertions
-- `molecule/default/cleanup.yml` and `playbooks/cleanup.yml`: VM 400 stop +
-  destroy, PCI cleanup (vfio-pci unbind, driver reload)
-- Per-feature scenario: `molecule/desktop-vm/` with converge that reconstructs
-  desktop group first
+#### 5a. Per-feature scenario: `molecule/desktop-vm/`
 
-- [ ] Create `tasks/reconstruct_desktop_group.yml`:
-  - Verify VM 400 is running: `qm status {{ desktop_vm_id }}`
-  - Get VM LAN IP (from OpenWrt DHCP lease via VM MAC, or cloud-init metadata)
-  - Register via `add_host` with:
-    `ansible_connection: ansible.builtin.ssh`,
-    `ansible_host: <vm_lan_ip>`,
-    `ansible_ssh_common_args: -o ProxyJump=root@{{ ansible_host }} -o ServerAliveInterval=15 -o ServerAliveCountMax=4`,
-    `ansible_user: <desktop_user>`
-  - Required for per-feature molecule scenarios (add_host is ephemeral)
-  - See: `multi-node-ssh` skill (ProxyJump keepalives)
-- [ ] Extend `molecule/default/verify.yml`:
+- [ ] Create `molecule/desktop-vm/molecule.yml`:
+  ```yaml
+  platforms:
+    - name: home
+      groups:
+        - proxmox
+        - desktop_nodes
+  provisioner:
+    env:
+      HOME_API_TOKEN: ${HOME_API_TOKEN}
+      PRIMARY_HOST: ${PRIMARY_HOST}
+      DESKTOP_USER: ${DESKTOP_USER:-testuser}
+      DESKTOP_PASSWORD: ${DESKTOP_PASSWORD:-}
+      DESKTOP_SSH_PUBLIC_KEY: ${DESKTOP_SSH_PUBLIC_KEY:-}
+      DESKTOP_AUTOLOGIN: ${DESKTOP_AUTOLOGIN:-false}
+  scenario:
+    test_sequence:
+      - dependency
+      - syntax
+      - converge
+      - verify
+      - cleanup
+  ```
+
+- [ ] Create `molecule/desktop-vm/converge.yml`
+- [ ] Create `molecule/desktop-vm/verify.yml`
+- [ ] Create `molecule/desktop-vm/cleanup.yml`:
+  Destroys VM 400 and runs PCI cleanup (vfio-pci unbind, driver reload).
+
+#### 5b. Full integration (`molecule/default/`)
+
+- [ ] Extend `molecule/default/verify.yml` with Desktop VM assertions:
   - VM 400 created, cloud-init complete, SSH accessible
   - SDDM installed, KDE + GNOME packages present
   - GPU passthrough configured (`hostpci0` set)
-  - deploy_stamp contains desktop_vm
+  - Hookscript attached
+  - deploy_stamp contains `desktop_vm` entry
+
 - [ ] Extend `molecule/default/cleanup.yml` for VM 400:
   - `qm stop 400` + `qm destroy 400`
-  - PCI cleanup: unbind vfio-pci, remove vfio config, reload i915, rescan PCI
+  - PCI cleanup: unbind vfio-pci, remove vfio config, reload i915/amdgpu, rescan PCI
   - (See `proxmox-host-safety` skill, PCI device cleanup section)
+
+#### 5c. Rollback plays in `playbooks/cleanup.yml`
+
+- [ ] Add `desktop-rollback` play:
+  ```yaml
+  - name: Rollback Desktop VM
+    hosts: desktop_nodes
+    gather_facts: false
+    tags: [desktop-rollback, never]
+    tasks:
+      - name: Stop and destroy Desktop VM
+        ansible.builtin.shell:
+          cmd: |
+            qm stop {{ desktop_vm_id }} 2>/dev/null || true
+            sleep 3
+            qm destroy {{ desktop_vm_id }} --purge 2>/dev/null || true
+          executable: /bin/bash
+        changed_when: true
+
+      - name: PCI cleanup - restore iGPU to host
+        ansible.builtin.shell:
+          cmd: |
+            set -o pipefail
+            echo 1 > /sys/bus/pci/rescan
+          executable: /bin/bash
+        changed_when: true
+  ```
+
 - [ ] Extend `playbooks/cleanup.yml` with same VM + PCI cleanup
-- [ ] Create `molecule/desktop-vm/` per-feature scenario (optional):
-  - converge.yml: reconstruct desktop group, run desktop_configure
-  - verify.yml: reconstruct, run Desktop assertions
-  - cleanup.yml: VM destroy, PCI cleanup
-- [ ] Run `molecule test` — must pass with exit code 0
 
-**Verify:**
+#### 5d. Molecule env passthrough
 
-- [ ] Full `molecule test` passes with exit code 0
-- [ ] Verify assertions cover: VM state, cloud-init, SSH, packages, hostpci0,
-  deploy_stamp
-- [ ] Cleanup leaves no Desktop artifacts; iGPU returns to i915
+- [ ] Add `DESKTOP_USER`, `DESKTOP_PASSWORD`, `DESKTOP_SSH_PUBLIC_KEY`,
+  `DESKTOP_AUTOLOGIN` to `molecule/default/molecule.yml` `provisioner.env`
+
+#### 5e. Final validation
+
+- [ ] Run `molecule test` — full 4-node integration passes with exit code 0
+- [ ] Run `molecule test -s desktop-vm` — per-feature cycle passes
+- [ ] `ansible-lint && yamllint .` passes with no new warnings
+- [ ] Cleanup leaves no Desktop artifacts; iGPU returns to i915/amdgpu
 - [ ] PCI cleanup restores host GPU for next run
 
 **Rollback:** N/A — test infrastructure only; revert via git.
 
 ---
 
-### Milestone 7: Documentation
+### Milestone 6: Documentation
 
-_Blocked on: M1–M6._
-
-Create `docs/architecture/desktop-build.md`, update overview/roadmap, add
-CHANGELOG entry.
-
-See: `project-planning` skill (documentation accuracy).
+_Depends on M2–M5._
 
 - [ ] Create `docs/architecture/desktop-build.md`:
   - Requirements, design decisions, env variables
+  - Cloud image + apt install as documented exception to bake principle
   - iGPU exclusive passthrough, cloud-init bootstrap
   - Session switching (KDE/GNOME), SDDM config
   - Display-exclusive hookscript (deployed by Kiosk project 2026-03-09-12)
@@ -401,6 +525,9 @@ See: `project-planning` skill (documentation accuracy).
 - [ ] Update `docs/architecture/overview.md`:
   - site.yml diagram: Desktop provision + configure plays
   - Role catalog: desktop_vm, desktop_configure
+- [ ] Update `docs/architecture/roles.md`:
+  - Add `desktop_vm` role documentation (purpose, exclusive iGPU, key variables)
+  - Add `desktop_configure` role documentation (purpose, env vars, cloud-init exception)
 - [ ] Update `docs/architecture/roadmap.md`:
   - Add Desktop project to Active Projects
 - [ ] Add CHANGELOG entry under `[Unreleased]`
@@ -411,5 +538,23 @@ See: `project-planning` skill (documentation accuracy).
 - [ ] Documentation matches implemented behavior
 - [ ] All env variables documented
 - [ ] Display exclusivity and hookscript ownership (Kiosk project) documented
+- [ ] Cloud image + apt exception documented
 
 **Rollback:** N/A — documentation-only milestone.
+
+---
+
+## Future Integration Considerations
+
+- **Display exclusivity**: Desktop VM is the most disruptive display-exclusive
+  service. Starting it stops Kiosk, Kodi, and Moonlight AND unbinds the
+  iGPU from the host. Jellyfin falls back to software transcoding.
+- **Kiosk hookscript**: Desktop VM attaches the hookscript deployed by the
+  Kiosk project. When the Desktop VM stops, the hookscript restarts Kiosk
+  and the iGPU returns to the host driver.
+- **rsyslog**: Desktop VM logs can be forwarded to the rsyslog collector via
+  standard rsyslog client configuration inside the VM.
+- **Future: pre-built image**: If a single hardware platform is standardized,
+  a pre-built desktop image via Packer/debootstrap could replace the cloud
+  image + apt approach, bringing the Desktop VM in line with the bake
+  principle.

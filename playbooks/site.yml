@@ -128,6 +128,23 @@
   roles:
     - pihole_configure
 
+- name: Provision rsyslog LXC
+  hosts: monitoring_nodes
+  gather_facts: false
+  tags: [monitoring]
+  roles:
+    - rsyslog_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: rsyslog_lxc
+
+- name: Configure rsyslog
+  hosts: rsyslog
+  gather_facts: true
+  tags: [monitoring]
+  roles:
+    - rsyslog_configure
+
 - name: Provision WireGuard LXC
   hosts: vpn_nodes
   gather_facts: false
@@ -239,6 +256,36 @@
     - role: deploy_stamp
       vars:
         deploy_stamp_play: openwrt_mesh
+
+- name: Reconstruct openwrt group for syslog forwarding
+  hosts: router_nodes
+  gather_facts: true
+  tags:
+    - openwrt-syslog
+    - openwrt-syslog-rollback
+    - never
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: ../tasks/reconstruct_openwrt_group.yml
+
+- name: Apply syslog forwarding to OpenWrt
+  hosts: openwrt
+  gather_facts: false
+  tags: [openwrt-syslog, never]
+  tasks:
+    - name: Include syslog tasks
+      ansible.builtin.include_role:
+        name: openwrt_configure
+        tasks_from: syslog.yml
+
+- name: Record syslog forwarding
+  hosts: router_nodes
+  gather_facts: false
+  tags: [openwrt-syslog, never]
+  roles:
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: openwrt_syslog
 
 - name: Reconstruct openwrt group for Pi-hole DNS forwarding
   hosts: router_nodes

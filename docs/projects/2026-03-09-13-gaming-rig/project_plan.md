@@ -47,6 +47,18 @@ Minimum Gaming Rig Hardware
 - Gaming Rig: yes (core)
 - The gaming rig host also belongs to `monitoring_nodes` for Netdata + rsyslog
 
+## Network topology assumption
+
+`gaming_nodes` is **separate physical hardware** that may or may not be
+behind an OpenWrt router. The Gaming Rig build profile does NOT include
+`router_nodes` — it connects directly to the upstream network (ISP router
+or switch). The Windows VM uses the host's WAN bridge and gets its IP
+from the upstream DHCP server.
+
+This is fundamentally different from Home Entertainment Box services which
+are always behind OpenWrt. There is no LAN/WAN branching decision — the
+Gaming Rig always uses the WAN bridge.
+
 ## Prerequisites
 
 - Shared infrastructure: `proxmox_pci_passthrough` role (project 00) — extended
@@ -57,6 +69,8 @@ Minimum Gaming Rig Hardware
   invalid)
 - Windows 11 ISO or image in `images/` directory
 - virtio-win ISO in `images/` directory
+- `gaming_vm_id: 600` already in `group_vars/all.yml`
+- `gaming_nodes` flavor group and `gaming` dynamic group already in `inventory/hosts.yml`
 
 ## Skills
 
@@ -79,6 +93,11 @@ Decisions
 ├── Gaming OS: Windows 11
 │   └── Required for AAA game compatibility; DirectX 12; widest game library
 │
+├── Image management: Windows ISO + autounattend.xml (install-from-media)
+│   └── Windows is inherently install-from-ISO. This is NOT an exception to the bake
+│       principle — it IS the bake approach for Windows. The ISO + autounattend.xml
+│       produce a deterministic, unattended install with drivers pre-injected.
+│
 ├── Streaming server: Sunshine
 │   └── Open-source, cross-platform Moonlight host; replaces NVIDIA GeForce Experience
 │
@@ -98,17 +117,58 @@ Decisions
 ├── Looking Glass: deferred (not in scope for initial build)
 │   └── Adds complexity; Sunshine covers streaming use case; revisit if local display needed
 │
-├── Windows provisioning: virtio ISO + autounattend.xml
-│   └── Automated Windows install with virtio drivers; no manual interaction required
-│
 ├── Configuration method: WinRM or SSH
 │   └── gaming_configure connects via WinRM (ansible.windows) or SSH (OpenSSH on Windows)
 │
-├── Image management: local images/ directory
-│   └── NEVER use remote downloads; upload from controller; paths in group_vars/all.yml
-│
 └── Monitoring: provisioned by monitoring projects
     └── Gaming host joins monitoring_nodes; Netdata + rsyslog added by those projects
+```
+
+---
+
+## Testing Strategy
+
+### Parallelism in `molecule/default` (full integration)
+
+The gaming rig is **separate physical hardware**. When gaming hardware is
+available, it appears as a separate platform in `molecule/default/molecule.yml`
+(conditional). When unavailable, gaming plays are skipped and only role
+syntax and cleanup logic are validated.
+
+### Per-feature scenarios (fast iteration)
+
+Day-to-day development uses `molecule/gaming-vm/` which requires actual
+gaming hardware. The per-feature scenario provisions and configures only
+VMID 600.
+
+```
+Scenario Hierarchy (Gaming Rig additions)
+├── molecule/default/                 Full integration (requires gaming hardware)
+│   └── Runs gaming provision + configure on gaming_nodes host
+│
+└── molecule/gaming-vm/              Gaming VM only (requires gaming hardware)
+    ├── converge: provision + configure Gaming VM
+    ├── verify: VM assertions (GPU passthrough, Sunshine, Windows)
+    └── cleanup: destroy VM 600 + PCI cleanup (restore GPU to host)
+```
+
+### Hardware dependency
+
+| Hardware state | What runs | What's validated |
+|---------------|-----------|------------------|
+| Gaming hardware present | Full converge + verify + cleanup | VM state, GPU passthrough, Sunshine, Windows config |
+| No gaming hardware | Syntax check, cleanup logic | Role structure, variable templating, cleanup correctness |
+
+### Day-to-day workflow
+
+```bash
+# Only when gaming hardware is available:
+molecule converge -s gaming-vm                # ~5 min, provision + configure
+molecule verify -s gaming-vm                  # ~30s, assertions
+molecule cleanup -s gaming-vm                 # destroys VM 600, PCI cleanup
+
+# Final validation (all hardware present):
+molecule test                                 # full clean-state
 ```
 
 ---
@@ -122,8 +182,8 @@ M1: Image & Driver Prep ─── self-contained
            └── M4: Backup Strategy ─ depends on M2
                 └── M5: Streaming Verify ─ depends on M3
                      └── M6: Monitoring ─── depends on monitoring projects (host group only)
-                          └── M7: Integration ─ depends on M1–M5
-                               └── M8: Documentation ─ depends on M1–M7
+                          └── M7: Testing & Integration ── depends on M2–M5
+                               └── M8: Documentation ── depends on M1–M7
 ```
 
 ---
@@ -165,7 +225,9 @@ See: `vm-lifecycle` skill (image management, local images/ directory).
 
 ### Milestone 2: VM Provisioning
 
-_Self-contained. Depends on M1 (images ready). Requires `proxmox_pci_passthrough` extended for discrete GPU._
+_Depends on M1 (images ready). Requires `proxmox_pci_passthrough` extended
+for discrete GPU._ Add the provision and configure plays to `site.yml`.
+Integration is consolidated here.
 
 Create the `gaming_vm` role: q35 machine type, OVMF UEFI, virtio-scsi, discrete
 GPU via hostpci. The GPU PCI address comes from `proxmox_pci_passthrough`
@@ -177,9 +239,14 @@ See: `proxmox-host-safety` skill (discrete GPU passthrough, IOMMU validation, q3
 
 **Implementation pattern:**
 - Role: `roles/gaming_vm/defaults/main.yml`, `tasks/main.yml`, `meta/main.yml`
-- site.yml: provision play targeting `gaming_nodes`, tagged `[gaming]`
+- site.yml: provision play targeting `gaming_nodes`, tagged `[gaming]`,
+  in the appropriate phase for the gaming host
 - deploy_stamp included as last role in the provision play
 - Dynamic group `gaming` populated via `add_host` (WinRM/SSH connection vars)
+
+**Already complete** (from shared infrastructure / inventory):
+- `gaming_vm_id: 600` in `group_vars/all.yml`
+- `gaming_nodes` flavor group and `gaming` dynamic group in `inventory/hosts.yml`
 
 - [ ] Create `roles/gaming_vm/defaults/main.yml`:
   - `gaming_vm_id: 600`, `gaming_vm_memory: 8192` (or 16384), `gaming_vm_cores: 8`
@@ -192,12 +259,20 @@ See: `proxmox-host-safety` skill (discrete GPU passthrough, IOMMU validation, q3
   - Import Windows disk image (or attach ISO + autounattend for install)
   - Attach virtio-win ISO as second CD-ROM
   - Configure `hostpci0` for discrete GPU (PCI address from `proxmox_pci_passthrough` gpu_pci_devices)
-  - Attach NIC on LAN bridge (virtio model)
+  - Attach NIC on WAN bridge (virtio model) — gaming rig has no OpenWrt
   - CPU: host model, hidden KVM, `topoext` for AMD (or appropriate Intel flags)
   - Set `--onboot 1 --startup order=1` (unconditional, self-healing)
   - Start VM
   - Register in `gaming` dynamic group via `add_host` with WinRM/SSH connection vars
 - [ ] Create `roles/gaming_vm/meta/main.yml` with required metadata
+- [ ] Add provision play to `site.yml` targeting `gaming_nodes`, tagged `[gaming]`,
+  with `gaming_vm` role and `deploy_stamp`
+- [ ] Add configure play to `site.yml` targeting `gaming` dynamic group,
+  tagged `[gaming]`, after provision play
+- [ ] Create `tasks/reconstruct_gaming_group.yml`:
+  - Verify VM 600 is running (`qm status {{ gaming_vm_id }}`)
+  - Register via `add_host` with WinRM/SSH connection vars,
+    `ansible_host` (VM IP or Proxmox + port forward)
 - [ ] Extend `proxmox_pci_passthrough` for discrete GPU detection on gaming hosts if not present:
   - Detect VGA/3D controllers (NVIDIA, AMD); export `gpu_pci_devices` fact
   - Same IOMMU validation, vfio-pci binding pattern as WiFi
@@ -228,7 +303,7 @@ cleanup after passthrough).
 
 ### Milestone 3: Windows Configuration
 
-_Self-contained. Depends on M2 (VM running)._
+_Depends on M2 (VM running)._
 
 Configure the Windows 11 guest via WinRM or SSH: virtio drivers, GPU drivers,
 Sunshine, optional Steam, Windows Update policy, RDP.
@@ -263,11 +338,6 @@ See: `vm-lifecycle` skill (configure role, dynamic group targeting).
   - Disable Windows Update auto-restart (gaming interruption prevention)
   - Enable RDP for backup remote access
 - [ ] Create `roles/gaming_configure/meta/main.yml` with required metadata
-- [ ] Add configure play to `site.yml` targeting `gaming` dynamic group, tagged `[gaming]`
-- [ ] Create `tasks/reconstruct_gaming_group.yml`:
-  - Verify VM 600 is running (`qm status {{ gaming_vm_id }}`)
-  - Register via `add_host` with WinRM/SSH connection vars, `ansible_host` (VM IP or Proxmox + port forward)
-  - Required for per-feature molecule converge/verify/cleanup (add_host is ephemeral)
 
 **Verify:**
 
@@ -289,7 +359,7 @@ See: `vm-lifecycle` skill (configure role, dynamic group targeting).
 
 ### Milestone 4: Backup & Snapshot Strategy
 
-_Self-contained. Depends on M2 (VM exists)._
+_Depends on M2 (VM exists)._
 
 Configure vzdump schedule, exclude game data, document restore procedure.
 
@@ -312,7 +382,7 @@ See: `rollback-patterns` skill (backup before changes).
 
 ### Milestone 5: Streaming Verification
 
-_Self-contained. Depends on M3 (Sunshine configured)._
+_Depends on M3 (Sunshine configured)._
 
 Verify Sunshine web UI, Moonlight pairing, streaming quality, wake-on-suspend.
 
@@ -354,45 +424,92 @@ is in the group and documents what gets monitored.
 
 ---
 
-### Milestone 7: Integration
+### Milestone 7: Testing & Integration
 
-_Self-contained. Depends on M1–M5._
+_Depends on M2–M5._
 
-Wire up site.yml, inventory, molecule default scenario, cleanup completeness.
+Wire up molecule testing, cleanup completeness, and final validation.
 
 See: `vm-lifecycle` skill (site.yml plays, flavor group, deploy_stamp).
 See: `ansible-testing` skill (verify assertions, cleanup completeness).
 See: `build-conventions` skill (entry point, tags).
 
-**Implementation pattern:**
-- site.yml: provision play targeting `gaming_nodes`, configure play targeting `gaming`
-- Inventory: `gaming_nodes` flavor group, `gaming` dynamic group (already in hosts.yml)
-- Molecule: `gaming_nodes` in `molecule/default/molecule.yml` platform groups (when gaming hardware present)
-- Cleanup: VM destruction via `qm list` iteration; PCI cleanup (vfio unbind, driver reload)
+#### 7a. Per-feature scenario: `molecule/gaming-vm/`
 
-- [ ] Add `gaming_vm` provision play to `site.yml` targeting `gaming_nodes`, tagged `[gaming]`
-- [ ] Add `gaming_configure` play targeting `gaming` dynamic group, tagged `[gaming]`
-- [ ] Include `deploy_stamp` as last role in provision play
-- [ ] Add `gaming_nodes` to `molecule/default/molecule.yml` platform groups (conditional on hardware)
-- [ ] Extend `molecule/default/verify.yml` with Gaming VM assertions (when hardware present)
+- [ ] Create `molecule/gaming-vm/molecule.yml`:
+  ```yaml
+  platforms:
+    - name: gaming-host
+      groups:
+        - proxmox
+        - gaming_nodes
+  provisioner:
+    env:
+      GAMING_HOST_API_TOKEN: ${GAMING_HOST_API_TOKEN}
+      SUNSHINE_USER: ${SUNSHINE_USER:-}
+      SUNSHINE_PASSWORD: ${SUNSHINE_PASSWORD:-}
+      WINDOWS_PRODUCT_KEY: ${WINDOWS_PRODUCT_KEY:-}
+  scenario:
+    test_sequence:
+      - dependency
+      - syntax
+      - converge
+      - verify
+      - cleanup
+  ```
+
+- [ ] Create `molecule/gaming-vm/converge.yml`
+- [ ] Create `molecule/gaming-vm/verify.yml`
+- [ ] Create `molecule/gaming-vm/cleanup.yml`:
+  Destroys VM 600 and runs PCI cleanup.
+
+#### 7b. Full integration (`molecule/default/`)
+
+- [ ] Add `gaming_nodes` to `molecule/default/molecule.yml` platform groups
+  (conditional on gaming hardware availability)
+- [ ] Extend `molecule/default/verify.yml` with Gaming VM assertions
+  (when hardware present):
+  - VM 600 running, onboot=1, startup order=1
+  - GPU passthrough configured, machine type q35, OVMF UEFI
+  - Sunshine accessible, deploy_stamp present
+
 - [ ] Extend `molecule/default/cleanup.yml` and `playbooks/cleanup.yml`:
   - VM: `qm list` iteration → `qm stop` + `qm destroy` for VMID 600
   - PCI: vfio-pci unbind, remove blacklist/vfio config, reload driver, rescan PCI
-- [ ] Create `molecule/gaming-vm/` scenario for gaming-specific tests (requires actual hardware)
-- [ ] Update `build.py` docstring with `gaming` tag
-- [ ] Add `tasks/reconstruct_gaming_group.yml` and use it in per-feature converge/verify/cleanup
 
-**Testing strategy:** The gaming rig is separate hardware. If no gaming hardware is available:
-- Tests verify role structure, variable templating, and cleanup playbook logic only
-- Molecule scenario for gaming requires the actual hardware to run full converge/verify
+#### 7c. Rollback plays in `playbooks/cleanup.yml`
 
-**Verify:**
+- [ ] Add `gaming-rollback` play:
+  ```yaml
+  - name: Rollback Gaming VM
+    hosts: gaming_nodes
+    gather_facts: false
+    tags: [gaming-rollback, never]
+    tasks:
+      - name: Stop and destroy Gaming VM
+        ansible.builtin.shell:
+          cmd: |
+            qm stop {{ gaming_vm_id }} 2>/dev/null || true
+            sleep 3
+            qm destroy {{ gaming_vm_id }} --purge 2>/dev/null || true
+          executable: /bin/bash
+        changed_when: true
+
+      - name: PCI cleanup - restore GPU to host
+        ansible.builtin.shell:
+          cmd: |
+            set -o pipefail
+            echo 1 > /sys/bus/pci/rescan
+          executable: /bin/bash
+        changed_when: true
+  ```
+
+#### 7d. Final validation
 
 - [ ] Full `molecule test` passes when gaming hardware present (exit code 0)
 - [ ] Without gaming hardware: role syntax valid, cleanup playbooks handle missing VM
-- [ ] Verify assertions cover: VM state, auto-start, GPU passthrough, deploy_stamp
-- [ ] Cleanup leaves no gaming artifacts; PCI devices unbound from vfio-pci
 - [ ] `ansible-lint && yamllint .` passes
+- [ ] Cleanup leaves no gaming artifacts; PCI devices unbound from vfio-pci
 
 **Rollback:** Revert site.yml plays, molecule config; cleanup restores baseline.
 
@@ -400,17 +517,21 @@ See: `build-conventions` skill (entry point, tags).
 
 ### Milestone 8: Documentation
 
-_Self-contained. Run after all implemented milestones._
+_Depends on M1–M7._
 
 - [ ] Create `docs/architecture/gaming-build.md`:
+  - Image management (Windows ISO + autounattend.xml, virtio-win)
   - Requirements, design decisions, env variables
   - Discrete GPU passthrough (NOT iGPU), IOMMU requirements, q35/OVMF
   - Sunshine setup, Moonlight pairing
-  - Image management (local images/), virtio-win
+  - Separate build profile and hardware topology
   - Testing strategy (hardware-dependent)
 - [ ] Update `docs/architecture/overview.md`:
   - site.yml diagram: add Gaming provision + configure plays
   - Gaming Rig section: discrete GPU, separate build profile
+- [ ] Update `docs/architecture/roles.md`:
+  - Add `gaming_vm` role documentation (purpose, discrete GPU, key variables)
+  - Add `gaming_configure` role documentation (purpose, WinRM/SSH, Sunshine)
 - [ ] Update `docs/architecture/roadmap.md`:
   - Add Gaming Rig project to Active Projects section
 - [ ] Add CHANGELOG entry under `[Unreleased]`
@@ -420,6 +541,23 @@ _Self-contained. Run after all implemented milestones._
 - [ ] `ansible-lint && yamllint .` passes with no new warnings
 - [ ] Documentation matches implemented behavior
 - [ ] All env variables documented: `WINDOWS_PRODUCT_KEY`, `SUNSHINE_USER`, `SUNSHINE_PASSWORD`
-- [ ] IOMMU hard-fail, PCI cleanup, reconstruct_gaming_group documented
+- [ ] IOMMU hard-fail, PCI cleanup, separate hardware topology documented
 
 **Rollback:** N/A — documentation-only milestone.
+
+---
+
+## Future Integration Considerations
+
+- **Moonlight client**: The Moonlight client (project 10) on the Home
+  Entertainment Box streams from this Gaming Rig's Sunshine server.
+  Pairing requires both services operational on the LAN.
+- **Monitoring**: The gaming rig host joins `monitoring_nodes`. Netdata
+  and rsyslog are provisioned by the monitoring projects — GPU temperature,
+  fan speed, and streaming session metrics are collected automatically.
+- **Looking Glass**: If local display output is needed (monitor directly
+  connected to gaming rig), Looking Glass can provide low-latency shared
+  memory display. Deferred to future enhancement.
+- **Multi-GPU**: If the gaming rig has multiple discrete GPUs, the
+  `proxmox_pci_passthrough` role must be extended to select the correct
+  GPU for passthrough. Currently assumes a single discrete GPU.

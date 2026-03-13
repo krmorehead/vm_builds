@@ -622,6 +622,36 @@ directly against VMs in verify — use raw commands instead.
         fail_msg: "HomeAssistant VM is not running"
 ```
 
+## LXC container verify checklist
+
+LXC services need deeper verification than "container is running." The
+following categories should be tested for every LXC service:
+
+| Category | Example assertions |
+|---|---|
+| Container state | Running, correct VMID |
+| Auto-start | `onboot=1`, `startup order=N` |
+| Baked config | All baked config files exist inside container |
+| Config validation | Service config passes validation (e.g., `rsyslogd -N1`, `nginx -t`) |
+| Service state | `systemctl is-active <service>` |
+| Network listener | Port is listening (`ss -tlnp`) |
+| Functional test | Send data, verify it's received/processed |
+| Multi-source test | Multiple senders/tags produce correctly separated output |
+| No-leak test | Remote data stays in remote logs, not local syslog |
+| Restart resilience | Stop/start service, verify listener and reception recover |
+| Resource usage | Memory within allocation (e.g., `free -m` < allocated) |
+| Logrotate | Config exists and passes `logrotate --debug` validation |
+| Deploy stamp | `stamp.plays` contains the service entry |
+
+The no-leak test is critical for services that use rsyslog's `stop` directive
+to prevent remote messages from polluting local logs. Without it, the `stop`
+directive could silently break and double-log everything.
+
+Previous bug: rsyslog used a named ruleset for TCP input. Messages in the
+named ruleset never reached the default ruleset, so forwarding config
+deployed at number 20 never saw remote messages. The no-leak test catches
+this class of routing error.
+
 ## Hard-fail over graceful degradation
 
 NEVER add "graceful skip" logic for hardware expected on every host. Silent
@@ -816,6 +846,81 @@ permanent diagnostics been in place, the first run would have shown the issue.
 3. **Interface/bridge state**: `ip addr`, `ip route`, bridge membership
 4. **Firewall state**: zone bindings, nftables chains
 5. **Protocol-level test**: test with the actual protocol (TCP, HTTP) not just ICMP
+
+## Molecule env var handling
+
+Molecule's `provisioner.env` section uses `${VAR_NAME}` syntax for variable
+substitution. NEVER use shell-style defaults like `${VAR:-default}` — the
+parser treats `:-}` as part of the variable name and fails with "Invalid
+placeholder in string."
+
+For required env vars: use `${VAR_NAME}` and ensure the var is always set
+in `test.env` (sourced before `molecule test`).
+
+For optional env vars: do NOT add them to `provisioner.env` at all. The
+role's `defaults/main.yml` already uses `lookup('env', 'VAR_NAME') | default('', true)`,
+which reads directly from the shell environment. Ansible inherits the full
+shell environment regardless of what `provisioner.env` lists.
+
+Previous bug: `RSYSLOG_HOME_SERVER: ${RSYSLOG_HOME_SERVER:-}` in
+`molecule.yml` caused "Invalid placeholder in string" and prevented all
+molecule runs from starting.
+
+## Multi-node E2E testing
+
+When a service needs testing on all 4 nodes (home, mesh1, ai, mesh2), add the
+flavor group to ALL platforms in the molecule default scenario — not just the
+static inventory. This is a test-only change that doesn't affect production.
+
+Verify tasks for multi-node scenarios MUST avoid recomputing IPs. Instead,
+query the actual container state from Proxmox:
+
+```yaml
+- name: Get container IP from Proxmox config
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct config {{ ct_id }} | grep -oP 'ip=\K[^/,]+'
+    executable: /bin/bash
+  register: _ct_ip_query
+  changed_when: false
+```
+
+This pattern:
+- Works for both LAN and WAN hosts
+- Eliminates `default('10.10.10.1', true)` fallbacks in verify tasks
+- Avoids index computation drift between per-feature and E2E scenarios
+- Serves as a hard-fail if the container doesn't exist (empty stdout)
+
+Previous bug: rsyslog verify computed IP as `LAN_GATEWAY + offset`. This only
+worked for LAN hosts and used a fallback default for the gateway. With 4-node
+testing, WAN hosts had wrong computed IPs. Fixed by querying `pct config`.
+
+## Verify task conventions
+
+1. **Fail-fast IP validation.** After retrieving a container IP (via `pct config`),
+   assert it is non-empty and doesn't collide with the host IP BEFORE any
+   functional tests (log send, DNS query, etc.). Wrong-IP errors are confusing
+   when they surface as "log not found" 10 tasks later.
+
+2. **No `failed_when: false` on client sends.** When sending test traffic
+   (`logger --tcp`, `dig`, `curl`), let the task fail immediately on connection
+   error. The real failure message ("Connection refused") is far more
+   informative than a downstream "expected output not found" assertion.
+   Reserve `failed_when: false` for commands whose rc is checked by a later
+   assertion (e.g., `grep -c` that returns rc=1 on no match).
+
+3. **`set -o pipefail` only on pipelines.** Never add `pipefail` to
+   single-command or `&&`-chained tasks. It adds noise and obscures the
+   convention that "pipefail = there is a pipe here." Correct: `pct exec ...
+   | grep -c ...` with pipefail. Wrong: `logger --tcp ...` with pipefail.
+
+4. **Use standard modules for service management.** Prefer
+   `ansible.builtin.systemd` over `ansible.builtin.command: cmd: systemctl
+   restart ...` for restarts and state management. Both work over `pct_remote`,
+   but the module reports state accurately and follows Ansible conventions.
+   Use `command` only for status checks (`systemctl is-active`) or validation
+   (`rsyslogd -N1`).
 
 ## Lint configuration
 

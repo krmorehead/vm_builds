@@ -31,9 +31,14 @@ This project manages multiple VM and LXC container types on Proxmox. Each servic
 18. Every entry point that targets a dynamic group as a separate `ansible-playbook` invocation (per-feature converge, verify, cleanup/rollback) MUST reconstruct the group first. `add_host` state is ephemeral.
 19. LXC container networking MUST match the host's actual topology. Hosts behind OpenWrt (`router_nodes`, `lan_hosts`) use the OpenWrt LAN subnet. Hosts directly on WAN use `ansible_default_ipv4.gateway/prefix`. NEVER hardcode all containers to the OpenWrt LAN subnet.
 20. `add_host` loops in `proxmox_lxc` MUST use `ansible_play_hosts` (not `ansible_play_hosts_all`). The latter includes hosts that failed in earlier plays, creating phantom container registrations.
-21. **Bake, don't configure at runtime** (see `project-structure.mdc` Design principles). Custom images are REQUIRED. Provision roles verify the image exists and hard-fail if missing. Configure roles NEVER install packages — all packages are baked into the image. To add a package, update the image build script and rebuild.
+21. **Bake, don't configure at runtime** (see `project-structure.mdc` Design principles). Custom images are REQUIRED. Provision roles verify the image exists and hard-fail if missing. Configure roles NEVER install packages — all packages are baked into the image. To add a package, update the image build script and rebuild. Three documented exceptions exist (see below).
 22. **One path, no fallbacks** (see `project-structure.mdc` Design principles). NEVER add stock/generic image fallback logic. One tested code path per feature. Missing prerequisites fail with an actionable error message.
 23. **Follow community standards** (see `project-structure.mdc` Design principles). Check upstream tooling before writing custom workarounds.
+24. **Documented exceptions to bake principle**: three cases where runtime installation is acceptable. Each MUST be explicitly documented in the project plan with rationale:
+    - **Docker pull of pinned image tag**: deterministic and versioned. Used for Docker-in-LXC services (e.g., Home Assistant pre-pulls `homeassistant/home-assistant:stable`).
+    - **Desktop VMs via cloud image + apt**: full desktop environments (KDE, GNOME, 2-4 GB packages) are too large and hardware-dependent for pre-built images. GPU drivers depend on `igpu_vendor` (Intel vs AMD), known only at runtime. Cloud image + cloud-init is the community standard for VM provisioning.
+    - **Windows VMs via ISO + autounattend.xml**: install-from-ISO IS the bake approach for Windows. The ISO + autounattend.xml produce a deterministic, unattended install with virtio drivers pre-injected. This is NOT an exception — it is how Windows images are built.
+    Any OTHER runtime package installation (`apt install`, `opkg install`, `pip install` during converge) is rejected. If you need a new package, add it to the image build script.
 
 ## Playbook execution order (site.yml)
 
@@ -388,6 +393,68 @@ Roles that install packages on the Proxmox HOST (not inside VMs/containers) must
 
 The `deploy_stamp` role writes `/etc/ansible/facts.d/vm_builds.fact` on Proxmox hosts after each play. On subsequent runs with `gather_facts: true`, the data is available as `ansible_local.vm_builds`. Each play appends its entry without overwriting others.
 
+## Service config validation
+
+Configure roles that deploy config files into LXC containers SHOULD validate
+the config before restarting the service. If the config is invalid, the
+service won't start and the container loses the service until the config is
+fixed.
+
+Pattern: use an Ansible handler chain where validation runs before restart:
+```yaml
+# handlers/main.yml
+- name: Validate config
+  ansible.builtin.command:
+    cmd: <service> --check-config  # e.g., rsyslogd -N1, nginx -t
+  listen: _restart_service
+  changed_when: false
+
+- name: Restart service
+  ansible.builtin.command:
+    cmd: systemctl restart <service>
+  listen: _restart_service
+```
+
+Handlers with the same `listen` event run in definition order. If validation
+fails, the chain stops and the restart never executes.
+
+After flush_handlers, add a health check with retries to confirm the service
+came up:
+```yaml
+- name: Wait for service
+  ansible.builtin.command:
+    cmd: systemctl is-active <service>
+  retries: 5
+  delay: 2
+  until: result.stdout | trim == 'active'
+```
+
+Previous bug: rsyslog `20-forward.conf` deployment had no config validation.
+An invalid template would have crashed rsyslog on restart, killing log
+reception for all upstream senders.
+
+## Config file ordering for optional runtime configs
+
+When baked image configs need to interoperate with optional runtime configs,
+use numbered filenames in `/etc/<service>.d/` to control processing order:
+
+```
+10-base.conf       — module loads, template definitions (baked)
+20-optional.conf   — runtime config deployed by configure role
+50-routing.conf    — final routing/filtering (baked)
+```
+
+This pattern is needed when:
+- The runtime config needs to intercept messages before the baked config
+  processes them (e.g., forwarding before local storage)
+- The baked config uses `stop` to prevent messages from falling through
+
+Previous bug: rsyslog used a named ruleset for TCP-received messages.
+Messages in a named ruleset never enter the default ruleset, so the
+optional forwarding config (in the default ruleset) never saw remote
+messages. Fix: remove the named ruleset, use a property filter with `stop`
+at number 50, and deploy forwarding at number 20.
+
 ## Diagnostics pattern
 
 Every VM type SHOULD include diagnostic tasks at key milestones in its roles.
@@ -485,6 +552,57 @@ skill for full details. Summary:
       # ... undo UCI, remove packages, restart services
 ```
 
+## Cross-cutting infrastructure ownership
+
+Some infrastructure components are deployed by one service but consumed by
+multiple services. The deploying project OWNS the resource; other projects
+only ATTACH to it. This prevents duplicate deployment tasks and conflicting
+configurations.
+
+Current cross-cutting components:
+
+| Component                  | Owning project     | Consumers                        |
+|----------------------------|--------------------|---------------------------------|
+| Display-exclusive hookscript | Custom UX Kiosk   | Kodi, Moonlight, Desktop VM, Gaming VM |
+
+Rules:
+- Only the owning project deploys the hookscript (via its provision role).
+- Other projects add `hookscript: <path>` to their VM/container config.
+- If the hookscript doesn't exist yet (owning project not deployed), the
+  consumer's provision role MUST skip hookscript attachment with a warning,
+  NOT deploy its own copy.
+- Document the owning project explicitly in each consumer's project plan.
+
+## Separate hardware topology
+
+Services that run on separate physical hardware (e.g., Gaming Rig on a
+dedicated machine) have unique characteristics:
+
+- No OpenWrt router — the machine connects directly to the ISP router.
+- Build profile may differ from the primary cluster.
+- Testing requires the hardware to be physically available.
+- Molecule scenarios should be conditional: skip when hardware unavailable
+  rather than hard-fail.
+
+Document the hardware topology separately in the project plan, including:
+- Which machine, where it is, how it connects to the network.
+- Which build profile it uses.
+- How testing works when hardware is unavailable.
+
+## VA-API driver portability
+
+Image builds for services that use the iGPU for hardware acceleration
+(Jellyfin, Kodi, Moonlight) SHOULD include BOTH Intel and AMD VA-API driver
+packages. At runtime, only the matching driver loads.
+
+Intel: `intel-media-va-driver` + `vainfo`
+AMD: `mesa-va-drivers` + `vainfo`
+
+This avoids rebuilding images when a container is moved to different
+hardware. The configure role reads `igpu_vendor` (exported by
+`proxmox_igpu`) to set `LIBVA_DRIVER_NAME` appropriately (`iHD` for Intel,
+`radeonsi` for AMD).
+
 ## Hardware detection: hard-fail by default
 
 NEVER add "graceful skip" for hardware expected on every host. Roles MUST
@@ -529,6 +647,77 @@ IOMMU groups were invalid. Root cause was VT-d disabled in BIOS — a
   depends on `linux-image-rt-amd64`. Without `install_recommends: false`,
   apt pulled in a 70MB kernel image that filled the 1GB container disk
   (No space left on device).
+
+## Per-host IP indexing for multi-node LXC services
+
+When a service deploys to multiple Proxmox hosts (e.g., rsyslog on all
+monitoring_nodes), each container needs a unique IP. Use the host's index
+in its flavor group: `offset + groups['<flavor>'].index(inventory_hostname)`.
+
+- Ansible sorts group members ALPHABETICALLY. The index depends on the full
+  group composition, which can differ between per-feature and E2E scenarios.
+- Verify tasks MUST query the actual container IP from `pct config` instead
+  of recomputing it. This avoids index drift between scenarios.
+- WAN IPs add +200 to the base offset: `offset + 200 + index`.
+- ALWAYS check that WAN IPs don't collide with any host's management IP.
+  Previous bug: rsyslog_ct_ip_offset=11 produced WAN IP .211, colliding
+  with mesh2's host IP (192.168.86.211).
+
+Pattern for querying actual IP in verify tasks:
+
+```yaml
+- name: Get container IP from Proxmox config
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct config {{ ct_id }} | grep -oP 'ip=\K[^/,]+'
+    executable: /bin/bash
+  register: _ct_ip_query
+  changed_when: false
+```
+
+## Per-feature scenario group membership
+
+Per-feature Molecule scenarios MUST include all groups that affect the role's
+branching logic. The role's `when:` conditions check group membership — if a
+group is missing, the wrong branch executes.
+
+- Previous bug: rsyslog-lxc scenario had `home` in `monitoring_nodes` only.
+  The LAN/WAN detection checked `router_nodes` membership, found it missing,
+  took the WAN path, and failed because `ansible_default_ipv4` was undefined
+  (no `gather_facts`).
+- Fix: add `router_nodes` to the per-feature scenario's platform groups for
+  hosts that need the LAN path.
+- This applies to ALL LXC roles with LAN/WAN branching, not just rsyslog.
+
+## Logrotate in LXC containers
+
+When writing logrotate configs baked into LXC images, use `root adm` as the
+file ownership — NOT `syslog adm`. The `syslog` user may not exist in minimal
+container templates. The Debian community standard for `/etc/logrotate.d/rsyslog`
+uses `root adm`.
+
+Previous bug: logrotate config with `create 0640 syslog adm` failed in the
+rsyslog container because the `syslog` user didn't exist in the Proxmox
+Debian 12 standard template. The chown fallback in build-images.sh (`chown
+syslog:syslog || chown root:root`) masked this — a graceful fallback that
+should have been a hard error.
+
+## Handler conventions for LXC service roles
+
+Configure roles that run inside LXC containers via `pct_remote` MUST use
+`ansible.builtin.systemd` for service restarts in handlers, not
+`ansible.builtin.command: cmd: systemctl restart ...`. Both work over
+`pct_remote`, but the module follows Ansible conventions, reports state
+accurately, and matches the pattern established by `pihole_configure`.
+
+Use `ansible.builtin.command` only for operations that have no module
+equivalent: config validation (`rsyslogd -N1`), status checks
+(`systemctl is-active`), and binary execution (`pihole -g`).
+
+Previous bug: `rsyslog_configure` handler used `ansible.builtin.command`
+for restart while `pihole_configure` used `ansible.builtin.systemd`. Fixed
+for consistency.
 
 ## Secret generation
 

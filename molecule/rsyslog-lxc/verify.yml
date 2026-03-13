@@ -1,0 +1,425 @@
+---
+- name: Reconstruct rsyslog dynamic group
+  hosts: monitoring_nodes
+  gather_facts: false
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_rsyslog_group.yml
+
+- name: Verify rsyslog LXC container
+  hosts: monitoring_nodes
+  gather_facts: false
+  tasks:
+    # ── Container state ──────────────────────────────────────────
+
+    - name: Check container is running
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct status {{ rsyslog_ct_id }} | grep -c running
+        executable: /bin/bash
+      register: _rsyslog_running
+      changed_when: false
+
+    - name: Assert container is running
+      ansible.builtin.assert:
+        that: (_rsyslog_running.stdout | trim | int) > 0
+        fail_msg: "Container {{ rsyslog_ct_id }} is not running"
+
+    # ── Auto-start ───────────────────────────────────────────────
+
+    - name: Check onboot setting
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ rsyslog_ct_id }} | grep -oP '^onboot:\s*\K.*'
+        executable: /bin/bash
+      register: _rsyslog_onboot
+      changed_when: false
+
+    - name: Assert onboot is enabled
+      ansible.builtin.assert:
+        that: (_rsyslog_onboot.stdout | trim) == '1'
+        fail_msg: "onboot={{ _rsyslog_onboot.stdout | trim }}, expected 1"
+
+    - name: Check startup order
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ rsyslog_ct_id }} | grep -oP '^startup:\s*order=\K\d+'
+        executable: /bin/bash
+      register: _rsyslog_startup
+      changed_when: false
+
+    - name: Assert startup order is 3
+      ansible.builtin.assert:
+        that: (_rsyslog_startup.stdout | trim) == '3'
+        fail_msg: "startup order={{ _rsyslog_startup.stdout | trim }}, expected 3"
+
+    # ── Baked config files ───────────────────────────────────────
+
+    - name: Check 10-receive.conf exists (baked)
+      ansible.builtin.command:
+        cmd: pct exec {{ rsyslog_ct_id }} -- test -f /etc/rsyslog.d/10-receive.conf
+      register: _rsyslog_receive_conf
+      changed_when: false
+
+    - name: Assert 10-receive.conf is baked
+      ansible.builtin.assert:
+        that: _rsyslog_receive_conf.rc == 0
+        fail_msg: "/etc/rsyslog.d/10-receive.conf missing (should be baked in image)"
+
+    - name: Check 50-remote-route.conf exists (baked)
+      ansible.builtin.command:
+        cmd: pct exec {{ rsyslog_ct_id }} -- test -f /etc/rsyslog.d/50-remote-route.conf
+      register: _rsyslog_route_conf
+      changed_when: false
+
+    - name: Assert 50-remote-route.conf is baked
+      ansible.builtin.assert:
+        that: _rsyslog_route_conf.rc == 0
+        fail_msg: "/etc/rsyslog.d/50-remote-route.conf missing (should be baked in image)"
+
+    - name: Read 10-receive.conf content
+      ansible.builtin.command:
+        cmd: pct exec {{ rsyslog_ct_id }} -- cat /etc/rsyslog.d/10-receive.conf
+      register: _receive_conf_content
+      changed_when: false
+
+    - name: Assert 10-receive.conf loads imtcp
+      ansible.builtin.assert:
+        that:
+          - "'imtcp' in _receive_conf_content.stdout"
+          - "'514' in _receive_conf_content.stdout"
+          - "'RemoteLogFile' in _receive_conf_content.stdout"
+        fail_msg: "10-receive.conf content is wrong: {{ _receive_conf_content.stdout }}"
+
+    - name: Assert no deprecated AllowedSender in config
+      ansible.builtin.command:
+        cmd: pct exec {{ rsyslog_ct_id }} -- grep -r 'AllowedSender' /etc/rsyslog.d/
+      register: _allowed_sender_check
+      changed_when: false
+      failed_when: false
+
+    - name: Assert AllowedSender is not present
+      ansible.builtin.assert:
+        that: _allowed_sender_check.rc != 0
+        fail_msg: "Deprecated $AllowedSender found in rsyslog config"
+
+    # ── rsyslog service ──────────────────────────────────────────
+
+    - name: Check rsyslog service is active
+      ansible.builtin.command:
+        cmd: pct exec {{ rsyslog_ct_id }} -- systemctl is-active rsyslog
+      register: _rsyslog_active
+      changed_when: false
+
+    - name: Assert rsyslog is active
+      ansible.builtin.assert:
+        that: "'active' in _rsyslog_active.stdout"
+        fail_msg: "rsyslog service not active: {{ _rsyslog_active.stdout }}"
+
+    # ── Config validation ────────────────────────────────────────
+
+    - name: Validate rsyslog config inside container
+      ansible.builtin.command:
+        cmd: pct exec {{ rsyslog_ct_id }} -- /usr/sbin/rsyslogd -N1
+      register: _rsyslog_config_valid
+      changed_when: false
+
+    - name: Assert rsyslog config is valid
+      ansible.builtin.assert:
+        that: _rsyslog_config_valid.rc == 0
+        fail_msg: "rsyslog config validation failed: {{ _rsyslog_config_valid.stderr }}"
+
+    # ── TCP listener ─────────────────────────────────────────────
+
+    - name: Check rsyslog listening on TCP 514
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ rsyslog_ct_id }} -- ss -tlnp | grep -c ':514'
+        executable: /bin/bash
+      register: _rsyslog_listening
+      changed_when: false
+
+    - name: Assert TCP 514 is listening
+      ansible.builtin.assert:
+        that: (_rsyslog_listening.stdout | trim | int) > 0
+        fail_msg: "rsyslog not listening on TCP 514"
+
+    # ── Spool directory ──────────────────────────────────────────
+
+    - name: Check spool directory exists
+      ansible.builtin.command:
+        cmd: pct exec {{ rsyslog_ct_id }} -- test -d /var/spool/rsyslog
+      register: _rsyslog_spool
+      changed_when: false
+
+    - name: Assert spool directory exists
+      ansible.builtin.assert:
+        that: _rsyslog_spool.rc == 0
+        fail_msg: "/var/spool/rsyslog missing inside container"
+
+    # ── Log reception test ───────────────────────────────────────
+
+    - name: Get rsyslog container IP from Proxmox config
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ rsyslog_ct_id }} | grep -oP 'ip=\K[^/,]+'
+        executable: /bin/bash
+      register: _rsyslog_ct_ip_query
+      changed_when: false
+
+    - name: Set rsyslog verify IP
+      ansible.builtin.set_fact:
+        _verify_rsyslog_ip: "{{ _rsyslog_ct_ip_query.stdout | trim }}"
+
+    - name: Assert container IP is not empty
+      ansible.builtin.assert:
+        that: (_verify_rsyslog_ip | length) > 0
+        fail_msg: "Could not determine rsyslog container IP from pct config"
+
+    - name: Assert container IP does not collide with host IP
+      ansible.builtin.assert:
+        that: _verify_rsyslog_ip != ansible_host
+        fail_msg: >-
+          Container IP {{ _verify_rsyslog_ip }} collides with host IP
+          {{ ansible_host }} on {{ inventory_hostname }}
+
+    - name: Send test log message to rsyslog container
+      ansible.builtin.shell:
+        cmd: >-
+          logger --tcp -n {{ _verify_rsyslog_ip }} -P 514
+          "molecule-rsyslog-verify-test-$(date +%s)"
+      changed_when: true
+
+    - name: Wait for log to arrive
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: Check test log arrived in container
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ rsyslog_ct_id }} -- find /var/log/remote/ -name '*.log' -exec grep -l 'molecule-rsyslog-verify-test' {} + 2>/dev/null | head -1
+        executable: /bin/bash
+      register: _rsyslog_test_log
+      changed_when: false
+      failed_when: false
+
+    - name: Assert test log was received
+      ansible.builtin.assert:
+        that: _rsyslog_test_log.stdout | trim | length > 0
+        fail_msg: "Test log message not found in /var/log/remote/ inside container"
+
+    # ── Multi-source separation test ─────────────────────────────
+
+    - name: Send tagged log messages for separation test
+      ansible.builtin.shell:
+        cmd: |
+          logger --tcp -n {{ _verify_rsyslog_ip }} -P 514 -t testdaemon1 "separation-test-daemon1-$(date +%s)" &&
+          logger --tcp -n {{ _verify_rsyslog_ip }} -P 514 -t testdaemon2 "separation-test-daemon2-$(date +%s)"
+      changed_when: true
+
+    - name: Wait for tagged logs to arrive
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: Check daemon1 log is in its own file
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ rsyslog_ct_id }} -- find /var/log/remote/ -name 'testdaemon1.log' -exec grep -c 'separation-test-daemon1' {} + 2>/dev/null | head -1
+        executable: /bin/bash
+      register: _daemon1_log
+      changed_when: false
+      failed_when: false
+
+    - name: Check daemon2 log is in its own file
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ rsyslog_ct_id }} -- find /var/log/remote/ -name 'testdaemon2.log' -exec grep -c 'separation-test-daemon2' {} + 2>/dev/null | head -1
+        executable: /bin/bash
+      register: _daemon2_log
+      changed_when: false
+      failed_when: false
+
+    - name: Assert per-program log separation works
+      ansible.builtin.assert:
+        that:
+          - (_daemon1_log.stdout | trim | int) > 0
+          - (_daemon2_log.stdout | trim | int) > 0
+        fail_msg: >-
+          Per-program separation failed:
+          daemon1={{ _daemon1_log.stdout | trim }},
+          daemon2={{ _daemon2_log.stdout | trim }}
+
+    # ── Service restart resilience ───────────────────────────────
+
+    - name: Restart rsyslog inside container
+      ansible.builtin.command:
+        cmd: pct exec {{ rsyslog_ct_id }} -- systemctl restart rsyslog
+      changed_when: true
+
+    - name: Wait for service to stabilize after restart
+      ansible.builtin.pause:
+        seconds: 2
+
+    - name: Check rsyslog is active after restart
+      ansible.builtin.command:
+        cmd: pct exec {{ rsyslog_ct_id }} -- systemctl is-active rsyslog
+      register: _rsyslog_post_restart
+      changed_when: false
+
+    - name: Assert rsyslog survived restart
+      ansible.builtin.assert:
+        that: "'active' in _rsyslog_post_restart.stdout"
+        fail_msg: "rsyslog not active after restart: {{ _rsyslog_post_restart.stdout }}"
+
+    - name: Verify TCP listener survives restart
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ rsyslog_ct_id }} -- ss -tlnp | grep -c ':514'
+        executable: /bin/bash
+      register: _rsyslog_listen_post
+      changed_when: false
+
+    - name: Assert TCP 514 still listening after restart
+      ansible.builtin.assert:
+        that: (_rsyslog_listen_post.stdout | trim | int) > 0
+        fail_msg: "TCP 514 not listening after rsyslog restart"
+
+    - name: Send post-restart test log
+      ansible.builtin.shell:
+        cmd: >-
+          logger --tcp -n {{ _verify_rsyslog_ip }} -P 514 -t postrestart
+          "restart-recovery-test-$(date +%s)"
+      changed_when: true
+
+    - name: Wait for post-restart log
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: Check post-restart log arrived
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ rsyslog_ct_id }} -- find /var/log/remote/ -name 'postrestart.log' -exec grep -c 'restart-recovery-test' {} + 2>/dev/null | head -1
+        executable: /bin/bash
+      register: _post_restart_log
+      changed_when: false
+      failed_when: false
+
+    - name: Assert log reception works after restart
+      ansible.builtin.assert:
+        that: (_post_restart_log.stdout | trim | int) > 0
+        fail_msg: "Log reception failed after rsyslog restart"
+
+    # ── No-leak test: remote messages must NOT appear in local syslog
+
+    - name: Send uniquely tagged message for leak test
+      ansible.builtin.shell:
+        cmd: >-
+          logger --tcp -n {{ _verify_rsyslog_ip }} -P 514 -t leaktest
+          "noleak-sentinel-$(date +%s)"
+      changed_when: true
+
+    - name: Wait for message processing
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: Check message landed in remote log (expected)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ rsyslog_ct_id }} -- find /var/log/remote/ -name 'leaktest.log' -exec grep -c 'noleak-sentinel' {} + 2>/dev/null | head -1
+        executable: /bin/bash
+      register: _leak_remote
+      changed_when: false
+      failed_when: false
+
+    - name: Check message did NOT leak to local syslog
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ rsyslog_ct_id }} -- grep -c 'noleak-sentinel'
+          /var/log/syslog 2>/dev/null || echo 0
+      register: _leak_local
+      changed_when: false
+      failed_when: false
+
+    - name: Assert remote messages are isolated from local syslog
+      ansible.builtin.assert:
+        that:
+          - (_leak_remote.stdout | trim | int) > 0
+          - (_leak_local.stdout | trim | int) == 0
+        fail_msg: >-
+          Remote message isolation failed:
+          in_remote={{ _leak_remote.stdout | trim }},
+          in_local_syslog={{ _leak_local.stdout | trim }}.
+          The 50-remote-route.conf stop directive may not be working.
+
+    # ── Logrotate validation ─────────────────────────────────────
+
+    - name: Check logrotate config exists
+      ansible.builtin.command:
+        cmd: pct exec {{ rsyslog_ct_id }} -- test -f /etc/logrotate.d/rsyslog-remote
+      register: _logrotate_exists
+      changed_when: false
+
+    - name: Assert logrotate config exists
+      ansible.builtin.assert:
+        that: _logrotate_exists.rc == 0
+        fail_msg: "/etc/logrotate.d/rsyslog-remote missing"
+
+    - name: Validate logrotate config syntax
+      ansible.builtin.command:
+        cmd: pct exec {{ rsyslog_ct_id }} -- logrotate --debug /etc/logrotate.d/rsyslog-remote
+      register: _logrotate_valid
+      changed_when: false
+      failed_when: false
+
+    - name: Assert logrotate config is valid
+      ansible.builtin.assert:
+        that: _logrotate_valid.rc == 0
+        fail_msg: "logrotate config invalid: {{ _logrotate_valid.stderr }}"
+
+    # ── Memory usage check ───────────────────────────────────────
+
+    - name: Check container memory usage
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ rsyslog_ct_id }} -- free -m | awk '/^Mem:/{print $3}'
+        executable: /bin/bash
+      register: _rsyslog_mem
+      changed_when: false
+
+    - name: Assert memory usage is reasonable for 64 MB container
+      ansible.builtin.assert:
+        that: (_rsyslog_mem.stdout | trim | int) < 56
+        fail_msg: >-
+          rsyslog container using {{ _rsyslog_mem.stdout | trim }} MB
+          of 64 MB allocated — risk of OOM
+
+    # ── Report ───────────────────────────────────────────────────
+
+    - name: Report rsyslog verification
+      ansible.builtin.debug:
+        msg: >-
+          rsyslog per-feature verify passed:
+          ct={{ rsyslog_ct_id }}, running=yes,
+          onboot={{ _rsyslog_onboot.stdout | trim }},
+          order={{ _rsyslog_startup.stdout | trim }},
+          service={{ _rsyslog_active.stdout | trim }},
+          config_valid=yes,
+          tcp_514=listening,
+          log_reception=verified,
+          multi_source_separation=verified,
+          restart_resilience=verified,
+          remote_isolation=verified,
+          logrotate=valid,
+          memory={{ _rsyslog_mem.stdout | trim }}MB

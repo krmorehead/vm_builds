@@ -1,0 +1,9 @@
+---
+rsyslog_ct_hostname: rsyslog
+rsyslog_ct_memory: 64
+rsyslog_ct_cores: 1
+rsyslog_ct_disk: "1"
+rsyslog_ct_template: "{{ rsyslog_lxc_template }}"
+rsyslog_ct_template_path: "{{ rsyslog_lxc_template_path }}"
+rsyslog_ct_onboot: true
+rsyslog_ct_startup_order: 3

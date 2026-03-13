@@ -186,9 +186,11 @@ alwaysApply: true
 - All other hosts → containers use `ansible_default_ipv4.gateway/prefix` on the WAN bridge (`proxmox_wan_bridge`).
 - For WAN-connected hosts, offset container IPs by +200 to avoid collisions with LAN containers (e.g., .203 instead of .3).
 - WAN-connected containers MUST use `proxmox_wan_bridge` as their bridge. The default bridge (`proxmox_all_bridges[1]`) is the SECOND bridge, which on multi-NIC WAN hosts is typically connected to a different physical NIC than the management interface.
-- ALWAYS verify IP offsets for new services do not collide with existing services on the same subnet. WireGuard uses `wireguard_ct_ip_offset(3) + group_index` for up to N vpn_nodes. New service offsets must be above the max WireGuard IP. Current allocation: .1 OpenWrt, .2 Proxmox mgmt, .3-.6 WireGuard, .10 Pi-hole.
+- ALWAYS verify IP offsets for new services do not collide with existing services on the same subnet. WireGuard uses `wireguard_ct_ip_offset(3) + group_index` for up to N vpn_nodes. New service offsets must be above the max WireGuard IP. Current allocation: .1 OpenWrt, .2 Proxmox mgmt, .3-.6 WireGuard, .10 Pi-hole, .12+ rsyslog.
+- ALWAYS verify WAN IPs (offset + 200 + index) don't collide with host management IPs. Current host IPs: home=.201, ai=.220, mesh2=.211. Avoid offsets that produce .201, .211, or .220 on the WAN.
 - Previous bug: `wireguard-ai` container was on `vmbr1` (connected to `nic0`) but the host's internet was on `vmbr0` (connected to `nic1`). The container had a correct IP and route but zero L2 connectivity to the gateway.
 - Previous bug: Pi-hole at offset 5 collided with WireGuard on mesh1 (offset 3 + vpn_nodes index 2 = 5). Both containers claimed 10.10.10.5 on the same LAN. Tests passed because `pct exec` bypasses the network, but production would have ARP ambiguity. Fixed by moving Pi-hole to offset 10.
+- Previous bug: rsyslog at offset 11 → WAN IP .211 (11 + 200), colliding with mesh2's host IP (192.168.86.211). Fixed by moving to offset 12.
 
 ## Dynamic inventory and failed hosts
 - ALWAYS use `ansible_play_hosts` (not `ansible_play_hosts_all`) in `add_host` loops that register containers. `ansible_play_hosts_all` includes hosts that failed in earlier plays, leading to phantom container registrations for containers that were never created.
@@ -233,6 +235,40 @@ alwaysApply: true
 - Previous bug: Configure role set `resolv.conf` to `127.0.0.1`, restarted FTL, then ran `pihole -g`. The gravity update hung indefinitely because FTL's DNS wasn't fully initialized when the download started. Fix: move `resolv.conf` change to after gravity succeeds.
 - Previous bug: Configure role templated `setupVars.conf` and managed `lighttpd.service` — both failed because v6 doesn't use them.
 - Previous bug: Image build used `setupVars.conf` for unattended install (v5 approach). This worked via migration but is not the v6-native approach. Pre-seeding `pihole.toml` is the community standard.
+
+## build-images.sh shell escaping
+- When writing config files via `pct exec -- bash -c '...'` inside `remote_cmd "..."`, there are 4 layers of shell interpretation: (1) local bash double quotes, (2) SSH, (3) remote bash (parsing single quotes around bash -c), (4) bash -c with heredoc.
+- For heredocs with quoted delimiters (`<< "EOF"`), NO expansion happens inside. Content is written literally.
+- To get a literal `$var` in the file: use `\$var` in the source (single backslash-dollar). Local bash expands `\$` → `$`, then it passes through SSH, single quotes, and quoted heredoc unchanged.
+- NEVER use `\\\$var` (triple backslash-dollar) — it produces `\$var` in the file (backslash-dollar), not `$var`.
+- Previous bug: `\\\$AllowedSender` produced `\$AllowedSender` in the file, which was silently ignored by rsyslog (deprecated directive). `\\\$inputname` produced `\$inputname` which caused a config parse error, preventing rsyslog from starting.
+- ALWAYS verify baked config by creating a test container from the template and inspecting the actual file content with `pct exec -- cat /path/to/config`.
+- The Proxmox Debian 12 standard template does NOT include rsyslog. The build script MUST install it with `apt-get install -y --no-install-recommends rsyslog`.
+- ALWAYS wait for network readiness inside the build container (`getent hosts deb.debian.org`) before running `apt-get`.
+
+## rsyslog LXC conventions
+- rsyslog v8+ (Debian 12) supports RainerScript. NEVER mix legacy directives (`$AllowedSender`, `$template`) with new-style config (`module()`, `input()`, `template()`, `ruleset()`).
+- NEVER use disk-assisted queues (`queue.type="disk"`) on `omfile` actions. Disk queues are for `omfwd` (network forwarding) where the remote target may be temporarily unreachable. For local file writes, the default in-memory queue is correct.
+- NEVER use named rulesets when optional runtime forwarding needs to see the same messages. Messages in a named ruleset never enter the default ruleset. Use property filters (`if $inputname == "imtcp"`) with `stop` instead.
+- ALWAYS validate rsyslog config (`rsyslogd -N1`) before restarting the service. An invalid config prevents rsyslog from starting, silently dropping all incoming logs.
+- Previous bug: `10-receive.conf` used `ruleset(name="remote")` for TCP input. The optional `20-forward.conf` in the default ruleset never saw remote messages because they were processed entirely within the named ruleset. Fix: split into `10-receive.conf` (module + template only) and `50-remote-route.conf` (property filter + omfile + stop). The forwarding config at `20-` sits between them in processing order.
+- Previous bug: `$AllowedSender TCP, 10.0.0.0/8, ...` was used for access control. This is a deprecated legacy directive that shouldn't be mixed with new-style RainerScript config. On a private-subnet LXC container, network topology provides access control.
+
+## LXC container IP allocation
+- ALWAYS use per-host indexing (`offset + groups['flavor_group'].index(inventory_hostname)`) for LXC service IPs when the service can deploy to multiple hosts. Without indexing, two hosts on the same subnet get the same container IP.
+- ALWAYS verify WAN container IPs (offset + 200 + index) don't collide with any host's management IP. Current host IPs: home=.201, mesh1=.210 (LAN), ai=.220, mesh2=.211.
+- Current WAN-safe allocation: Pi-hole offset=10 (.210 collides with mesh1 but mesh1 is LAN-only, so WAN .210 is safe), rsyslog offset=12 (.212 safe), WireGuard offset=3+index (.203-.206 safe).
+- Previous bug: rsyslog_ct_ip_offset=11 → WAN IP .211, colliding with mesh2's host IP (192.168.86.211). Fixed by changing to offset 12.
+- Verify tasks MUST query the actual IP from `pct config` (not recompute) because per-host index depends on group composition which varies between per-feature and E2E scenarios.
+
+## OpenWrt BusyBox compatibility
+- NEVER use `pgrep` on OpenWrt — it may not exist in BusyBox. Use `/etc/init.d/<service> status` or `ps | grep -c '[p]rocess'` instead.
+- Previous bug: `pgrep -x logd` failed on OpenWrt because pgrep wasn't available. Fixed by using `/etc/init.d/log status`.
+
+## Verify task ordering
+- ALWAYS validate retrieved IPs (non-empty, no collision) BEFORE functional tests (log send, DNS query). If the IP is wrong, "log not found" errors are confusing; "IP is empty" is clear.
+- NEVER use `failed_when: false` on client send commands (`logger --tcp`, `dig`, `curl`). Let connection errors fail immediately with the real error. Reserve `failed_when: false` for result-checking commands (`grep -c` with expected rc=1).
+- NEVER add `set -o pipefail` to non-pipeline commands. It adds noise and obscures the convention that pipefail signals a pipeline.
 
 ## Documentation accuracy
 - When changing a role's exported facts, bridge names, device paths, or connection patterns, ALWAYS update `docs/architecture/` in the same commit.

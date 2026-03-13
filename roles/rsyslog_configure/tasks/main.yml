@@ -1,0 +1,46 @@
+---
+# rsyslog base config (TCP listener, routing, spool dir, logrotate) is
+# baked into the image.  This role only applies host-specific forwarding
+# rules when RSYSLOG_HOME_SERVER is set.
+#
+# Config file processing order inside the container:
+#   10-receive.conf     — loads imtcp, defines RemoteLogFile template
+#   20-forward.conf     — (optional) forwards ALL messages to home server
+#   50-remote-route.conf — writes TCP-received msgs to per-host files, stops
+
+# ── Deploy or remove forwarding config ───────────────────────────
+
+- name: Deploy forwarding config to rsyslog
+  ansible.builtin.template:
+    src: 20-forward.conf.j2
+    dest: /etc/rsyslog.d/20-forward.conf
+    mode: "0644"
+  when: rsyslog_home_server | length > 0
+  notify: _restart_rsyslog
+
+- name: Remove forwarding config when home server is not set
+  ansible.builtin.file:
+    path: /etc/rsyslog.d/20-forward.conf
+    state: absent
+  when: rsyslog_home_server | length == 0
+  notify: _restart_rsyslog
+
+- name: Flush handlers to validate and restart rsyslog
+  ansible.builtin.meta: flush_handlers
+
+# ── Post-restart health check ────────────────────────────────────
+
+- name: Wait for rsyslog to be active after config change
+  ansible.builtin.command:
+    cmd: systemctl is-active rsyslog
+  register: _rsyslog_status
+  changed_when: false
+  retries: 5
+  delay: 2
+  until: _rsyslog_status.stdout | trim == 'active'
+
+- name: Report rsyslog status
+  ansible.builtin.debug:
+    msg: >-
+      rsyslog service: {{ _rsyslog_status.stdout | trim }},
+      forwarding={{ 'enabled to ' + rsyslog_home_server if rsyslog_home_server | length > 0 else 'disabled (local only)' }}
