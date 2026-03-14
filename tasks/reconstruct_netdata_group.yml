@@ -1,0 +1,45 @@
+---
+# Reusable task file: reconstruct the netdata dynamic group.
+#
+# Consumed by:
+#   - Per-feature molecule converge.yml (netdata-lxc scenario)
+#   - Per-feature molecule verify.yml
+#   - playbooks/cleanup.yml (rollback plays)
+#
+# Must run on a host in the monitoring_nodes/proxmox group.
+# Same pattern as rsyslog reconstruction: pct_remote is always the
+# connection method (no SSH auth detection needed).
+
+- name: Verify netdata container is running
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct status {{ netdata_ct_id }} | grep -c running
+    executable: /bin/bash
+  register: _netdata_ct_status
+  changed_when: false
+  failed_when: (_netdata_ct_status.stdout | trim | int) == 0
+
+- name: Add netdata containers to dynamic group
+  ansible.builtin.add_host:
+    name: "netdata-{{ item }}"
+    groups: netdata
+    ansible_connection: community.proxmox.proxmox_pct_remote
+    ansible_host: "{{ hostvars[item].ansible_host }}"
+    ansible_user: root
+    proxmox_vmid: "{{ netdata_ct_id }}"
+    ansible_paramiko_host_key_checking: false
+    ansible_paramiko_proxy_command: >-
+      {{ 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@'
+         + lookup('env', 'PRIMARY_HOST')
+         if 'lan_hosts' in (hostvars[item].group_names | default([]))
+         else omit }}
+  loop: "{{ ansible_play_hosts }}"
+
+- name: Report reconstructed netdata group
+  ansible.builtin.debug:
+    msg: >-
+      Reconstructed netdata group: host=netdata-{{ inventory_hostname }},
+      proxmox_host={{ ansible_host }},
+      vmid={{ netdata_ct_id }},
+      connection=pct_remote

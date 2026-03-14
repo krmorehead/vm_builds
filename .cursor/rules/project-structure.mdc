@@ -91,12 +91,15 @@ Phase 3: Services (flavor groups span both primary + LAN hosts)
   Play 9: rsyslog_lxc (monitoring_nodes)  tag: monitoring
            deploy_stamp: rsyslog_lxc
   Play 10: rsyslog_configure (rsyslog)    tag: monitoring
-  Play 11: wireguard_lxc (vpn_nodes)      tag: wireguard
+  Play 11: netdata_lxc (monitoring_nodes)  tag: monitoring
+           deploy_stamp: netdata_lxc
+  Play 12: netdata_configure (netdata)    tag: monitoring
+  Play 13: wireguard_lxc (vpn_nodes)      tag: wireguard
            deploy_stamp: wireguard_lxc
-  Play 12: wireguard_configure (wireguard) tag: wireguard
-  Play 13: openwrt_mesh_lxc (wifi_nodes:!router_nodes) tag: mesh-wifi
+  Play 14: wireguard_configure (wireguard) tag: wireguard
+  Play 15: openwrt_mesh_lxc (wifi_nodes:!router_nodes) tag: mesh-wifi
            deploy_stamp: openwrt_mesh_lxc
-  Play 14: openwrt_mesh_configure (openwrt_mesh) tag: mesh-wifi
+  Play 16: openwrt_mesh_configure (openwrt_mesh) tag: mesh-wifi
 
 Per-feature plays (opt-in via --tags, tagged with [never])
 Bootstrap cleanup (proxmox:!lan_hosts)    tag: cleanup
@@ -188,7 +191,7 @@ All VMIDs defined in `group_vars/all.yml`.
 | `setup.sh` | Bootstrap .venv + pip + ansible-galaxy |
 | `run.sh` | Convenience wrapper — delegates to `build.py` |
 | `cleanup.sh` | Restore / full-restore / clean / rollback — delegates to `build.py` |
-| `build-images.sh` | Builds custom OpenWrt images via Image Builder (mesh LXC + router VM) |
+| `build-images.sh` | Builds custom images (mesh LXC, router VM, Pi-hole, rsyslog, Netdata, WireGuard). Use `--only <target>` for selective rebuilds |
 | `test.env` | Test machine config (committed, IP: 192.168.86.201) |
 | `.env` | Production secrets (gitignored) |
 | `test.env.generated` | Auto-generated secrets during test runs (gitignored) |
@@ -198,6 +201,7 @@ All VMIDs defined in `group_vars/all.yml`.
 | `tasks/reconstruct_wireguard_group.yml` | Reusable dynamic group reconstruction for WireGuard |
 | `tasks/reconstruct_pihole_group.yml` | Reusable dynamic group reconstruction for Pi-hole |
 | `tasks/reconstruct_rsyslog_group.yml` | Reusable dynamic group reconstruction for rsyslog |
+| `tasks/reconstruct_netdata_group.yml` | Reusable dynamic group reconstruction for Netdata |
 | `tasks/bootstrap_lan_host.yml` | Reusable bootstrap for LAN hosts (DHCP lease + API token) |
 | `tasks/cleanup_lan_host.yml` | Reusable per-LAN-host cleanup (SSH from primary host) |
 | `molecule/default/` | Full integration tests (home, mesh1, ai, mesh2 — 4-node) |
@@ -207,8 +211,10 @@ All VMIDs defined in `group_vars/all.yml`.
 | `molecule/pihole-lxc/` | Per-feature scenario for Pi-hole DNS container |
 | `molecule/openwrt-pihole-dns/` | Per-feature scenario for OpenWrt DNS forwarding to Pi-hole |
 | `molecule/rsyslog-lxc/` | Per-feature scenario for rsyslog log collector container |
+| `molecule/netdata-lxc/` | Per-feature scenario for Netdata monitoring agent container |
 | `molecule/openwrt-syslog/` | Per-feature scenario for OpenWrt syslog forwarding to rsyslog |
 | `molecule/mesh1-infra/` | Lightweight infra-only on mesh1 (quick iteration) |
+| `wol.sh` | Wake-on-LAN utility: wake hosts by alias or MAC. Proxied WoL for LAN hosts via PRIMARY_HOST |
 
 ## Adding a new LXC service — checklist
 1. **Build the image first.** Add the service's image build to `build-images.sh` (or create a new build script). All packages baked in. Define the image path in `group_vars/all.yml`.
@@ -222,8 +228,9 @@ All VMIDs defined in `group_vars/all.yml`.
 9. Flavor group already in `molecule/default/molecule.yml` platform groups
 10. Create `molecule/<type>-lxc/` per-feature scenario (converge + verify + cleanup)
 11. Extend `molecule/default/verify.yml` with assertions for the new service
-12. Update `docs/architecture/` with a `<type>-build.md`
-13. Add a CHANGELOG entry under `[Unreleased]`
+12. Add the VMID to cleanup lists: `molecule/default/cleanup.yml` (`project_ct_ids`), `molecule/default/cleanup_lan_host.yml`, and `tasks/cleanup_lan_host.yml`
+13. Update `docs/architecture/` with a `<type>-build.md`
+14. Add a CHANGELOG entry under `[Unreleased]`
 
 ## Adding a new VM type — checklist
 1. **Build the image first.** Add the service's image build to `build-images.sh` (or create a new build script). All packages baked in. Define the image path in `group_vars/all.yml`.
@@ -237,19 +244,33 @@ All VMIDs defined in `group_vars/all.yml`.
 9. Flavor group already in `molecule/default/molecule.yml` platform groups
 10. Create `molecule/<type>-vm/` per-feature scenario
 11. Extend `molecule/default/verify.yml` with assertions for the new VM
-12. Update `docs/architecture/` with a `<type>-build.md`
-13. Add a CHANGELOG entry under `[Unreleased]`
+12. Add the VMID to cleanup lists: `molecule/default/cleanup.yml` (`project_vm_ids`), `molecule/default/cleanup_lan_host.yml`, and `tasks/cleanup_lan_host.yml`
+13. Update `docs/architecture/` with a `<type>-build.md`
+14. Add a CHANGELOG entry under `[Unreleased]`
 
 ## Image and template management
 - Per the Design principles above: every VM and container uses a purpose-built image with all packages baked in. Images are REQUIRED — provision roles verify existence and hard-fail if missing. Configure roles NEVER install packages at runtime.
 - ALL images are stored locally in `images/` (gitignored) and uploaded to Proxmox during provisioning. NEVER depend on remote downloads from the Proxmox host.
 - `build-images.sh` is the current image build script (OpenWrt via Image Builder). Future services will have their own build steps (Dockerfiles, Packer, debootstrap, etc.).
 - VM images: uploaded to `/tmp/`, decompressed if `.gz`, imported via `qm importdisk`, then deleted.
-- LXC templates: uploaded to `/var/lib/vz/template/cache/` via `ansible.builtin.copy`.
+- LXC templates: uploaded to `/var/lib/vz/template/cache/` via `ansible.builtin.copy`. The `proxmox_lxc` role checks `pveam list` and skips upload when the template is already cached.
+- NEVER delete LXC templates in molecule cleanup. Templates are large (140-315MB each) and identical between runs. Deleting them forces re-upload of ~820MB across all hosts on every test cycle. Template deletion is ONLY valid in production cleanup behind `[full-restore, clean]` tags.
 - NEVER use `pveam download` — the host may lack internet (router VM destroyed) or have unreachable enterprise repos (no subscription).
 - Image paths are defined in `group_vars/all.yml` (e.g., `openwrt_image_path`, `openwrt_lxc_template_path`). Roles verify the image exists and fail with a clear message pointing to `./build-images.sh` if missing.
 - ALWAYS use `role_path` for source paths in tasks. Bare relative paths break when Molecule runs from non-default scenarios.
+- Use `./build-images.sh --only <target>` to rebuild a single image (~2-3 min vs ~15 min for all). Targets: mesh, router, pihole, rsyslog, netdata, wireguard.
 - See `vm-lifecycle` skill, Image management section, for the full pattern.
+
+## NTP synchronization
+- ALWAYS check clock skew BEFORE running the full NTP sync sequence. Use `chronyc -n tracking | awk '/System time/{print $4}'` to measure skew. Only sync when skew > 30 seconds.
+- NEVER run unconditional NTP burst+sleep+makestep sequences. Each sync takes ~7s per host. With 4 hosts and multiple sync points, unconditional syncs waste 60-90s when clocks are accurate.
+- Set `cache_valid_time: 86400` (24h) for `ansible.builtin.apt` tasks on test machines, not 3600 (1h). Short intervals trigger unnecessary `apt-get update` calls between test cycles.
+
+## pct_remote performance
+- Each `pct_remote` task opens a new paramiko SSH connection to the Proxmox host, then spawns `pct exec`. Overhead: 15-60s per task.
+- MINIMIZE configure role task count for LXC containers. Base system config that is identical across containers MUST be baked into the image, not deployed via the configure role.
+- Configure roles should ONLY contain host-specific config (IPs, streaming endpoints, passwords, optional features gated on env vars).
+- Previous bug: systemd override deployed via configure role (3 tasks × 4 nodes = 12 pct_remote calls) added ~12 minutes. Moving to image-only saved 38% of per-feature test time.
 
 ## Hardware detection: hard-fail over graceful degradation
 - ALWAYS prefer hard-fail when expected hardware is missing. Graceful degradation masks real problems.
@@ -272,6 +293,39 @@ All VMIDs defined in `group_vars/all.yml`.
 - ALWAYS run `pytest tests/ -v` after modifying `build.py` — every public function and error path needs coverage
 - Run `ansible-lint && yamllint .` before deploying to hardware
 - See `.cursor/skills/ansible-testing/SKILL.md` for full details
+
+## Cleanup philosophy: service-specific, not scorched-earth
+- Molecule cleanup MUST destroy VMs/containers using **explicit VMIDs** from `group_vars/all.yml`. NEVER iterate `qm list` / `pct list` to destroy ALL resources. Check existence first with `qm status` / `pct status`, then stop + destroy.
+- When adding a new service, add its VMID to the cleanup lists in `molecule/default/cleanup.yml`, `molecule/default/cleanup_lan_host.yml`, `tasks/cleanup_lan_host.yml`, and the per-feature scenario cleanup.
+- Molecule cleanup MUST NOT restore the host config from backup archive. Explicit file removal is sufficient. Backup restore is only for production cleanup behind `[full-restore]` tags.
+- Previous bug: blanket `qm list` / `pct list` cleanup destroyed non-project resources, forced full rebuild of every VM/container on every test run, and was slower than explicit VMID lookup.
+
+## Systemd sandboxing in LXC containers
+- Many Debian packages ship systemd unit files with sandboxing directives (`LogNamespace`, `ProtectSystem`, `ProtectHome`, `ProtectControlGroups`, `BindReadOnlyPaths`, `RuntimeDirectory`) that require mount namespace creation. Inside LXC containers, these fail with exit code 226 (NAMESPACE) unless the container has `nesting=1` feature.
+- ALWAYS add `features: nesting=1` to LXC containers that run services with systemd sandboxing. This is NOT optional for Netdata, rsyslog, and most Debian services.
+- Even with `nesting=1`, some directives like `LogNamespace` still fail. Bake a systemd drop-in override into the image during `build-images.sh` to disable problematic directives: `LogNamespace=`, `ProtectSystem=false`, `ProtectHome=false`, `ProtectControlGroups=false`, `BindReadOnlyPaths=`. Do NOT deploy this in the configure role — it's base system config, not host-specific topology.
+- NEVER try to clear systemd directives with empty strings for boolean-like settings. Use explicit `false` values (e.g., `ProtectSystem=false`, not `ProtectSystem=`).
+- Previous bug: Netdata service exited 226/NAMESPACE in an LXC container even as privileged. Root cause: `LogNamespace=netdata` in the Netdata systemd unit. Fix: nesting=1 feature + systemd override baked into image.
+- Previous bug: systemd override deployed via configure role (pct_remote) added 3 slow tasks per container. With 4 nodes, this added ~12 minutes to molecule test. Moved to image-only.
+
+## Host metrics via LXC bind mounts
+- Bind mounting host `/proc` and `/sys` into LXC containers for monitoring requires BOTH: (1) privileged container (`unprivileged: false`) and (2) `nesting=1` feature.
+- Mount entries use full Proxmox mount specs: `/proc,mp=/host/proc,ro=1` — the `ro=1` flag makes them read-only.
+- The monitoring agent's config must point to `/host/proc` and `/host/sys` (baked into the image) so it reads host metrics, not container-local metrics.
+- Previous bug: unprivileged container with bind mounts — extraction failed (disk full at 1GB) and systemd sandboxing prevented service startup.
+
+## LXC container disk sizing
+- ALWAYS verify the compressed template size fits the target rootfs. A vzdump archive reports its compressed and extracted sizes, but the rootfs must have headroom for runtime data.
+- Netdata's Debian 12 template is ~314MB compressed, ~1013MB extracted. A 1GB rootfs is too small — extraction fails partway through (tar errors on SSL certs). Use 2GB minimum.
+- Previous bug: Netdata template built via vzdump produced a 314MB archive. `pct create` with 1GB rootfs failed mid-extraction because the expanded content exceeded the disk.
+
+## Wake-on-LAN recovery
+- `wol.sh` is a utility script for remotely waking Proxmox hosts. It is a LAST RESORT for recovering from power outages — not a substitute for proper UPS or IPMI.
+- WAN hosts (home, ai, mesh2) receive magic packets via local L2 broadcast from the controller.
+- LAN hosts (mesh1) receive magic packets via proxy: the script SSHes to the primary host and sends the packet from there (Python 3 socket, no extra packages needed).
+- WoL requires: (1) NIC with WoL support, (2) WoL enabled in BIOS, (3) `ethtool Wake-on: g` on the management NIC, (4) the machine in standby (S5) with power connected.
+- USB ethernet adapters do NOT support WoL. The USB host controller is powered down in S5 and lacks magic packet detection circuitry. Hosts with USB-only networking (e.g., ai) require manual power-on or an alternative like a smart plug.
+- NEVER test WoL as part of the regular test suite. WoL is destructive (requires the host to be down). Only test it manually or in a dedicated recovery scenario.
 
 ## Entry point convention
 - `build.py` is the SINGLE entry point for running Ansible. ALL shell scripts MUST delegate to it.

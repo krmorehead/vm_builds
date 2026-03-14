@@ -110,7 +110,7 @@
 
 - name: Pause for services and network to stabilize
   ansible.builtin.pause:
-    seconds: 30
+    seconds: 20
 
 - name: Remove bootstrap IP from WAN bridge on Proxmox
   ansible.builtin.shell:
@@ -457,7 +457,7 @@
 
 - name: Pause for services and network to restart
   ansible.builtin.pause:
-    seconds: 30
+    seconds: 20
 
 - name: Clean up bootstrap IP from LAN bridge
   ansible.builtin.command:

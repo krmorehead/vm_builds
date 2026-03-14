@@ -34,7 +34,7 @@
   register: _mesh_radio_count
   changed_when: false
   retries: 10
-  delay: 5
+  delay: 3
   until: (_mesh_radio_count.stdout | default('0') | trim | int) > 0
 
 - name: Get WiFi radio names
@@ -55,6 +55,21 @@
       The PHY namespace move may have failed. Check that
       'iw phy set netns' succeeded in openwrt_mesh_lxc.
   when: _mesh_radios | length == 0
+
+# ── Generate wireless config from detected hardware ────────────
+# The WiFi PHY was namespace-moved into the container AFTER boot,
+# so OpenWrt didn't auto-generate /etc/config/wireless. We must
+# run `wifi config` to create radio sections from the detected PHYs.
+
+- name: Generate wireless config from detected hardware
+  ansible.builtin.raw: >-
+    /bin/sh -c
+    'wifi config > /tmp/wifi_detected.conf &&
+    if [ ! -s /etc/config/wireless ] || ! grep -q "wifi-device" /etc/config/wireless; then
+      cp /tmp/wifi_detected.conf /etc/config/wireless;
+    fi;
+    rm -f /tmp/wifi_detected.conf'
+  changed_when: true
 
 # ── Mesh WiFi configuration ─────────────────────────────────────
 

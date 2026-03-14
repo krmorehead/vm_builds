@@ -266,7 +266,8 @@ Service-specific LXC roles consume `proxmox_lxc` via `include_role`:
 | `wireguard_ct_memory` | `128` | RAM in MB |
 | `wireguard_ct_cores` | `1` | CPU cores |
 | `wireguard_ct_disk` | `"1"` | Root disk size in GB |
-| `wireguard_ct_template` | `proxmox_lxc_default_template` | LXC template filename |
+| `wireguard_ct_template` | `wireguard_lxc_template` | Custom LXC template (wireguard-tools + iptables baked in) |
+| `wireguard_ct_template_path` | `wireguard_lxc_template_path` | Local path to template image |
 | `wireguard_ct_onboot` | `true` | Start on host boot |
 | `wireguard_ct_startup_order` | `2` | Boot priority (after OpenWrt) |
 | `wireguard_ct_features` | `["nesting=1"]` | Container features |
@@ -292,11 +293,10 @@ Cleanup must remove the config file and `modprobe -r wireguard`.
    - Writes all generated values to `.env.generated` on the controller (append mode, gitignored). Includes the client public key for server-side configuration.
 
 2. **Configuration** (runs always, using provided or generated values):
-   - Installs `wireguard-tools` via apt (with retries).
    - Templates `/etc/wireguard/wg0.conf` with mode `0600`.
    - Enables and starts `wg-quick@wg0` service.
-   - Enables IP forwarding (persistent via `/etc/sysctl.d/99-wireguard.conf`).
-   - Configures iptables MASQUERADE on wg0 for NAT. Installs `iptables-persistent` for boot persistence.
+   - Applies IP forwarding (sysctl file baked into image by `build-images.sh`).
+   - Configures iptables MASQUERADE on wg0 for NAT. Saves via `netfilter-persistent` (package baked into image).
 
 ### Key Variables (all optional -- auto-generated when empty)
 
@@ -487,3 +487,67 @@ None — rsyslog is pure userspace. No kernel modules, no host config files.
 - Remote routing (`/etc/rsyslog.d/50-remote-route.conf`) — per-hostname file write + stop
 - Spool directory (`/var/spool/rsyslog/`)
 - Logrotate config for remote logs
+
+---
+
+## netdata_lxc
+
+**Purpose:** Provision a Netdata monitoring agent LXC container on Proxmox via the shared `proxmox_lxc` role, with read-only bind mounts for host `/proc` and `/sys`.
+
+### How It Works
+
+1. Verifies the custom Netdata template exists on the controller (hard-fails if missing).
+2. Reads LAN gateway/CIDR from `env_generated_path`.
+3. Branches on host topology: LAN hosts (behind OpenWrt) use the LAN bridge and OpenWrt LAN subnet; WAN hosts use `proxmox_wan_bridge` and the host's WAN subnet with IP offset +200.
+4. Delegates to `proxmox_lxc` with service-specific vars: VMID 500, hostname `netdata`, 128 MB RAM, 1 core, 2 GB disk, privileged with `nesting=1`, auto-start priority 3, bind mounts for `/proc` and `/sys`.
+5. `proxmox_lxc` handles template upload, `pct create`, feature flags, mount entries, start, and `add_host` registration in the `netdata` dynamic group with `pct_remote` connection.
+
+### Key Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `netdata_ct_hostname` | `netdata` | Container hostname |
+| `netdata_ct_memory` | `128` | RAM in MB |
+| `netdata_ct_cores` | `1` | CPU cores |
+| `netdata_ct_disk` | `"2"` | Root disk size in GB |
+| `netdata_ct_template` | `netdata_lxc_template` | Custom Netdata template (built by `build-images.sh`) |
+| `netdata_ct_onboot` | `true` | Start on host boot |
+| `netdata_ct_startup_order` | `3` | Boot priority |
+| `netdata_ct_unprivileged` | `false` | Privileged container (required for bind mounts) |
+| `netdata_ct_features` | `["nesting=1"]` | LXC features for systemd sandboxing |
+| `netdata_ct_mount_entries` | `/proc,mp=/host/proc,ro=1` and `/sys,mp=/host/sys,ro=1` | Host metrics bind mounts |
+
+### Host State Changes
+
+None — Netdata is pure userspace. No kernel modules, no host config files. The bind mounts are container-level configuration managed by `pct set`.
+
+---
+
+## netdata_configure
+
+**Purpose:** Configure optional Netdata child-parent streaming for remote metrics aggregation. Base config (dbengine retention, proc/sys paths, dashboard) is baked into the image.
+
+### How It Works
+
+1. Detects the Netdata config directory (`/etc/netdata/` or `/opt/netdata/etc/netdata/`).
+2. When `NETDATA_PARENT_IP` is set: templates `stream.conf` inside the container with destination, API key, and buffer settings.
+3. When `NETDATA_PARENT_IP` is empty: ensures `stream.conf` is absent. Netdata operates as a standalone local dashboard.
+4. Restarts Netdata if config changed.
+5. Post-restart health check waits for the API to respond.
+
+The systemd drop-in override (disabling `LogNamespace`, `ProtectSystem`, etc.)
+is baked into the image by `build-images.sh` — it is NOT deployed by this role.
+
+### Key Variables
+
+| Variable | Env Var | Default | Description |
+|----------|---------|---------|-------------|
+| `netdata_stream_api_key` | `NETDATA_STREAM_API_KEY` | `""` | API key for parent streaming (optional) |
+| `netdata_parent_ip` | `NETDATA_PARENT_IP` | `""` | Parent Netdata IP via WireGuard (optional; empty = local only) |
+
+### What Is NOT in This Role (Baked in Image)
+
+- Netdata agent and service
+- `netdata.conf` with dbengine retention (1 hour), proc/sys paths, dashboard port 19999
+- Cgroups plugin for per-container metrics
+- Web dashboard server

@@ -90,13 +90,16 @@
     cmd: "{{ _pct_create_cmd }}"
   when: not lxc_exists | bool
 
-# ── Device bind mounts ────────────────────────────────────────────
+# ── Bind mounts ───────────────────────────────────────────────────
+# Entries are full pct mount specs, e.g.:
+#   /proc,mp=/host/proc,ro=1     (host /proc → container /host/proc, read-only)
+#   /dev/dri/renderD128,mp=/dev/dri/renderD128   (device passthrough)
 
-- name: Apply device mount entries
+- name: Apply mount entries
   ansible.builtin.command:
     cmd: >-
       pct set {{ lxc_ct_id }}
-      -mp{{ idx }} {{ item }},mp={{ item }}
+      -mp{{ idx }} {{ item }}
   loop: "{{ lxc_ct_mount_entries }}"
   loop_control:
     index_var: idx
@@ -157,7 +160,7 @@
     executable: /bin/bash
   register: _ct_addr
   retries: 15
-  delay: 4
+  delay: 3
   until: (_ct_addr.stdout | default('0') | trim | int) > 0
   changed_when: false
 

@@ -15,7 +15,7 @@ LXC container
 
 - Cores: 1
 - RAM: 128 MB
-- Disk: 1 GB
+- Disk: 2 GB
 - Network: bridge selected by host topology, static IP
 - VMID: 500
 
@@ -90,17 +90,20 @@ Decisions
 │   └── Build installs Netdata, pre-configures dbengine retention and proc/sys paths
 │
 ├── Host metrics access: bind mount /proc and /sys read-only into LXC
-│   └── Needed for accurate host CPU, memory, disk, temperature; Proxmox API lacks per-interface and thermal data
-│   └── Bind mounts passed to proxmox_lxc via role vars: lxc_ct_mount_entries with full spec
-│       (e.g., /proc,mp=/host/proc,ro=1 and /sys,mp=/host/sys,ro=1)
+│   ├── Needed for accurate host CPU, memory, disk, temperature; Proxmox API lacks per-interface and thermal data
+│   ├── Bind mounts passed to proxmox_lxc via role vars: lxc_ct_mount_entries with full spec
+│   │   (e.g., /proc,mp=/host/proc,ro=1 and /sys,mp=/host/sys,ro=1)
+│   └── Requires privileged container (unprivileged=false) for host procfs access
 │
 ├── Container networking: host topology-aware (LAN vs WAN)
 │   ├── LAN hosts: container on LAN bridge, OpenWrt LAN subnet
 │   ├── WAN hosts: container on WAN bridge, host's WAN subnet
 │   └── Same branching pattern as WireGuard and rsyslog provisioning
 │
-├── LXC features: none required
-│   └── Netdata is a pure userspace daemon — no iptables, no cgroups, no nesting
+├── LXC features: nesting=1 required
+│   ├── Netdata's systemd unit uses LogNamespace + sandboxing → needs mount namespace
+│   ├── nesting=1 enables CLONE_NEWNS inside the container
+│   └── systemd drop-in override clears LogNamespace and disables remaining sandboxing
 │
 ├── WireGuard dependency: soft (optional)
 │   └── Functions fully as local dashboard; streaming activates when parent is reachable
@@ -115,12 +118,18 @@ Decisions
 
 ### Parallelism in `molecule/default` (full integration)
 
-`molecule/default` converges all 4 nodes (home, mesh1, ai, mesh2). In
-Phase 3 of `site.yml`, Netdata provisions on `monitoring_nodes` (currently
-`home` only). It runs alongside other Phase 3 plays — rsyslog and
-WireGuard containers deploy in the same phase. Netdata and rsyslog
-share the `[monitoring]` tag and provision in the same play on
-`monitoring_nodes`.
+`molecule/default` converges all 4 nodes (home, mesh1, ai, mesh2). All
+4 hosts are in `monitoring_nodes` in the molecule platform config, so
+Netdata provisions on all 4 nodes in the E2E test (even though the
+static inventory currently only has `home`). This exercises:
+- Per-host IP indexing across 4 nodes
+- LAN path (home, mesh1) vs WAN path (ai, mesh2)
+- WAN IPs (.213, .214, .215, .216 at offset 13) — verified to not
+  collide with any host management IPs (.201, .210, .211, .220)
+
+Netdata and rsyslog share the `[monitoring]` tag but have separate
+provision plays in `site.yml`. Both run in Phase 3 alongside WireGuard
+and other service plays.
 
 ### Per-feature scenarios (fast iteration)
 
@@ -210,21 +219,21 @@ pattern as Pi-hole and rsyslog). Steps:
 5. Clean apt caches, stop container
 6. Export via `vzdump` and download template
 
-- [ ] Add Netdata template build section to `build-images.sh`
+- [x] Add Netdata template build section to `build-images.sh`
   (follow Pi-hole/rsyslog pattern: `build_netdata_lxc` function)
-- [ ] Add `netdata_lxc_template` and `netdata_lxc_template_path` to
+- [x] Add `netdata_lxc_template` and `netdata_lxc_template_path` to
   `group_vars/all.yml`
-- [ ] Add `netdata_ct_ip_offset: 12` to `group_vars/all.yml`
-  (after rsyslog at 11; WAN offset: 212)
-- [ ] Build template and place in `images/` (gitignored)
-- [ ] Document build prerequisites in `docs/architecture/netdata-build.md`
+- [x] Add `netdata_ct_ip_offset: 13` to `group_vars/all.yml`
+  (after rsyslog at 12; WAN offset: 213)
+- [x] Build template and place in `images/` (gitignored)
+- [x] Document build prerequisites in `docs/architecture/netdata-build.md`
 
 **Verify:**
 
-- [ ] Template file exists at the configured path
-- [ ] Template contains Netdata packages pre-installed
-- [ ] `netdata.conf` has correct proc/sys paths and retention defaults
-- [ ] Template is usable by `pct create` without errors
+- [x] Template file exists at the configured path
+- [x] Template contains Netdata packages pre-installed
+- [x] `netdata.conf` has correct proc/sys paths and retention defaults
+- [x] Template is usable by `pct create` without errors
 
 **Rollback:**
 
@@ -240,17 +249,19 @@ _Depends on M0 (template must be built)._
 Create the `netdata_lxc` role as a thin wrapper around `proxmox_lxc`,
 add the provision and configure plays to `site.yml`, and verify the
 container runs. Integration with `site.yml` is consolidated here.
-Netdata and rsyslog provisioning are combined in the same site.yml
-play (both target `monitoring_nodes`); configure plays are separate
-(different dynamic groups: `netdata` vs `rsyslog`).
+Netdata gets its own provision play in `site.yml` (separate from
+rsyslog), both tagged `[monitoring]`. Configure plays are also
+separate (different dynamic groups: `netdata` vs `rsyslog`).
 
 See: `vm-lifecycle` skill (LXC provisioning pattern, deploy_stamp,
 LXC container networking).
 
 **Implementation pattern:**
 - Role: `roles/netdata_lxc/defaults/main.yml`, `tasks/main.yml`, `meta/main.yml`
-- site.yml: provision play targeting `monitoring_nodes`, tagged `[monitoring]`,
-  in Phase 3 (combined with `rsyslog_lxc` in same play)
+- site.yml: separate provision play targeting `monitoring_nodes`, tagged
+  `[monitoring]`, in Phase 3 (after the rsyslog provision play). Separate
+  plays provide failure isolation — if netdata_lxc fails, rsyslog's
+  deploy_stamp is unaffected.
 - deploy_stamp included as last role in the provision play
 - Dynamic group `netdata` populated by `proxmox_lxc` via `add_host`
 - Bind mounts: pass `lxc_ct_mount_entries` to `proxmox_lxc` via include_role vars
@@ -258,12 +269,12 @@ LXC container networking).
 **Container IP addressing:**
 
 Netdata uses a static IP computed from the host's network topology
-(identical to the WireGuard and rsyslog pattern). Default offset: 12.
+(identical to the WireGuard and rsyslog pattern). Default offset: 13.
 
 | Host topology | IP computation | Example |
 |---------------|---------------|---------|
-| Behind OpenWrt | `<LAN_prefix>.{{ netdata_ct_ip_offset }}` | `10.10.10.12/24` |
-| Directly on WAN | `<WAN_prefix>.{{ netdata_ct_ip_offset + 200 }}` | `192.168.86.212/24` |
+| Behind OpenWrt | `<LAN_prefix>.{{ netdata_ct_ip_offset }}` | `10.10.10.13/24` |
+| Directly on WAN | `<WAN_prefix>.{{ netdata_ct_ip_offset + 200 }}` | `192.168.86.213/24` |
 
 **Already complete** (from shared infrastructure / group_vars):
 - `netdata_ct_id: 500` in `inventory/group_vars/all.yml`
@@ -272,28 +283,29 @@ Netdata uses a static IP computed from the host's network topology
 - `proxmox_startup_order[500]: 3` in `inventory/group_vars/all.yml`
 - `proxmox_lxc` role operational with `pct_remote` connection support
 
-- [ ] Create `roles/netdata_lxc/defaults/main.yml`:
+- [x] Create `roles/netdata_lxc/defaults/main.yml`:
   - `netdata_ct_hostname: netdata`
-  - `netdata_ct_memory: 128`, `netdata_ct_cores: 1`, `netdata_ct_disk: "1"`
+  - `netdata_ct_memory: 128`, `netdata_ct_cores: 1`, `netdata_ct_disk: "2"`
   - `netdata_ct_template: "{{ netdata_lxc_template }}"` (custom Netdata image)
   - `netdata_ct_template_path: "{{ netdata_lxc_template_path }}"`
   - `netdata_ct_onboot: true`, `netdata_ct_startup_order: 3`
-  - `netdata_ct_ip_offset: "{{ netdata_ct_ip_offset | default(12) }}"`
+  - `netdata_ct_ip_offset: "{{ netdata_ct_ip_offset | default(13) }}"`
   - `netdata_ct_mount_entries: ["/proc,mp=/host/proc,ro=1", "/sys,mp=/host/sys,ro=1"]`
-  - No `lxc_ct_features` needed (Netdata is pure userspace)
-- [ ] Create `roles/netdata_lxc/tasks/main.yml`:
+  - `netdata_ct_unprivileged: false` (privileged, required for host procfs bind mounts)
+  - `netdata_ct_features: ["nesting=1"]` (required for systemd sandboxing/namespace)
+- [x] Create `roles/netdata_lxc/tasks/main.yml`:
   - Read LAN gateway/CIDR from `env_generated_path` (same pattern as rsyslog)
   - Branch on host topology: compute container IP, bridge, gateway, DNS
   - Verify template exists, hard-fail with message pointing to `./build-images.sh`
   - Include `proxmox_lxc` with static IP on the appropriate bridge,
     `lxc_ct_mount_entries: "{{ netdata_ct_mount_entries }}"`
-- [ ] Create `roles/netdata_lxc/meta/main.yml` with required metadata
-- [ ] Add provision play to `site.yml` Phase 3, targeting `monitoring_nodes`,
+- [x] Create `roles/netdata_lxc/meta/main.yml` with required metadata
+- [x] Add provision play to `site.yml` Phase 3, targeting `monitoring_nodes`,
   tagged `[monitoring]`, with `netdata_lxc` role and `deploy_stamp`
-  (combined with `rsyslog_lxc` in same play)
-- [ ] Add configure play to `site.yml` Phase 3, targeting `netdata` dynamic
+  (separate play after the rsyslog provision play)
+- [x] Add configure play to `site.yml` Phase 3, targeting `netdata` dynamic
   group, tagged `[monitoring]`, `gather_facts: true`, after provision play
-- [ ] Create `tasks/reconstruct_netdata_group.yml`:
+- [x] Create `tasks/reconstruct_netdata_group.yml`:
   - Verify container 500 is running (`pct status {{ netdata_ct_id }}`)
   - Register via `add_host` with:
     `ansible_connection: community.proxmox.proxmox_pct_remote`,
@@ -301,24 +313,27 @@ Netdata uses a static IP computed from the host's network topology
     `proxmox_vmid: {{ netdata_ct_id }}`,
     `ansible_user: root`
 
-**Note on `[monitoring]` tag:** This tag is shared with rsyslog (per the
-target site.yml architecture, both netdata and rsyslog provision in the
-same play on `monitoring_nodes`). Configure plays remain separate since
-they target different dynamic groups (`netdata` vs `rsyslog`).
+**Note on `[monitoring]` tag:** This tag is shared with rsyslog. Both
+services have separate provision plays in `site.yml`, both tagged
+`[monitoring]` and targeting `monitoring_nodes`. Running `--tags
+monitoring` deploys both services. Configure plays are also separate
+since they target different dynamic groups (`netdata` vs `rsyslog`).
+Separate plays maintain failure isolation: if one service fails, the
+other's deploy_stamp and state are unaffected.
 
 **Verify:**
 
-- [ ] Container 500 is running: `pct status 500` returns `running`
-- [ ] Container is in `netdata` dynamic group (`add_host` registered)
-- [ ] `pct_remote` connection works: `ansible.builtin.ping` succeeds
-- [ ] Auto-start configured: `pct config 500` shows `onboot: 1`,
+- [x] Container 500 is running: `pct status 500` returns `running`
+- [x] Container is in `netdata` dynamic group (`add_host` registered)
+- [x] `pct_remote` connection works: `ansible.builtin.ping` succeeds
+- [x] Auto-start configured: `pct config 500` shows `onboot: 1`,
   `startup: order=3`
-- [ ] Bind mounts present: `pct config 500` shows mp entries for
+- [x] Bind mounts present: `pct config 500` shows mp entries for
   `/proc`→`/host/proc` and `/sys`→`/host/sys` (read-only)
-- [ ] Correct bridge assignment (LAN bridge on LAN hosts, WAN bridge on WAN hosts)
-- [ ] Correct static IP matches computed offset
-- [ ] Idempotent: re-run skips creation, container still running
-- [ ] deploy_stamp contains `netdata_lxc` play entry
+- [x] Correct bridge assignment (LAN bridge on LAN hosts, WAN bridge on WAN hosts)
+- [x] Correct static IP matches computed offset
+- [x] Idempotent: re-run skips creation, container still running
+- [x] deploy_stamp contains `netdata_lxc` play entry
 
 **Rollback:**
 
@@ -356,18 +371,18 @@ See: `vm-lifecycle` skill (LXC configure connection, pct_remote pattern).
 Both are soft-deps: when unset, Netdata runs as local-only dashboard.
 NEVER add to REQUIRED_ENV in build.py — monitoring is flavor-specific.
 
-- [ ] Create `roles/netdata_configure/defaults/main.yml`:
+- [x] Create `roles/netdata_configure/defaults/main.yml`:
   - `netdata_stream_api_key: "{{ lookup('env', 'NETDATA_STREAM_API_KEY') | default('', true) }}"`
   - `netdata_parent_ip: "{{ lookup('env', 'NETDATA_PARENT_IP') | default('', true) }}"`
-- [ ] Create `roles/netdata_configure/tasks/main.yml` (via `pct_remote`):
+- [x] Create `roles/netdata_configure/tasks/main.yml` (via `pct_remote`):
   - Template `stream.conf` (conditional on `netdata_parent_ip | length > 0`):
     - Destination: parent via WireGuard tunnel
     - API key from env (`NETDATA_STREAM_API_KEY`)
     - Buffer on disconnect
   - When `netdata_parent_ip` is empty: ensure `stream.conf` is absent or disabled
   - Restart Netdata inside the container
-- [ ] Create `roles/netdata_configure/templates/stream.conf.j2`
-- [ ] Create `roles/netdata_configure/meta/main.yml` with required metadata
+- [x] Create `roles/netdata_configure/templates/stream.conf.j2`
+- [x] Create `roles/netdata_configure/meta/main.yml` with required metadata
 
 **What is NOT in this role (baked into image M0):**
 - Netdata packages and service — baked
@@ -377,15 +392,15 @@ NEVER add to REQUIRED_ENV in build.py — monitoring is flavor-specific.
 
 **Verify:**
 
-- [ ] Netdata service running: `pct exec 500 -- systemctl is-active netdata`
-- [ ] Dashboard on port 19999: `pct exec 500 -- curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:19999`
-- [ ] Host metrics visible: `/host/proc` and `/host/sys` exist and contain
+- [x] Netdata service running: `pct exec 500 -- systemctl is-active netdata`
+- [x] Dashboard on port 19999: `pct exec 500 -- curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:19999`
+- [x] Host metrics visible: `/host/proc` and `/host/sys` exist and contain
   expected data (CPU, memory from host)
-- [ ] `netdata.conf` has correct proc/sys paths and retention (baked in image)
-- [ ] `stream.conf` present if `NETDATA_PARENT_IP` set; absent or disabled
+- [x] `netdata.conf` has correct proc/sys paths and retention (baked in image)
+- [x] `stream.conf` present if `NETDATA_PARENT_IP` set; absent or disabled
   when empty
-- [ ] Cgroups plugin enabled for per-container metrics (baked in image)
-- [ ] Idempotent: second run does not break config
+- [x] Cgroups plugin enabled for per-container metrics (baked in image)
+- [x] Idempotent: second run does not break config
 
 **Rollback:**
 
@@ -413,19 +428,18 @@ Covers container provisioning + configuration. Only touches VMID 500.
 Assumes baseline exists (OpenWrt running, LAN bridge up). Follows the
 rsyslog `molecule/rsyslog-lxc/` pattern exactly.
 
-- [ ] Create `molecule/netdata-lxc/molecule.yml`:
+- [x] Create `molecule/netdata-lxc/molecule.yml`:
   ```yaml
   platforms:
     - name: home
       groups:
         - proxmox
+        - router_nodes
         - monitoring_nodes
   provisioner:
     env:
       HOME_API_TOKEN: ${HOME_API_TOKEN}
       PRIMARY_HOST: ${PRIMARY_HOST}
-      NETDATA_STREAM_API_KEY: ${NETDATA_STREAM_API_KEY:-}
-      NETDATA_PARENT_IP: ${NETDATA_PARENT_IP:-}
   scenario:
     test_sequence:
       - dependency
@@ -434,12 +448,19 @@ rsyslog `molecule/rsyslog-lxc/` pattern exactly.
       - verify
       - cleanup
   ```
+  Note: `router_nodes` is required so the LAN/WAN topology check
+  (`'router_nodes' in group_names`) takes the correct LAN path for
+  `home`. Optional env vars (`NETDATA_STREAM_API_KEY`,
+  `NETDATA_PARENT_IP`) are NOT listed in `provisioner.env` — Molecule's
+  `${VAR:-}` syntax causes "Invalid placeholder in string" errors. The
+  role defaults already read them via `lookup('env', ...)` from the
+  shell environment.
 
-- [ ] Create `molecule/netdata-lxc/converge.yml`:
+- [x] Create `molecule/netdata-lxc/converge.yml`:
   ```yaml
   - name: Provision Netdata LXC container
     hosts: monitoring_nodes
-    gather_facts: false
+    gather_facts: true
     roles:
       - netdata_lxc
 
@@ -457,26 +478,28 @@ rsyslog `molecule/rsyslog-lxc/` pattern exactly.
       - netdata_configure
   ```
 
-- [ ] Create `molecule/netdata-lxc/verify.yml`:
+- [x] Create `molecule/netdata-lxc/verify.yml`:
   Netdata-specific assertions. Runs on `monitoring_nodes` via `pct exec`.
 
-- [ ] Create `molecule/netdata-lxc/cleanup.yml`:
+- [x] Create `molecule/netdata-lxc/cleanup.yml`:
   Destroys only container 500.
 
 #### 3b. Full integration (`molecule/default/`)
 
-- [ ] Extend `molecule/default/verify.yml` with Netdata assertions:
+- [x] Extend `molecule/default/verify.yml` with Netdata assertions:
   - Container 500 running, onboot=1, startup order=3
   - Netdata service active, dashboard on port 19999
   - Host metrics visible (CPU, memory from /host/proc)
   - Bind mounts present
   - deploy_stamp contains `netdata_lxc` entry
 
-- [ ] Verify generic container cleanup handles VMID 500
+- [x] Verify generic container cleanup handles VMID 500
+- [x] Add `netdata-*.tar.zst` to the "Remove cached LXC templates" glob
+  in both `playbooks/cleanup.yml` and `molecule/default/cleanup.yml`
 
 #### 3c. Rollback plays in `playbooks/cleanup.yml`
 
-- [ ] Add `netdata-rollback` play:
+- [x] Add `netdata-rollback` play:
   ```yaml
   - name: Rollback Netdata container
     hosts: monitoring_nodes
@@ -495,15 +518,18 @@ rsyslog `molecule/rsyslog-lxc/` pattern exactly.
 
 #### 3d. Molecule env passthrough
 
-- [ ] Add `NETDATA_STREAM_API_KEY` and `NETDATA_PARENT_IP` to
-  `molecule/default/molecule.yml` `provisioner.env` (optional, empty)
+No changes needed. `NETDATA_STREAM_API_KEY` and `NETDATA_PARENT_IP` are
+optional env vars read via `lookup('env', ...)` in role defaults. Ansible
+inherits the full shell environment regardless of what `provisioner.env`
+lists. NEVER add optional vars with `${VAR:-}` syntax to `provisioner.env`
+— Molecule's parser fails with "Invalid placeholder in string."
 
 #### 3e. Final validation
 
-- [ ] Run `molecule test` — full 4-node integration passes with exit code 0
-- [ ] Run `molecule test -s netdata-lxc` — per-feature cycle passes
-- [ ] `ansible-lint && yamllint .` passes with no new warnings
-- [ ] Cleanup leaves no Netdata artifacts on host or controller
+- [x] Run `molecule test` — full 4-node integration passes with exit code 0
+- [x] Run `molecule test -s netdata-lxc` — per-feature cycle passes
+- [x] `ansible-lint && yamllint .` passes with no new warnings
+- [x] Cleanup leaves no Netdata artifacts on host or controller
 
 **Rollback:** N/A — test infrastructure only; revert via git.
 
@@ -513,28 +539,28 @@ rsyslog `molecule/rsyslog-lxc/` pattern exactly.
 
 _Depends on M1–M3._
 
-- [ ] Create `docs/architecture/netdata-build.md`:
+- [x] Create `docs/architecture/netdata-build.md`:
   - Image build process (build-images.sh section)
   - Requirements, design decisions, env variables
   - Bind mount requirements (/proc, /sys read-only via proxmox_lxc vars)
   - Child-parent streaming flow and WireGuard soft dependency
   - Baked config vs runtime config split
-- [ ] Update `docs/architecture/overview.md`:
+- [x] Update `docs/architecture/overview.md`:
   - site.yml diagram: add Netdata provision + configure plays
   - Verify monitoring topology includes Netdata container
-- [ ] Update `docs/architecture/roles.md`:
+- [x] Update `docs/architecture/roles.md`:
   - Add `netdata_lxc` role documentation (purpose, bind mounts, key variables)
   - Add `netdata_configure` role documentation (purpose, env vars, streaming)
-- [ ] Update `docs/architecture/roadmap.md`:
+- [x] Update `docs/architecture/roadmap.md`:
   - Add Netdata project to Active Projects section
-- [ ] Add CHANGELOG entry under `[Unreleased]`
+- [x] Add CHANGELOG entry under `[Unreleased]`
 
 **Verify:**
 
-- [ ] `ansible-lint && yamllint .` passes with no new warnings
-- [ ] Documentation matches implemented behavior
-- [ ] All env variables documented with optional/soft-dependency behavior
-- [ ] `roles.md` entries match actual role exports
+- [x] `ansible-lint && yamllint .` passes with no new warnings
+- [x] Documentation matches implemented behavior
+- [x] All env variables documented with optional/soft-dependency behavior
+- [x] `roles.md` entries match actual role exports
 
 **Rollback:** N/A — documentation-only milestone.
 
@@ -543,9 +569,9 @@ _Depends on M1–M3._
 ## Future Integration Considerations
 
 - **rsyslog**: Both Netdata and rsyslog share `monitoring_nodes` and the
-  `[monitoring]` tag. The provision play includes both roles. Configure
-  plays remain separate. Netdata may want to forward its own logs to
-  rsyslog.
+  `[monitoring]` tag. Each has its own provision play for failure
+  isolation. Configure plays are also separate. Netdata may want to
+  forward its own logs to rsyslog.
 - **Multi-node expansion**: When `monitoring_nodes` expands beyond `home`,
   each node gets its own Netdata container. The WAN/LAN topology branching
   (M1) handles IP and bridge assignment automatically.

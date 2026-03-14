@@ -26,155 +26,90 @@
         that: (_rsyslog_running.stdout | trim | int) > 0
         fail_msg: "Container {{ rsyslog_ct_id }} is not running"
 
-    # ── Auto-start ───────────────────────────────────────────────
+    # ── Container config (single read) ───────────────────────────
 
-    - name: Check onboot setting
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ rsyslog_ct_id }} | grep -oP '^onboot:\s*\K.*'
-        executable: /bin/bash
-      register: _rsyslog_onboot
+    - name: Read container config (single call)
+      ansible.builtin.command:
+        cmd: pct config {{ rsyslog_ct_id }}
+      register: _rsyslog_cfg
       changed_when: false
 
     - name: Assert onboot is enabled
       ansible.builtin.assert:
-        that: (_rsyslog_onboot.stdout | trim) == '1'
-        fail_msg: "onboot={{ _rsyslog_onboot.stdout | trim }}, expected 1"
-
-    - name: Check startup order
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ rsyslog_ct_id }} | grep -oP '^startup:\s*order=\K\d+'
-        executable: /bin/bash
-      register: _rsyslog_startup
-      changed_when: false
+        that: "'onboot: 1' in _rsyslog_cfg.stdout"
+        fail_msg: "Container {{ rsyslog_ct_id }} missing onboot: 1"
 
     - name: Assert startup order is 3
       ansible.builtin.assert:
-        that: (_rsyslog_startup.stdout | trim) == '3'
-        fail_msg: "startup order={{ _rsyslog_startup.stdout | trim }}, expected 3"
+        that: _rsyslog_cfg.stdout is regex('startup:.*order=3')
+        fail_msg: "Container {{ rsyslog_ct_id }} missing startup order=3"
 
-    # ── Baked config files ───────────────────────────────────────
+    # ── rsyslog health checks (batched single pct exec) ──────────
 
-    - name: Check 10-receive.conf exists (baked)
-      ansible.builtin.command:
-        cmd: pct exec {{ rsyslog_ct_id }} -- test -f /etc/rsyslog.d/10-receive.conf
-      register: _rsyslog_receive_conf
+    - name: Run rsyslog container health checks (single pct exec)
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ rsyslog_ct_id }} -- /bin/sh -c '
+          echo "RECV=$(test -f /etc/rsyslog.d/10-receive.conf && echo present || echo missing)";
+          echo "ROUTE=$(test -f /etc/rsyslog.d/50-remote-route.conf && echo present || echo missing)";
+          echo "RECV_CONTENT=$(cat /etc/rsyslog.d/10-receive.conf 2>/dev/null)";
+          echo "ALLOWED=$(grep -r AllowedSender /etc/rsyslog.d/ 2>/dev/null && echo found || echo clean)";
+          echo "SVC=$(systemctl is-active rsyslog 2>/dev/null || echo inactive)";
+          /usr/sbin/rsyslogd -N1 >/dev/null 2>&1; echo "CFG_VALID=$?";
+          echo "TCP514=$(ss -tlnp 2>/dev/null | grep -c ":514")";
+          echo "SPOOL=$(test -d /var/spool/rsyslog && echo present || echo missing)"
+          '
+      register: _rsyslog_health
       changed_when: false
 
     - name: Assert 10-receive.conf is baked
       ansible.builtin.assert:
-        that: _rsyslog_receive_conf.rc == 0
+        that: "'RECV=present' in _rsyslog_health.stdout"
         fail_msg: "/etc/rsyslog.d/10-receive.conf missing (should be baked in image)"
-
-    - name: Check 50-remote-route.conf exists (baked)
-      ansible.builtin.command:
-        cmd: pct exec {{ rsyslog_ct_id }} -- test -f /etc/rsyslog.d/50-remote-route.conf
-      register: _rsyslog_route_conf
-      changed_when: false
 
     - name: Assert 50-remote-route.conf is baked
       ansible.builtin.assert:
-        that: _rsyslog_route_conf.rc == 0
+        that: "'ROUTE=present' in _rsyslog_health.stdout"
         fail_msg: "/etc/rsyslog.d/50-remote-route.conf missing (should be baked in image)"
-
-    - name: Read 10-receive.conf content
-      ansible.builtin.command:
-        cmd: pct exec {{ rsyslog_ct_id }} -- cat /etc/rsyslog.d/10-receive.conf
-      register: _receive_conf_content
-      changed_when: false
 
     - name: Assert 10-receive.conf loads imtcp
       ansible.builtin.assert:
         that:
-          - "'imtcp' in _receive_conf_content.stdout"
-          - "'514' in _receive_conf_content.stdout"
-          - "'RemoteLogFile' in _receive_conf_content.stdout"
-        fail_msg: "10-receive.conf content is wrong: {{ _receive_conf_content.stdout }}"
-
-    - name: Assert no deprecated AllowedSender in config
-      ansible.builtin.command:
-        cmd: pct exec {{ rsyslog_ct_id }} -- grep -r 'AllowedSender' /etc/rsyslog.d/
-      register: _allowed_sender_check
-      changed_when: false
-      failed_when: false
+          - "'imtcp' in _rsyslog_health.stdout"
+          - "'514' in _rsyslog_health.stdout"
+          - "'RemoteLogFile' in _rsyslog_health.stdout"
+        fail_msg: "10-receive.conf content is wrong"
 
     - name: Assert AllowedSender is not present
       ansible.builtin.assert:
-        that: _allowed_sender_check.rc != 0
+        that: "'ALLOWED=clean' in _rsyslog_health.stdout"
         fail_msg: "Deprecated $AllowedSender found in rsyslog config"
-
-    # ── rsyslog service ──────────────────────────────────────────
-
-    - name: Check rsyslog service is active
-      ansible.builtin.command:
-        cmd: pct exec {{ rsyslog_ct_id }} -- systemctl is-active rsyslog
-      register: _rsyslog_active
-      changed_when: false
 
     - name: Assert rsyslog is active
       ansible.builtin.assert:
-        that: "'active' in _rsyslog_active.stdout"
-        fail_msg: "rsyslog service not active: {{ _rsyslog_active.stdout }}"
-
-    # ── Config validation ────────────────────────────────────────
-
-    - name: Validate rsyslog config inside container
-      ansible.builtin.command:
-        cmd: pct exec {{ rsyslog_ct_id }} -- /usr/sbin/rsyslogd -N1
-      register: _rsyslog_config_valid
-      changed_when: false
+        that: "'SVC=active' in _rsyslog_health.stdout"
+        fail_msg: "rsyslog service not active"
 
     - name: Assert rsyslog config is valid
       ansible.builtin.assert:
-        that: _rsyslog_config_valid.rc == 0
-        fail_msg: "rsyslog config validation failed: {{ _rsyslog_config_valid.stderr }}"
-
-    # ── TCP listener ─────────────────────────────────────────────
-
-    - name: Check rsyslog listening on TCP 514
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct exec {{ rsyslog_ct_id }} -- ss -tlnp | grep -c ':514'
-        executable: /bin/bash
-      register: _rsyslog_listening
-      changed_when: false
+        that: "'CFG_VALID=0' in _rsyslog_health.stdout"
+        fail_msg: "rsyslog config validation failed"
 
     - name: Assert TCP 514 is listening
       ansible.builtin.assert:
-        that: (_rsyslog_listening.stdout | trim | int) > 0
+        that: _rsyslog_health.stdout | regex_search('TCP514=(\d+)', '\\1') | first | int > 0
         fail_msg: "rsyslog not listening on TCP 514"
-
-    # ── Spool directory ──────────────────────────────────────────
-
-    - name: Check spool directory exists
-      ansible.builtin.command:
-        cmd: pct exec {{ rsyslog_ct_id }} -- test -d /var/spool/rsyslog
-      register: _rsyslog_spool
-      changed_when: false
 
     - name: Assert spool directory exists
       ansible.builtin.assert:
-        that: _rsyslog_spool.rc == 0
+        that: "'SPOOL=present' in _rsyslog_health.stdout"
         fail_msg: "/var/spool/rsyslog missing inside container"
 
     # ── Log reception test ───────────────────────────────────────
 
-    - name: Get rsyslog container IP from Proxmox config
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ rsyslog_ct_id }} | grep -oP 'ip=\K[^/,]+'
-        executable: /bin/bash
-      register: _rsyslog_ct_ip_query
-      changed_when: false
-
-    - name: Set rsyslog verify IP
+    - name: Extract rsyslog container IP from cached config
       ansible.builtin.set_fact:
-        _verify_rsyslog_ip: "{{ _rsyslog_ct_ip_query.stdout | trim }}"
+        _verify_rsyslog_ip: "{{ _rsyslog_cfg.stdout | regex_search('ip=([^/,]+)', '\\1') | first }}"
 
     - name: Assert container IP is not empty
       ansible.builtin.assert:
@@ -362,17 +297,21 @@
           in_local_syslog={{ _leak_local.stdout | trim }}.
           The 50-remote-route.conf stop directive may not be working.
 
-    # ── Logrotate validation ─────────────────────────────────────
+    # ── Logrotate and memory (batched check + separate syntax) ────
 
-    - name: Check logrotate config exists
-      ansible.builtin.command:
-        cmd: pct exec {{ rsyslog_ct_id }} -- test -f /etc/logrotate.d/rsyslog-remote
-      register: _logrotate_exists
+    - name: Run logrotate and memory checks (single pct exec)
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ rsyslog_ct_id }} -- /bin/sh -c '
+          echo "LOGROTATE=$(test -f /etc/logrotate.d/rsyslog-remote && echo present || echo missing)";
+          MEM=$(free -m | awk "/^Mem:/{print \$3}"); echo "MEM=${MEM}"
+          '
+      register: _rsyslog_extras
       changed_when: false
 
     - name: Assert logrotate config exists
       ansible.builtin.assert:
-        that: _logrotate_exists.rc == 0
+        that: "'LOGROTATE=present' in _rsyslog_extras.stdout"
         fail_msg: "/etc/logrotate.d/rsyslog-remote missing"
 
     - name: Validate logrotate config syntax
@@ -387,22 +326,15 @@
         that: _logrotate_valid.rc == 0
         fail_msg: "logrotate config invalid: {{ _logrotate_valid.stderr }}"
 
-    # ── Memory usage check ───────────────────────────────────────
-
-    - name: Check container memory usage
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct exec {{ rsyslog_ct_id }} -- free -m | awk '/^Mem:/{print $3}'
-        executable: /bin/bash
-      register: _rsyslog_mem
-      changed_when: false
+    - name: Parse rsyslog memory usage
+      ansible.builtin.set_fact:
+        _rsyslog_mem_mb: "{{ _rsyslog_extras.stdout | regex_search('MEM=(\\d+)', '\\1') | first }}"
 
     - name: Assert memory usage is reasonable for 64 MB container
       ansible.builtin.assert:
-        that: (_rsyslog_mem.stdout | trim | int) < 56
+        that: (_rsyslog_mem_mb | int) < 56
         fail_msg: >-
-          rsyslog container using {{ _rsyslog_mem.stdout | trim }} MB
+          rsyslog container using {{ _rsyslog_mem_mb }} MB
           of 64 MB allocated — risk of OOM
 
     # ── Report ───────────────────────────────────────────────────
@@ -412,9 +344,6 @@
         msg: >-
           rsyslog per-feature verify passed:
           ct={{ rsyslog_ct_id }}, running=yes,
-          onboot={{ _rsyslog_onboot.stdout | trim }},
-          order={{ _rsyslog_startup.stdout | trim }},
-          service={{ _rsyslog_active.stdout | trim }},
           config_valid=yes,
           tcp_514=listening,
           log_reception=verified,
@@ -422,4 +351,4 @@
           restart_resilience=verified,
           remote_isolation=verified,
           logrotate=valid,
-          memory={{ _rsyslog_mem.stdout | trim }}MB
+          memory={{ _rsyslog_mem_mb }}MB

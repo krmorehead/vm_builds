@@ -1,0 +1,15 @@
+---
+netdata_ct_hostname: netdata
+netdata_ct_memory: 128
+netdata_ct_cores: 1
+netdata_ct_disk: "2"
+netdata_ct_template: "{{ netdata_lxc_template }}"
+netdata_ct_template_path: "{{ netdata_lxc_template_path }}"
+netdata_ct_onboot: true
+netdata_ct_startup_order: 3
+netdata_ct_unprivileged: false
+netdata_ct_features:
+  - "nesting=1"
+netdata_ct_mount_entries:
+  - "/proc,mp=/host/proc,ro=1"
+  - "/sys,mp=/host/sys,ro=1"

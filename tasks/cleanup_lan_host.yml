@@ -29,11 +29,12 @@
     msg: "{{ _lan_host_name }} is unreachable -- skipping cleanup"
   when: not (_host_reachable | bool)
 
-- name: Stop and destroy containers on LAN host  # noqa command-instead-of-shell
+- name: Stop and destroy project containers on LAN host  # noqa command-instead-of-shell
   ansible.builtin.shell:
     cmd: >-
       {{ _cleanup_ssh }} "
-      for ct in \$(pct list 2>/dev/null | awk 'NR>1 {print \$1}'); do
+      for ct in {{ wireguard_ct_id }} {{ meshwifi_ct_id }} {{ netdata_ct_id }} {{ rsyslog_ct_id }} {{ pihole_ct_id }}; do
+        pct status \$ct >/dev/null 2>&1 || continue;
         pct stop \$ct 2>/dev/null || true;
         sleep 2;
         pct destroy \$ct --purge 2>/dev/null || true;
@@ -54,17 +55,6 @@
       /etc/ansible/facts.d/vm_builds.fact
       /etc/apt/sources.list.d/pve-no-subscription.sources
       /etc/modules-load.d/wireguard.conf"
-  when: _host_reachable | bool
-  changed_when: true
-  failed_when: false
-
-- name: Remove cached LXC templates on LAN host  # noqa command-instead-of-shell
-  ansible.builtin.shell:
-    cmd: >-
-      {{ _cleanup_ssh }} "rm -f
-      /var/lib/vz/template/cache/debian-*.tar.zst
-      /var/lib/vz/template/cache/openwrt-*.tar.gz
-      /var/lib/vz/template/cache/pihole-*.tar.zst"
   when: _host_reachable | bool
   changed_when: true
   failed_when: false

@@ -1,0 +1,3 @@
+---
+netdata_stream_api_key: "{{ lookup('env', 'NETDATA_STREAM_API_KEY') | default('', true) }}"
+netdata_parent_ip: "{{ lookup('env', 'NETDATA_PARENT_IP') | default('', true) }}"

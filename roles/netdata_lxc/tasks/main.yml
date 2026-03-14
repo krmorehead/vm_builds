@@ -1,0 +1,100 @@
+---
+# ── Verify netdata template exists ──────────────────────────────
+- name: Check netdata LXC template exists on controller
+  ansible.builtin.stat:
+    path: "{{ role_path }}/../../{{ netdata_ct_template_path }}"
+  register: _netdata_template_stat
+  delegate_to: localhost
+
+- name: Fail if netdata template is missing
+  ansible.builtin.fail:
+    msg: >-
+      Netdata template not found: {{ netdata_ct_template_path }}.
+      Run ./build-images.sh to build it.
+  when: not (_netdata_template_stat.stat.exists | default(false))
+
+# ── Determine container network based on host topology ───────────
+
+- name: Determine if host is on the OpenWrt LAN
+  ansible.builtin.set_fact:
+    _host_on_openwrt_lan: >-
+      {{ 'router_nodes' in group_names or 'lan_hosts' in group_names }}
+
+- name: Read LAN gateway from generated env
+  ansible.builtin.set_fact:
+    _lan_gateway: >-
+      {{ lookup('pipe', 'grep "^LAN_GATEWAY=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2') }}
+    _lan_cidr: >-
+      {{ lookup('pipe', 'grep "^LAN_CIDR=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2') }}
+  when: _host_on_openwrt_lan | bool
+
+- name: Fail if LAN_GATEWAY is missing on LAN host
+  ansible.builtin.fail:
+    msg: >-
+      LAN_GATEWAY not found in {{ env_generated_path }}.
+      Run the OpenWrt baseline first — it writes LAN_GATEWAY during configure.
+  when:
+    - _host_on_openwrt_lan | bool
+    - (_lan_gateway | default('') | trim) | length == 0
+
+- name: Fail if LAN_CIDR is missing on LAN host
+  ansible.builtin.fail:
+    msg: >-
+      LAN_CIDR not found in {{ env_generated_path }}.
+      Run the OpenWrt baseline first — it writes LAN_CIDR during configure.
+  when:
+    - _host_on_openwrt_lan | bool
+    - (_lan_cidr | default('') | trim) | length == 0
+
+- name: Set container network for OpenWrt LAN hosts
+  ansible.builtin.set_fact:
+    _netdata_gateway: "{{ _lan_gateway }}"
+    _netdata_cidr: "{{ _lan_cidr }}"
+    _netdata_ct_ip: >-
+      {{ _lan_gateway.split('.')[0:3] | join('.') }}.{{
+         netdata_ct_ip_offset + groups['monitoring_nodes'].index(inventory_hostname) }}
+    _netdata_nameserver: "{{ _lan_gateway }}"
+  when: _host_on_openwrt_lan | bool
+
+- name: Set container network for WAN-connected hosts
+  ansible.builtin.set_fact:
+    _netdata_gateway: "{{ ansible_default_ipv4.gateway }}"
+    _netdata_cidr: "{{ ansible_default_ipv4.prefix }}"
+    _netdata_ct_ip: >-
+      {{ ansible_default_ipv4.network.split('.')[0:3] | join('.') }}.{{
+         netdata_ct_ip_offset + 200 + groups['monitoring_nodes'].index(inventory_hostname) }}
+    _netdata_nameserver: "8.8.8.8"
+  when: not (_host_on_openwrt_lan | bool)
+
+- name: Report netdata container IP assignment
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: netdata IP={{ _netdata_ct_ip }}/{{ _netdata_cidr }}
+      gw={{ _netdata_gateway }} ({{ 'OpenWrt LAN' if (_host_on_openwrt_lan | bool) else 'WAN subnet' }})
+
+# ── Provision via shared proxmox_lxc role ────────────────────────
+
+- name: Provision Netdata LXC container
+  ansible.builtin.include_role:
+    name: proxmox_lxc
+  vars:
+    lxc_ct_id: "{{ netdata_ct_id }}"
+    lxc_ct_hostname: "{{ netdata_ct_hostname }}"
+    lxc_ct_dynamic_group: netdata
+    lxc_ct_memory: "{{ netdata_ct_memory }}"
+    lxc_ct_cores: "{{ netdata_ct_cores }}"
+    lxc_ct_disk: "{{ netdata_ct_disk }}"
+    lxc_ct_onboot: "{{ netdata_ct_onboot }}"
+    lxc_ct_startup_order: "{{ netdata_ct_startup_order }}"
+    lxc_ct_template: "{{ netdata_ct_template }}"
+    lxc_ct_template_path: "{{ netdata_ct_template_path }}"
+    lxc_ct_ip: "{{ _netdata_ct_ip }}/{{ _netdata_cidr }}"
+    lxc_ct_gateway: "{{ _netdata_gateway }}"
+    lxc_ct_nameserver: "{{ _netdata_nameserver }}"
+    lxc_ct_mount_entries: "{{ netdata_ct_mount_entries }}"
+    lxc_ct_unprivileged: "{{ netdata_ct_unprivileged }}"
+    lxc_ct_features: "{{ netdata_ct_features }}"
+    lxc_ct_bridge: >-
+      {{ proxmox_wan_bridge
+         if not (_host_on_openwrt_lan | bool)
+         else (proxmox_all_bridges[1] | default('vmbr0')) }}

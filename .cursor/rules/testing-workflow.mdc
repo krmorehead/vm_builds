@@ -45,6 +45,24 @@ works, then implement the feature.
   baseline before working on layered scenarios.
 - NEVER consider a fix complete until `molecule test` passes end-to-end.
 
+## Service-specific cleanup
+
+Molecule cleanup destroys only known project VMs/containers by explicit VMID.
+NEVER iterate `qm list` / `pct list` to destroy ALL resources on a host.
+
+- Images are built once via `build-images.sh` and cached on each Proxmox host.
+  Templates persist across test runs (`pveam list` cache hit → skip upload).
+- Each service owns its own lifecycle: provision, configure, verify, cleanup.
+  Per-feature scenarios create and destroy only their own container/VM.
+- The full integration test (`molecule test`) creates all services from cached
+  images, verifies they work together, then cleans up each service by VMID.
+- Adding a new feature: run only the per-feature scenario. The full integration
+  test is reserved for CI and final proof.
+
+Previous bug: blanket `qm list` / `pct list` cleanup destroyed everything on
+the host (including non-project resources), forced a full rebuild of ~820MB
+of templates on every test run, and was slower than explicit VMID lookup.
+
 ## Hard-fail over graceful degradation
 
 NEVER add "graceful skip" for hardware expected on every host. iGPU is present

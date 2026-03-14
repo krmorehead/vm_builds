@@ -208,6 +208,22 @@
         executable: /bin/bash
       changed_when: true
 
+# ── Per-feature rollback: Netdata container ─────────────────────
+
+- name: Rollback Netdata container
+  hosts: monitoring_nodes
+  gather_facts: false
+  tags: [netdata-rollback, never]
+  tasks:
+    - name: Stop and destroy Netdata container
+      ansible.builtin.shell:
+        cmd: |
+          pct stop {{ netdata_ct_id }} 2>/dev/null || true
+          sleep 2
+          pct destroy {{ netdata_ct_id }} --purge 2>/dev/null || true
+        executable: /bin/bash
+      changed_when: true
+
 # ── Per-feature rollback: OpenWrt syslog forwarding ──────────────
 
 - name: Rollback OpenWrt syslog forwarding
@@ -402,7 +418,12 @@
 
     - name: Remove cached LXC templates
       ansible.builtin.shell:
-        cmd: rm -f /var/lib/vz/template/cache/debian-*.tar.zst /var/lib/vz/template/cache/openwrt-*.tar.gz /var/lib/vz/template/cache/pihole-*.tar.zst /var/lib/vz/template/cache/rsyslog-*.tar.zst
+        cmd: |
+          rm -f /var/lib/vz/template/cache/debian-*.tar.zst \
+               /var/lib/vz/template/cache/openwrt-*.tar.gz \
+               /var/lib/vz/template/cache/pihole-*.tar.zst \
+               /var/lib/vz/template/cache/rsyslog-*.tar.zst \
+               /var/lib/vz/template/cache/netdata-*.tar.zst
         executable: /bin/bash
       changed_when: true
       failed_when: false

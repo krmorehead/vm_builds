@@ -131,7 +131,9 @@ alwaysApply: true
 
 ## DNS resolution
 - After cleanup destroys the OpenWrt router VM, `/etc/resolv.conf` on the Proxmox host still points to `10.10.10.1` (the router's LAN IP). Without the router running, DNS breaks and all `apt` operations hang.
-- Roles that need internet access (apt installs, downloads) SHOULD check DNS first with `getent hosts deb.debian.org` and fall back to `8.8.8.8` / `1.1.1.1` if resolution fails.
+- Roles that need internet access (apt installs, downloads) MUST check DNS first with `getent hosts deb.debian.org` and fall back if resolution fails.
+- DNS fallback MUST use `ansible_default_ipv4.gateway` as the first nameserver, then external DNS (8.8.8.8, 1.1.1.1). NEVER hardcode only external DNS for LAN hosts — OpenWrt blocks outbound DNS from the LAN subnet, redirecting all queries through its own dnsmasq.
+- Previous bug: `proxmox_igpu` set DNS fallback to `8.8.8.8` on mesh1. OpenWrt's firewall blocked outbound DNS from the LAN. When `openwrt_mesh_lxc` tried to `apt install iw`, DNS was broken and apt hung indefinitely. Fix: use gateway IP as first nameserver in the fallback.
 
 ## Shell pipefail with grep -q
 - NEVER use `grep -q` in a pipeline with `set -o pipefail`. When `grep -q` exits early after matching, the upstream command (e.g., `lsmod`) receives SIGPIPE and the pipeline exit code becomes 141 (128 + SIGPIPE). Use `grep -c` instead to count matches (returns 0 for no match, >0 for match).
@@ -211,6 +213,12 @@ alwaysApply: true
 - WiFi kernel modules MUST be loaded on the HOST by the provisioning role (`openwrt_mesh_lxc`) BEFORE the container is created and the PHY is moved. The configure role (`openwrt_mesh_configure`) MUST NOT load modules.
 - Previous bug: `modprobe iwlwifi` ran inside the container via `pct_remote` after the PHY was already moved. The module reload created a new PHY in the host namespace. WiFi detection inside the container found zero radios.
 
+## WiFi config generation after PHY namespace move
+- When a WiFi PHY is namespace-moved into an OpenWrt LXC container AFTER boot, OpenWrt does NOT auto-generate `/etc/config/wireless`. The config file either doesn't exist or contains no `wifi-device` sections.
+- The configure role MUST run `wifi config` inside the container to generate the wireless configuration from detected hardware BEFORE any `uci set wireless.radio*` commands.
+- Pattern: `wifi config > /tmp/wifi_detected.conf && cp /tmp/wifi_detected.conf /etc/config/wireless` (only if wireless config is empty or missing).
+- Previous bug: `uci set wireless.radio0.disabled=0` failed with `uci: Invalid argument` on both mesh1 and mesh2. The PHY was detected (`iw phy` found `phy0`), but the UCI `wireless` config had no `radio0` section because the PHY was moved into the namespace after the container booted.
+
 ## pct exec PATH limitation
 - `pct exec` (and `lxc-attach`) uses a restricted PATH: `/sbin:/bin:/usr/sbin:/usr/bin`. Binaries in `/usr/local/bin/` (e.g., `pihole`) are NOT found.
 - ALWAYS use full paths for binaries in `/usr/local/bin/` or `/opt/` when running via `pct exec`, `pct_remote`, or `ansible.builtin.command` on containers.
@@ -264,6 +272,11 @@ alwaysApply: true
 ## OpenWrt BusyBox compatibility
 - NEVER use `pgrep` on OpenWrt — it may not exist in BusyBox. Use `/etc/init.d/<service> status` or `ps | grep -c '[p]rocess'` instead.
 - Previous bug: `pgrep -x logd` failed on OpenWrt because pgrep wasn't available. Fixed by using `/etc/init.d/log status`.
+
+## Jinja regex_search in assert conditionals
+- `regex_search` without a capture group returns a STRING match (not boolean). In `assert: that:` blocks, Ansible requires boolean results. ALWAYS append `is not none` when using bare `regex_search` in conditionals.
+- `regex_search` WITH a capture group piped to `| first | int > 0` is fine — the comparison produces a boolean.
+- Previous bug: `mesh_health.stdout | regex_search('RADIOS=phy')` in an assert failed with "Conditional result (True) was derived from value of type 'str'". Fix: added `is not none`.
 
 ## Verify task ordering
 - ALWAYS validate retrieved IPs (non-empty, no collision) BEFORE functional tests (log send, DNS query). If the IP is wrong, "log not found" errors are confusing; "IP is empty" is clear.

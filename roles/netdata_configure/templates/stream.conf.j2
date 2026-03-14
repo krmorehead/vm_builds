@@ -1,0 +1,7 @@
+[stream]
+    enabled = yes
+    destination = {{ netdata_parent_ip }}:19999
+    api key = {{ netdata_stream_api_key }}
+    buffer size bytes = 1048576
+    reconnect delay seconds = 5
+    initial clock resync iterations = 60

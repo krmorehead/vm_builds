@@ -1,0 +1,19 @@
+---
+- name: Provision Netdata LXC container
+  hosts: monitoring_nodes
+  gather_facts: true
+  roles:
+    - netdata_lxc
+
+- name: Reconstruct netdata dynamic group
+  hosts: monitoring_nodes
+  gather_facts: false
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_netdata_group.yml
+
+- name: Configure Netdata
+  hosts: netdata
+  gather_facts: true
+  roles:
+    - netdata_configure

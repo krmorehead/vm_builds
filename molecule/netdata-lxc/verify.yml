@@ -1,0 +1,196 @@
+---
+- name: Reconstruct netdata dynamic group
+  hosts: monitoring_nodes
+  gather_facts: false
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_netdata_group.yml
+
+- name: Verify Netdata LXC container
+  hosts: monitoring_nodes
+  gather_facts: false
+  tasks:
+    # ── Container state ──────────────────────────────────────────
+
+    - name: Check container is running
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct status {{ netdata_ct_id }} | grep -c running
+        executable: /bin/bash
+      register: _netdata_running
+      changed_when: false
+
+    - name: Assert container is running
+      ansible.builtin.assert:
+        that: (_netdata_running.stdout | trim | int) > 0
+        fail_msg: "Container {{ netdata_ct_id }} is not running"
+
+    # ── Container config (single read) ───────────────────────────
+
+    - name: Read container config (single call)
+      ansible.builtin.command:
+        cmd: pct config {{ netdata_ct_id }}
+      register: _netdata_cfg
+      changed_when: false
+
+    - name: Assert onboot is enabled
+      ansible.builtin.assert:
+        that: "'onboot: 1' in _netdata_cfg.stdout"
+        fail_msg: "Container {{ netdata_ct_id }} missing onboot: 1"
+
+    - name: Assert startup order is 3
+      ansible.builtin.assert:
+        that: _netdata_cfg.stdout is regex('startup:.*order=3')
+        fail_msg: "Container {{ netdata_ct_id }} missing startup order=3"
+
+    - name: Assert /host/proc bind mount exists
+      ansible.builtin.assert:
+        that: "'/host/proc' in _netdata_cfg.stdout"
+        fail_msg: "Bind mount for /host/proc not found in container config"
+
+    - name: Assert /host/sys bind mount exists
+      ansible.builtin.assert:
+        that: "'/host/sys' in _netdata_cfg.stdout"
+        fail_msg: "Bind mount for /host/sys not found in container config"
+
+    - name: Assert nesting=1 is enabled
+      ansible.builtin.assert:
+        that: "'nesting=1' in _netdata_cfg.stdout"
+        fail_msg: "Container missing nesting=1 feature — systemd sandboxing will fail"
+
+    # ── Netdata container health checks (batched single pct exec) ─
+
+    - name: Run Netdata container health checks (single pct exec)
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ netdata_ct_id }} -- /bin/sh -c '
+          echo "OVERRIDE=$(test -f /etc/systemd/system/netdata.service.d/lxc-override.conf && echo present || echo missing)";
+          echo "SVC=$(systemctl is-active netdata 2>/dev/null || echo inactive)";
+          echo "CPUINFO=$(test -f /host/proc/cpuinfo && echo present || echo missing)";
+          echo "SYSDIR=$(test -d /host/sys/class && echo present || echo missing)"
+          '
+      register: _netdata_health
+      changed_when: false
+
+    - name: Assert systemd override is present
+      ansible.builtin.assert:
+        that: "'OVERRIDE=present' in _netdata_health.stdout"
+        fail_msg: "systemd LXC override not found — Netdata will fail with 226/NAMESPACE"
+
+    - name: Assert Netdata service is active
+      ansible.builtin.assert:
+        that: "'SVC=active' in _netdata_health.stdout"
+        fail_msg: "Netdata service not active"
+
+    # ── Dashboard on port 19999 (kept separate for retry logic) ──
+
+    - name: Check Netdata dashboard responds
+      ansible.builtin.command:
+        cmd: pct exec {{ netdata_ct_id }} -- curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:19999
+      register: _netdata_dashboard
+      changed_when: false
+      retries: 3
+      delay: 3
+      until: (_netdata_dashboard.stdout | trim) == '200'
+
+    - name: Assert dashboard is accessible
+      ansible.builtin.assert:
+        that: (_netdata_dashboard.stdout | trim) == '200'
+        fail_msg: "Dashboard HTTP status: {{ _netdata_dashboard.stdout | trim }}"
+
+    - name: Assert host cpuinfo is readable
+      ansible.builtin.assert:
+        that: "'CPUINFO=present' in _netdata_health.stdout"
+        fail_msg: "/host/proc/cpuinfo not accessible inside container"
+
+    - name: Assert host sys is readable
+      ansible.builtin.assert:
+        that: "'SYSDIR=present' in _netdata_health.stdout"
+        fail_msg: "/host/sys/class not accessible inside container"
+
+    # ── Container IP validation ──────────────────────────────────
+
+    - name: Extract netdata container IP from cached config
+      ansible.builtin.set_fact:
+        _netdata_verify_ip: "{{ _netdata_cfg.stdout | regex_search('ip=([^/,]+)', '\\1') | first }}"
+
+    - name: Assert container IP is not empty
+      ansible.builtin.assert:
+        that: (_netdata_verify_ip | length) > 0
+        fail_msg: "Could not determine netdata container IP from pct config"
+
+    - name: Assert container IP does not collide with host IP
+      ansible.builtin.assert:
+        that: _netdata_verify_ip != ansible_host
+        fail_msg: >-
+          Container IP {{ _netdata_verify_ip }} collides with host IP
+          {{ ansible_host }} on {{ inventory_hostname }}
+
+    # ── Service restart resilience ───────────────────────────────
+
+    - name: Restart Netdata inside container
+      ansible.builtin.command:
+        cmd: pct exec {{ netdata_ct_id }} -- systemctl restart netdata
+      changed_when: true
+
+    - name: Wait for service to stabilize after restart
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: Check Netdata is active after restart
+      ansible.builtin.command:
+        cmd: pct exec {{ netdata_ct_id }} -- systemctl is-active netdata
+      register: _netdata_post_restart
+      changed_when: false
+
+    - name: Assert Netdata survived restart
+      ansible.builtin.assert:
+        that: "'active' in _netdata_post_restart.stdout"
+        fail_msg: "Netdata not active after restart: {{ _netdata_post_restart.stdout }}"
+
+    - name: Verify dashboard survives restart
+      ansible.builtin.command:
+        cmd: pct exec {{ netdata_ct_id }} -- curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:19999
+      register: _netdata_dash_post
+      changed_when: false
+      retries: 3
+      delay: 3
+      until: (_netdata_dash_post.stdout | trim) == '200'
+
+    - name: Assert dashboard still works after restart
+      ansible.builtin.assert:
+        that: (_netdata_dash_post.stdout | trim) == '200'
+        fail_msg: "Dashboard not responding after restart: {{ _netdata_dash_post.stdout | trim }}"
+
+    # ── Memory usage check ───────────────────────────────────────
+
+    - name: Check container memory usage (single pct exec)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ netdata_ct_id }} -- free -m | awk '/^Mem:/{print $3}'
+        executable: /bin/bash
+      register: _netdata_mem
+      changed_when: false
+
+    - name: Assert memory usage is reasonable for 128 MB container
+      ansible.builtin.assert:
+        that: (_netdata_mem.stdout | trim | int) < 112
+        fail_msg: >-
+          Netdata container using {{ _netdata_mem.stdout | trim }} MB
+          of 128 MB allocated — risk of OOM
+
+    # ── Report ───────────────────────────────────────────────────
+
+    - name: Report Netdata verification
+      ansible.builtin.debug:
+        msg: >-
+          Netdata per-feature verify passed:
+          ct={{ netdata_ct_id }}, running=yes,
+          dashboard=200,
+          host_proc=accessible,
+          host_sys=accessible,
+          ip={{ _netdata_verify_ip }},
+          restart_resilience=verified,
+          memory={{ _netdata_mem.stdout | trim }}MB

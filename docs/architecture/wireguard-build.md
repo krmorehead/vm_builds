@@ -94,19 +94,42 @@ WIREGUARD_ALLOWED_IPS=10.0.0.0/24
 | Tunnel connectivity | Not verified | Handshake + data |
 | Generated env | `test.env.generated` (cleaned up) | `.env.generated` → copied to `.env` |
 
+## Image Build
+
+Custom Debian 12 template built by `build-images.sh --only wireguard`.
+Builds remotely on a Proxmox host via `pct create`/`exec`/`vzdump`.
+
+### What's Baked In
+
+| Component | Path | Purpose |
+|-----------|------|---------|
+| wireguard-tools | `wg`, `wg-quick` | WireGuard CLI utilities |
+| iptables | `iptables`, `ip6tables` | Packet filtering (NAT) |
+| iptables-persistent | `netfilter-persistent` | Boot-persistent rules |
+| /etc/wireguard/ (0700) | dir | Config directory (wg0.conf deployed at runtime) |
+| /etc/sysctl.d/99-wireguard.conf | file | IP forwarding enabled |
+
+### Container Resources
+
+- **Template**: `wireguard-debian-12-amd64.tar.zst` (~143 MB)
+- **Disk**: 1 GB (template extracts to ~483 MB)
+- **Memory**: 128 MB
+- **Features**: `nesting=1` (required for iptables in container)
+
 ## Roles
 
 ### `wireguard_lxc`
 
 Thin wrapper around `proxmox_lxc`. Loads the `wireguard` kernel module
 on the host, persists it, then delegates to `proxmox_lxc` for container
-creation.
+creation. Uses the custom WireGuard template (`wireguard_lxc_template`).
 
 ### `wireguard_configure`
 
-Configures the container via `pct_remote`. Installs `wireguard-tools`,
-templates `wg0.conf`, enables the service, sets up IP forwarding and
-NAT. Auto-generates keys when env vars are empty.
+Configures the container via `pct_remote`. Zero package installs — all
+packages are baked into the custom image by `build-images.sh`. Templates
+`wg0.conf`, enables the service, applies IP forwarding sysctl, and
+configures NAT. Auto-generates keys when env vars are empty.
 
 ## Molecule Scenarios
 
@@ -123,8 +146,8 @@ NAT. Auto-generates keys when env vars are empty.
 3. Unloads `wireguard` kernel module
 4. Removes `.env.generated` on controller
 
-Full cleanup (`molecule test` or `--tags clean`) destroys all containers
-via `pct list` iteration — no WireGuard-specific cleanup needed.
+Full cleanup (`molecule test` or `--tags clean`) destroys containers by
+explicit VMIDs — no blanket `pct list` iteration.
 
 ## Future Integration
 

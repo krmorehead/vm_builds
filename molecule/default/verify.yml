@@ -263,6 +263,12 @@
         fail_msg: "deploy_stamp missing rsyslog_lxc entry: {{ stamp.plays.keys() | list }}"
       when: "'monitoring_nodes' in group_names"
 
+    - name: Assert stamp contains netdata_lxc (monitoring nodes only)
+      ansible.builtin.assert:
+        that: "'netdata_lxc' in stamp.plays"
+        fail_msg: "deploy_stamp missing netdata_lxc entry: {{ stamp.plays.keys() | list }}"
+      when: "'monitoring_nodes' in group_names"
+
     - name: Assert stamp contains openwrt_mesh_lxc (mesh wifi nodes only)
       ansible.builtin.assert:
         that: "'openwrt_mesh_lxc' in stamp.plays"
@@ -362,56 +368,33 @@
         that: "'running' in vm_running.stdout"
         fail_msg: "VM {{ openwrt_vm_id }} is not running: {{ vm_running.stdout }}"
 
-    # ── VM auto-start ──────────────────────────────────────────────
+    # ── VM auto-start and NIC ordering ──────────────────────────────
 
-    - name: Get VM onboot setting
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          qm config {{ openwrt_vm_id }} | grep -oP '^onboot:\s*\K.*'
-        executable: /bin/bash
-      register: vm_onboot
+    - name: Read VM config (single call)
+      ansible.builtin.command:
+        cmd: qm config {{ openwrt_vm_id }}
+      register: vm_cfg
       changed_when: false
 
     - name: Assert VM is configured to start on boot
       ansible.builtin.assert:
-        that: (vm_onboot.stdout | trim) == '1'
-        fail_msg: >-
-          VM {{ openwrt_vm_id }} onboot={{ vm_onboot.stdout | trim }},
-          expected 1
-
-    - name: Get VM startup order
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          qm config {{ openwrt_vm_id }} | grep -oP '^startup:\s*order=\K\d+'
-        executable: /bin/bash
-      register: vm_startup_order
-      changed_when: false
+        that: "'onboot: 1' in vm_cfg.stdout"
+        fail_msg: "VM {{ openwrt_vm_id }} missing onboot: 1"
 
     - name: Assert VM has startup order 1
       ansible.builtin.assert:
-        that: (vm_startup_order.stdout | trim) == '1'
-        fail_msg: >-
-          VM {{ openwrt_vm_id }} startup order={{ vm_startup_order.stdout | trim }},
-          expected 1
+        that: vm_cfg.stdout is regex('startup:.*order=1')
+        fail_msg: "VM {{ openwrt_vm_id }} missing startup order=1"
 
-    # ── VM NIC ordering ───────────────────────────────────────────
-
-    - name: Get VM net0 bridge assignment
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          qm config {{ openwrt_vm_id }} | grep '^net0:' | grep -oP 'bridge=\K[^,]+'
-        executable: /bin/bash
-      register: vm_net0_bridge
-      changed_when: false
+    - name: Extract net0 bridge from cached config
+      ansible.builtin.set_fact:
+        vm_net0_bridge_value: "{{ vm_cfg.stdout | regex_search('net0:.*bridge=([^,\\s]+)', '\\1') | first }}"
 
     - name: Assert net0 is the WAN bridge
       ansible.builtin.assert:
-        that: (vm_net0_bridge.stdout | trim) == wan_bridge
+        that: vm_net0_bridge_value == wan_bridge
         fail_msg: >-
-          VM net0 is on {{ vm_net0_bridge.stdout | trim }},
+          VM net0 is on {{ vm_net0_bridge_value }},
           expected WAN bridge {{ wan_bridge }}
 
     # ── Proxmox LAN management IP ────────────────────────────────
@@ -511,8 +494,8 @@
       ansible.builtin.wait_for:
         host: "{{ openwrt_lan_ip }}"
         port: 22
-        delay: 10
-        timeout: 120
+        delay: 5
+        timeout: 60
 
     - name: Check OpenWrt WAN interface and IP
       ansible.builtin.shell:
@@ -873,7 +856,7 @@
         msg: >-
           Router verification passed:
           WAN bridge={{ wan_bridge }}, LAN bridge={{ lan_bridge }},
-          VM net0={{ vm_net0_bridge.stdout | trim }},
+          VM net0={{ vm_net0_bridge_value }},
           Proxmox LAN IP={{ proxmox_lan_ip }},
           WAN={{ wan_info.stdout | trim }},
           LAN={{ lan_ip.stdout | trim }},
@@ -903,90 +886,72 @@
         that: (pihole_ct_running.stdout | trim | int) > 0
         fail_msg: "Container {{ pihole_ct_id }} is not running on {{ inventory_hostname }}"
 
-    - name: Get Pi-hole container onboot setting
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ pihole_ct_id }} | grep -oP '^onboot:\s*\K.*'
-        executable: /bin/bash
-      register: pihole_ct_onboot
+    - name: Read Pi-hole container config (single call)
+      ansible.builtin.command:
+        cmd: pct config {{ pihole_ct_id }}
+      register: pihole_ct_cfg
       changed_when: false
 
     - name: Assert Pi-hole container starts on boot
       ansible.builtin.assert:
-        that: (pihole_ct_onboot.stdout | trim) == '1'
-        fail_msg: >-
-          Container {{ pihole_ct_id }} on {{ inventory_hostname }}
-          onboot={{ pihole_ct_onboot.stdout | trim }}, expected 1
-
-    - name: Get Pi-hole container startup order
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ pihole_ct_id }} | grep -oP '^startup:\s*order=\K\d+'
-        executable: /bin/bash
-      register: pihole_ct_startup
-      changed_when: false
+        that: "'onboot: 1' in pihole_ct_cfg.stdout"
+        fail_msg: "Container {{ pihole_ct_id }} on {{ inventory_hostname }} missing onboot: 1"
 
     - name: Assert Pi-hole container has startup order 3
       ansible.builtin.assert:
-        that: (pihole_ct_startup.stdout | trim) == '3'
-        fail_msg: >-
-          Container {{ pihole_ct_id }} on {{ inventory_hostname }}
-          startup order={{ pihole_ct_startup.stdout | trim }}, expected 3
-
-    - name: Get Pi-hole container features
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ pihole_ct_id }} | grep -oP '^features:\s*\K.*'
-        executable: /bin/bash
-      register: pihole_ct_features
-      changed_when: false
+        that: pihole_ct_cfg.stdout is regex('startup:.*order=3')
+        fail_msg: "Container {{ pihole_ct_id }} on {{ inventory_hostname }} missing startup order=3"
 
     - name: Assert Pi-hole container has nesting enabled
       ansible.builtin.assert:
-        that: "'nesting=1' in pihole_ct_features.stdout"
-        fail_msg: >-
-          Container {{ pihole_ct_id }} on {{ inventory_hostname }}
-          missing nesting=1 in features: {{ pihole_ct_features.stdout | trim }}
+        that: "'nesting=1' in pihole_ct_cfg.stdout"
+        fail_msg: "Container {{ pihole_ct_id }} on {{ inventory_hostname }} missing nesting=1"
 
-    # ── Pi-hole FTL service ───────────────────────────────────────
+    # ── Pi-hole health checks (batched single pct exec) ───────────
 
-    - name: Check FTL daemon is running
-      ansible.builtin.command:
-        cmd: pct exec {{ pihole_ct_id }} -- /usr/local/bin/pihole status
-      register: pihole_ftl_status
+    - name: Run Pi-hole container health checks (single pct exec)
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ pihole_ct_id }} -- /bin/sh -c '
+          echo "FTL=$(/usr/local/bin/pihole status 2>/dev/null | head -3)";
+          echo "WEB=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1/admin/ 2>/dev/null)";
+          echo "DHCP=$(/usr/bin/pihole-FTL --config dhcp.active 2>/dev/null)"
+          '
+      register: pihole_health
       changed_when: false
-      failed_when: false
 
     - name: Assert FTL is active
       ansible.builtin.assert:
-        that: "'FTL' in pihole_ftl_status.stdout or 'Enabled' in pihole_ftl_status.stdout or 'Active' in pihole_ftl_status.stdout"
-        fail_msg: "Pi-hole FTL not active: {{ pihole_ftl_status.stdout }}"
+        that: "'FTL' in pihole_health.stdout or 'Enabled' in pihole_health.stdout or 'Active' in pihole_health.stdout"
+        fail_msg: "Pi-hole FTL not active on {{ inventory_hostname }}"
 
-    # ── Web admin ────────────────────────────────────────────────
-
-    - name: Check web admin responds
-      ansible.builtin.command:
-        cmd: pct exec {{ pihole_ct_id }} -- curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/admin/
-      register: pihole_web_status
-      changed_when: false
+    - name: Parse web admin status
+      ansible.builtin.set_fact:
+        _pihole_web_code: "{{ pihole_health.stdout | regex_search('WEB=(\\d+)', '\\1') | first }}"
 
     - name: Assert web admin is accessible
       ansible.builtin.assert:
-        that: (pihole_web_status.stdout | trim) in ['200', '301']
-        fail_msg: "Web admin HTTP status: {{ pihole_web_status.stdout | trim }}"
+        that: _pihole_web_code in ['200', '301']
+        fail_msg: "Web admin HTTP status: {{ _pihole_web_code }}"
 
-    # ── DNS resolution ───────────────────────────────────────────
+    # ── DNS resolution (kept separate for retry logic) ───────────
+
+    - name: Wait for FTL to listen on port 53
+      ansible.builtin.command:
+        cmd: pct exec {{ pihole_ct_id }} -- /bin/sh -c 'ss -tlnp | grep -q :53'
+      register: _ftl_listen
+      changed_when: false
+      retries: 6
+      delay: 5
+      until: _ftl_listen.rc == 0
 
     - name: Test DNS query through Pi-hole
       ansible.builtin.command:
         cmd: pct exec {{ pihole_ct_id }} -- dig @127.0.0.1 google.com +short +time=5
       register: pihole_dns_test
       changed_when: false
-      retries: 3
-      delay: 5
+      retries: 5
+      delay: 10
       until: pihole_dns_test.rc == 0 and (pihole_dns_test.stdout | trim | length > 0)
 
     - name: Assert DNS resolves through Pi-hole
@@ -994,18 +959,10 @@
         that: pihole_dns_test.stdout | trim | length > 0
         fail_msg: "DNS resolution failed through Pi-hole"
 
-    # ── DHCP disabled ────────────────────────────────────────────
-
-    - name: Check DHCP is disabled in Pi-hole (v6 pihole.toml)  # noqa command-instead-of-shell
-      ansible.builtin.shell:
-        cmd: pct exec {{ pihole_ct_id }} -- /usr/bin/pihole-FTL --config dhcp.active
-      register: pihole_dhcp_check
-      changed_when: false
-
     - name: Assert DHCP is disabled
       ansible.builtin.assert:
-        that: "'false' in pihole_dhcp_check.stdout"
-        fail_msg: "DHCP is active in Pi-hole — should be disabled: {{ pihole_dhcp_check.stdout }}"
+        that: "'false' in pihole_health.stdout"
+        fail_msg: "DHCP is active in Pi-hole — should be disabled"
 
     # ── deploy_stamp ─────────────────────────────────────────────
 
@@ -1019,10 +976,7 @@
         msg: >-
           Pi-hole verification passed on {{ inventory_hostname }}:
           container={{ pihole_ct_id }}, running=yes,
-          onboot={{ pihole_ct_onboot.stdout | trim }},
-          order={{ pihole_ct_startup.stdout | trim }},
-          nesting={{ pihole_ct_features.stdout | trim }},
-          web={{ pihole_web_status.stdout | trim }},
+          web={{ _pihole_web_code }},
           dns={{ 'working' if pihole_dns_test.stdout | trim | length > 0 else 'failed' }}
 
 # ── Play 4: rsyslog assertions (monitoring_nodes) ────────────────
@@ -1047,131 +1001,78 @@
         that: (rsyslog_ct_running.stdout | trim | int) > 0
         fail_msg: "Container {{ rsyslog_ct_id }} is not running on {{ inventory_hostname }}"
 
-    - name: Get rsyslog container onboot setting
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ rsyslog_ct_id }} | grep -oP '^onboot:\s*\K.*'
-        executable: /bin/bash
-      register: rsyslog_ct_onboot
+    - name: Read rsyslog container config (single call)
+      ansible.builtin.command:
+        cmd: pct config {{ rsyslog_ct_id }}
+      register: rsyslog_ct_cfg
       changed_when: false
 
     - name: Assert rsyslog container starts on boot
       ansible.builtin.assert:
-        that: (rsyslog_ct_onboot.stdout | trim) == '1'
-        fail_msg: >-
-          Container {{ rsyslog_ct_id }} on {{ inventory_hostname }}
-          onboot={{ rsyslog_ct_onboot.stdout | trim }}, expected 1
-
-    - name: Get rsyslog container startup order
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ rsyslog_ct_id }} | grep -oP '^startup:\s*order=\K\d+'
-        executable: /bin/bash
-      register: rsyslog_ct_startup
-      changed_when: false
+        that: "'onboot: 1' in rsyslog_ct_cfg.stdout"
+        fail_msg: "Container {{ rsyslog_ct_id }} on {{ inventory_hostname }} missing onboot: 1"
 
     - name: Assert rsyslog container has startup order 3
       ansible.builtin.assert:
-        that: (rsyslog_ct_startup.stdout | trim) == '3'
-        fail_msg: >-
-          Container {{ rsyslog_ct_id }} on {{ inventory_hostname }}
-          startup order={{ rsyslog_ct_startup.stdout | trim }}, expected 3
+        that: rsyslog_ct_cfg.stdout is regex('startup:.*order=3')
+        fail_msg: "Container {{ rsyslog_ct_id }} on {{ inventory_hostname }} missing startup order=3"
 
     # ── Baked config files ─────────────────────────────────────────
 
-    - name: Check 10-receive.conf exists (baked)
+    - name: Check baked rsyslog config files exist
       ansible.builtin.command:
-        cmd: pct exec {{ rsyslog_ct_id }} -- test -f /etc/rsyslog.d/10-receive.conf
-      register: rsyslog_receive_conf
+        cmd: >-
+          pct exec {{ rsyslog_ct_id }} -- /bin/sh -c
+          'test -f /etc/rsyslog.d/10-receive.conf && test -f /etc/rsyslog.d/50-remote-route.conf'
+      register: rsyslog_baked_confs
       changed_when: false
 
-    - name: Assert 10-receive.conf is baked
+    - name: Assert baked rsyslog configs are present
       ansible.builtin.assert:
-        that: rsyslog_receive_conf.rc == 0
-        fail_msg: "/etc/rsyslog.d/10-receive.conf missing (should be baked in image)"
+        that: rsyslog_baked_confs.rc == 0
+        fail_msg: "Baked rsyslog config files missing (10-receive.conf or 50-remote-route.conf)"
 
-    - name: Check 50-remote-route.conf exists (baked)
-      ansible.builtin.command:
-        cmd: pct exec {{ rsyslog_ct_id }} -- test -f /etc/rsyslog.d/50-remote-route.conf
-      register: rsyslog_route_conf
-      changed_when: false
+    # ── rsyslog health checks (batched single pct exec) ────────────
 
-    - name: Assert 50-remote-route.conf is baked
-      ansible.builtin.assert:
-        that: rsyslog_route_conf.rc == 0
-        fail_msg: "/etc/rsyslog.d/50-remote-route.conf missing (should be baked in image)"
-
-    # ── rsyslog service ───────────────────────────────────────────
-
-    - name: Check rsyslog service is active
-      ansible.builtin.command:
-        cmd: pct exec {{ rsyslog_ct_id }} -- systemctl is-active rsyslog
-      register: rsyslog_svc_status
+    - name: Run rsyslog container health checks (single pct exec)
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ rsyslog_ct_id }} -- /bin/sh -c '
+          echo "SVC=$(systemctl is-active rsyslog 2>/dev/null || echo inactive)";
+          /usr/sbin/rsyslogd -N1 >/dev/null 2>&1; echo "CFG_VALID=$?";
+          echo "TCP514=$(ss -tlnp 2>/dev/null | grep -c ":514")";
+          echo "SPOOL=$(test -d /var/spool/rsyslog && echo present || echo missing)";
+          echo "LOGROTATE=$(test -f /etc/logrotate.d/rsyslog-remote && echo present || echo missing)";
+          MEM=$(free -m | awk "/^Mem:/{print \$3}"); echo "MEM=${MEM}"
+          '
+      register: rsyslog_health
       changed_when: false
 
     - name: Assert rsyslog service is active
       ansible.builtin.assert:
-        that: "'active' in rsyslog_svc_status.stdout"
-        fail_msg: "rsyslog service not active: {{ rsyslog_svc_status.stdout }}"
-
-    # ── Config validation ──────────────────────────────────────────
-
-    - name: Validate rsyslog config inside container
-      ansible.builtin.command:
-        cmd: pct exec {{ rsyslog_ct_id }} -- /usr/sbin/rsyslogd -N1
-      register: rsyslog_config_valid
-      changed_when: false
+        that: "'SVC=active' in rsyslog_health.stdout"
+        fail_msg: "rsyslog service not active on {{ inventory_hostname }}"
 
     - name: Assert rsyslog config is valid
       ansible.builtin.assert:
-        that: rsyslog_config_valid.rc == 0
-        fail_msg: "rsyslog config validation failed: {{ rsyslog_config_valid.stderr }}"
-
-    # ── TCP listener ─────────────────────────────────────────────
-
-    - name: Check rsyslog listening on TCP 514
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct exec {{ rsyslog_ct_id }} -- ss -tlnp | grep -c ':514'
-        executable: /bin/bash
-      register: rsyslog_tcp_listen
-      changed_when: false
+        that: "'CFG_VALID=0' in rsyslog_health.stdout"
+        fail_msg: "rsyslog config validation failed on {{ inventory_hostname }}"
 
     - name: Assert TCP 514 is listening
       ansible.builtin.assert:
-        that: (rsyslog_tcp_listen.stdout | trim | int) > 0
-        fail_msg: "rsyslog not listening on TCP 514"
-
-    # ── Spool directory ──────────────────────────────────────────
-
-    - name: Check spool directory exists
-      ansible.builtin.command:
-        cmd: pct exec {{ rsyslog_ct_id }} -- test -d /var/spool/rsyslog
-      register: rsyslog_spool_check
-      changed_when: false
+        that: rsyslog_health.stdout | regex_search('TCP514=(\d+)', '\\1') | first | int > 0
+        fail_msg: "rsyslog not listening on TCP 514 on {{ inventory_hostname }}"
 
     - name: Assert spool directory exists
       ansible.builtin.assert:
-        that: rsyslog_spool_check.rc == 0
-        fail_msg: "/var/spool/rsyslog missing inside container"
+        that: "'SPOOL=present' in rsyslog_health.stdout"
+        fail_msg: "/var/spool/rsyslog missing on {{ inventory_hostname }}"
 
     # ── Log reception test ───────────────────────────────────────
 
-    - name: Get rsyslog container IP from Proxmox config
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ rsyslog_ct_id }} | grep -oP 'ip=\K[^/,]+'
-        executable: /bin/bash
-      register: _rsyslog_ct_ip_query
-      changed_when: false
-
-    - name: Set rsyslog verify IP
+    - name: Extract rsyslog container IP from cached config
       ansible.builtin.set_fact:
-        _rsyslog_verify_ip: "{{ _rsyslog_ct_ip_query.stdout | trim }}"
+        _rsyslog_verify_ip: "{{ rsyslog_ct_cfg.stdout | regex_search('ip=([^/,]+)', '\\1') | first }}"
 
     - name: Assert container IP is not empty
       ansible.builtin.assert:
@@ -1191,6 +1092,10 @@
           logger --tcp -n {{ _rsyslog_verify_ip }} -P 514
           "molecule-default-verify-rsyslog-$(date +%s)"
       changed_when: true
+      retries: 3
+      delay: 5
+      register: _rsyslog_send
+      until: _rsyslog_send.rc == 0
 
     - name: Wait for log to arrive
       ansible.builtin.pause:
@@ -1296,35 +1201,22 @@
           in_remote={{ rsyslog_leak_remote.stdout | trim }},
           in_local_syslog={{ rsyslog_leak_local.stdout | trim }}
 
-    # ── Memory usage check ─────────────────────────────────────
+    # ── Memory and logrotate checks (from batched health output) ──
 
-    - name: Check container memory usage
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct exec {{ rsyslog_ct_id }} -- free -m | awk '/^Mem:/{print $3}'
-        executable: /bin/bash
-      register: rsyslog_mem
-      changed_when: false
+    - name: Parse rsyslog memory usage from health check
+      ansible.builtin.set_fact:
+        _rsyslog_mem_mb: "{{ rsyslog_health.stdout | regex_search('MEM=(\\d+)', '\\1') | first }}"
 
     - name: Assert memory usage is reasonable for 64 MB container
       ansible.builtin.assert:
-        that: (rsyslog_mem.stdout | trim | int) < 56
+        that: (_rsyslog_mem_mb | int) < 56
         fail_msg: >-
           rsyslog container on {{ inventory_hostname }} using
-          {{ rsyslog_mem.stdout | trim }} MB of 64 MB — risk of OOM
-
-    # ── Logrotate validation ───────────────────────────────────
-
-    - name: Check logrotate config exists
-      ansible.builtin.command:
-        cmd: pct exec {{ rsyslog_ct_id }} -- test -f /etc/logrotate.d/rsyslog-remote
-      register: rsyslog_logrotate
-      changed_when: false
+          {{ _rsyslog_mem_mb }} MB of 64 MB — risk of OOM
 
     - name: Assert logrotate config exists
       ansible.builtin.assert:
-        that: rsyslog_logrotate.rc == 0
+        that: "'LOGROTATE=present' in rsyslog_health.stdout"
         fail_msg: "/etc/logrotate.d/rsyslog-remote missing on {{ inventory_hostname }}"
 
     - name: Validate logrotate config syntax
@@ -1352,18 +1244,160 @@
           rsyslog verification passed on {{ inventory_hostname }}:
           container={{ rsyslog_ct_id }}, running=yes,
           ip={{ _rsyslog_verify_ip }},
-          onboot={{ rsyslog_ct_onboot.stdout | trim }},
-          order={{ rsyslog_ct_startup.stdout | trim }},
-          service={{ rsyslog_svc_status.stdout | trim }},
           config_valid=yes,
           tcp_514=listening,
           log_reception={{ 'verified' if rsyslog_log_test.stdout | trim | length > 0 else 'failed' }},
           multi_source=verified,
           remote_isolation=verified,
-          memory={{ rsyslog_mem.stdout | trim }}MB,
+          memory={{ _rsyslog_mem_mb }}MB,
           logrotate=valid
 
-# ── Play 5: WireGuard assertions (all vpn_nodes) ─────────────────
+    # ── Netdata container ──────────────────────────────────────────
+
+    - name: Check Netdata container is running
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct status {{ netdata_ct_id }} | grep -c running
+        executable: /bin/bash
+      register: netdata_ct_running
+      changed_when: false
+
+    - name: Assert Netdata container is running
+      ansible.builtin.assert:
+        that: (netdata_ct_running.stdout | trim | int) > 0
+        fail_msg: "Container {{ netdata_ct_id }} is not running on {{ inventory_hostname }}"
+
+    - name: Read Netdata container config (single call)
+      ansible.builtin.command:
+        cmd: pct config {{ netdata_ct_id }}
+      register: netdata_ct_cfg
+      changed_when: false
+
+    - name: Assert Netdata container starts on boot
+      ansible.builtin.assert:
+        that: "'onboot: 1' in netdata_ct_cfg.stdout"
+        fail_msg: "Container {{ netdata_ct_id }} on {{ inventory_hostname }} missing onboot: 1"
+
+    - name: Assert Netdata container has startup order 3
+      ansible.builtin.assert:
+        that: netdata_ct_cfg.stdout is regex('startup:.*order=3')
+        fail_msg: "Container {{ netdata_ct_id }} on {{ inventory_hostname }} missing startup order=3"
+
+    # ── Bind mounts ──────────────────────────────────────────────
+
+    - name: Assert /host/proc bind mount exists
+      ansible.builtin.assert:
+        that: "'/host/proc' in netdata_ct_cfg.stdout"
+        fail_msg: "Bind mount for /host/proc not found in container config on {{ inventory_hostname }}"
+
+    - name: Assert /host/sys bind mount exists
+      ansible.builtin.assert:
+        that: "'/host/sys' in netdata_ct_cfg.stdout"
+        fail_msg: "Bind mount for /host/sys not found in container config on {{ inventory_hostname }}"
+
+    # ── Nesting feature ──────────────────────────────────────────
+
+    - name: Assert nesting=1 is enabled
+      ansible.builtin.assert:
+        that: "'nesting=1' in netdata_ct_cfg.stdout"
+        fail_msg: "Container missing nesting=1 on {{ inventory_hostname }}"
+
+    # ── Netdata container health checks (batched single pct exec) ─
+
+    - name: Run Netdata container health checks (single pct exec)
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ netdata_ct_id }} -- /bin/sh -c '
+          echo "OVERRIDE=$(test -f /etc/systemd/system/netdata.service.d/lxc-override.conf && echo present || echo missing)";
+          echo "SVC=$(systemctl is-active netdata 2>/dev/null || echo inactive)";
+          echo "CPUINFO=$(test -f /host/proc/cpuinfo && echo present || echo missing)";
+          MEM=$(free -m | awk "/^Mem:/{print \$3}"); echo "MEM=${MEM}"
+          '
+      register: netdata_health
+      changed_when: false
+
+    - name: Assert systemd override is present
+      ansible.builtin.assert:
+        that: "'OVERRIDE=present' in netdata_health.stdout"
+        fail_msg: "systemd LXC override not found on {{ inventory_hostname }}"
+
+    - name: Assert Netdata service is active
+      ansible.builtin.assert:
+        that: "'SVC=active' in netdata_health.stdout"
+        fail_msg: "Netdata service not active on {{ inventory_hostname }}"
+
+    # ── Dashboard on port 19999 (kept separate for retry logic) ──
+
+    - name: Check Netdata dashboard responds
+      ansible.builtin.command:
+        cmd: pct exec {{ netdata_ct_id }} -- curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:19999
+      register: netdata_dashboard
+      changed_when: false
+      retries: 3
+      delay: 3
+      until: (netdata_dashboard.stdout | trim) == '200'
+
+    - name: Assert dashboard is accessible
+      ansible.builtin.assert:
+        that: (netdata_dashboard.stdout | trim) == '200'
+        fail_msg: "Dashboard HTTP status on {{ inventory_hostname }}: {{ netdata_dashboard.stdout | trim }}"
+
+    - name: Assert host cpuinfo is readable
+      ansible.builtin.assert:
+        that: "'CPUINFO=present' in netdata_health.stdout"
+        fail_msg: "/host/proc/cpuinfo not accessible in container on {{ inventory_hostname }}"
+
+    # ── Container IP validation ──────────────────────────────────
+
+    - name: Extract netdata container IP from cached config
+      ansible.builtin.set_fact:
+        _netdata_verify_ip: "{{ netdata_ct_cfg.stdout | regex_search('ip=([^/,]+)', '\\1') | first }}"
+
+    - name: Assert container IP is not empty
+      ansible.builtin.assert:
+        that: (_netdata_verify_ip | length) > 0
+        fail_msg: "Could not determine netdata container IP from pct config on {{ inventory_hostname }}"
+
+    - name: Assert container IP does not collide with host IP
+      ansible.builtin.assert:
+        that: _netdata_verify_ip != ansible_host
+        fail_msg: >-
+          Container IP {{ _netdata_verify_ip }} collides with host IP
+          {{ ansible_host }} on {{ inventory_hostname }}
+
+    # ── Memory usage check (from batched health output) ──────────
+
+    - name: Parse Netdata memory usage from health check
+      ansible.builtin.set_fact:
+        _netdata_mem_mb: "{{ netdata_health.stdout | regex_search('MEM=(\\d+)', '\\1') | first }}"
+
+    - name: Assert memory usage is reasonable for 128 MB container
+      ansible.builtin.assert:
+        that: (_netdata_mem_mb | int) < 112
+        fail_msg: >-
+          Netdata container on {{ inventory_hostname }} using
+          {{ _netdata_mem_mb }} MB of 128 MB — risk of OOM
+
+    # ── deploy_stamp ─────────────────────────────────────────────
+
+    - name: Assert stamp contains netdata_lxc
+      ansible.builtin.assert:
+        that: "'netdata_lxc' in stamp.plays"
+        fail_msg: "deploy_stamp missing netdata_lxc entry: {{ stamp.plays.keys() | list }}"
+
+    - name: Report Netdata verification
+      ansible.builtin.debug:
+        msg: >-
+          Netdata verification passed on {{ inventory_hostname }}:
+          container={{ netdata_ct_id }}, running=yes,
+          ip={{ _netdata_verify_ip }},
+          dashboard={{ netdata_dashboard.stdout | trim }},
+          host_proc=accessible,
+          bind_mounts=present,
+          memory={{ _netdata_mem_mb }}MB
+
+# ── Play 6: WireGuard assertions (all vpn_nodes) ─────────────────
 
 - name: Verify WireGuard LXC on VPN nodes
   hosts: vpn_nodes
@@ -1385,53 +1419,26 @@
         that: (wg_ct_running.stdout | trim | int) > 0
         fail_msg: "Container {{ wireguard_ct_id }} is not running on {{ inventory_hostname }}"
 
-    - name: Get WireGuard container onboot setting
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ wireguard_ct_id }} | grep -oP '^onboot:\s*\K.*'
-        executable: /bin/bash
-      register: wg_ct_onboot
+    - name: Read WireGuard container config (single call)
+      ansible.builtin.command:
+        cmd: pct config {{ wireguard_ct_id }}
+      register: wg_ct_cfg
       changed_when: false
 
     - name: Assert WireGuard container starts on boot
       ansible.builtin.assert:
-        that: (wg_ct_onboot.stdout | trim) == '1'
-        fail_msg: >-
-          Container {{ wireguard_ct_id }} on {{ inventory_hostname }}
-          onboot={{ wg_ct_onboot.stdout | trim }}, expected 1
-
-    - name: Get WireGuard container startup order
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ wireguard_ct_id }} | grep -oP '^startup:\s*order=\K\d+'
-        executable: /bin/bash
-      register: wg_ct_startup
-      changed_when: false
+        that: "'onboot: 1' in wg_ct_cfg.stdout"
+        fail_msg: "Container {{ wireguard_ct_id }} on {{ inventory_hostname }} missing onboot: 1"
 
     - name: Assert WireGuard container has startup order 2
       ansible.builtin.assert:
-        that: (wg_ct_startup.stdout | trim) == '2'
-        fail_msg: >-
-          Container {{ wireguard_ct_id }} on {{ inventory_hostname }}
-          startup order={{ wg_ct_startup.stdout | trim }}, expected 2
-
-    - name: Get WireGuard container features
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ wireguard_ct_id }} | grep -oP '^features:\s*\K.*'
-        executable: /bin/bash
-      register: wg_ct_features
-      changed_when: false
+        that: wg_ct_cfg.stdout is regex('startup:.*order=2')
+        fail_msg: "Container {{ wireguard_ct_id }} on {{ inventory_hostname }} missing startup order=2"
 
     - name: Assert WireGuard container has nesting enabled
       ansible.builtin.assert:
-        that: "'nesting=1' in wg_ct_features.stdout"
-        fail_msg: >-
-          Container {{ wireguard_ct_id }} on {{ inventory_hostname }}
-          missing nesting=1 in features: {{ wg_ct_features.stdout | trim }}
+        that: "'nesting=1' in wg_ct_cfg.stdout"
+        fail_msg: "Container {{ wireguard_ct_id }} on {{ inventory_hostname }} missing nesting=1"
 
     # ── Kernel module on host ──────────────────────────────────────
 
@@ -1459,92 +1466,59 @@
         that: wg_module_conf.stat.exists
         fail_msg: "/etc/modules-load.d/wireguard.conf missing on {{ inventory_hostname }}"
 
-    # ── WireGuard configuration (inside container via pct exec) ────
+    # ── WireGuard configuration (batched single pct exec) ──────────
 
-    - name: Check wg0 interface exists in container
-      ansible.builtin.command:
-        cmd: pct exec {{ wireguard_ct_id }} -- ip link show wg0
-      register: wg_iface
+    - name: Run WireGuard container health checks (single pct exec)
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ wireguard_ct_id }} -- /bin/sh -c '
+          echo "IFACE=$(ip link show wg0 >/dev/null 2>&1 && echo ok || echo missing)";
+          echo "PERMS=$(stat -c "%a" /etc/wireguard/wg0.conf 2>/dev/null || echo missing)";
+          echo "PEER=$(wg show wg0 2>/dev/null | grep -c -E "peer|endpoint")";
+          echo "SVC=$(systemctl is-enabled wg-quick@wg0 2>/dev/null || echo unknown)";
+          echo "IPFWD=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)";
+          echo "SYSCTL=$(test -f /etc/sysctl.d/99-wireguard.conf && echo present || echo missing)";
+          echo "NAT=$(iptables -t nat -C POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null && echo present || echo missing)"
+          '
+      register: wg_health
       changed_when: false
-      failed_when: false
 
     - name: Assert wg0 interface exists
       ansible.builtin.assert:
-        that: wg_iface.rc == 0
-        fail_msg: "wg0 interface does not exist in container {{ wireguard_ct_id }} on {{ inventory_hostname }}"
-
-    - name: Check wg0 config file permissions
-      ansible.builtin.command:
-        cmd: pct exec {{ wireguard_ct_id }} -- stat -c '%a' /etc/wireguard/wg0.conf
-      register: wg_conf_perms
-      changed_when: false
+        that: "'IFACE=ok' in wg_health.stdout"
+        fail_msg: "wg0 interface not found in container {{ wireguard_ct_id }} on {{ inventory_hostname }}"
 
     - name: Assert wg0 config has correct permissions
       ansible.builtin.assert:
-        that: (wg_conf_perms.stdout | trim) == '600'
+        that: "'PERMS=600' in wg_health.stdout"
         fail_msg: >-
-          /etc/wireguard/wg0.conf has mode {{ wg_conf_perms.stdout | trim }},
-          expected 600
+          /etc/wireguard/wg0.conf permissions incorrect on {{ inventory_hostname }}.
+          Health output: {{ wg_health.stdout }}
 
-    - name: Check wg show output
-      ansible.builtin.command:
-        cmd: pct exec {{ wireguard_ct_id }} -- wg show wg0
-      register: wg_show
-      changed_when: false
-      failed_when: false
-
-    - name: Assert wg show reports endpoint
+    - name: Assert wg show reports peer
       ansible.builtin.assert:
-        that: "'endpoint' in wg_show.stdout or 'peer' in wg_show.stdout"
-        fail_msg: "wg show wg0 missing endpoint/peer info: {{ wg_show.stdout }}"
-      when: wg_show.rc == 0
-
-    - name: Check wg-quick@wg0 service is enabled
-      ansible.builtin.command:
-        cmd: pct exec {{ wireguard_ct_id }} -- systemctl is-enabled wg-quick@wg0
-      register: wg_service_enabled
-      changed_when: false
+        that: wg_health.stdout | regex_search('PEER=(\d+)', '\\1') | first | int > 0
+        fail_msg: "wg show wg0 missing peer/endpoint info on {{ inventory_hostname }}"
 
     - name: Assert wg-quick@wg0 is enabled
       ansible.builtin.assert:
-        that: "'enabled' in wg_service_enabled.stdout"
-        fail_msg: >-
-          wg-quick@wg0 is not enabled on {{ inventory_hostname }}:
-          {{ wg_service_enabled.stdout | trim }}
-
-    - name: Check IP forwarding is active
-      ansible.builtin.command:
-        cmd: pct exec {{ wireguard_ct_id }} -- sysctl -n net.ipv4.ip_forward
-      register: wg_ip_forward
-      changed_when: false
+        that: "'SVC=enabled' in wg_health.stdout"
+        fail_msg: "wg-quick@wg0 not enabled on {{ inventory_hostname }}"
 
     - name: Assert IP forwarding is enabled
       ansible.builtin.assert:
-        that: (wg_ip_forward.stdout | trim) == '1'
-        fail_msg: "IP forwarding is not enabled on {{ inventory_hostname }}: {{ wg_ip_forward.stdout | trim }}"
-
-    - name: Check IP forwarding persistence
-      ansible.builtin.command:
-        cmd: pct exec {{ wireguard_ct_id }} -- test -f /etc/sysctl.d/99-wireguard.conf
-      register: wg_sysctl_file
-      changed_when: false
-      failed_when: false
+        that: "'IPFWD=1' in wg_health.stdout"
+        fail_msg: "IP forwarding not enabled on {{ inventory_hostname }}"
 
     - name: Assert IP forwarding sysctl file exists
       ansible.builtin.assert:
-        that: wg_sysctl_file.rc == 0
-        fail_msg: "/etc/sysctl.d/99-wireguard.conf missing in container on {{ inventory_hostname }}"
-
-    - name: Check NAT MASQUERADE rule
-      ansible.builtin.command:
-        cmd: pct exec {{ wireguard_ct_id }} -- iptables -t nat -L POSTROUTING -n
-      register: wg_nat_rules
-      changed_when: false
+        that: "'SYSCTL=present' in wg_health.stdout"
+        fail_msg: "/etc/sysctl.d/99-wireguard.conf missing on {{ inventory_hostname }}"
 
     - name: Assert MASQUERADE rule present on wg0
       ansible.builtin.assert:
-        that: "'MASQUERADE' in wg_nat_rules.stdout"
-        fail_msg: "MASQUERADE rule missing from POSTROUTING chain on {{ inventory_hostname }}: {{ wg_nat_rules.stdout }}"
+        that: "'NAT=present' in wg_health.stdout"
+        fail_msg: "MASQUERADE rule missing on {{ inventory_hostname }}"
 
     # ── Generated env file (controller, check once) ────────────────
 
@@ -1586,12 +1560,9 @@
         msg: >-
           WireGuard verification passed on {{ inventory_hostname }}:
           container={{ wireguard_ct_id }}, running=yes,
-          onboot={{ wg_ct_onboot.stdout | trim }},
-          order={{ wg_ct_startup.stdout | trim }},
-          nesting={{ wg_ct_features.stdout | trim }},
-          wg0={{ 'present' if wg_iface.rc == 0 else 'absent' }},
-          ip_forward={{ wg_ip_forward.stdout | trim }},
-          nat={{ 'present' if 'MASQUERADE' in wg_nat_rules.stdout else 'absent' }}
+          wg0={{ 'present' if 'IFACE=ok' in wg_health.stdout else 'absent' }},
+          ip_forward={{ 'enabled' if 'IPFWD=1' in wg_health.stdout else 'disabled' }},
+          nat={{ 'present' if 'NAT=present' in wg_health.stdout else 'absent' }}
 
 # ── Play 4: LAN host assertions (mesh1-specific) ─────────────────
 
@@ -1668,38 +1639,23 @@
         that: (mesh_ct_running.stdout | trim | int) > 0
         fail_msg: "Container {{ meshwifi_ct_id }} is not running on {{ inventory_hostname }}"
 
-    - name: Get mesh container onboot setting
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ meshwifi_ct_id }} | grep -oP '^onboot:\s*\K.*'
-        executable: /bin/bash
-      register: mesh_ct_onboot
+    - name: Read mesh WiFi container config (single call)
+      ansible.builtin.command:
+        cmd: pct config {{ meshwifi_ct_id }}
+      register: mesh_ct_cfg
       changed_when: false
 
     - name: Assert mesh container starts on boot
       ansible.builtin.assert:
-        that: (mesh_ct_onboot.stdout | trim) == '1'
-        fail_msg: >-
-          Container {{ meshwifi_ct_id }} on {{ inventory_hostname }}
-          onboot={{ mesh_ct_onboot.stdout | trim }}, expected 1
-
-    - name: Get mesh container unprivileged setting
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ meshwifi_ct_id }} | grep -oP '^unprivileged:\s*\K.*' || echo '0'
-        executable: /bin/bash
-      register: mesh_ct_unpriv
-      changed_when: false
+        that: "'onboot: 1' in mesh_ct_cfg.stdout"
+        fail_msg: "Container {{ meshwifi_ct_id }} on {{ inventory_hostname }} missing onboot: 1"
 
     - name: Assert mesh container is privileged (unprivileged=0)
       ansible.builtin.assert:
-        that: (mesh_ct_unpriv.stdout | trim) == '0'
+        that: mesh_ct_cfg.stdout is not regex('unprivileged:\\s*1')
         fail_msg: >-
           Container {{ meshwifi_ct_id }} on {{ inventory_hostname }}
-          unprivileged={{ mesh_ct_unpriv.stdout | trim }}, expected 0
-          (privileged is required for WiFi PHY namespace move)
+          is unprivileged (required: privileged for WiFi PHY namespace move)
 
     - name: Check WiFi PHY hookscript exists
       ansible.builtin.stat:
@@ -1711,71 +1667,44 @@
         that: mesh_hookscript.stat.exists
         fail_msg: "Hookscript mesh-wifi-phy-{{ meshwifi_ct_id }}.sh not found"
 
-    - name: Check hookscript is attached to container
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ meshwifi_ct_id }} | grep -c 'hookscript'
-        executable: /bin/bash
-      register: mesh_hookscript_attached
-      changed_when: false
-      failed_when: false
-
     - name: Assert hookscript is attached
       ansible.builtin.assert:
-        that: (mesh_hookscript_attached.stdout | trim | int) > 0
+        that: "'hookscript' in mesh_ct_cfg.stdout"
         fail_msg: "No hookscript attached to container {{ meshwifi_ct_id }}"
 
-    - name: Check WiFi radios visible inside mesh container
+    - name: Run mesh container health checks (single pct exec)
       ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct exec {{ meshwifi_ct_id }} -- /bin/sh -c 'iw phy 2>/dev/null | sed -n "s/^Wiphy //p"'
-        executable: /bin/bash
-      register: mesh_radios_inside
+        cmd: >-
+          pct exec {{ meshwifi_ct_id }} -- /bin/sh -c '
+          echo "RADIOS=$(iw phy 2>/dev/null | sed -n "s/^Wiphy //p" | tr "\n" ",")";
+          echo "MESH_IFACES=$(cat /etc/config/wireless 2>/dev/null | grep -c "mode .mesh.")";
+          echo "WPAD=$(opkg list-installed wpad-mesh-openssl 2>/dev/null)"
+          '
+      register: mesh_health
       changed_when: false
       failed_when: false
 
     - name: Assert WiFi radios are visible inside container
       ansible.builtin.assert:
         that:
-          - mesh_radios_inside.rc == 0
-          - mesh_radios_inside.stdout_lines | select('match', '^phy') | list | length > 0
+          - mesh_health.rc == 0
+          - mesh_health.stdout | regex_search('RADIOS=phy') is not none
         fail_msg: >-
           No WiFi radios visible inside mesh container {{ meshwifi_ct_id }}
           on {{ inventory_hostname }}. PHY namespace move may have failed.
-          Output: {{ mesh_radios_inside.stdout | default('empty') }}
-
-    - name: Check mesh interface configuration inside container
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct exec {{ meshwifi_ct_id }} -- /bin/sh -c "cat /etc/config/wireless 2>/dev/null | grep -c \"mode 'mesh'\""
-        executable: /bin/bash
-      register: mesh_iface_config
-      changed_when: false
-      failed_when: false
+          Output: {{ mesh_health.stdout | default('empty') }}
 
     - name: Assert mesh interfaces are configured
       ansible.builtin.assert:
-        that: (mesh_iface_config.stdout | trim | int) > 0
+        that: mesh_health.stdout | regex_search('MESH_IFACES=(\d+)', '\\1') | first | int > 0
         fail_msg: >-
           No mesh interfaces configured inside container {{ meshwifi_ct_id }}
           on {{ inventory_hostname }}
-      when: mesh_radios_inside.rc == 0
-
-    - name: Check wpad-mesh-openssl is installed
-      ansible.builtin.shell:
-        cmd: |
-          pct exec {{ meshwifi_ct_id }} -- /bin/sh -c 'opkg list-installed wpad-mesh-openssl'
-        executable: /bin/bash
-      register: mesh_wpad_installed
-      changed_when: false
-      failed_when: false
+      when: mesh_health.rc == 0
 
     - name: Assert wpad-mesh-openssl is installed
       ansible.builtin.assert:
-        that: mesh_wpad_installed.stdout | trim | length > 0
+        that: "'wpad-mesh-openssl' in mesh_health.stdout"
         fail_msg: "wpad-mesh-openssl not installed in mesh container on {{ inventory_hostname }}"
 
     - name: Assert mesh container has deploy_stamp
@@ -1788,6 +1717,4 @@
         msg: >-
           Mesh LXC verification passed on {{ inventory_hostname }}:
           container={{ meshwifi_ct_id }}, running=yes,
-          privileged=yes, hookscript=deployed,
-          radios_inside={{ mesh_radios_inside.stdout_lines | select('match', '^phy') | list | length }},
-          mesh_ifaces={{ mesh_iface_config.stdout | default('0') | trim }}
+          privileged=yes, hookscript=deployed

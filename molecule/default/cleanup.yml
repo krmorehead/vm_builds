@@ -1,11 +1,23 @@
 ---
 # ── Play 1: Primary hosts (directly reachable) ───────────────────
+#
+# Service-specific cleanup: destroy only known project VMs/containers
+# by explicit VMID. NEVER iterate qm list / pct list — that destroys
+# non-project resources and is slower.
 
 - name: Clean reset primary Proxmox hosts
   hosts: proxmox:!lan_hosts
   gather_facts: false
   vars:
     backup_dir: /var/lib/ansible-backup
+    project_vm_ids:
+      - "{{ openwrt_vm_id }}"
+    project_ct_ids:
+      - "{{ wireguard_ct_id }}"
+      - "{{ pihole_ct_id }}"
+      - "{{ meshwifi_ct_id }}"
+      - "{{ netdata_ct_id }}"
+      - "{{ rsyslog_ct_id }}"
   tasks:
     - name: Check for backup manifest
       ansible.builtin.stat:
@@ -21,66 +33,65 @@
       ansible.builtin.meta: end_play
       when: not manifest_stat.stat.exists
 
-    - name: Read backup manifest
-      ansible.builtin.slurp:
-        src: "{{ backup_dir }}/manifest.json"
-      register: manifest_raw
+    # ── Destroy project VMs by explicit VMID ─────────────────────
 
-    - name: Parse manifest
-      ansible.builtin.set_fact:
-        manifest: "{{ manifest_raw.content | b64decode | from_json }}"
-
-    - name: List all current VMs
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          qm list 2>/dev/null | awk 'NR>1 {print $1}'
-        executable: /bin/bash
-      register: current_vms
+    - name: Check which project VMs exist
+      ansible.builtin.command:
+        cmd: qm status {{ item }}
+      loop: "{{ project_vm_ids }}"
+      register: _vm_checks
+      failed_when: false
       changed_when: false
 
-    - name: Stop all VMs
+    - name: Stop existing project VMs
       ansible.builtin.command:
-        cmd: qm stop {{ item }}
-      loop: "{{ current_vms.stdout_lines | default([]) }}"
+        cmd: qm stop {{ item.item }}
+      loop: "{{ _vm_checks.results }}"
+      when: item.rc == 0
       failed_when: false
 
     - name: Wait for VMs to stop
       ansible.builtin.pause:
         seconds: 5
-      when: current_vms.stdout_lines | default([]) | length > 0
+      when: _vm_checks.results | selectattr('rc', 'equalto', 0) | list | length > 0
 
-    - name: Destroy all VMs
+    - name: Destroy existing project VMs
       ansible.builtin.command:
-        cmd: qm destroy {{ item }} --purge
-      loop: "{{ current_vms.stdout_lines | default([]) }}"
+        cmd: qm destroy {{ item.item }} --purge
+      loop: "{{ _vm_checks.results }}"
+      when: item.rc == 0
       failed_when: false
 
-    - name: List all current containers
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct list 2>/dev/null | awk 'NR>1 {print $1}'
-        executable: /bin/bash
-      register: current_cts
+    # ── Destroy project containers by explicit VMID ──────────────
+
+    - name: Check which project containers exist
+      ansible.builtin.command:
+        cmd: pct status {{ item }}
+      loop: "{{ project_ct_ids }}"
+      register: _ct_checks
+      failed_when: false
       changed_when: false
 
-    - name: Stop all containers
+    - name: Stop existing project containers
       ansible.builtin.command:
-        cmd: pct stop {{ item }}
-      loop: "{{ current_cts.stdout_lines | default([]) }}"
+        cmd: pct stop {{ item.item }}
+      loop: "{{ _ct_checks.results }}"
+      when: item.rc == 0
       failed_when: false
 
     - name: Wait for containers to stop
       ansible.builtin.pause:
         seconds: 3
-      when: current_cts.stdout_lines | default([]) | length > 0
+      when: _ct_checks.results | selectattr('rc', 'equalto', 0) | list | length > 0
 
-    - name: Destroy all containers
+    - name: Destroy existing project containers
       ansible.builtin.command:
-        cmd: pct destroy {{ item }} --purge
-      loop: "{{ current_cts.stdout_lines | default([]) }}"
+        cmd: pct destroy {{ item.item }} --purge
+      loop: "{{ _ct_checks.results }}"
+      when: item.rc == 0
       failed_when: false
+
+    # ── PCI passthrough cleanup ──────────────────────────────────
 
     - name: Unbind devices from vfio-pci
       ansible.builtin.shell:
@@ -93,6 +104,13 @@
         executable: /bin/bash
       changed_when: true
       failed_when: false
+
+    - name: Check if PCI passthrough config exists
+      ansible.builtin.stat:
+        path: /etc/modprobe.d/vfio-pci.conf
+      register: _vfio_conf
+
+    # ── Remove ansible-managed config files ──────────────────────
 
     - name: Remove ansible-managed config files
       ansible.builtin.file:
@@ -109,13 +127,6 @@
         - /etc/modules-load.d/wireguard.conf
         - /tmp/openwrt-router-24.10.0-x86-64-combined.img.gz
         - /tmp/openwrt-router-24.10.0-x86-64-combined.img
-
-    - name: Remove cached LXC templates
-      ansible.builtin.shell:
-        cmd: rm -f /var/lib/vz/template/cache/debian-*.tar.zst /var/lib/vz/template/cache/openwrt-*.tar.gz /var/lib/vz/template/cache/pihole-*.tar.zst /var/lib/vz/template/cache/rsyslog-*.tar.zst
-        executable: /bin/bash
-      changed_when: true
-      failed_when: false
 
     - name: Remove mesh WiFi PHY hookscripts
       ansible.builtin.shell:
@@ -147,16 +158,13 @@
         executable: /bin/bash
       changed_when: true
 
-    - name: Restore host configuration from backup
-      ansible.builtin.unarchive:
-        src: "{{ manifest.host_config }}"
-        dest: /
-        remote_src: true
+    # ── Kernel / PCI state restoration ───────────────────────────
 
-    - name: Update initramfs
+    - name: Update initramfs after PCI config removal
       ansible.builtin.command:
         cmd: update-initramfs -u -k all
       changed_when: true
+      when: _vfio_conf.stat.exists | default(false)
 
     - name: Reload WiFi kernel modules
       ansible.builtin.shell:
@@ -185,6 +193,8 @@
         cmd: modprobe -r wireguard
       failed_when: false
       changed_when: true
+
+    # ── Controller state ─────────────────────────────────────────
 
     - name: Remove local state file from controller
       ansible.builtin.file:

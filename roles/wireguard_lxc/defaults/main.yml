@@ -3,7 +3,8 @@ wireguard_ct_hostname: wireguard
 wireguard_ct_memory: 128
 wireguard_ct_cores: 1
 wireguard_ct_disk: "1"
-wireguard_ct_template: "{{ proxmox_lxc_default_template }}"
+wireguard_ct_template: "{{ wireguard_lxc_template }}"
+wireguard_ct_template_path: "{{ wireguard_lxc_template_path }}"
 wireguard_ct_onboot: true
 wireguard_ct_startup_order: 2
 wireguard_ct_features:

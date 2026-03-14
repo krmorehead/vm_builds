@@ -232,14 +232,27 @@ Before considering a plan ready for execution, verify each item.
 
 9. **LXC features and capabilities**: If the plan provisions an LXC
    container, verify that required features are declared:
-   - `nesting=1`: needed for iptables/nftables inside unprivileged containers
+   - `nesting=1`: needed for iptables/nftables inside unprivileged
+     containers AND for systemd services that use sandboxing directives
+     (`LogNamespace`, `ProtectSystem`, `ProtectHome`, `ProtectControlGroups`,
+     `BindReadOnlyPaths`). Most Debian-packaged services use these.
    - `mount=cgroup`: needed for cgroup mounts (systemd containers)
    - `keyctl=1`: needed for kernel key management
+   - If the service uses systemd sandboxing (most Debian services), the
+     plan MUST also include a systemd drop-in override baked into the image
+     via `build-images.sh`. NEVER deploy the override via the configure
+     role — it's base system config (identical on every container) and
+     each `pct_remote` task adds 15-60s overhead. `nesting=1` alone does
+     not fix all directives (e.g., `LogNamespace` still fails).
    - If no special features are needed, the plan MUST explicitly state
      "no special LXC features required" so reviewers don't wonder.
    Previous bug: WireGuard plan omitted `nesting=1`. The `iptables -t nat
    MASQUERADE` command in M2 would have failed with "Permission denied"
    at runtime.
+   Previous bug: Netdata LXC exited 226/NAMESPACE even as privileged.
+   Root cause: `LogNamespace=netdata` in the systemd unit requires
+   `CLONE_NEWNS`, forbidden without `nesting=1`. Fix: `nesting=1` +
+   systemd override clearing `LogNamespace`.
 10. **Bake, don't configure at runtime** (per `project-structure.mdc`): if
     the plan mentions runtime package installation (`opkg install`,
     `apt install`), reject it. Packages AND base configuration belong in
@@ -340,8 +353,8 @@ Before considering a plan ready for execution, verify each item.
 25. **Container IP offset allocation**: If the service uses static IPs
     computed from an offset, verify the offset is defined in
     `group_vars/all.yml` and doesn't collide with existing allocations.
-    Current allocations: WireGuard 3–6, Pi-hole 10, rsyslog 11, Netdata
-    12, MeshWiFi 13, HA 14, Jellyfin 15. WAN offsets add +200. Check WAN
+    Current allocations: WireGuard 3–6, Pi-hole 10, rsyslog 12, Netdata
+    13, HA 14, Jellyfin 15, MeshWiFi 20. WAN offsets add +200. Check WAN
     offset against physical host IPs on the supernet.
 26. **Milestone consolidation**: Are any milestones redundant? Provisioning
     and site.yml integration should be in the SAME milestone (not split).
@@ -388,6 +401,19 @@ Before considering a plan ready for execution, verify each item.
     iGPU (Jellyfin, Kodi, Moonlight) SHOULD include BOTH Intel and AMD
     VA-API driver packages. At runtime, only the matching driver loads.
     This avoids rebuilding images when hardware changes.
+33. **Configure role task budget**: For LXC services, count the tasks in
+    the proposed configure role. Each `pct_remote` task adds 15-60s of
+    overhead. If a task deploys config that is identical across all
+    containers (systemd overrides, base config files, logrotate), move it
+    to the image build. Only host-specific config (IPs, keys, optional
+    features) belongs in the configure role.
+    Previous bug: Netdata configure role had 3 extra tasks for systemd
+    override (mkdir + copy + daemon_reload). Across 4 nodes, this added
+    ~3 minutes per test run. Moving to the image saved 38% of test time.
+34. **LXC disk sizing**: Verify the planned rootfs disk size accommodates
+    the EXTRACTED template, not just the compressed size. Compressed
+    templates can be 3-5x smaller. Minimum 2GB for services with databases
+    or monitoring data.
 
 ## Cross-references
 

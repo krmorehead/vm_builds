@@ -70,4 +70,6 @@
     lxc_ct_ip: "{{ _wg_ct_ip }}/{{ _wg_cidr }}"
     lxc_ct_gateway: "{{ _wg_gateway }}"
     lxc_ct_nameserver: "{{ _wg_nameserver }}"
+    lxc_ct_template: "{{ wireguard_ct_template }}"
+    lxc_ct_template_path: "{{ wireguard_ct_template_path }}"
     lxc_ct_bridge: "{{ proxmox_wan_bridge if not (_host_on_openwrt_lan | bool) else proxmox_all_bridges[1] | default('vmbr0') }}"

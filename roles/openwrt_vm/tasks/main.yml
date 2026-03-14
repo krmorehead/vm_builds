@@ -230,8 +230,8 @@
   ansible.builtin.wait_for:
     host: "{{ openwrt_bootstrap_gw }}"
     port: 22
-    delay: 15
-    timeout: 180
+    delay: 10
+    timeout: 120
 
 - name: Bootstrap diagnostics
   ansible.builtin.shell:

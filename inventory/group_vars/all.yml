@@ -45,6 +45,14 @@ rsyslog_lxc_template: rsyslog-debian-12-amd64.tar.zst
 rsyslog_lxc_template_path: images/rsyslog-debian-12-amd64.tar.zst
 rsyslog_ct_ip_offset: 12
 
+# ── Netdata LXC ─────────────────────────────────────────────────
+# Custom image built by build-images.sh: Debian 12 + Netdata pre-installed
+# with dbengine retention, /host/proc and /host/sys paths pre-configured.
+# Run ./build-images.sh before first deploy.
+netdata_lxc_template: netdata-debian-12-amd64.tar.zst
+netdata_lxc_template_path: images/netdata-debian-12-amd64.tar.zst
+netdata_ct_ip_offset: 13
+
 # ── OpenWrt Router (VM) ──────────────────────────────────────────
 # Custom image built by build-images.sh: mesh/security/DNS packages baked in.
 # Run ./build-images.sh before first deploy.
@@ -54,6 +62,13 @@ openwrt_vm_name: openwrt-router
 openwrt_vm_memory: 512
 openwrt_vm_cores: 2
 openwrt_vm_disk_size: 512M
+
+# ── WireGuard LXC ─────────────────────────────────────────────────
+# Custom image built by build-images.sh: Debian 12 + wireguard-tools,
+# iptables, iptables-persistent, sysctl ip_forward pre-configured.
+# Run ./build-images.sh before first deploy.
+wireguard_lxc_template: wireguard-debian-12-amd64.tar.zst
+wireguard_lxc_template_path: images/wireguard-debian-12-amd64.tar.zst
 
 # ── Network Tier (100-199) ───────────────────────────────────────
 wireguard_ct_id: 101

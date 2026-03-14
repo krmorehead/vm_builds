@@ -11,9 +11,7 @@ openwrt_bootstrap_bridge: ""
 openwrt_wan_bridge: ""
 
 # Clone a MAC address onto the WAN NIC (net0) so the ISP sees the
-# same MAC as the old router.  Avoids DHCP lease / DNS cert issues
-# when swapping routers.  Empty string = use Proxmox auto-generated MAC.
-# Set via WAN_MAC env variable in .env.
+# same MAC as the old router. Empty string = use Proxmox auto-generated MAC.
 openwrt_wan_mac: "{{ lookup('env', 'WAN_MAC') | default('', true) }}"
 
 # Proxmox auto-start: boot priority (lower = earlier).

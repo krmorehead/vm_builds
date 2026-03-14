@@ -359,6 +359,17 @@ drivers. Without this cleanup, WiFi PHYs are invisible to the mesh role.
 Previous bug: mesh1 WiFi was bound to vfio-pci from a prior test cycle.
 `/sys/class/ieee80211/` was empty despite the hardware being present.
 
+IMPORTANT: After the WiFi PHY is namespace-moved into the container, OpenWrt
+does NOT auto-generate `/etc/config/wireless`. The configure role MUST run
+`wifi config` inside the container to generate the wireless configuration
+from detected hardware BEFORE any `uci set wireless.radio*` commands.
+Without this step, `uci set wireless.radio0.disabled=0` fails with
+`uci: Invalid argument` because the `radio0` section doesn't exist.
+Previous bug: `uci set wireless.radio0.disabled=0` failed on both mesh1 and
+mesh2. The PHY was detected by `iw phy` (found `phy0`), but the UCI wireless
+config had no matching `radio0` section because the PHY was moved into the
+namespace after the container booted.
+
 Container networking follows host topology:
 - LAN hosts (`router_nodes`, `lan_hosts`) → OpenWrt LAN subnet, LAN bridge.
 - WAN hosts → `proxmox_wan_bridge`, `ansible_default_ipv4` subnet, DNS `8.8.8.8`.

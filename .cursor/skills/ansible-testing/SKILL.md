@@ -564,17 +564,54 @@ Without this, provision plays targeting flavor groups will skip hosts.
 
 ## Cleanup requirements for repeatable runs
 
-The cleanup playbook MUST restore the host to a clean state:
+The cleanup playbook MUST restore the host to a clean state using
+**service-specific cleanup** — destroy only known project VMs and containers
+by explicit VMID from `group_vars/all.yml`.
 
-1. Stop and destroy ALL VMs (`qm list` iteration, not hardcoded IDs).
-2. Unbind all devices from `vfio-pci`. Without this, WiFi hardware is invisible.
-3. Remove modprobe blacklist files (`/etc/modprobe.d/blacklist-wifi.conf`, `/etc/modprobe.d/vfio-pci.conf`).
-4. Reload WiFi kernel modules: `modprobe -r iwlmvm iwlwifi; modprobe iwlwifi`.
-5. Rescan PCI bus: `echo 1 > /sys/bus/pci/rescan`.
-6. Tear down stale bridges (skip vmbr0 management bridge).
-7. Restore host config from backup, `ifup --all --force`.
+1. Destroy project VMs by explicit VMID (check existence first with
+   `qm status`, then stop + destroy). Current VMIDs: OpenWrt (100).
+2. Destroy project containers by explicit VMID (check with `pct status`,
+   then stop + destroy). Current VMIDs: WireGuard (101), Pi-hole (102),
+   Mesh WiFi (103), Netdata (500), rsyslog (501).
+3. Unbind all devices from `vfio-pci`. Without this, WiFi hardware is invisible.
+4. Remove modprobe blacklist files (`/etc/modprobe.d/blacklist-wifi.conf`, `/etc/modprobe.d/vfio-pci.conf`).
+5. Reload WiFi kernel modules: `modprobe -r iwlmvm iwlwifi; modprobe iwlwifi`.
+6. Rescan PCI bus: `echo 1 > /sys/bus/pci/rescan`.
+7. Tear down stale bridges (skip vmbr0 management bridge).
+8. `ifup --all --force` to restore interfaces.
 
-Steps 2-5 are critical. Without them, the next run cannot detect WiFi hardware.
+Steps 3-6 are critical. Without them, the next run cannot detect WiFi hardware.
+
+**NEVER use blanket `qm list` / `pct list` iteration to destroy VMs and
+containers.** This destroys non-project resources on shared hosts, is slower
+than explicit VMIDs, and provides no benefit. Use explicit VMIDs defined in
+`group_vars/all.yml`. Check existence with `qm status` / `pct status` before
+attempting stop + destroy.
+
+Previous bug: molecule cleanup used `qm list | awk` and `pct list | awk` to
+discover and destroy ALL VMs/containers. This was unsafe on shared test hosts
+and forced a full rebuild of every resource on every test run.
+
+**NEVER delete LXC templates from `/var/lib/vz/template/cache/` in molecule
+cleanup.** The `proxmox_lxc` role checks `pveam list` and skips upload when
+the template is already cached. Deleting templates forces re-upload of ~820MB
+across 4 hosts on every run. Template deletion is only appropriate in
+`playbooks/cleanup.yml` behind `[full-restore, clean]` tags.
+
+Previous bug: molecule cleanup deleted all cached templates. Each subsequent
+`molecule test` re-uploaded pihole (205MB), rsyslog (143MB), netdata (315MB),
+wireguard (143MB), and openwrt-mesh (14MB) to every host. Removing the
+template deletion saved ~7 minutes on a 4-node test run.
+
+**NEVER restore the host config from backup archive in molecule cleanup.**
+The explicit file removal tasks already remove all ansible-managed files.
+The backup restore is redundant and adds ~15s per host. Backup restore is
+only appropriate in `playbooks/cleanup.yml` behind `[full-restore]` tag.
+
+**Make `update-initramfs` conditional** on PCI passthrough config having been
+present. Check `stat` on `/etc/modprobe.d/vfio-pci.conf` before removing it.
+Only run `update-initramfs` when the file existed. This saves ~20s per host
+when PCI passthrough wasn't configured.
 
 ## Verify completeness requirements
 
@@ -690,12 +727,127 @@ When adding a file to one, ALWAYS add it to all others. Current managed files:
 - Module config: `blacklist-wifi.conf`, `vfio-pci.conf`, `wireguard.conf`
 - Apt repos: `pve-no-subscription.sources` (added by igpu), enterprise
   repos (renamed to `.disabled`, restored on cleanup)
-- Templates/images: `/tmp/openwrt-upload*`, `/var/lib/vz/template/cache/debian-*.tar.zst`, `/var/lib/vz/template/cache/openwrt-*.tar.gz`
+- VM images: `/tmp/openwrt-upload*` (temporary during import)
+- Templates: `/var/lib/vz/template/cache/*` — ONLY in `playbooks/cleanup.yml`
+  behind `[full-restore, clean]` tags. NEVER in molecule cleanup (see above).
 - Hookscripts: `/var/lib/vz/snippets/mesh-wifi-phy-*.sh`
 - Facts: `vm_builds.fact`
 - Local: `.state/addresses.json`, `.env.generated`, `test.env.generated`
 
 Previous bug: `ansible-proxmox-lan.conf` was deployed by `openwrt_configure` but not removed by cleanup, causing stale LAN management IPs on subsequent test runs.
+
+## Test performance optimization
+
+The full 4-node `molecule test` takes ~13-14 minutes. Most time goes to
+template uploads, NTP sync, `pct_remote` overhead, and SSH round trips in
+verify. Apply these rules to avoid wasting time:
+
+### Template caching
+- NEVER delete templates in molecule cleanup. Keep them cached on Proxmox
+  hosts. The `proxmox_lxc` role's `pveam list` check skips upload when
+  cached. Template deletion forces re-upload of ~820MB across 4 hosts.
+- Template deletion is only valid in production cleanup behind
+  `[full-restore, clean]` tags.
+
+### NTP sync
+- ALWAYS check clock skew BEFORE running the full NTP burst+sleep+makestep
+  sequence. Use `chronyc -n tracking | awk '/System time/{print $4}'` to
+  get skew in seconds. Only sync when skew > 30s.
+- The NTP sync takes ~7s per host (sleep 6 + burst). With 4 hosts × 3
+  sync points (site.yml primary, site.yml LAN, proxmox_igpu), that's 84s
+  wasted when clocks are accurate.
+
+### pct_remote task count
+- Each `pct_remote` task opens a new paramiko SSH connection → `pct exec`
+  pipeline. Each task takes 15-60 seconds depending on payload.
+- MINIMIZE the number of tasks in configure roles. Base system config that
+  is identical across all containers belongs in the image, NOT the
+  configure role.
+- Previous bug: `netdata_configure` deployed a systemd override (3 tasks:
+  mkdir, copy, daemon_reload) via `pct_remote`. With 4 containers, this
+  added ~12 minutes. Moving the override to the image saved 38% of the
+  per-feature test time.
+
+### apt cache
+- Set `cache_valid_time: 86400` (24h) for apt tasks, not 3600 (1h).
+  Test machines rarely have stale packages. The shorter interval triggers
+  `apt-get update` on every run when the cache expires between test cycles.
+
+### Selective image rebuilds
+- Use `./build-images.sh --host <ip> --only <target>` to rebuild a single
+  image (mesh, router, pihole, rsyslog, netdata, wireguard). Full rebuilds
+  take ~15 min; selective rebuilds take ~2-3 min.
+- Every service MUST have a custom image with ALL packages baked in.
+  WireGuard was the last service converted (from stock Debian template to
+  custom image). ZERO configure roles should install packages at runtime.
+
+### Verify phase: consolidate pct config reads
+- NEVER call `pct config <id>` multiple times for the same container. Each
+  call is an SSH round trip (~1-2s). Read the full config once, register it,
+  then assert against the registered output using Jinja filters.
+- Pattern: `ansible.builtin.command: cmd: pct config {{ ct_id }}` →
+  register as `_ct_cfg` → assert `"'onboot: 1' in _ct_cfg.stdout"`,
+  `_ct_cfg.stdout is regex('startup:.*order=3')`, etc.
+- For IP extraction from cached config: use
+  `{{ _ct_cfg.stdout | regex_search('ip=([^/,]+)', '\\1') | first }}`.
+- Previous bug: verify.yml had 20 individual `pct config` calls (3-6 per
+  container). Consolidating to 6 (one per container type) eliminated 14
+  SSH round trips per host × 4 hosts = 56 unnecessary SSH connections.
+
+### Verify phase: batch pct exec calls per container
+- NEVER run multiple individual `pct exec` calls against the same container
+  when the checks are independent. Batch them into a single `pct exec`
+  with `/bin/sh -c '...'` and key=value output for easy parsing.
+- Pattern: combine health checks into one shell script that outputs
+  `KEY=value` lines. Parse with `'KEY=value' in result.stdout` or
+  `result.stdout | regex_search('KEY=(\d+)', '\\1') | first`.
+- Example (WireGuard — 7 checks → 1 pct exec):
+  ```yaml
+  - name: Run WireGuard container health checks (single pct exec)
+    ansible.builtin.shell:
+      cmd: >-
+        pct exec {{ ct_id }} -- /bin/sh -c '
+        echo "IFACE=$(ip link show wg0 >/dev/null 2>&1 && echo ok || echo missing)";
+        echo "SVC=$(systemctl is-enabled wg-quick@wg0 2>/dev/null || echo unknown)";
+        echo "NAT=$(iptables -t nat -C POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null && echo present || echo missing)"
+        '
+    register: wg_health
+    changed_when: false
+
+  - name: Assert wg0 exists
+    ansible.builtin.assert:
+      that: "'IFACE=ok' in wg_health.stdout"
+  ```
+- Keep tasks with retry logic (e.g., `curl` with `retries/until`) as
+  separate `pct exec` calls since they need per-attempt control.
+- Keep timing-dependent tests (log reception after `pause`) as separate
+  calls since they depend on wall-clock ordering.
+- Previous savings: batching eliminated ~43 individual SSH calls in the
+  default verify, saving ~60-80 seconds across 4 hosts.
+
+### Verify phase: merge plays with same hosts target
+- When two verify plays target the same `hosts:` group with the same
+  `gather_facts:` setting, merge them into one play. Each play has startup
+  overhead (SSH connection setup, fact gathering if enabled, variable
+  resolution).
+- Example: rsyslog and Netdata both target `monitoring_nodes` with
+  `gather_facts: false`. Merging them into one play eliminates one play
+  startup per host.
+
+### Wait/pause tuning
+- OpenWrt detached restart scripts take ~18s (8s explicit sleep + ~10s
+  service restarts). The post-script pause should be 20s, not 30s.
+- OpenWrt VM first boot SSH: `delay: 10, timeout: 120` (not 15/180).
+  Typical first boot is 30-60s.
+- LXC container networking: `delay: 3` (not 4). DHCP usually completes on
+  first probe.
+- WiFi PHY detection: `delay: 3` (not 5). PHY appears within seconds or
+  indicates a real problem.
+- Apt retry delay: `delay: 10` (not 15). Transient apt failures recover
+  quickly.
+- Verify-phase SSH waits: reduce `delay` and `timeout` for services that
+  are already confirmed running from converge. The verify wait is a safety
+  check, not a first-boot wait.
 
 ## Common failures
 
@@ -725,6 +877,8 @@ Previous bug: `ansible-proxmox-lan.conf` was deployed by `openwrt_configure` but
 | Per-feature verify passes with 0 assertions | Dynamic group empty in verify (separate invocation) | Add group reconstruction play at top of verify.yml |
 | Rollback play targets 0 hosts | Dynamic group empty in cleanup (separate invocation) | Add reconstruction play in cleanup.yml, tagged with all rollback tags |
 | SSH auth fails after security rollback | Rollback re-enabled password but didn't clear root password | Rollback MUST clear `/etc/shadow` root hash to restore empty-password baseline |
+| `uci: Invalid argument` on mesh WiFi radio | WiFi PHY namespace-moved after boot; wireless config not auto-generated | Run `wifi config` to generate `/etc/config/wireless` before `uci set wireless.radio*` |
+| All hosts unreachable during cleanup | PCI passthrough cleanup + initramfs update can trigger host reboot or network loss | Check host reachability before re-running; may need physical power cycle |
 
 ## Ansible syntax pitfalls with `raw:` heredocs
 
@@ -873,17 +1027,19 @@ flavor group to ALL platforms in the molecule default scenario — not just the
 static inventory. This is a test-only change that doesn't affect production.
 
 Verify tasks for multi-node scenarios MUST avoid recomputing IPs. Instead,
-query the actual container state from Proxmox:
+read the full container config once, then extract the IP from the cached
+output:
 
 ```yaml
-- name: Get container IP from Proxmox config
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      pct config {{ ct_id }} | grep -oP 'ip=\K[^/,]+'
-    executable: /bin/bash
-  register: _ct_ip_query
+- name: Read container config (single call)
+  ansible.builtin.command:
+    cmd: pct config {{ ct_id }}
+  register: _ct_cfg
   changed_when: false
+
+- name: Extract container IP from cached config
+  ansible.builtin.set_fact:
+    _ct_ip: "{{ _ct_cfg.stdout | regex_search('ip=([^/,]+)', '\\1') | first }}"
 ```
 
 This pattern:
@@ -891,6 +1047,8 @@ This pattern:
 - Eliminates `default('10.10.10.1', true)` fallbacks in verify tasks
 - Avoids index computation drift between per-feature and E2E scenarios
 - Serves as a hard-fail if the container doesn't exist (empty stdout)
+- Reuses the same registered config for onboot, startup order, features,
+  and IP assertions — eliminating redundant SSH round trips
 
 Previous bug: rsyslog verify computed IP as `LAN_GATEWAY + offset`. This only
 worked for LAN hosts and used a fallback default for the gateway. With 4-node
@@ -921,6 +1079,17 @@ testing, WAN hosts had wrong computed IPs. Fixed by querying `pct config`.
    but the module reports state accurately and follows Ansible conventions.
    Use `command` only for status checks (`systemctl is-active`) or validation
    (`rsyslogd -N1`).
+
+## Wake-on-LAN testing
+
+WoL (`wol.sh`) is a recovery utility, NOT a testable service. NEVER include
+WoL in the Molecule test suite — it requires a host to be powered off, which
+is destructive and non-idempotent.
+
+- WoL is verified manually after physical power events, not in CI/CD.
+- The script's correctness is validated by code review, not automated testing.
+- USB ethernet adapters do not support WoL. Hosts with USB-only networking
+  need alternative recovery (smart plug, IPMI, manual power button).
 
 ## Lint configuration
 

@@ -69,12 +69,29 @@
 
 # ── Ensure iw is available on the Proxmox host ───────────────────
 
+- name: Check DNS resolution before apt
+  ansible.builtin.command:
+    cmd: getent hosts deb.debian.org
+  register: _dns_check
+  changed_when: false
+  failed_when: false
+
+- name: Fix DNS to use gateway if external DNS is unreachable
+  ansible.builtin.copy:
+    dest: /etc/resolv.conf
+    mode: "0644"
+    content: |
+      nameserver {{ ansible_default_ipv4.gateway | default('8.8.8.8') }}
+      nameserver 8.8.8.8
+      nameserver 1.1.1.1
+  when: _dns_check.rc != 0
+
 - name: Install iw on Proxmox host
   ansible.builtin.apt:
     name: iw
     state: present
     update_cache: true
-    cache_valid_time: 3600
+    cache_valid_time: 86400
 
 # ── Determine container network based on host topology ───────────
 

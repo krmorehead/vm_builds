@@ -28,86 +28,75 @@
         that: (_pihole_running.stdout | trim | int) > 0
         fail_msg: "Container {{ pihole_ct_id }} is not running"
 
-    # ── Auto-start ───────────────────────────────────────────────
+    # ── Container config (single read) ───────────────────────────
 
-    - name: Check onboot setting
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ pihole_ct_id }} | grep -oP '^onboot:\s*\K.*'
-        executable: /bin/bash
-      register: _pihole_onboot
+    - name: Read container config (single call)
+      ansible.builtin.command:
+        cmd: pct config {{ pihole_ct_id }}
+      register: _pihole_cfg
       changed_when: false
 
     - name: Assert onboot is enabled
       ansible.builtin.assert:
-        that: (_pihole_onboot.stdout | trim) == '1'
-        fail_msg: "onboot={{ _pihole_onboot.stdout | trim }}, expected 1"
-
-    - name: Check startup order
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ pihole_ct_id }} | grep -oP '^startup:\s*order=\K\d+'
-        executable: /bin/bash
-      register: _pihole_startup
-      changed_when: false
+        that: "'onboot: 1' in _pihole_cfg.stdout"
+        fail_msg: "Container {{ pihole_ct_id }} missing onboot: 1"
 
     - name: Assert startup order is 3
       ansible.builtin.assert:
-        that: (_pihole_startup.stdout | trim) == '3'
-        fail_msg: "startup order={{ _pihole_startup.stdout | trim }}, expected 3"
-
-    # ── Features ─────────────────────────────────────────────────
-
-    - name: Check nesting feature
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ pihole_ct_id }} | grep -oP '^features:\s*\K.*'
-        executable: /bin/bash
-      register: _pihole_features
-      changed_when: false
+        that: _pihole_cfg.stdout is regex('startup:.*order=3')
+        fail_msg: "Container {{ pihole_ct_id }} missing startup order=3"
 
     - name: Assert nesting is enabled
       ansible.builtin.assert:
-        that: "'nesting=1' in _pihole_features.stdout"
-        fail_msg: "Missing nesting=1: {{ _pihole_features.stdout | trim }}"
+        that: "'nesting=1' in _pihole_cfg.stdout"
+        fail_msg: "Container {{ pihole_ct_id }} missing nesting=1"
 
-    # ── Pi-hole FTL daemon ───────────────────────────────────────
+    # ── Pi-hole health checks (batched single pct exec) ──────────
 
-    - name: Check FTL is running
-      ansible.builtin.command:
-        cmd: pct exec {{ pihole_ct_id }} -- /usr/local/bin/pihole status
-      register: _pihole_ftl
+    - name: Run Pi-hole container health checks (single pct exec)
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ pihole_ct_id }} -- /bin/sh -c '
+          echo "FTL=$(/usr/local/bin/pihole status 2>/dev/null | head -3)";
+          echo "WEB=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1/admin/ 2>/dev/null)";
+          echo "DHCP=$(/usr/bin/pihole-FTL --config dhcp.active 2>/dev/null)"
+          '
+      register: _pihole_health
       changed_when: false
-      failed_when: false
 
     - name: Assert FTL is active
       ansible.builtin.assert:
-        that: "'FTL' in _pihole_ftl.stdout or 'Enabled' in _pihole_ftl.stdout or 'Active' in _pihole_ftl.stdout"
-        fail_msg: "Pi-hole FTL not active: {{ _pihole_ftl.stdout }}"
+        that: "'FTL' in _pihole_health.stdout or 'Enabled' in _pihole_health.stdout or 'Active' in _pihole_health.stdout"
+        fail_msg: "Pi-hole FTL not active"
 
-    # ── Web admin ────────────────────────────────────────────────
-
-    - name: Check web admin responds
-      ansible.builtin.command:
-        cmd: pct exec {{ pihole_ct_id }} -- curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/admin/
-      register: _pihole_web
-      changed_when: false
+    - name: Parse web admin status
+      ansible.builtin.set_fact:
+        _pihole_web_code: "{{ _pihole_health.stdout | regex_search('WEB=(\\d+)', '\\1') | first }}"
 
     - name: Assert web admin returns 200 or 301
       ansible.builtin.assert:
-        that: (_pihole_web.stdout | trim) in ['200', '301']
-        fail_msg: "Web admin HTTP status: {{ _pihole_web.stdout | trim }}, expected 200 or 301"
+        that: _pihole_web_code in ['200', '301']
+        fail_msg: "Web admin HTTP status: {{ _pihole_web_code }}, expected 200 or 301"
 
     # ── DNS resolution ───────────────────────────────────────────
+
+    - name: Wait for FTL to listen on port 53
+      ansible.builtin.command:
+        cmd: pct exec {{ pihole_ct_id }} -- /bin/sh -c 'ss -tlnp | grep -q :53'
+      register: _ftl_listen
+      changed_when: false
+      retries: 6
+      delay: 5
+      until: _ftl_listen.rc == 0
 
     - name: Test DNS query through Pi-hole
       ansible.builtin.command:
         cmd: pct exec {{ pihole_ct_id }} -- dig @127.0.0.1 google.com +short +time=5
       register: _pihole_dns
       changed_when: false
+      retries: 5
+      delay: 10
+      until: _pihole_dns.rc == 0 and (_pihole_dns.stdout | trim | length > 0)
 
     - name: Assert DNS resolves
       ansible.builtin.assert:
@@ -127,18 +116,10 @@
       ansible.builtin.debug:
         msg: "Ad block test (doubleclick.net): {{ _pihole_adblock.stdout | default('no response') | trim }}"
 
-    # ── DHCP disabled ────────────────────────────────────────────
-
-    - name: Check DHCP is disabled (v6 pihole.toml)  # noqa command-instead-of-shell
-      ansible.builtin.shell:
-        cmd: pct exec {{ pihole_ct_id }} -- /usr/bin/pihole-FTL --config dhcp.active
-      register: _pihole_dhcp
-      changed_when: false
-
     - name: Assert DHCP is disabled
       ansible.builtin.assert:
-        that: "'false' in _pihole_dhcp.stdout"
-        fail_msg: "DHCP is active in Pi-hole: {{ _pihole_dhcp.stdout }}"
+        that: "'false' in _pihole_health.stdout"
+        fail_msg: "DHCP is active in Pi-hole — should be disabled"
 
     # ── Report ───────────────────────────────────────────────────
 
@@ -147,8 +128,5 @@
         msg: >-
           Pi-hole per-feature verify passed:
           ct={{ pihole_ct_id }}, running=yes,
-          onboot={{ _pihole_onboot.stdout | trim }},
-          order={{ _pihole_startup.stdout | trim }},
-          nesting={{ _pihole_features.stdout | trim }},
-          web={{ _pihole_web.stdout | trim }},
+          web={{ _pihole_web_code }},
           dns={{ 'working' if _pihole_dns.stdout | trim | length > 0 else 'failed' }}

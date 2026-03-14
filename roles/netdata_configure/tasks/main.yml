@@ -1,0 +1,65 @@
+---
+# Netdata base config (dbengine, retention, proc/sys paths, dashboard,
+# systemd LXC override) is baked into the image. This role only applies
+# host-specific streaming config when NETDATA_PARENT_IP is set.
+
+# ── Locate netdata config directory ──────────────────────────────
+
+- name: Detect netdata config directory
+  ansible.builtin.command:
+    cmd: >-
+      sh -c '
+      if [ -d /etc/netdata ]; then echo /etc/netdata;
+      elif [ -d /opt/netdata/etc/netdata ]; then echo /opt/netdata/etc/netdata;
+      else echo "";
+      fi'
+  register: _netdata_conf_dir
+  changed_when: false
+
+- name: Set netdata config directory fact
+  ansible.builtin.set_fact:
+    _netdata_conf_dir: "{{ _netdata_conf_dir.stdout | trim }}"
+
+- name: Fail if netdata config directory not found
+  ansible.builtin.fail:
+    msg: >-
+      Netdata config directory not found at /etc/netdata or /opt/netdata/etc/netdata.
+      Is Netdata installed in the image?
+  when: _netdata_conf_dir | length == 0
+
+# ── Deploy or remove streaming config ────────────────────────────
+
+- name: Deploy streaming config to netdata
+  ansible.builtin.template:
+    src: stream.conf.j2
+    dest: "{{ _netdata_conf_dir }}/stream.conf"
+    mode: "0644"
+  when: netdata_parent_ip | length > 0
+  notify: _restart_netdata
+
+- name: Remove streaming config when parent IP is not set
+  ansible.builtin.file:
+    path: "{{ _netdata_conf_dir }}/stream.conf"
+    state: absent
+  when: netdata_parent_ip | length == 0
+  notify: _restart_netdata
+
+- name: Flush handlers to restart netdata
+  ansible.builtin.meta: flush_handlers
+
+# ── Post-restart health check ────────────────────────────────────
+
+- name: Wait for netdata to be active after config change
+  ansible.builtin.command:
+    cmd: systemctl is-active netdata
+  register: _netdata_status
+  changed_when: false
+  retries: 10
+  delay: 3
+  until: _netdata_status.stdout | trim == 'active'
+
+- name: Report netdata status
+  ansible.builtin.debug:
+    msg: >-
+      Netdata service: {{ _netdata_status.stdout | trim }},
+      streaming={{ 'enabled to ' + netdata_parent_ip if netdata_parent_ip | length > 0 else 'disabled (local dashboard only)' }}

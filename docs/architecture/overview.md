@@ -423,7 +423,7 @@ LXC container networking must match host topology:
 The playbook (`playbooks/site.yml`) runs plays in sequence. Plays targeting
 flavor groups the host doesn't belong to are automatically skipped.
 
-### Current (v1.4) — Phased Multi-Node
+### Current (v1.2) — Phased Multi-Node
 
 ```
 site.yml (current — phased for multi-node)
@@ -444,28 +444,30 @@ site.yml (current — phased for multi-node)
 │   ├── Play 8:  pihole              [pihole]     pihole_configure
 │   ├── Play 9:  monitoring_nodes    [monitoring]  rsyslog_lxc, deploy_stamp
 │   ├── Play 10: rsyslog             [monitoring]  rsyslog_configure
-│   ├── Play 11: vpn_nodes           [wireguard]  wireguard_lxc, deploy_stamp
-│   ├── Play 12: wireguard           [wireguard]  wireguard_configure
-│   ├── Play 13: wifi_nodes:!router_nodes [mesh-wifi]  openwrt_mesh_lxc, deploy_stamp
-│   └── Play 14: openwrt_mesh        [mesh-wifi]  openwrt_mesh_configure
+│   ├── Play 11: monitoring_nodes    [monitoring]  netdata_lxc, deploy_stamp
+│   ├── Play 12: netdata             [monitoring]  netdata_configure
+│   ├── Play 13: vpn_nodes           [wireguard]  wireguard_lxc, deploy_stamp
+│   ├── Play 14: wireguard           [wireguard]  wireguard_configure
+│   ├── Play 15: wifi_nodes:!router_nodes [mesh-wifi]  openwrt_mesh_lxc, deploy_stamp
+│   └── Play 16: openwrt_mesh        [mesh-wifi]  openwrt_mesh_configure
 │
 ├── Per-feature plays (opt-in via --tags <name>, tagged with [never]):
-│   ├── Play 15: openwrt             [openwrt-security]   include_role: openwrt_configure/security.yml
-│   ├── Play 16: router_nodes        [openwrt-security]   deploy_stamp (openwrt_security)
-│   ├── Play 17: openwrt             [openwrt-vlans]      include_role: openwrt_configure/vlans.yml
-│   ├── Play 18: router_nodes        [openwrt-vlans]      deploy_stamp (openwrt_vlans)
-│   ├── Play 19: openwrt             [openwrt-dns]        include_role: openwrt_configure/dns.yml
-│   ├── Play 20: router_nodes        [openwrt-dns]        deploy_stamp (openwrt_dns)
-│   ├── Play 21: openwrt             [openwrt-mesh]       include_role: openwrt_configure/mesh.yml
-│   ├── Play 22: router_nodes        [openwrt-mesh]       deploy_stamp (openwrt_mesh)
-│   ├── Play 23: router_nodes        [openwrt-syslog]     reconstruct openwrt group
-│   ├── Play 24: openwrt             [openwrt-syslog]     include_role: openwrt_configure/syslog.yml
-│   ├── Play 25: router_nodes        [openwrt-syslog]     deploy_stamp (openwrt_syslog)
-│   ├── Play 26: router_nodes        [openwrt-pihole-dns] reconstruct openwrt group
-│   ├── Play 27: openwrt             [openwrt-pihole-dns] include_role: openwrt_configure/pihole_dns.yml
-│   └── Play 28: router_nodes        [openwrt-pihole-dns] deploy_stamp (openwrt_pihole_dns)
+│   ├── Play 17: openwrt             [openwrt-security]   include_role: openwrt_configure/security.yml
+│   ├── Play 18: router_nodes        [openwrt-security]   deploy_stamp (openwrt_security)
+│   ├── Play 19: openwrt             [openwrt-vlans]      include_role: openwrt_configure/vlans.yml
+│   ├── Play 20: router_nodes        [openwrt-vlans]      deploy_stamp (openwrt_vlans)
+│   ├── Play 21: openwrt             [openwrt-dns]        include_role: openwrt_configure/dns.yml
+│   ├── Play 22: router_nodes        [openwrt-dns]        deploy_stamp (openwrt_dns)
+│   ├── Play 23: openwrt             [openwrt-mesh]       include_role: openwrt_configure/mesh.yml
+│   ├── Play 24: router_nodes        [openwrt-mesh]       deploy_stamp (openwrt_mesh)
+│   ├── Play 25: router_nodes        [openwrt-syslog]     reconstruct openwrt group
+│   ├── Play 26: openwrt             [openwrt-syslog]     include_role: openwrt_configure/syslog.yml
+│   ├── Play 27: router_nodes        [openwrt-syslog]     deploy_stamp (openwrt_syslog)
+│   ├── Play 28: router_nodes        [openwrt-pihole-dns] reconstruct openwrt group
+│   ├── Play 29: openwrt             [openwrt-pihole-dns] include_role: openwrt_configure/pihole_dns.yml
+│   └── Play 30: router_nodes        [openwrt-pihole-dns] deploy_stamp (openwrt_pihole_dns)
 │
-└── Play 29: proxmox:!lan_hosts      [cleanup]    Remove bootstrap IP
+└── Play 31: proxmox:!lan_hosts      [cleanup]    Remove bootstrap IP
 ```
 
 The phased approach ensures LAN hosts (behind the OpenWrt router) are only
@@ -502,8 +504,8 @@ site.yml (target)
 │   └── Play 10: netdata          [monitoring]  netdata_configure
 │
 ├── Phase: WiFi Management
-│   ├── Play 11: wifi_nodes       [wifi]        meshwifi_lxc, deploy_stamp
-│   └── Play 12: meshwifi         [wifi]        meshwifi_configure
+│   ├── Play 11: wifi_nodes:!router_nodes [wifi]  openwrt_mesh_lxc, deploy_stamp
+│   └── Play 12: openwrt_mesh             [wifi]  openwrt_mesh_configure
 │
 ├── Phase: Services
 │   ├── Play 13: service_nodes    [services]    homeassistant_lxc, deploy_stamp
@@ -597,7 +599,6 @@ Service Roles
 │   ├── openwrt_vm / openwrt_configure           VM   VMID 100   router_nodes   → openwrt
 │   ├── wireguard_lxc / wireguard_configure       LXC  VMID 101   vpn_nodes      → wireguard
 │   ├── pihole_lxc / pihole_configure             LXC  VMID 102   dns_nodes      → pihole      Exports: pihole_static_ip
-│   ├── meshwifi_lxc / meshwifi_configure         LXC  VMID 103   wifi_nodes     → meshwifi
 │   └── openwrt_mesh_lxc / openwrt_mesh_configure  LXC  VMID 103   wifi_nodes:!router_nodes → openwrt_mesh
 │
 ├── Observability Tier
@@ -734,8 +735,6 @@ vm_builds/
 │   │   ├── wireguard_configure/
 │   │   ├── pihole_lxc/
 │   │   ├── pihole_configure/
-│   │   ├── meshwifi_lxc/
-│   │   ├── meshwifi_configure/
 │   │   ├── openwrt_mesh_lxc/
 │   │   └── openwrt_mesh_configure/
 │   │
@@ -772,6 +771,7 @@ vm_builds/
 │   ├── reconstruct_wireguard_group.yml   Reusable dynamic group reconstruction (WireGuard)
 │   ├── reconstruct_pihole_group.yml      Reusable dynamic group reconstruction (Pi-hole)
 │   ├── reconstruct_rsyslog_group.yml     Reusable dynamic group reconstruction (rsyslog)
+│   ├── reconstruct_netdata_group.yml    Reusable dynamic group reconstruction (Netdata)
 │   ├── bootstrap_lan_host.yml           SSH key check, DHCP lease, API token for LAN nodes
 │   └── cleanup_lan_host.yml             Reusable per-LAN-host cleanup (SSH from primary)
 │
@@ -785,6 +785,7 @@ vm_builds/
 │   ├── pihole-lxc/                Per-feature: Pi-hole DNS container
 │   ├── openwrt-pihole-dns/        Per-feature: OpenWrt DNS forwarding to Pi-hole
 │   ├── rsyslog-lxc/               Per-feature: rsyslog log collector container
+│   ├── netdata-lxc/               Per-feature: Netdata monitoring agent container
 │   ├── openwrt-syslog/            Per-feature: OpenWrt syslog forwarding to rsyslog
 │   └── mesh1-infra/               Lightweight infra-only on mesh1 (quick iteration)
 │

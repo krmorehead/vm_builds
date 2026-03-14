@@ -1,19 +1,4 @@
 ---
-# ── Package installation (must come first — wg genkey needs wireguard-tools)
-
-- name: Install wireguard-tools and iptables
-  ansible.builtin.apt:
-    name:
-      - wireguard-tools
-      - iptables
-    state: present
-    update_cache: true
-    install_recommends: false
-  register: _apt_install
-  retries: 3
-  delay: 15
-  until: _apt_install is success
-
 # ── Key generation (when WIREGUARD_PRIVATE_KEY is empty) ────────
 
 - name: Check if key generation is needed
@@ -29,7 +14,10 @@
 
 - name: Derive client public key
   ansible.builtin.shell:
-    cmd: echo "{{ _wg_client_privkey.stdout }}" | wg pubkey
+    cmd: |
+      set -o pipefail
+      echo "{{ _wg_client_privkey.stdout }}" | wg pubkey
+    executable: /bin/bash
   register: _wg_client_pubkey
   changed_when: false
   when: _wg_needs_keygen | bool
@@ -45,7 +33,10 @@
 
 - name: Derive dummy server public key
   ansible.builtin.shell:
-    cmd: echo "{{ _wg_dummy_server_privkey.stdout }}" | wg pubkey
+    cmd: |
+      set -o pipefail
+      echo "{{ _wg_dummy_server_privkey.stdout }}" | wg pubkey
+    executable: /bin/bash
   register: _wg_dummy_server_pubkey
   changed_when: false
   when:
@@ -86,12 +77,6 @@
 
 # ── WireGuard configuration ────────────────────────────────────
 
-- name: Create /etc/wireguard directory
-  ansible.builtin.file:
-    path: /etc/wireguard
-    state: directory
-    mode: "0700"
-
 - name: Template wg0 configuration
   ansible.builtin.template:
     src: wg0.conf.j2
@@ -105,12 +90,6 @@
     state: started
 
 # ── IP forwarding ──────────────────────────────────────────────
-
-- name: Enable persistent IP forwarding
-  ansible.builtin.copy:
-    content: "net.ipv4.ip_forward=1\n"
-    dest: /etc/sysctl.d/99-wireguard.conf
-    mode: "0644"
 
 - name: Apply sysctl settings
   ansible.builtin.command:
@@ -132,14 +111,7 @@
   ansible.builtin.command:
     cmd: iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE
   when: "'absent' in _nat_check.stdout"
-
-- name: Install iptables-persistent for boot persistence
-  ansible.builtin.apt:
-    name: iptables-persistent
-    state: present
-    install_recommends: false
-  environment:
-    DEBIAN_FRONTEND: noninteractive
+  changed_when: true
 
 - name: Save iptables rules
   ansible.builtin.command:

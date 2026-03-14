@@ -381,7 +381,7 @@ If the configure role needs to download packages:
 
 Roles that install packages on the Proxmox HOST (not inside VMs/containers) must handle three prerequisites:
 
-1. **Clock sync**: Sync via NTP before `apt-get update`. GPG verification fails with "Not live until" when the clock is behind. Use `chronyc -a 'burst 4/4'` + `sleep 6` + `chronyc -a makestep` (or `ntpdate -b pool.ntp.org` if chrony unavailable).
+1. **Clock sync**: Sync via NTP before `apt-get update`. GPG verification fails with "Not live until" when the clock is behind. ALWAYS check skew first with `chronyc -n tracking | awk '/System time/{print $4}'`. Only run the full burst+sleep+makestep sequence when skew > 30 seconds. The sync takes ~7s per host; on a 4-node cluster with 3 sync points, unconditional syncs waste ~84s when clocks are accurate.
 2. **DNS**: After cleanup destroys the router VM, `/etc/resolv.conf` may point to a dead IP (`10.10.10.1`). Check DNS with `getent hosts deb.debian.org` and fall back to `8.8.8.8` / `1.1.1.1`.
 3. **Enterprise repos**: `pve-enterprise.sources` and `ceph.sources` require a subscription. Without it, `apt-get update` hangs. Rename both to `.disabled` and add the `pve-no-subscription` repo. ALWAYS restore them in cleanup.
    - NEVER use `sed` or `Enabled: no` in deb822 files — unreliable.
@@ -500,8 +500,13 @@ Current managed files:
 - `/var/lib/vz/template/cache/*.tar.zst` (LXC templates, uploaded by `proxmox_lxc`)
 - `.state/addresses.json` (controller, via `delegate_to: localhost`)
 
-Cleanup MUST destroy both VMs (`qm list` iteration) AND containers
-(`pct list` iteration). NEVER hardcode VMIDs in cleanup.
+Cleanup MUST destroy both project VMs and containers using **explicit VMIDs**
+from `group_vars/all.yml`. NEVER use blanket `qm list` / `pct list` iteration
+— it destroys non-project resources on shared hosts. Check existence with
+`qm status` / `pct status` before attempting stop + destroy. Current project
+VMIDs: OpenWrt VM (100), WireGuard (101), Pi-hole (102), Mesh WiFi (103),
+Netdata (500), rsyslog (501). When adding a new service, add its VMID to the
+cleanup lists in both molecule and production cleanup playbooks.
 
 ## Dynamic group reconstruction
 
@@ -628,7 +633,7 @@ IOMMU groups were invalid. Root cause was VT-d disabled in BIOS — a
 - Use `molecule converge` + `molecule verify` for day-to-day iteration (preserves baseline).
 - Use `molecule test` only for clean-state validation (CI, pre-commit). It destroys the baseline.
 - After `molecule test`, ALWAYS re-run `molecule converge` to restore the baseline before working on layered scenarios.
-- Cleanup destroys ALL VMs via `qm list` iteration — not hardcoded VMIDs.
+- Cleanup destroys known project VMs/containers by explicit VMIDs from `group_vars/all.yml`.
 - Reproduce production bugs on the test machine first (`test.env`). Only involve production when the test machine cannot reproduce.
 - Use TDD: write the verify assertion first, confirm it fails, implement the fix, confirm it passes.
 
@@ -690,6 +695,95 @@ group is missing, the wrong branch executes.
   hosts that need the LAN path.
 - This applies to ALL LXC roles with LAN/WAN branching, not just rsyslog.
 
+## Systemd sandboxing in LXC containers
+
+Services installed from Debian packages (Netdata, rsyslog, etc.) often ship
+systemd unit files with sandboxing directives (`LogNamespace`, `ProtectSystem`,
+`ProtectHome`, `ProtectControlGroups`, `BindReadOnlyPaths`, `RuntimeDirectory`)
+that require mount namespace creation. Inside LXC containers, these fail with
+exit code 226 (NAMESPACE).
+
+**Fix (two-part):**
+
+1. **Container feature**: ALWAYS add `nesting=1` to LXC containers running
+   services with systemd sandboxing. Without it, `unshare(CLONE_NEWNS)` is
+   forbidden and ANY namespace-requiring directive fails.
+
+2. **Systemd drop-in override**: Even with `nesting=1`, some directives like
+   `LogNamespace` still fail. Deploy a drop-in override in the configure role
+   AND bake it into the image:
+
+```ini
+# /etc/systemd/system/<service>.service.d/lxc-override.conf
+[Service]
+LogNamespace=
+ProtectSystem=false
+ProtectHome=false
+ProtectControlGroups=false
+BindReadOnlyPaths=
+```
+
+**Rules:**
+- NEVER use empty strings for boolean-like settings (`ProtectSystem=` doesn't
+  work). Use `ProtectSystem=false`.
+- For `LogNamespace`, empty string IS correct (it means "no namespace").
+- ALWAYS bake the override into the image via `build-images.sh`. The configure
+  role MUST NOT deploy it — the override is base system config (identical on
+  every container), not host-specific topology. Deploying via `pct_remote`
+  adds 3 slow tasks (mkdir + copy + daemon_reload) per container. On a 4-node
+  cluster this adds ~3 minutes of pure overhead. Moving the override to the
+  image build saved 38% of per-feature test time.
+
+Previous bug: Netdata service exited 226/NAMESPACE in a privileged LXC
+container. Root cause: `LogNamespace=netdata` in the Netdata systemd unit
+created a journal namespace, which requires `CLONE_NEWNS` forbidden inside
+LXC even with `nesting=1`. Fix: systemd override clearing `LogNamespace`.
+
+## Host metrics via bind mounts
+
+Monitoring agents (Netdata) that read host CPU, memory, disk, and temperature
+need access to the HOST's `/proc` and `/sys`, not the container's.
+
+**Requirements:**
+1. **Privileged container** (`lxc_ct_unprivileged: false`). Unprivileged
+   containers use UID mapping that prevents reading host procfs files.
+2. **Nesting feature** (`features: nesting=1`). Required for systemd
+   sandboxing (see above).
+3. **Bind mount entries**: Pass full Proxmox mount specs to `proxmox_lxc`:
+   ```yaml
+   lxc_ct_mount_entries:
+     - "/proc,mp=/host/proc,ro=1"
+     - "/sys,mp=/host/sys,ro=1"
+   ```
+4. **Image config**: Bake `/host/proc` and `/host/sys` paths into the
+   monitoring agent's config during image build. The agent reads host
+   metrics, not container-local metrics.
+
+Previous bug: 1GB disk was too small for the Netdata template (314MB
+compressed, 1013MB extracted). `pct create` failed mid-extraction. Fixed
+by increasing to 2GB.
+
+## LXC disk sizing
+
+LXC templates compress well (~5:1 for Debian). ALWAYS verify that the rootfs
+disk is large enough for the EXTRACTED template, not just the compressed size.
+
+**Rule of thumb:** Set disk to at least 2× the compressed template size,
+minimum 2 GB for any Debian-based container with monitoring or database
+services.
+
+| Template | Compressed | Extracted | Min disk |
+|----------|-----------|-----------|----------|
+| Debian 12 base | 143 MB | ~600 MB | 1 GB |
+| Pi-hole | 205 MB | ~800 MB | 2 GB |
+| Netdata | 315 MB | ~1013 MB | 2 GB |
+| rsyslog | 143 MB | ~600 MB | 1 GB |
+| WireGuard | 143 MB | ~600 MB | 1 GB |
+
+Previous bug: Netdata template was 314MB compressed but expanded to ~1013MB.
+1GB rootfs caused `pct create` to fail mid-extraction (`tar xpf` exit code 2)
+with no clear error message. Fixed by increasing to 2GB.
+
 ## Logrotate in LXC containers
 
 When writing logrotate configs baked into LXC images, use `root adm` as the
@@ -702,6 +796,42 @@ rsyslog container because the `syslog` user didn't exist in the Proxmox
 Debian 12 standard template. The chown fallback in build-images.sh (`chown
 syslog:syslog || chown root:root`) masked this — a graceful fallback that
 should have been a hard error.
+
+## Configure role performance (pct_remote overhead)
+
+Each task in an LXC configure role opens a new paramiko SSH connection to the
+Proxmox host, then spawns `pct exec` inside the container. This overhead
+(15-60 seconds per task) makes LXC configure roles significantly slower than
+SSH-based configure roles.
+
+**Rules:**
+- MINIMIZE the number of tasks in LXC configure roles. Every task that can
+  be baked into the image MUST be.
+- Base system config (systemd overrides, default configs, package configs) is
+  ALWAYS the same across all containers → belongs in the image.
+- Host-specific config (IPs, streaming endpoints, peer keys, passwords) varies
+  per container → belongs in the configure role.
+- When in doubt, ask: "Does this value change between containers?" If no, bake
+  it into the image.
+
+**What belongs in the image (`build-images.sh`):**
+- Package installation (the bake principle)
+- systemd overrides for LXC compatibility
+- Base service config files (dbengine retention, logging paths, proc/sys paths)
+- Logrotate configs
+- Static config that every container shares
+
+**What belongs in the configure role:**
+- Streaming/replication endpoints that depend on host topology
+- Passwords and API keys from env vars
+- DNS upstream servers based on container location (LAN vs WAN)
+- Optional features gated on env vars (e.g., `NETDATA_PARENT_IP`)
+
+Previous optimization: Netdata `configure` role had 6 tasks (mkdir, copy
+override, daemon_reload, detect config dir, set streaming, health check).
+Moving 3 tasks (systemd override) to the image build reduced per-feature test
+time from 110s to 68s (38% speedup) and full integration from 23.5m to 16.6m
+(29% speedup).
 
 ## Handler conventions for LXC service roles
 

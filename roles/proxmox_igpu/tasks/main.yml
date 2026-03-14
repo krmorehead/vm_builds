@@ -207,6 +207,7 @@
     dest: /etc/resolv.conf
     mode: "0644"
     content: |
+      nameserver {{ ansible_default_ipv4.gateway | default('8.8.8.8') }}
       nameserver 8.8.8.8
       nameserver 1.1.1.1
   when:
@@ -256,13 +257,24 @@
 # Clock skew causes GPG signature verification to fail ("Not live
 # until" errors). Force NTP sync before any apt cache update.
 
+- name: Check clock skew against apt GPG signatures
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      skew=$(chronyc -n tracking 2>/dev/null | awk '/System time/{print $4}' || echo "999")
+      echo "$skew"
+    executable: /bin/bash
+  register: _clock_skew
+  changed_when: false
+  failed_when: false
+  when: igpu_available | bool
+
 - name: Force NTP time sync
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
       synced=false
 
-      # Method 1: chrony (Proxmox default) — restart, burst, then step
       if command -v chronyc >/dev/null 2>&1; then
         systemctl restart chronyd 2>/dev/null || true
         chronyc -a 'burst 4/4' 2>/dev/null || true
@@ -270,19 +282,16 @@
         chronyc -a makestep 2>/dev/null && synced=true
       fi
 
-      # Method 2: ntpdate one-shot
       if [ "$synced" = false ] && command -v ntpdate >/dev/null 2>&1; then
         ntpdate -b pool.ntp.org 2>/dev/null && synced=true
       fi
 
-      # Method 3: systemd-timesyncd
       if [ "$synced" = false ] && command -v timedatectl >/dev/null 2>&1; then
         timedatectl set-ntp true 2>/dev/null || true
         sleep 5
         synced=true
       fi
 
-      # Method 4: HTTP header fallback (works without NTP packages)
       if [ "$synced" = false ]; then
         http_date=$(wget -qS --spider http://google.com/ 2>&1 | grep -i '^ *Date:' | head -1 | sed 's/^ *[Dd]ate: //')
         if [ -n "$http_date" ]; then
@@ -295,11 +304,13 @@
   register: _clock_sync
   changed_when: false
   failed_when: false
-  when: igpu_available | bool
+  when:
+    - igpu_available | bool
+    - (_clock_skew.stdout | default('999') | float) > 30.0
 
 - name: Display clock sync result
   ansible.builtin.debug:
-    msg: "{{ _clock_sync.stdout | default('no output') }}"
+    msg: "{{ _clock_sync.stdout | default('skipped — clock skew < 30s') }}"
   when: igpu_available | bool
 
 # ── VA-API verification ──────────────────────────────────────────
@@ -309,7 +320,7 @@
     name: "{{ _igpu_vaapi_packages }}"
     state: present
     update_cache: true
-    cache_valid_time: 3600
+    cache_valid_time: 86400
   when: igpu_available | bool
 
 - name: Run vainfo to verify VA-API

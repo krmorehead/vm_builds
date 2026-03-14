@@ -8,6 +8,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Wake-on-LAN utility** (`wol.sh`) -- recovery script for remotely waking
+  Proxmox hosts after power outages. Supports WAN hosts via local L2 broadcast
+  and LAN hosts via proxied WoL through the primary host (Python 3 socket,
+  no extra packages on remote). Includes `--wait` flag for SSH polling,
+  `--list` for host inventory, and `all` to wake the entire fleet. Known host
+  MACs and IPs are hardcoded; env-sourced `PRIMARY_HOST` for LAN proxy path.
+- **Netdata monitoring agent** -- LXC container (VMID 500, 128 MB RAM, 2 GB
+  disk) running Netdata for host-level monitoring with CPU, memory, disk, and
+  temperature metrics via bind-mounted `/proc` and `/sys`. Custom Debian 12
+  template with Netdata pre-installed and pre-configured for dbengine retention
+  (1 hour), dashboard on port 19999, and `/host/proc`+`/host/sys` paths
+  (built by `build-images.sh`). Container runs privileged with `nesting=1`
+  feature and a systemd drop-in override for LXC compatibility.
+  `netdata_lxc` role provisions the container with topology-aware networking
+  and read-only bind mounts for host metrics; `netdata_configure` role
+  deploys optional child-parent streaming config when
+  `NETDATA_PARENT_IP` and `NETDATA_STREAM_API_KEY` are set (soft WireGuard
+  dependency). Per-feature molecule scenario (`netdata-lxc`), rollback tag
+  (`netdata-rollback`), and reusable group reconstruction
+  (`tasks/reconstruct_netdata_group.yml`).
+- **WireGuard custom image** -- `build-images.sh` now builds a custom WireGuard
+  LXC template with `wireguard-tools`, `iptables`, and `iptables-persistent`
+  pre-installed. Eliminates the last runtime package installation in the project,
+  fully aligning with "bake, don't configure at runtime." The
+  `wireguard_configure` role no longer installs any packages -- it only applies
+  host-specific tunnel configuration (keys, endpoints, NAT rules).
+- **Selective image builds** -- `build-images.sh` now supports `--only <target>`
+  to rebuild a single image instead of all six. Targets: `mesh`, `router`,
+  `pihole`, `rsyslog`, `netdata`, `wireguard`. Reduces rebuild time from
+  ~15 min to ~2-3 min.
 - **rsyslog centralized logging** -- LXC container (VMID 501, 64 MB RAM, 1 GB
   disk) running rsyslog as a centralized log collector. Custom Debian 12
   template with rsyslog pre-configured for TCP reception on port 514, disk-
@@ -36,8 +66,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   with persistent tunnel, IP forwarding, and iptables NAT/MASQUERADE. All
   credentials optional with auto-generation fallback via `.env.generated`.
   `wireguard_lxc` role provisions the container and loads the host kernel
-  module; `wireguard_configure` role installs wireguard-tools, templates
-  wg0.conf, and configures networking. Per-feature molecule scenario
+  module; `wireguard_configure` role templates wg0.conf and configures
+  tunnel networking (keys, endpoints, NAT rules). Per-feature molecule scenario
   (`wireguard-lxc`), rollback tag (`wireguard-rollback`), and reusable
   group reconstruction (`tasks/reconstruct_wireguard_group.yml`).
 - **OpenWrt security hardening** (M1) -- root password, SSH key-only auth,
@@ -95,8 +125,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Custom OpenWrt images** -- `build-images.sh` uses the OpenWrt Image
   Builder to create pre-configured images. Mesh LXC rootfs strips firewall/
   routing and pre-installs WiFi packages. Router VM image pre-installs
-  mesh, security, DNS, and diagnostic packages. All roles have fallback
-  logic (custom → stock image). Eliminates EPERM/opkg failures in LXC
+  mesh, security, DNS, and diagnostic packages. Custom images are required
+  (roles hard-fail if missing). Eliminates EPERM/opkg failures in LXC
   containers and reduces converge time by ~2-3 minutes.
 - **Self-hosted LXC templates** -- templates stored in `images/` and
   uploaded to Proxmox during provisioning (no external download needed).
@@ -130,6 +160,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Service-specific molecule cleanup** -- Replaced blanket `qm list` / `pct list`
+  iteration with explicit VMIDs from `group_vars/all.yml`. Cleanup now only
+  destroys known project VMs (100) and containers (101-103, 500-501) by checking
+  existence first. Removed backup restore and made `update-initramfs` conditional
+  on PCI passthrough config presence. Fixes template deletion on LAN hosts that
+  was missed in the earlier caching optimization.
+- **Verify phase performance** -- Batched `pct exec` calls per container into
+  single SSH round trips (WireGuard 7→1, Netdata 4→1, rsyslog 6→1, Pi-hole
+  3→1, Mesh WiFi 3→1). Eliminates ~43 SSH calls per run (~80+ with multi-host
+  multiplier). Previously consolidated `pct config` calls (20→6) remain.
+- **Converge timing** -- WireGuard configure role eliminated 4 `pct_remote`
+  tasks (apt install × 2, mkdir, sysctl copy — now baked into image).
+  Reduced OpenWrt restart pauses from 30s to 20s. Tightened OpenWrt VM SSH
+  wait, container networking wait, WiFi detection, and apt retry delays.
+- **Mesh WiFi wireless config generation** -- `openwrt_mesh_configure` now
+  runs `wifi config` inside the container to generate `/etc/config/wireless`
+  from detected hardware before modifying radio settings. Fixes `uci: Invalid
+  argument` when the WiFi PHY was namespace-moved after boot (the wireless
+  config was never auto-generated).
 - Tagged all plays in `site.yml`: `backup`, `infra`, `openwrt`, `cleanup`.
   Use `--tags` to run specific plays or `--skip-tags` to exclude them.
 - Split `site.yml` shared infrastructure into its own play, separate from

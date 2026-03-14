@@ -26,33 +26,21 @@
         that: (_wg_running.stdout | trim | int) > 0
         fail_msg: "Container {{ wireguard_ct_id }} is not running"
 
-    - name: Check onboot setting
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ wireguard_ct_id }} | grep -oP '^onboot:\s*\K.*'
-        executable: /bin/bash
-      register: _wg_onboot
+    - name: Read container config (single call)
+      ansible.builtin.command:
+        cmd: pct config {{ wireguard_ct_id }}
+      register: _wg_cfg
       changed_when: false
 
     - name: Assert onboot is enabled
       ansible.builtin.assert:
-        that: (_wg_onboot.stdout | trim) == '1'
-        fail_msg: "onboot={{ _wg_onboot.stdout | trim }}, expected 1"
-
-    - name: Check nesting feature
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ wireguard_ct_id }} | grep -oP '^features:\s*\K.*'
-        executable: /bin/bash
-      register: _wg_features
-      changed_when: false
+        that: "'onboot: 1' in _wg_cfg.stdout"
+        fail_msg: "Container {{ wireguard_ct_id }} missing onboot: 1"
 
     - name: Assert nesting is enabled
       ansible.builtin.assert:
-        that: "'nesting=1' in _wg_features.stdout"
-        fail_msg: "Missing nesting=1: {{ _wg_features.stdout | trim }}"
+        that: "'nesting=1' in _wg_cfg.stdout"
+        fail_msg: "Container {{ wireguard_ct_id }} missing nesting=1"
 
     - name: Check wireguard module loaded on host
       ansible.builtin.shell:
@@ -68,56 +56,43 @@
         that: (_wg_mod.stdout | trim | int) > 0
         fail_msg: "wireguard kernel module not loaded"
 
-    - name: Check wg0 interface in container
-      ansible.builtin.command:
-        cmd: pct exec {{ wireguard_ct_id }} -- ip link show wg0
-      register: _wg_iface
+    - name: Run WireGuard container health checks (single pct exec)
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ wireguard_ct_id }} -- /bin/sh -c '
+          echo "IFACE=$(ip link show wg0 >/dev/null 2>&1 && echo ok || echo missing)";
+          echo "SVC=$(systemctl is-enabled wg-quick@wg0 2>/dev/null || echo unknown)";
+          echo "IPFWD=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)";
+          echo "NAT=$(iptables -t nat -C POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null && echo present || echo missing)"
+          '
+      register: _wg_health
       changed_when: false
-      failed_when: false
 
     - name: Assert wg0 exists
       ansible.builtin.assert:
-        that: _wg_iface.rc == 0
+        that: "'IFACE=ok' in _wg_health.stdout"
         fail_msg: "wg0 interface missing in container"
-
-    - name: Check wg-quick@wg0 enabled
-      ansible.builtin.command:
-        cmd: pct exec {{ wireguard_ct_id }} -- systemctl is-enabled wg-quick@wg0
-      register: _wg_svc
-      changed_when: false
 
     - name: Assert service is enabled
       ansible.builtin.assert:
-        that: "'enabled' in _wg_svc.stdout"
-        fail_msg: "wg-quick@wg0 not enabled: {{ _wg_svc.stdout | trim }}"
-
-    - name: Check IP forwarding
-      ansible.builtin.command:
-        cmd: pct exec {{ wireguard_ct_id }} -- sysctl -n net.ipv4.ip_forward
-      register: _wg_fwd
-      changed_when: false
+        that: "'SVC=enabled' in _wg_health.stdout"
+        fail_msg: "wg-quick@wg0 not enabled"
 
     - name: Assert IP forwarding enabled
       ansible.builtin.assert:
-        that: (_wg_fwd.stdout | trim) == '1'
-        fail_msg: "IP forwarding disabled: {{ _wg_fwd.stdout | trim }}"
-
-    - name: Check NAT rule
-      ansible.builtin.command:
-        cmd: pct exec {{ wireguard_ct_id }} -- iptables -t nat -L POSTROUTING -n
-      register: _wg_nat
-      changed_when: false
+        that: "'IPFWD=1' in _wg_health.stdout"
+        fail_msg: "IP forwarding disabled"
 
     - name: Assert MASQUERADE present
       ansible.builtin.assert:
-        that: "'MASQUERADE' in _wg_nat.stdout"
-        fail_msg: "MASQUERADE missing: {{ _wg_nat.stdout }}"
+        that: "'NAT=present' in _wg_health.stdout"
+        fail_msg: "MASQUERADE missing"
 
     - name: Report per-feature verification
       ansible.builtin.debug:
         msg: >-
           WireGuard per-feature verify passed:
           ct={{ wireguard_ct_id }}, running=yes,
-          wg0={{ 'up' if _wg_iface.rc == 0 else 'missing' }},
-          fwd={{ _wg_fwd.stdout | trim }},
-          nat={{ 'present' if 'MASQUERADE' in _wg_nat.stdout else 'absent' }}
+          wg0={{ 'up' if 'IFACE=ok' in _wg_health.stdout else 'missing' }},
+          fwd={{ 'enabled' if 'IPFWD=1' in _wg_health.stdout else 'disabled' }},
+          nat={{ 'present' if 'NAT=present' in _wg_health.stdout else 'absent' }}

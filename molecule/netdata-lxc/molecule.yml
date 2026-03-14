@@ -1,0 +1,46 @@
+---
+dependency:
+  name: galaxy
+  options:
+    requirements-file: ${MOLECULE_PROJECT_DIRECTORY}/requirements.yml
+
+driver:
+  name: default
+  options:
+    managed: false
+
+platforms:
+  - name: home
+    groups:
+      - proxmox
+      - router_nodes
+      - monitoring_nodes
+
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      roles_path: ${MOLECULE_PROJECT_DIRECTORY}/roles
+      collections_paths: ${MOLECULE_PROJECT_DIRECTORY}/collections
+      host_key_checking: false
+      retry_files_enabled: false
+    ssh_connection:
+      pipelining: true
+  env:
+    HOME_API_TOKEN: ${HOME_API_TOKEN}
+    PRIMARY_HOST: ${PRIMARY_HOST}
+  inventory:
+    links:
+      host_vars: ../../inventory/host_vars/
+      group_vars: ../../inventory/group_vars/
+
+verifier:
+  name: ansible
+
+scenario:
+  test_sequence:
+    - dependency
+    - syntax
+    - converge
+    - verify
+    - cleanup

@@ -16,6 +16,16 @@
   gather_facts: true
   tags: [infra]
   pre_tasks:
+    - name: Check clock skew
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          chronyc -n tracking 2>/dev/null | awk '/System time/{print $4}' || echo "999"
+        executable: /bin/bash
+      register: _clock_skew
+      changed_when: false
+      failed_when: false
+
     - name: Force NTP clock sync before infrastructure setup
       ansible.builtin.shell:
         cmd: |
@@ -31,6 +41,7 @@
         executable: /bin/bash
       changed_when: false
       failed_when: false
+      when: (_clock_skew.stdout | default('999') | float) > 30.0
   roles:
     - proxmox_bridges
     - proxmox_pci_passthrough
@@ -86,6 +97,16 @@
   gather_facts: true
   tags: [lan-satellite, infra]
   pre_tasks:
+    - name: Check clock skew
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          chronyc -n tracking 2>/dev/null | awk '/System time/{print $4}' || echo "999"
+        executable: /bin/bash
+      register: _clock_skew
+      changed_when: false
+      failed_when: false
+
     - name: Force NTP clock sync before infrastructure setup
       ansible.builtin.shell:
         cmd: |
@@ -101,6 +122,7 @@
         executable: /bin/bash
       changed_when: false
       failed_when: false
+      when: (_clock_skew.stdout | default('999') | float) > 30.0
   roles:
     - proxmox_bridges
     - proxmox_pci_passthrough
@@ -144,6 +166,23 @@
   tags: [monitoring]
   roles:
     - rsyslog_configure
+
+- name: Provision Netdata LXC
+  hosts: monitoring_nodes
+  gather_facts: false
+  tags: [monitoring]
+  roles:
+    - netdata_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: netdata_lxc
+
+- name: Configure Netdata
+  hosts: netdata
+  gather_facts: true
+  tags: [monitoring]
+  roles:
+    - netdata_configure
 
 - name: Provision WireGuard LXC
   hosts: vpn_nodes

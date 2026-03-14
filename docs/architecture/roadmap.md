@@ -145,11 +145,25 @@ Delivered:
 - Rollback plays in `playbooks/cleanup.yml` (`rsyslog-rollback`, `openwrt-syslog-rollback`)
 - Full verify coverage: container state, auto-start, service, TCP listener, spool dir, log reception
 
+### `2026-03-09-05` Netdata Monitoring Agent ✓
+
+Lightweight LXC container running Netdata for host-level monitoring. Bind
+mounts `/proc` and `/sys` read-only for CPU, memory, disk, and temperature
+metrics. Optional child-parent streaming via WireGuard (soft dependency).
+
+Delivered:
+- `netdata_lxc` role (thin wrapper around `proxmox_lxc`, bind mounts for host metrics)
+- `netdata_configure` role (optional streaming via `NETDATA_PARENT_IP` + `NETDATA_STREAM_API_KEY`)
+- Custom Debian 12 template with Netdata pre-installed and pre-configured (built by `build-images.sh`)
+- Per-feature molecule scenario (`netdata-lxc`)
+- `tasks/reconstruct_netdata_group.yml` for dynamic group reconstruction
+- Rollback plays in `playbooks/cleanup.yml` (`netdata-rollback` tag)
+- Full verify coverage: container state, auto-start, bind mounts, service, dashboard, host metrics
+
 ## Medium-Term Goals
 
 ### Additional VM/LXC Types
 - The project name is `vm_builds` (plural) — the architecture supports multiple service types.
-- Near-term candidates: Netdata.
 - Each service type gets its own role pair: `<type>_lxc` + `<type>_configure` (or `<type>_vm`).
 - VMID ranges pre-allocated: 100s network, 200s services, 300s media, 400s desktop, 500s observability, 600s gaming.
 - See `docs/architecture/overview.md` for the full target architecture and `.cursor/skills/vm-lifecycle/SKILL.md` for implementation patterns.

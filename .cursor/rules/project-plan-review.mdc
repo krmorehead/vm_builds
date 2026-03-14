@@ -57,8 +57,9 @@ This rule activates when opening or editing any `project_plan.md` in
     specify the branching strategy (bridge, subnet, gateway, DNS).
 14. **Container IP offset**: verify the offset is defined in
     `group_vars/all.yml` and doesn't collide with existing allocations
-    (WireGuard 3–6, Pi-hole 10, rsyslog 11, Netdata 12, MeshWiFi 13,
-    HA 14, Jellyfin 15). Check WAN offset (+200) against physical host IPs.
+    (WireGuard 3–6, Pi-hole 10, rsyslog 12, Netdata 13, HA 14,
+    Jellyfin 15, MeshWiFi 20). Check WAN offset (+200) against
+    physical host IPs.
 15. **Milestone consolidation**: provisioning + site.yml integration
     should be one milestone. Blocked stubs should be deferred to
     downstream projects, not kept as dead code.
@@ -75,6 +76,14 @@ This rule activates when opening or editing any `project_plan.md` in
     services need different network, testing, and build profile docs.
 21. **VA-API driver portability**: iGPU image builds include BOTH Intel
     and AMD driver packages for hardware portability.
+
+### Performance
+22. **Configure role task budget**: count `pct_remote` tasks in the
+    proposed configure role. Each adds 15-60s overhead. If the config is
+    identical across all containers, bake it into the image instead.
+23. **LXC disk sizing**: verify planned rootfs can hold the EXTRACTED
+    template (3-5x compressed size). Minimum 2GB for services with
+    monitoring or databases.
 
 ## Previous bugs caught by plan review
 
@@ -99,3 +108,17 @@ This rule activates when opening or editing any `project_plan.md` in
   consolidated ownership to Kiosk project
 - Desktop VM plan had no documented exception for cloud image + apt install
 - MeshWiFi plan had no documented exception for opkg on OpenWrt nodes
+- Netdata plan used offset 12 which collided with rsyslog (already at 12, changed
+  from 11 to avoid mesh2 WAN collision). Plan referenced stale rsyslog offset of 11.
+- Netdata plan used `${NETDATA_STREAM_API_KEY:-}` in molecule.yml provisioner.env —
+  Molecule's parser fails on `:-}` syntax. Optional vars should be omitted entirely.
+- Netdata plan's per-feature scenario was missing `router_nodes` group — same bug
+  previously caught in rsyslog-lxc scenario (LAN/WAN detection takes wrong path)
+- Netdata plan combined netdata_lxc and rsyslog_lxc in one site.yml play — changed
+  to separate plays for failure isolation
+- Netdata 1GB disk was too small for 314MB compressed / 1013MB extracted template —
+  `pct create` failed mid-extraction with tar error (exit code 2)
+- Netdata systemd override deployed via configure role (3 pct_remote tasks × 4 nodes)
+  added ~3 minutes. Moved to image build for 38% per-feature speedup
+- Molecule cleanup deleted all LXC templates (~820MB across 4 hosts), forcing
+  re-upload every test run. Removed template deletion for 29% full-suite speedup
