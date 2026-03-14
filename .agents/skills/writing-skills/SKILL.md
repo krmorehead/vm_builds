@@ -1,102 +1,81 @@
 ---
 name: writing-skills
-description: Author effective skills optimized for LLM consumption. Create, edit, or review SKILL.md files.
-compatibility: opencode
+description: Author effective skills optimized for LLM consumption. Minimize context bloat, avoid perpendicular examples, keep concise.
 ---
 
-## Structure
+# Writing Skills for LLMs
 
-One folder per skill with SKILL.md inside.
+## Core principles
 
-Locations (searched in order):
-- Project: .agents/skills/<name>/SKILL.md
-- Global: ~/.agents/skills/<name>/SKILL.md
-- Legacy: .opencode/skills/, .claude/skills/, ~/.config/opencode/skills/, ~/.claude/skills/
+1. **Token budget is shared.** Every line competes with conversation history, other skills, and user code.
+2. **LLMs already know general knowledge.** Don't explain what tool/tech is. Only state things LLMs get wrong without the skill.
+3. **LLMs repeat mistakes.** Focus on previous bugs and how to prevent them.
+4. **LLMs follow patterns.** One simple implementation example. Multiply examples waste tokens.
+5. **Context bloat kills utility.** BAD/GOOD perpendicular examples over-teach. Simple correct implementation is enough.
 
-## Frontmatter
+## Size constraints
 
-Required fields:
-```yaml
----
-name: skill-name
-description: 1-1024 chars, specific for agent selection
----
-```
+- **< 100 lines ideal, < 200 hard limit.** Longer = context bloat = skill ignored.
+- If longer, split into separate skills by concern.
+- Remove explanations of what X is. Focus on what goes wrong without guidance.
 
-Optional:
-- license: SPDX identifier
-- compatibility: opencode, claude, or both
-- metadata: key-value map
-
-## Name Rules
-
-1-64 characters, lowercase alphanumeric with single hyphens:
-- No consecutive `--`
-- Cannot start/end with `-`
-- Must match directory name
-- Regex: `^[a-z0-9]+(-[a-z0-9]+)*$`
-
-## Discovery
-
-OpenCode walks up from CWD to git worktree root, loading all matching `skills/*/SKILL.md` in each directory. Global paths always load.
-
-Agents call `skill({ name: "skill-name" })` to load.
-
-## Example
+## Structure template
 
 ```markdown
 ---
-name: git-release
-description: Create consistent releases and changelogs
+name: skill-name
+description: What + When in third person. Include specific trigger words.
 ---
 
-## What I do
+# Title
 
-- Draft release notes from merged PRs
-- Propose a version bump
-- Provide copy-pasteable `gh release create` command
+## Rules (numbered)
+NEVER/ALWAYS constraints. Concrete and actionable.
 
-## When to use me
-
-Use when preparing a tagged release. Ask clarifying questions if versioning scheme is unclear.
+## Patterns
+Single correct implementation example. No BAD/GOOD contrast.
 ```
 
-Common sections: What I do, When to use me, Conventions, Patterns.
+## Anti-patterns
 
-## Agent Loading
+```markdown
+# BAD: Explains what tool is
+"Molecule is a testing framework for Ansible..."
 
-Agents load skills via the `skill` tool. Each visible skill appears in `<available_skills>` with name and description, used to select the right skill for the task.
+# BAD: BAD/GOOD perpendicular examples (context bloat)
+# BAD — do this
+# GOOD — do that instead
 
-## Permissions
+# BAD: WALL of examples for the same thing
+Three variations of the same pattern
 
-In opencode.json:
-```json
-{
-  "permission": {
-    "skill": {
-      "*": "allow",
-      "internal-*": "deny",
-      "experimental-*": "ask"
-    }
-  }
-}
+# GOOD: Constraint + single implementation
+"NEVER call sys.exit() from functions."
+
+def example():
+    return None
 ```
 
-Per-agent overrides:
-- Custom: in agent frontmatter
-- Built-in: in `agent.<name>.permission.skill`
+## Writing rules
 
-Values: allow, deny, ask
+- **Lead with constraints.** NEVER/ALWAYS before examples.
+- **One example per pattern.** LLMs generalize.
+- **No hedging.** Delete "consider", "might want to", "generally better".
+- **Description has trigger words.** Pack with terms user/tasks mention.
 
-## Tool Control
+## Validating
 
-Disable skill tool entirely:
-- Custom agent: `tools: { skill: false }`
-- Built-in: `agent.<name>.tools.skill: false`
+After writing:
+- Try removing each sentence. Does meaning change? If no, delete.
+- Count implementation examples. More than 1? Remove extras.
+- Check line count. >100? Split or prune.
+- Test description: triggers right skill if user said X?
 
-## Troubleshoot
+## Decision: skill vs rule
 
-- SKILL.md must be all caps
-- Frontmatter needs name and description
-- Skill names unique across all locations
-- Check permission patterns (deny hides skills)
+| Use a **skill** when | Use a **rule** when |
+|---|---|
+| Domain knowledge needed | Single convention |
+| Multi-step procedure | Style preference |
+| Decision tree or branching | Always-on constraint |
+| > 10 lines | < 50 lines, simple pattern |
