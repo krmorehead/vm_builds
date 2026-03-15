@@ -76,13 +76,15 @@ Gaming Rig always uses the WAN bridge.
 
 | Skill | When to use |
 |-------|-------------|
-| `vm-lifecycle` | Two-role pattern, VM provisioning, deploy_stamp, cleanup completeness, image management |
-| `ansible-testing` | Molecule scenarios, verify assertions, baseline workflow |
-| `rollback-patterns` | Per-feature rollback tags, deploy_stamp tracking, cleanup.yml conventions |
-| `proxmox-host-safety` | Discrete GPU passthrough, IOMMU group validation, safe host commands, PCI cleanup |
-| `multi-node-ssh` | ProxyJump for testing on LAN nodes (if gaming rig is on LAN) |
-| `build-conventions` | Entry point patterns for separate build profile |
-| `project-planning` | Milestone structure, verify/rollback sections |
+| `vm-lifecycle-architecture` | Two-role pattern, VM provisioning, deploy_stamp, cleanup completeness |
+| `image-management-patterns` | Image management, local images/ directory |
+| `vm-provisioning-patterns` | VM provisioning via qm create, add_host, dynamic groups |
+| `molecule-testing` | Molecule scenarios, verify assertions, baseline workflow |
+| `rollback-architecture` | Per-feature rollback tags, deploy_stamp tracking, cleanup.yml conventions |
+| `proxmox-system-safety` | Discrete GPU passthrough, IOMMU group validation, safe host commands, PCI cleanup |
+| `lan-ssh-patterns` | ProxyJump for testing on LAN nodes (if gaming rig is on LAN) |
+| `build-entry-point` | Entry point patterns for separate build profile |
+| `project-planning-structure` | Milestone structure, verify/rollback sections |
 
 ---
 
@@ -197,7 +199,7 @@ _Self-contained. No external dependencies._
 Download and stage Windows 11 ISO, virtio-win ISO, and create autounattend.xml.
 All images stored locally in `images/` — never downloaded from Proxmox host.
 
-See: `vm-lifecycle` skill (image management, local images/ directory).
+See: `image-management-patterns` skill.
 
 **Implementation pattern:**
 - Variables: `group_vars/all.yml` — `gaming_image_path`, `gaming_virtio_iso_path`
@@ -234,8 +236,8 @@ GPU via hostpci. The GPU PCI address comes from `proxmox_pci_passthrough`
 (gpu_pci_devices or equivalent — role must support discrete GPU detection on
 gaming hosts).
 
-See: `vm-lifecycle` skill (two-role pattern, qm create, add_host, deploy_stamp).
-See: `proxmox-host-safety` skill (discrete GPU passthrough, IOMMU validation, q35).
+See: `vm-provisioning-patterns` skill (two-role pattern, qm create, add_host, deploy_stamp).
+See: `proxmox-system-safety` skill (discrete GPU passthrough, IOMMU validation, q35).
 
 **Implementation pattern:**
 - Role: `roles/gaming_vm/defaults/main.yml`, `tasks/main.yml`, `meta/main.yml`
@@ -296,7 +298,7 @@ VM destruction: generic `qm list` iteration in `molecule/default/cleanup.yml` an
 `playbooks/cleanup.yml` — `qm stop` + `qm destroy`. PCI cleanup: vfio-pci unbind,
 remove modprobe blacklist/vfio config for GPU, reload original driver
 (`modprobe -r vfio_pci && modprobe <nvidia|amdgpu>`), rescan PCI bus. Add GPU
-cleanup to BOTH cleanup playbooks. See: `proxmox-host-safety` skill (PCI device
+cleanup to BOTH cleanup playbooks. See: `proxmox-system-safety` skill (PCI device
 cleanup after passthrough).
 
 ---
@@ -308,7 +310,7 @@ _Depends on M2 (VM running)._
 Configure the Windows 11 guest via WinRM or SSH: virtio drivers, GPU drivers,
 Sunshine, optional Steam, Windows Update policy, RDP.
 
-See: `vm-lifecycle` skill (configure role, dynamic group targeting).
+See: `vm-lifecycle-architecture` skill (configure role, dynamic group targeting).
 
 **Implementation pattern:**
 - Role: `roles/gaming_configure/defaults/main.yml`, `tasks/main.yml`, `meta/main.yml`
@@ -363,7 +365,7 @@ _Depends on M2 (VM exists)._
 
 Configure vzdump schedule, exclude game data, document restore procedure.
 
-See: `rollback-patterns` skill (backup before changes).
+See: `rollback-architecture` skill (backup before changes).
 
 - [ ] Configure vzdump schedule for Windows VM (via Proxmox or cron)
 - [ ] Exclude game data directories from backup (large, re-downloadable)
@@ -430,9 +432,9 @@ _Depends on M2–M5._
 
 Wire up molecule testing, cleanup completeness, and final validation.
 
-See: `vm-lifecycle` skill (site.yml plays, flavor group, deploy_stamp).
-See: `ansible-testing` skill (verify assertions, cleanup completeness).
-See: `build-conventions` skill (entry point, tags).
+See: `vm-lifecycle-architecture` skill (site.yml plays, flavor group, deploy_stamp).
+See: `molecule-testing` skill (verify assertions), `molecule-cleanup` skill (cleanup completeness).
+See: `build-entry-point` skill (entry point, tags).
 
 #### 7a. Per-feature scenario: `molecule/gaming-vm/`
 

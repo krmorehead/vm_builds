@@ -23,11 +23,11 @@ Cross-cutting infrastructure
 
 | Skill | When to use |
 |-------|-------------|
-| `ansible-testing` | Molecule scenarios, multi-platform config, verify assertions |
-| `vm-lifecycle` | Two-role pattern, flavor groups, inventory structure |
-| `proxmox-host-safety` | Safe host commands, bridge teardown, kernel module handling |
-| `openwrt-build` | DHCP static leases, firewall rules, UCI patterns |
-| `project-planning` | Milestone structure and conventions |
+| `molecule-testing` | Molecule scenarios, multi-platform config, verify assertions |
+| `vm-lifecycle-architecture` | Two-role pattern, flavor groups, inventory structure |
+| `proxmox-network-safety` | Safe host commands, bridge teardown, kernel module handling |
+| `openwrt-network-topology` | DHCP static leases, firewall rules, UCI patterns |
+| `project-planning-structure` | Milestone structure and conventions |
 
 ---
 
@@ -129,8 +129,8 @@ Establish the SSH ProxyJump pattern for reaching hosts behind the
 OpenWrt router. Discover the new node on the LAN, set up SSH key
 auth, assign a stable IP, and verify end-to-end connectivity.
 
-See: `proxmox-host-safety` skill (SSH keepalives, safe commands),
-`openwrt-build` skill (DHCP static leases via UCI).
+See: `proxmox-ssh-safety` skill (SSH keepalives, safe commands),
+`openwrt-network-topology` skill (DHCP static leases via UCI).
 
 **Implementation pattern:**
 - Inventory: create `lan_hosts` child group under `proxmox`
@@ -168,7 +168,7 @@ See: `proxmox-host-safety` skill (SSH keepalives, safe commands),
 
 **Document access patterns:**
 
-- [x] SSH tunnel documented in `multi-node-ssh` skill
+- [x] SSH tunnel documented in `lan-ssh-patterns` skill
 
 **Verify:**
 
@@ -193,7 +193,7 @@ variables, and verify Ansible can fully manage it. Do NOT add mesh1 to
 the default molecule test yet — that requires solving the ordering
 constraint (mesh1 unreachable during early plays).
 
-See: `vm-lifecycle` skill (flavor groups, inventory structure).
+See: `vm-lifecycle-architecture` skill (flavor groups, inventory structure).
 
 - [x] Create Proxmox API token on mesh1 (via `tasks/bootstrap_lan_host.yml`
   or manually via `pveum user token add root@pam ansible --privsep=0`)
@@ -230,8 +230,8 @@ Run the shared infrastructure roles against the new hardware to validate
 hardware-agnostic detection. Create a dedicated molecule scenario for
 mesh1 (NOT part of the default test — see architectural decisions for why).
 
-See: `proxmox-host-safety` skill (bridge teardown, PCI handling),
-`ansible-testing` skill (per-feature scenario setup).
+See: `proxmox-network-safety` skill (bridge teardown, PCI handling),
+`molecule-testing` skill (per-feature scenario setup).
 
 **Cross-hardware validation (via molecule):**
 
@@ -278,10 +278,10 @@ Manual cleanup on mesh1 (targeted file removal as listed above).
 
 _Self-contained. Run after all implemented milestones._
 
-Create the `multi-node-ssh` skill documenting the ProxyJump patterns,
+Create the `lan-ssh-patterns` skill documenting the ProxyJump patterns,
 and update architecture docs with the multi-node topology.
 
-- [x] Create `.cursor/skills/multi-node-ssh/SKILL.md`:
+- [x] Create `.agents/skills/lan-ssh-patterns/SKILL.md`:
   - ProxyJump pattern, `lan_hosts` group, SSH tunnel, API token convention,
     full "add new LAN node" checklist, dependency chain, troubleshooting
     (unreachable, permission denied, DHCP drift, API tokens), BAD/GOOD
@@ -290,17 +290,17 @@ and update architecture docs with the multi-node topology.
 - [x] Update `docs/architecture/overview.md`:
   - Network topology shows mesh1 at 10.10.10.210
   - `lan_hosts` group and ProxyJump pattern documented
-  - Build profiles reference `multi-node-ssh` skill
+  - Build profiles reference `lan-ssh-patterns` skill
 - [x] Update `docs/architecture/roadmap.md`:
   - Added `2026-03-11-00` as active project (✓ complete)
-- [x] Update `.cursor/rules/project-structure.mdc`:
+- [x] Update `.agents/skills/project-structure-rules/SKILL.md`:
   - `lan_hosts` in flavor groups, `PRIMARY_HOST`/`<HOSTNAME>_API_TOKEN`
     in variable scoping, `bootstrap_lan_host.yml` and `mesh1-infra/`
     in key files
 - [x] CHANGELOG entry under `[Unreleased]`
 - [x] Safety rules updated: cleanup NEVER removes credentials
-  (`.cursor/rules/proxmox-safety.mdc`, `learn-from-mistakes.mdc`,
-  `ansible-testing`, `proxmox-host-safety`, `multi-node-ssh` skills)
+  (`.agents/skills/proxmox-safety-rules/SKILL.md`, `.agents/skills/learn-from-mistakes/SKILL.md`,
+  `molecule-testing`, `proxmox-safety-rules`, `lan-ssh-patterns` skills)
 
 **Verify:**
 

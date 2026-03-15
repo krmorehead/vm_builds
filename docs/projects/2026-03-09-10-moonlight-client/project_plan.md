@@ -68,12 +68,14 @@ at that time.
 
 | Skill | When to use |
 |-------|-------------|
-| `vm-lifecycle` | Two-role pattern, LXC provisioning via `proxmox_lxc`, deploy_stamp, cleanup completeness, image management |
-| `ansible-testing` | Molecule scenarios, verify assertions, per-feature scenario setup, baseline workflow |
-| `rollback-patterns` | Per-feature rollback tags, deploy_stamp tracking, cleanup.yml conventions |
-| `proxmox-host-safety` | iGPU hard-fail detection, safe host commands, shell pipefail |
-| `multi-node-ssh` | ProxyJump for testing on LAN nodes |
-| `project-planning` | Milestone structure, verify/rollback sections |
+| `vm-lifecycle-architecture` | Two-role pattern, LXC provisioning via `proxmox_lxc`, deploy_stamp, cleanup completeness |
+| `image-management-patterns` | Image build, local images/ directory, template management |
+| `lxc-container-patterns` | LXC provisioning, pct_remote connection, container networking |
+| `molecule-testing` | Molecule scenarios, verify assertions, per-feature scenario setup, baseline workflow |
+| `rollback-architecture` | Per-feature rollback tags, deploy_stamp tracking, cleanup.yml conventions |
+| `proxmox-system-safety` | iGPU hard-fail detection, safe host commands, shell pipefail |
+| `lan-ssh-patterns` | ProxyJump for testing on LAN nodes |
+| `project-planning-structure` | Milestone structure, verify/rollback sections |
 
 ---
 
@@ -208,7 +210,7 @@ drivers pre-installed. Per the project's "Bake, don't configure at runtime"
 principle, all packages belong in the image. The configure role (M2) only
 applies host-specific settings (Sunshine server IP, resolution, codec).
 
-See: `vm-lifecycle` skill (image management section).
+See: `image-management-patterns` skill.
 
 **Implementation pattern:**
 - Script: add Moonlight image build section to `build-images.sh`
@@ -263,8 +265,8 @@ add device bind mounts for iGPU and input, add the provision and configure
 plays to `site.yml`, and verify the container runs. Integration with
 `site.yml` is consolidated here.
 
-See: `vm-lifecycle` skill (LXC provisioning pattern, deploy_stamp).
-See: `proxmox-host-safety` skill (iGPU hard-fail — `proxmox_igpu` runs
+See: `lxc-container-patterns` skill (LXC provisioning pattern, deploy_stamp).
+See: `proxmox-system-safety` skill (iGPU hard-fail — `proxmox_igpu` runs
 before this play and hard-fails if absent).
 
 **Implementation pattern:**
@@ -344,8 +346,8 @@ Sunshine server IP, resolution, codec, and pairing. moonlight-embedded
 and VA-API drivers are already baked into the image (M0). This role
 only applies host-specific configuration.
 
-See: `vm-lifecycle` skill (LXC configure connection, pct_remote pattern).
-See: `proxmox-host-safety` skill (package name verification — ALWAYS
+See: `lxc-container-patterns` skill (LXC configure connection, pct_remote pattern).
+See: `proxmox-system-safety` skill (package name verification — ALWAYS
 `apt-cache search` before adding VA-API driver).
 
 **Implementation pattern:**
@@ -404,8 +406,8 @@ Create per-feature molecule scenario for fast Moonlight-only iteration,
 extend `molecule/default/verify.yml` for full integration, add rollback
 plays to `playbooks/cleanup.yml`, and run final validation.
 
-See: `ansible-testing` skill (per-feature scenario setup, verify
-completeness, baseline workflow), `rollback-patterns` skill (cleanup
+See: `molecule-testing` skill (per-feature scenario setup, baseline workflow),
+`molecule-verify` skill (verify completeness), `molecule-cleanup` skill (cleanup
 completeness).
 
 #### 3a. Per-feature scenario: `molecule/moonlight-lxc/`

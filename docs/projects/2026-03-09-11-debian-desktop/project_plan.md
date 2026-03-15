@@ -83,12 +83,14 @@ standard bake pattern.
 
 | Skill | When to use |
 |-------|-------------|
-| `vm-lifecycle` | Two-role pattern, VM provisioning, deploy_stamp, cleanup completeness, image management |
-| `ansible-testing` | Molecule scenarios, verify assertions, per-feature scenario setup, baseline workflow |
-| `rollback-patterns` | Per-feature rollback tags, deploy_stamp tracking, cleanup.yml conventions |
-| `proxmox-host-safety` | iGPU hard-fail detection, exclusive GPU passthrough, safe host commands, PCI cleanup |
-| `multi-node-ssh` | ProxyJump for testing on LAN nodes |
-| `project-planning` | Milestone structure, verify/rollback sections |
+| `vm-lifecycle-architecture` | Two-role pattern, VM provisioning, deploy_stamp, cleanup completeness |
+| `image-management-patterns` | Image management, local images/ directory |
+| `vm-provisioning-patterns` | VM provisioning via qm create, add_host, dynamic groups |
+| `molecule-testing` | Molecule scenarios, verify assertions, per-feature scenario setup, baseline workflow |
+| `rollback-architecture` | Per-feature rollback tags, deploy_stamp tracking, cleanup.yml conventions |
+| `proxmox-system-safety` | iGPU hard-fail detection, exclusive GPU passthrough, safe host commands, PCI cleanup |
+| `lan-ssh-patterns` | ProxyJump for testing on LAN nodes |
+| `project-planning-structure` | Milestone structure, verify/rollback sections |
 
 ---
 
@@ -210,7 +212,7 @@ _Self-contained. No external dependencies._
 Download the Debian 12 cloud image into `images/`, add `desktop_image_path`
 to `group_vars/all.yml`, and verify cloud-init support.
 
-See: `vm-lifecycle` skill (image management, local images/ directory).
+See: `image-management-patterns` skill.
 
 **Implementation pattern:**
 - Add `desktop_image_path` to `inventory/group_vars/all.yml`
@@ -243,7 +245,7 @@ display-exclusive hookscript (deployed by Kiosk project 2026-03-09-12). Add
 the provision and configure plays to `site.yml`. Integration with `site.yml`
 is consolidated here.
 
-See: `vm-lifecycle` skill (two-role pattern, qm create, add_host), `proxmox-host-safety`
+See: `vm-provisioning-patterns` skill (two-role pattern, qm create, add_host), `proxmox-system-safety`
 skill (iGPU hard-fail, exclusive passthrough, PCI address from proxmox_igpu).
 
 **Implementation pattern:**
@@ -294,7 +296,7 @@ skill (iGPU hard-fail, exclusive passthrough, PCI address from proxmox_igpu).
     `ansible_host: <vm_lan_ip>`,
     `ansible_ssh_common_args: -o ProxyJump=root@{{ ansible_host }} -o ServerAliveInterval=15 -o ServerAliveCountMax=4`,
     `ansible_user: <desktop_user>`
-  - See: `multi-node-ssh` skill (ProxyJump keepalives)
+  - See: `lan-ssh-patterns` skill (ProxyJump keepalives)
 
 **Note on `[desktop]` tag:** This tag is separate from `[kiosk]`. Desktop VM
 is significantly more disruptive (exclusive iGPU passthrough) than Kiosk
@@ -315,7 +317,7 @@ triggering the Desktop VM's heavy GPU unbind/rebind cycle.
 **Rollback:**
 
 VM destruction: generic `qm list` iteration in cleanup (`qm stop` + `qm destroy`).
-PCI cleanup (see `proxmox-host-safety` skill): unbind vfio-pci, remove blacklist/vfio
+PCI cleanup (see `proxmox-system-safety` skill): unbind vfio-pci, remove blacklist/vfio
 config, reload original drivers, rescan PCI bus. Detach hookscript before destroy.
 
 ---
@@ -329,7 +331,7 @@ Configure the running VM via SSH + ProxyJump: install KDE, GNOME, SDDM,
 GPU drivers (vendor-specific via `igpu_vendor`), base applications, and
 user setup from `.env`.
 
-See: `vm-lifecycle` skill (configure via SSH, dynamic group), `multi-node-ssh`
+See: `vm-lifecycle-architecture` skill (configure via SSH, dynamic group), `lan-ssh-patterns`
 skill (ProxyJump for LAN nodes).
 
 **Implementation pattern:**
@@ -385,7 +387,7 @@ _Blocked on: M3 (base config complete)._
 Apply session-specific polish: KDE taskbar/theme, GNOME dock/theme, session
 switching, and optional auto-login controlled by `DESKTOP_AUTOLOGIN`.
 
-See: `vm-lifecycle` skill (configure role task files).
+See: `vm-lifecycle-architecture` skill (configure role task files).
 
 **Implementation pattern:**
 - Role: `roles/desktop_configure/tasks/polish.yml` (or inline in main.yml)
@@ -417,8 +419,8 @@ extend `molecule/default/verify.yml` for full integration, add rollback
 plays to `playbooks/cleanup.yml`, add VM and PCI cleanup to both cleanup
 playbooks, and run final validation.
 
-See: `ansible-testing` skill (verify completeness, per-feature scenario,
-baseline workflow), `proxmox-host-safety` skill (PCI cleanup after VM destroy).
+See: `molecule-testing` skill (per-feature scenario, baseline workflow),
+`molecule-verify` skill (verify completeness), `proxmox-system-safety` skill (PCI cleanup after VM destroy).
 
 #### 5a. Per-feature scenario: `molecule/desktop-vm/`
 
@@ -463,7 +465,7 @@ baseline workflow), `proxmox-host-safety` skill (PCI cleanup after VM destroy).
 - [ ] Extend `molecule/default/cleanup.yml` for VM 400:
   - `qm stop 400` + `qm destroy 400`
   - PCI cleanup: unbind vfio-pci, remove vfio config, reload i915/amdgpu, rescan PCI
-  - (See `proxmox-host-safety` skill, PCI device cleanup section)
+  - (See `proxmox-system-safety` skill, PCI device cleanup section)
 
 #### 5c. Rollback plays in `playbooks/cleanup.yml`
 
