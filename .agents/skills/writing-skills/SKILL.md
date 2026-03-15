@@ -1,9 +1,17 @@
 ---
 name: writing-skills
-description: Author effective skills optimized for LLM consumption. Minimize context bloat, avoid perpendicular examples, keep concise.
+description: Use when creating new skills, writing skill documentation, or building LLM-optimized skills. Includes skill structure patterns, constraint formatting, and validation guidelines.
 ---
 
 # Writing Skills for LLMs
+
+## When to Use
+This skill triggers when you:
+- Create new skill files (.agents/skills/*/SKILL.md)
+- Write or edit existing skill documentation
+- Build skills optimized for LLM consumption
+- Need skill structure guidance
+- Want to validate skill effectiveness
 
 ## Core principles
 
