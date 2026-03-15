@@ -25,7 +25,7 @@ Skills update process:
 ```bash
 # When encountering new issue:
 1. Fix immediate problem first
-2. Search existing .agents/skills/ and .cursor/rules/
+2. Search existing .agents/skills/ and AGENTS.md files
 3. If lesson is new, add to relevant skill
 4. Use NEVER/ALWAYS constraints, not suggestions
 5. Include one-line "what went wrong" before rule
@@ -51,6 +51,20 @@ Mandatory testing sequence:
 3. Update verify.yml if needed         # Add assertions
 4. No untested merges                  # Tests must pass first
 ```
+
+## Documentation accuracy
+
+When changing a role's exported facts, bridge names, device paths, or connection patterns, ALWAYS update `docs/architecture/` in the same commit.
+
+- `overview.md` role-reference diagrams MUST list the same exports — update both if you update one
+- NEVER document planned/future exports as if they already exist (mark with "(future)" or omit)
+- NEVER hardcode bridge names (`vmbr0`, `vmbr1`) in docs — use "WAN bridge" / "LAN bridge"
+
+Previous bug: `overview.md` listed `gpu_pci_devices` as an export of `proxmox_pci_passthrough`, but the role only exports `wifi_pci_devices`.
+
+## Handler conventions
+
+Prefer `ansible.builtin.systemd` over `ansible.builtin.command: cmd: systemctl restart` for service management in handlers. Use `command` only for status checks and config validation.
 
 ## Anti-patterns
 

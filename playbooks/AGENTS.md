@@ -4,7 +4,7 @@ This AGENTS.md provides specific instructions for agentic coding agents working 
 
 ## External File Loading
 
-CRITICAL: When you encounter a file reference (e.g., @.cursor/rules/async-job-patterns.mdc), use your Read tool to load it on a need-to-know basis. They're relevant to the SPECIFIC task at hand.
+CRITICAL: When you encounter a file reference (e.g., .agents/skills/async-job-patterns/SKILL.md), use your Read tool to load it on a need-to-know basis. They're relevant to the SPECIFIC task at hand.
 
 Instructions:
 - Do NOT preemptively load all references - use lazy loading based on actual need
@@ -33,8 +33,8 @@ Instructions:
 
 ## Development Guidelines
 
-For async and detached job patterns: @.cursor/rules/async-job-patterns.mdc
-For task dependency ordering: @.cursor/rules/task-ordering.mdc
+For async and detached job patterns: .agents/skills/async-job-patterns/SKILL.md
+For task dependency ordering: .agents/skills/task-ordering/SKILL.md
 
 ## Cross-Coverage Rules
 

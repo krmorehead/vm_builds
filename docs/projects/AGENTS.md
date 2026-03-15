@@ -4,7 +4,7 @@ This AGENTS.md provides specific instructions for agentic coding agents working 
 
 ## External File Loading
 
-CRITICAL: When you encounter a file reference (e.g., @.cursor/rules/learn-from-mistakes.mdc), use your Read tool to load it on a need-to-know basis. They're relevant to the SPECIFIC task at hand.
+CRITICAL: When you encounter a file reference (e.g., .agents/skills/learn-from-mistakes/SKILL.md), use your Read tool to load it on a need-to-know basis. They're relevant to the SPECIFIC task at hand.
 
 Instructions:
 - Do NOT preemptively load all references - use lazy loading based on actual need
@@ -27,7 +27,7 @@ Instructions:
 
 ## Development Guidelines
 
-For learning from planning mistakes: @.cursor/rules/learn-from-mistakes.mdc
+For learning from planning mistakes: .agents/skills/learn-from-mistakes/SKILL.md
 
 ## Cross-Coverage Rules
 

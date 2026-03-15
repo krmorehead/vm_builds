@@ -75,5 +75,5 @@ description: VM cleanup completeness, performance optimization, and maintenance 
 
 17. Roles that install packages on the Proxmox HOST must handle three prerequisites:
     - **Clock sync**: Sync via NTP before `apt-get update`
-    - **DNS**: After cleanup destroys the router VM, check DNS with `getent hosts deb.debian.org` and fall back to `8.8.8.8` / `1.1.1.1`
+    - **DNS**: After cleanup destroys the router VM, check DNS with `getent hosts deb.debian.org` and fall back. DNS fallback MUST use `ansible_default_ipv4.gateway` as the FIRST nameserver, then `8.8.8.8` / `1.1.1.1`. NEVER use only external DNS for LAN hosts — OpenWrt blocks outbound DNS from the LAN subnet, redirecting all queries through its own dnsmasq.
     - **Enterprise repos**: `pve-enterprise.sources` and `ceph.sources` require a subscription. Rename both to `.disabled` and add the `pve-no-subscription` repo. ALWAYS restore them in cleanup.

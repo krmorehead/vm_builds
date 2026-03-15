@@ -133,3 +133,9 @@ molecule verify -s openwrt-security   # check only (after manual fixes)
 # Full integration (before commit)
 molecule test
 ```
+
+## Per-Feature Scenario Group Membership
+
+Per-feature scenarios MUST include all groups that affect topology branching in their platform config. If a role uses `router_nodes` or `lan_hosts` group membership to determine LAN vs WAN networking, the per-feature scenario must include those groups even if the scenario doesn't test router functionality.
+
+Previous bug: rsyslog-lxc per-feature scenario was missing `router_nodes` group for the home host. The LXC provisioning role used `router_nodes` membership to choose between LAN and WAN bridges. Without the group, home was treated as a WAN host, and the container was placed on the wrong bridge.

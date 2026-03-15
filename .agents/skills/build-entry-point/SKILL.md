@@ -75,3 +75,6 @@ def build_command(playbook: Path, extra_vars: dict, tags: list, skip_tags: list)
 - Optional vars marked required → blocked valid runs
 - Missing fallback host → silent failures
 - Wrong host by default → no probing
+- Quoted values: `.env` had `PRIMARY_HOST="192.168.1.100"` with literal quotes. SSH connected to `"192.168.1.100"` (with quotes) and hung. Fix: `build.py` strips surrounding quotes during env parsing.
+- `sys.exit()` in library function: `find_ansible_playbook()` called `sys.exit(1)` on error instead of returning None or raising. This made the function untestable and killed the process in unexpected places.
+- When adding a new CLI argument, ALWAYS add a corresponding test in `TestBuildCommand`.

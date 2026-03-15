@@ -89,3 +89,33 @@ description: LXC container provisioning and configuration patterns. Use when cre
 19. WAN IPs add +200 to the base offset. ALWAYS check that WAN IPs don't collide with any host's management IP.
 
 20. Previous bug: rsyslog_ct_ip_offset=11 produced WAN IP .211, colliding with mesh2's host IP.
+
+## Dynamic Inventory and Failed Hosts
+
+21. ALWAYS use `ansible_play_hosts` (not `ansible_play_hosts_all`) in `add_host` loops that register containers. `ansible_play_hosts_all` includes hosts that failed in earlier plays, leading to phantom container registrations for containers that were never created.
+
+22. Previous bug: `ai` failed in infrastructure (clock skew). The `add_host` loop used `ansible_play_hosts_all`, registering `wireguard-ai` even though no container existed. The configure play then failed with UNREACHABLE.
+
+## Container PID Retrieval
+
+23. NEVER use `pct pid` — it does not exist in Proxmox VE. Use `lxc-info -n <vmid>` and parse the PID line with `awk '/^PID:/{print $2}'`.
+
+24. Previous bug: `openwrt_mesh_lxc` used `pct pid 103` to get the container PID for WiFi PHY namespace move. It failed with "ERROR: unknown command 'pct pid'".
+
+## pct_remote Connection Requirements
+
+25. The `community.proxmox.proxmox_pct_remote` connection plugin requires the `paramiko` Python package on the controller. ALWAYS add `paramiko` to `requirements.txt` when using `pct_remote`.
+
+26. Previous bug: `ModuleNotFoundError: No module named 'paramiko'` at runtime because the dependency wasn't in `requirements.txt`.
+
+## Pi-hole v6 Configuration
+
+27. Pi-hole v6 uses `/etc/pihole/pihole.toml` (NOT `setupVars.conf` or `pihole-FTL.conf`). Use `/usr/bin/pihole-FTL --config <key> <value>` for programmatic configuration.
+
+28. Pi-hole v6 uses FTL's embedded web server (NOT lighttpd). Do not manage `lighttpd.service`.
+
+29. ALWAYS run `pihole -g` (gravity update) BEFORE switching the container's `resolv.conf` to `127.0.0.1`. Gravity downloads blocklists from the internet, which needs working DNS.
+
+30. For unattended install, pre-seed `/etc/pihole/pihole.toml` with at least `dns.upstreams` before running the installer. Use `PIHOLE_SKIP_OS_CHECK=true` in LXC containers.
+
+31. Previous bug: Configure role set `resolv.conf` to `127.0.0.1`, then ran `pihole -g`. Gravity hung because FTL's DNS wasn't fully initialized.

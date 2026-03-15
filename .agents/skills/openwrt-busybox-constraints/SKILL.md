@@ -22,3 +22,9 @@ description: BusyBox ash shell limitations and constraints for OpenWrt. Use when
 ## Default Route Detection
 
 6. When checking for the default route in scripts on OpenWrt, NEVER filter by device name (`ip route show default dev eth0`). OpenWrt's netifd may use interface aliases (e.g., `wan`, `eth0.2`) that differ from the physical device name. Use `ip route show default` without a device filter.
+
+## Process Detection
+
+7. NEVER use `pgrep` on OpenWrt — it may not exist in BusyBox. Use `/etc/init.d/<service> status` or `ps | grep -c '[p]rocess'` instead.
+
+8. Previous bug: `pgrep -x logd` failed on OpenWrt because pgrep wasn't available. Fixed by using `/etc/init.d/log status`.

@@ -81,3 +81,15 @@ Molecule's `provisioner.env` section uses `${VAR_NAME}` syntax for variable subs
 For required env vars: use `${VAR_NAME}` and ensure the var is always set in `test.env`. For optional env vars: do NOT add them to `provisioner.env` at all. The role's `defaults/main.yml` already uses `lookup('env', 'VAR_NAME') | default('', true)`.
 
 Previous bug: `RSYSLOG_HOME_SERVER: ${RSYSLOG_HOME_SERVER:-}` in `molecule.yml` caused "Invalid placeholder in string" and prevented all molecule runs from starting.
+
+## build-images.sh Shell Escaping
+
+When writing config files via `pct exec -- bash -c '...'` inside `remote_cmd "..."`, there are 4 layers of shell interpretation: (1) local bash double quotes, (2) SSH, (3) remote bash (parsing single quotes around bash -c), (4) bash -c with heredoc.
+
+For heredocs with quoted delimiters (`<< "EOF"`), NO expansion happens inside. To get a literal `$var` in the file: use `\$var` (single backslash-dollar). Local bash expands `\$` to `$`, then it passes through unchanged.
+
+NEVER use `\\\$var` (triple backslash-dollar) — it produces `\$var` in the file, not `$var`.
+
+Previous bug: `\\\$AllowedSender` produced `\$AllowedSender` in the rsyslog config file, which was silently ignored as a deprecated directive. `\\\$inputname` produced `\$inputname` which caused a parse error, preventing rsyslog from starting.
+
+ALWAYS verify baked config by creating a test container from the template and inspecting the actual file content with `pct exec -- cat /path/to/config`.

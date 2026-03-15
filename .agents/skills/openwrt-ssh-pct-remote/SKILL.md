@@ -61,3 +61,11 @@ description: OpenWrt pct_remote shell syntax and SSH connection patterns. Use wh
 10. `&&` and `||` inside single quotes are interpreted by container ash.
 
 11. `[ ... ] && echo x || echo y` WITHOUT sh -c is OK — `[` is exec'd by lxc-attach, `&&`/`||` chain at host level (works for simple checks).
+
+## pct exec PATH Limitation
+
+12. `pct exec` (and `lxc-attach`) uses a restricted PATH: `/sbin:/bin:/usr/sbin:/usr/bin`. Binaries in `/usr/local/bin/` (e.g., `pihole`) are NOT found.
+
+13. ALWAYS use full paths for binaries in `/usr/local/bin/` or `/opt/` when running via `pct exec`, `pct_remote`, or `ansible.builtin.command` on containers.
+
+14. Previous bug: `pihole -a -p` via `pct_remote` failed with `[Errno 2] No such file or directory: b'pihole'`. The binary was at `/usr/local/bin/pihole` but PATH didn't include it.

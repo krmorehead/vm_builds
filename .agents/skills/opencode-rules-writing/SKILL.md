@@ -1,6 +1,9 @@
-# OpenCode Rules Writing
+---
+name: opencode-rules-writing
+description: OpenCode rules and AGENTS.md conventions. Use when creating AGENTS.md files, configuring OpenCode rule precedence, implementing team coding standards, setting up opencode.json instructions, or managing external rule references.
+---
 
-Use when creating AGENTS.md files, configuring OpenCode rule precedence, implementing team coding standards, setting up opencode.json instructions, or managing external rule references.
+# OpenCode Rules Writing
 
 ## Rules
 

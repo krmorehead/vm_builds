@@ -25,7 +25,7 @@ Priority order during idle time:
 
 1. Review and update architecture docs (docs/architecture/)
 2. Review and update skills (.agents/skills/)
-3. Review and update rules (.cursor/rules/)
+3. Review and update rules (AGENTS.md files)
 4. Code review against original intent (compare to project plan)
 5. General code cleanliness (scan for dead code, naming issues)
 ```

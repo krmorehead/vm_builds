@@ -51,6 +51,6 @@ description: Container and VM planning constraints and capability requirements. 
 
 ## Bake vs Configure Separation
 
-14. Per `project-structure.mdc`: if the plan mentions runtime package installation (`opkg install`, `apt install`), reject it. Packages AND base configuration belong in the image build. Configure roles only apply host-specific topology.
+14. Per `project-structure-rules` skill: if the plan mentions runtime package installation (`opkg install`, `apt install`), reject it. Packages AND base configuration belong in the image build. Configure roles only apply host-specific topology.
 
 15. If the software is already in the base OS (e.g., rsyslog in Debian), the image build should pre-configure it — the configure role should not set up listeners, spool directories, or logrotate from scratch.

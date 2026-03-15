@@ -70,7 +70,7 @@ def example():
 - **One example per pattern.** LLMs generalize.
 - **No hedging.** Delete "consider", "might want to", "generally better".
 - **Description has trigger words.** Pack with terms user/tasks mention.
-- **NEVER remove original skills.** Always leave original .cursor/skills intact. Create new opencode skills alongside existing skills, never replace or remove them.
+- **Canonical location is `.agents/skills/`.** All skills live in `.agents/skills/<name>/SKILL.md`. Legacy `.cursor/skills/` files may still exist but `.agents/skills/` is the authoritative source.
 
 ## Validating
 

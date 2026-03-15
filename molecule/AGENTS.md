@@ -4,7 +4,7 @@ This AGENTS.md provides specific instructions for agentic coding agents working 
 
 ## External File Loading
 
-CRITICAL: When you encounter a file reference (e.g., @.cursor/rules/use-idle-time.mdc), use your Read tool to load it on a need-to-know basis. They're relevant to the SPECIFIC task at hand.
+CRITICAL: When you encounter a file reference (e.g., .agents/skills/use-idle-time/SKILL.md), use your Read tool to load it on a need-to-know basis. They're relevant to the SPECIFIC task at hand.
 
 Instructions:
 - Do NOT preemptively load all references - use lazy loading based on actual need
@@ -30,7 +30,7 @@ Instructions:
 
 ## Development Guidelines
 
-For productive use of wait time: @.cursor/rules/use-idle-time.mdc
+For productive use of wait time: .agents/skills/use-idle-time/SKILL.md
 
 ## Cross-Coverage Rules
 
@@ -111,8 +111,8 @@ When a long-running command is backgrounded (`molecule test`, `converge`), **ALW
 ### Priority Order During Idle Time
 
 1. **Review and update architecture docs** (`docs/architecture/`) — verify they match the current code
-2. **Review and update skills** (`.cursor/skills/`) — check for outdated patterns, missing lessons
-3. **Review and update rules** (`.cursor/rules/`) — same as skills
+2. **Review and update skills** (`.agents/skills/`) — check for outdated patterns, missing lessons
+3. **Review and update rules** (`AGENTS.md` files) — same as skills
 4. **Code review against original intent** — if working from a project plan (`docs/projects/`), re-read the plan and diff against the current implementation
 5. **General code cleanliness** — scan recently changed files for dead code, unclear naming, missing error handling, or inconsistent style
 

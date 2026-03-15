@@ -146,3 +146,43 @@ Exception: `ansible.builtin.raw` and BusyBox do NOT support pipefail.
 ## Deprecated patterns
 
 Use `delegate_to: localhost` instead of `local_action`. Use FQCNs: `ansible.builtin.command`.
+
+## Common failures
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `UNREACHABLE` during converge | SSH broken or host down | Check `PRIMARY_HOST`, verify SSH |
+| `community.proxmox` not found | Collections missing | `ansible-galaxy collection install -r requirements.yml` |
+| Bridge numbers keep incrementing | Cleanup didn't remove bridges | `./cleanup.sh clean test.env` |
+| WiFi radios=0 after converge | PCI passthrough not cleaned up | Ensure cleanup unbinds vfio-pci, reloads modules, rescans PCI |
+| `Timeout waiting for SSH` | Network restart dropped connection | Verify SSH args include `ConnectTimeout=10`, `ServerAliveInterval=15` |
+| `opkg update` fails HTTPS | HTTPS not supported | Ensure `sed -i 's\|https://\|http://\|g'` runs before `opkg update` |
+| `opkg update` EPERM | Firewall zones stale after network restart | Restart firewall before outbound connections |
+| MAC stored without colons in UCI | BusyBox `tr -d '[:space:]'` deletes `:` | Use `tr -d ' \t\n\r'` |
+| GUI reachability fails on OpenWrt | BusyBox `nc` no `-w` flag | Use `(echo QUIT \| nc HOST PORT) </dev/null` |
+| VM reachable by IPv6 but not IPv4 | Stale LAN-subnet IP on another bridge | Remove conflicting IPs from non-LAN bridges |
+| `ifreload -a` no DHCP client | Separate `inet dhcp` file conflicts | Modify bridge stanza in-place |
+| Route filter hides default route | `ip route show default dev eth0` misses aliases | Use `ip route show default` without `dev` filter |
+| `igpu_available not defined` in verify | Facts from converge not in verify | Re-include role in verify.yml |
+| `Could not find or access` template | Relative path from scenario dir | Use `role_path` for paths |
+| `ModuleNotFoundError: paramiko` | Missing Python dep for `pct_remote` | Add `paramiko` to `requirements.txt` |
+| `apt-get update` hangs on Proxmox | Enterprise repos unreachable | Rename to `.disabled`, add no-subscription repo |
+| `lsmod \| grep -q` returns rc=141 | SIGPIPE from `grep -q` with pipefail | Use `grep -c` instead |
+| Per-feature verify passes with 0 assertions | Dynamic group empty | Add group reconstruction play |
+| Rollback targets 0 hosts | Dynamic group empty in cleanup | Add reconstruction play in cleanup.yml |
+| SSH auth fails after security rollback | Didn't clear root password | Rollback MUST clear `/etc/shadow` root hash |
+| `uci: Invalid argument` on mesh radio | PHY namespace-moved after boot | Run `wifi config` before `uci set wireless.radio*` |
+
+## Permanent diagnostics rules
+
+1. ALWAYS use `changed_when: false` and `failed_when: false` on diagnostic tasks
+2. Register output and use `debug: var:` to display in logs
+3. Include kernel-level checks (`dmesg` errors) at key milestones
+4. Include actual protocol tests (TCP/HTTP), not just ICMP ping
+5. Generalize ad-hoc debug tasks into permanent diagnostics before closing issues
+
+## Lint configuration
+
+- `ansible-lint`: `.ansible-lint` — production profile, skips `command-instead-of-module` for Proxmox shell tasks
+- `yamllint`: `.yamllint.yml` — 160-char lines, relaxed comment spacing
+- Run manually: `ansible-lint && yamllint .`

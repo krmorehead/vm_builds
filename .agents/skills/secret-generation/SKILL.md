@@ -75,6 +75,10 @@ LAN_GATEWAY: "10.10.10.1"
 ansible_host: "192.168.86.201"
 ```
 
+## Verify requirement
+
+Every section written to the generated env file SHOULD have a corresponding assertion in `molecule/default/verify.yml`. This ensures the generated values are actually produced during converge and are accessible in subsequent plays.
+
 ## Anti-patterns
 
 NEVER explain what secrets are in secret generation rules

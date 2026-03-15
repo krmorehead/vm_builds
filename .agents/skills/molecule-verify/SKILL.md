@@ -16,9 +16,37 @@ description: Molecule verify assertion patterns. completeness requirements, batc
 
 ## Completeness requirements
 
-**Per VM:** state, NIC topology, network config, services running, deploy tracking.
+**Per VM:**
 
-**Per LXC:** container state, auto-start, baked config, config validation, service active, listener bound, functional test, restart resilience, resource usage, deploy stamp.
+| Category | Example assertions |
+|---|---|
+| VM state | Running, correct VMID |
+| VM auto-start | `onboot=1`, `startup order=N` |
+| NIC topology | `net0` on correct bridge (WAN vs LAN) |
+| Network config | WAN has IP, LAN subnet doesn't collide with WAN |
+| Services | DHCP configured, firewall running |
+| Optional features | MAC cloning (when `WAN_MAC` set), mesh (when WiFi present) |
+| Backup | Manifest exists, has required fields, archive on disk |
+| Deploy tracking | `vm_builds.fact` exists, contains expected plays |
+| State files | `.state/addresses.json` exists, contains host + IPs |
+
+**Per LXC:**
+
+| Category | Example assertions |
+|---|---|
+| Container state | Running, correct VMID |
+| Auto-start | `onboot=1`, `startup order=N` |
+| Baked config | All baked config files exist inside container |
+| Config validation | Service config passes validation (`rsyslogd -N1`, `nginx -t`) |
+| Service state | `systemctl is-active <service>` |
+| Network listener | Port is listening (`ss -tlnp`) |
+| Functional test | Send data, verify received/processed |
+| Multi-source test | Multiple senders/tags produce correctly separated output |
+| No-leak test | Remote data stays in remote logs, not local syslog |
+| Restart resilience | Stop/start service, verify listener and reception recover |
+| Resource usage | Memory within allocation (`free -m` < allocated) |
+| Logrotate | Config exists and passes `logrotate --debug` validation |
+| Deploy stamp | `stamp.plays` contains the service entry |
 
 ## IP validation
 
@@ -128,9 +156,32 @@ Verify remote messages don't pollute local logs:
   failed_when: _leak.rc == 0
 ```
 
+## Verify task conventions
+
+1. **Fail-fast IP validation.** Assert IP non-empty and no collision with host IP BEFORE functional tests. "IP is empty" is clear; "log not found" 10 tasks later is not.
+
+2. **No `failed_when: false` on client sends.** Let `logger --tcp`, `dig`, `curl` fail immediately on connection error. "Connection refused" is far more useful than downstream "expected output not found."
+
+3. **`set -o pipefail` only on pipelines.** NEVER add pipefail to single-command tasks. It adds noise and obscures the convention that pipefail signals a pipeline.
+
+4. **Use `ansible.builtin.systemd` over `command: systemctl`** for restarts. Use `command` only for status checks and validation.
+
+## Jinja regex_search in assert
+
+`regex_search` without a capture group returns a STRING match (not boolean). In `assert: that:` blocks, ALWAYS append `is not none`:
+
+```yaml
+# BAD — returns string, assert sees "Conditional was derived from type str"
+- _output | regex_search('RADIOS=phy')
+
+# GOOD — explicit boolean
+- _output | regex_search('RADIOS=phy') is not none
+```
+
 ## Common failures
 
 - 0 assertions ran → dynamic group empty (add reconstruction)
 - Rollback targets 0 hosts → empty group in cleanup
 - `igpu_available not defined` → re-include role in verify
 - Wrong IP for WAN hosts → use `pct config` extraction
+- Per-feature scenario missing `router_nodes` group → LAN/WAN detection takes wrong path

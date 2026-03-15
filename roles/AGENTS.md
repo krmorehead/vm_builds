@@ -4,7 +4,7 @@ This AGENTS.md provides specific instructions for agentic coding agents working 
 
 ## External File Loading
 
-CRITICAL: When you encounter a file reference (e.g., @.cursor/rules/proxmox-safety.mdc), use your Read tool to load it on a need-to-know basis. They're relevant to the SPECIFIC task at hand.
+CRITICAL: When you encounter a file reference (e.g., .agents/skills/proxmox-safety-rules/SKILL.md), use your Read tool to load it on a need-to-know basis. They're relevant to the SPECIFIC task at hand.
 
 Instructions:
 - Do NOT preemptively load all references - use lazy loading based on actual need
@@ -35,9 +35,9 @@ Instructions:
 
 ## Development Guidelines
 
-For Proxmox safety patterns: @.cursor/rules/proxmox-safety.mdc
-For task dependency ordering: @.cursor/rules/task-ordering.mdc
-For baseline establishment: @.cursor/rules/clean-baselines.mdc
+For Proxmox safety patterns: .agents/skills/proxmox-safety-rules/SKILL.md
+For task dependency ordering: .agents/skills/task-ordering/SKILL.md
+For baseline establishment: .agents/skills/clean-baselines/SKILL.md
 
 ## Cross-Coverage Rules
 
