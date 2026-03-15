@@ -7,11 +7,11 @@ description: Author effective skills optimized for LLM consumption. Minimize con
 
 ## Core principles
 
-1. **Token budget is shared.** Every line competes with conversation history, other skills, and user code.
-2. **LLMs already know general knowledge.** Don't explain what tool/tech is. Only state things LLMs get wrong without the skill.
-3. **LLMs repeat mistakes.** Focus on previous bugs and how to prevent them.
-4. **LLMs follow patterns.** One simple implementation example. Multiply examples waste tokens.
-5. **Context bloat kills utility.** BAD/GOOD perpendicular examples over-teach. Simple correct implementation is enough.
+1. **Token budget is shared.** Every line competes with conversation history, other skills, and user code. Justify each sentence's inclusion.
+2. **LLMs already know general knowledge.** Don't explain what Ansible is. Don't explain what a bridge is. Only state things the LLM would get wrong or miss without the skill.
+3. **LLMs repeat mistakes.** Skills exist to prevent recurrence. The highest-value content is "thing that went wrong + what to do instead."
+4. **LLMs follow patterns.** Give one concrete example of the right way. The LLM will generalize. Two examples only if the pattern has important variants.
+5. **LLMs obey constraints better than suggestions.** "NEVER run `ifdown --all`" works. "Consider avoiding `ifdown --all`" does not.
 
 ## Size constraints
 
@@ -62,6 +62,7 @@ def example():
 - **One example per pattern.** LLMs generalize.
 - **No hedging.** Delete "consider", "might want to", "generally better".
 - **Description has trigger words.** Pack with terms user/tasks mention.
+- **NEVER remove original skills.** Always leave original .cursor/skills intact. Create new opencode skills alongside existing skills, never replace or remove them.
 
 ## Validating
 
@@ -70,6 +71,37 @@ After writing:
 - Count implementation examples. More than 1? Remove extras.
 - Check line count. >100? Split or prune.
 - Test description: triggers right skill if user said X?
+
+## Validating a skill
+
+After writing, check:
+- [ ] Would an LLM get this wrong without the skill? If no, delete it.
+- [ ] Can any sentence be removed without losing information? If yes, remove it.
+- [ ] Are there concrete examples of the right pattern? If no, add one.
+- [ ] Is the description specific enough to trigger on relevant tasks? Test by asking: "would the LLM pick this skill if the user said X?"
+
+## Skill architecture: general vs specific
+
+When a project manages multiple components of the same kind (VMs, services, microservices), split skills into layers:
+
+- **General skill** — patterns that apply to ALL components of that kind. Contains the skeleton, checklist, shared conventions, and architectural constraints.
+- **Component-specific skill** — patterns particular to ONE component. Contains its package manager, service model, restart sequences, firewall behavior, network topology, and bug history.
+
+```
+# GOOD: layered skills
+.agents/skills/vm-lifecycle-architecture/SKILL.md    # general: two-role pattern, VMID allocation, deploy_stamp
+.agents/skills/openwrt-network-topology/SKILL.md    # specific: UCI, firewall zones, two-phase restart, opkg
+.agents/skills/service-config-validation/SKILL.md   # specific: service validation patterns
+
+# BAD: everything in one file
+.agents/skills/vm-lifecycle/SKILL.md                # general + OpenWrt firewall zones + service validation + ...
+```
+
+**Litmus test**: If a pattern mentions a specific component's name, package manager, init system, or network topology, it belongs in the component-specific skill, not the general one.
+
+**Why this matters**: An LLM working on a new VM type gets only the general patterns without noise from other VMs. An LLM working on OpenWrt gets both general + OpenWrt-specific. Without separation, OpenWrt-specific lessons (like firewall zone rebinding) pollute the context for every other VM type.
+
+Previous bug: firewall zone rebinding after network restarts, UCI commands, opkg feed switching, and bootstrap IP migration were all stored in `vm-lifecycle`. An LLM adding a Home Assistant VM would see all that noise and might incorrectly apply OpenWrt patterns to a different VM type.
 
 ## Decision: skill vs rule
 
