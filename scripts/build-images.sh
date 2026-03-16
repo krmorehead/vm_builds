@@ -2,19 +2,20 @@
 set -euo pipefail
 
 # Builds custom images for the vm_builds project.
-# Produces seven outputs:
+# Produces eight outputs:
 #   1. Mesh LXC rootfs        — minimal OpenWrt, no firewall, WiFi packages      (local build)
 #   2. Router VM combined      — full OpenWrt with mesh/security/DNS packages     (local build)
 #   3. Pi-hole LXC template    — Debian 12 with Pi-hole pre-installed             (remote build on Proxmox)
 #   4. rsyslog LXC template    — Debian 12 with rsyslog TCP receiver pre-configured (remote build on Proxmox)
-#   5. Netdata LXC template    — Debian 12 with Netdata monitoring agent pre-installed (remote build on Proxmox)
-#   6. WireGuard LXC template  — Debian 12 with wireguard-tools + iptables baked in (remote build on Proxmox)
-#   7. Home Assistant template — Debian 12 with Docker CE and HA container pre-pulled (remote build on Proxmox)
+#   5. Jellyfin LXC template   — Debian 12 with Jellyfin + VA-API drivers baked in (remote build on Proxmox)
+#   6. Netdata LXC template    — Debian 12 with Netdata monitoring agent pre-installed (remote build on Proxmox)
+#   7. WireGuard LXC template  — Debian 12 with wireguard-tools + iptables baked in (remote build on Proxmox)
+#   8. Home Assistant template — Debian 12 with Docker CE and HA container pre-pulled (remote build on Proxmox)
 #
 # Usage: ./build-images.sh [--clean] [--host <proxmox-ip>] [--only <target>]
 #   --clean          Remove cached Image Builder before downloading fresh copy
 #   --host <ip>      Proxmox host for remote image builds. Required for remote-built templates.
-#   --only <target>  Build only the specified target (mesh, router, pihole, rsyslog, netdata, wireguard, homeassistant).
+#   --only <target>  Build only the specified target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGES_DIR="$(cd "${SCRIPT_DIR}/../images" && pwd)"
@@ -498,6 +499,181 @@ ROTATE_EOF
     trap - EXIT
 
     log "rsyslog LXC template: ${output}"
+    log "  Size: $(du -h "$output" | cut -f1)"
+}
+
+# Jellyfin LXC template (built remotely on Proxmox via pct create/exec/vzdump)
+JELLYFIN_BASE_TEMPLATE="debian-12-standard_12.12-1_amd64.tar.zst"
+JELLYFIN_OUTPUT_NAME="jellyfin-debian-12-amd64.tar.zst"
+JELLYFIN_BUILD_VMID=995
+
+cleanup_jellyfin_build() {
+    local vmid="${JELLYFIN_BUILD_VMID}"
+    if [[ -n "$PROXMOX_HOST" ]]; then
+        log "Cleaning up Jellyfin build container ${vmid}..."
+        remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
+    fi
+}
+
+build_jellyfin_lxc() {
+    log "Building Jellyfin LXC template (remote on Proxmox)..."
+    local base_template="${IMAGES_DIR}/${JELLYFIN_BASE_TEMPLATE}"
+    local output="${IMAGES_DIR}/${JELLYFIN_OUTPUT_NAME}"
+    local vmid="${JELLYFIN_BUILD_VMID}"
+
+    if [[ -f "$output" ]]; then
+        log "Jellyfin template already exists at ${output}"
+        log "  Delete it and re-run to rebuild."
+        return
+    fi
+
+    if [[ -z "$PROXMOX_HOST" ]]; then
+        die "Jellyfin build requires --host <proxmox-ip>. Example:
+  ./build-images.sh --host 192.168.86.201"
+    fi
+
+    if [[ ! -f "$base_template" ]]; then
+        die "Base template not found: ${base_template}. Download it first:
+  wget -O ${base_template} \\
+    http://download.proxmox.com/images/system/${JELLYFIN_BASE_TEMPLATE}"
+    fi
+
+    trap cleanup_jellyfin_build EXIT
+
+    remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
+
+    local remote_template="/var/lib/vz/template/cache/${JELLYFIN_BASE_TEMPLATE}"
+    if ! remote_cmd "test -f ${remote_template}"; then
+        log "Uploading base template to Proxmox host..."
+        # shellcheck disable=SC2086
+        scp $SSH_OPTS "$base_template" "root@${PROXMOX_HOST}:${remote_template}"
+    fi
+
+    local mgmt_bridge
+    mgmt_bridge=$(remote_cmd "ip -o route show default | awk '{print \$5}' | head -1")
+    log "Management bridge: ${mgmt_bridge}"
+
+    log "Creating temporary build container (VMID ${vmid})..."
+    remote_cmd "pct create ${vmid} local:vztmpl/${JELLYFIN_BASE_TEMPLATE} \
+        --hostname jellyfin-build \
+        --memory 512 \
+        --cores 1 \
+        --rootfs local-lvm:2 \
+        --net0 name=eth0,bridge=${mgmt_bridge},ip=dhcp \
+        --nameserver 8.8.8.8 \
+        --unprivileged 1 \
+        --start false"
+
+    log "Starting build container..."
+    remote_cmd "pct start ${vmid}"
+
+    log "Waiting for container to start..."
+    local retries=0
+    while ! remote_cmd "pct exec ${vmid} -- ls / >/dev/null 2>&1"; do
+        retries=$((retries + 1))
+        if [[ $retries -gt 30 ]]; then
+            remote_cmd "pct destroy ${vmid} --purge 2>/dev/null; true"
+            die "Build container failed to start after 60 seconds"
+        fi
+        log "  waiting... ($retries/30)"
+        sleep 2
+    done
+    log "Container has network access."
+
+    # Force reliable DNS — DHCP may inject an ISP nameserver that doesn't resolve
+    remote_cmd "pct exec ${vmid} -- bash -c 'echo nameserver 8.8.8.8 > /etc/resolv.conf'"
+
+    log "Installing Jellyfin and VA-API drivers..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        export DEBIAN_FRONTEND=noninteractive
+
+        # Update package lists
+        apt-get update -qq
+
+        # Install Jellyfin from official repositories
+        # Add Jellyfin official GPG key and repository
+        apt-get install -y --no-install-recommends gnupg2 wget curl
+
+        # Download and add Jellyfin GPG key
+        wget -O - https://repo.jellyfin.org/jellyfin_team.gpg.key | gpg --dearmor -o /usr/share/keyrings/jellyfin.gpg
+
+        # Add Jellyfin repository
+        echo \"deb [signed-by=/usr/share/keyrings/jellyfin.gpg] https://repo.jellyfin.org/debian bookworm main\" | tee /etc/apt/sources.list.d/jellyfin.list
+
+        # Update package lists to include Jellyfin
+        apt-get update -qq
+
+        # Install Jellyfin server and web components
+        apt-get install -y --no-install-recommends \
+            jellyfin \
+            jellyfin-web \
+            jellyfin-ffmpeg7
+
+        # Install VA-API drivers for hardware transcoding (Intel + AMD)
+        # Intel iGPU support
+        apt-get install -y --no-install-recommends \
+            intel-media-va-driver \
+            vainfo
+
+        # AMD GPU support (mesa drivers for broader compatibility)
+        apt-get install -y --no-install-recommends \
+            mesa-va-drivers \
+            mesa-vdpau-drivers
+
+        # Pre-configure Jellyfin for port 8096
+        mkdir -p /etc/jellyfin
+        cat > /etc/jellyfin/jellyfin.conf << \"JELLYFIN_EOF\"
+[Networking]
+_port = 8096
+_base_url = /
+
+[MediaEncoder]
+_vaapi_device = /dev/dri/renderD128
+_vaapi_driver = auto
+JELLYFIN_EOF
+
+        # Enable hardware acceleration by default
+        systemctl enable jellyfin || true
+
+        # Clean up package caches
+        apt-get clean
+        rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    '"
+
+    log "Verifying Jellyfin installation..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        which jellyfin
+        vainfo
+        ls -la /usr/lib/jellyfin/
+        ls -la /usr/share/jellyfin/web/
+    '"
+    log "Jellyfin smoke test passed."
+
+    log "Stopping build container..."
+    remote_cmd "pct stop ${vmid}"
+    sleep 2
+
+    log "Exporting container as template via vzdump..."
+    remote_cmd "vzdump ${vmid} --dumpdir /tmp --compress zstd --mode stop"
+
+    local vzdump_file
+    vzdump_file=$(remote_cmd "ls -t /tmp/vzdump-lxc-${vmid}-*.tar.zst 2>/dev/null | head -1")
+    if [[ -z "$vzdump_file" ]]; then
+        remote_cmd "pct destroy ${vmid} --purge 2>/dev/null; true"
+        die "vzdump archive not found on Proxmox host"
+    fi
+    log "vzdump archive: ${vzdump_file}"
+
+    log "Downloading template from Proxmox host..."
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS "root@${PROXMOX_HOST}:${vzdump_file}" "$output"
+
+    log "Cleaning up build container and vzdump archive..."
+    remote_cmd "pct destroy ${vmid} --purge 2>/dev/null; rm -f '${vzdump_file}'; true"
+
+    trap - EXIT
+
+    log "Jellyfin LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
 
@@ -1063,6 +1239,7 @@ should_build mesh    && build_mesh_lxc
 should_build router  && build_router_vm
 should_build pihole  && build_pihole_lxc
 should_build rsyslog && build_rsyslog_lxc
+should_build jellyfin && build_jellyfin_lxc
 should_build netdata    && build_netdata_lxc
 should_build wireguard  && build_wireguard_lxc
 should_build homeassistant && build_homeassistant_lxc
@@ -1071,6 +1248,6 @@ log ""
 log "Done. Custom images in ${IMAGES_DIR}/:"
 ls -lh "${IMAGES_DIR}/${MESH_OUTPUT_NAME}" "${IMAGES_DIR}/${ROUTER_OUTPUT_NAME}" \
     "${IMAGES_DIR}/${PIHOLE_OUTPUT_NAME}" "${IMAGES_DIR}/${RSYSLOG_OUTPUT_NAME}" \
-    "${IMAGES_DIR}/${NETDATA_OUTPUT_NAME}" "${IMAGES_DIR}/${WIREGUARD_OUTPUT_NAME}" \
-    "${IMAGES_DIR}/${HOMEASSISTANT_OUTPUT_NAME}" \
+    "${IMAGES_DIR}/${JELLYFIN_OUTPUT_NAME}" "${IMAGES_DIR}/${NETDATA_OUTPUT_NAME}" \
+    "${IMAGES_DIR}/${WIREGUARD_OUTPUT_NAME}" "${IMAGES_DIR}/${HOMEASSISTANT_OUTPUT_NAME}" \
     2>/dev/null || true

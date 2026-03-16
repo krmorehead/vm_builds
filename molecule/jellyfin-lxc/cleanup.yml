@@ -1,0 +1,22 @@
+---
+- name: Destroy Jellyfin container
+  hosts: media_nodes
+  gather_facts: false
+  vars:
+    jellyfin_ct_id: 300
+  tasks:
+    - name: Stop Jellyfin container
+      ansible.builtin.command:
+        cmd: pct stop {{ jellyfin_ct_id }}
+      failed_when: false
+      changed_when: true
+
+    - name: Wait for container to stop
+      ansible.builtin.pause:
+        seconds: 2
+
+    - name: Destroy Jellyfin container
+      ansible.builtin.command:
+        cmd: pct destroy {{ jellyfin_ct_id }} --purge
+      failed_when: false
+      changed_when: true

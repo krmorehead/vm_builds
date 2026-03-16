@@ -201,6 +201,23 @@
   roles:
     - homeassistant_configure
 
+- name: Provision Jellyfin LXC
+  hosts: media_nodes
+  gather_facts: false
+  tags: [media]
+  roles:
+    - jellyfin_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: jellyfin_lxc
+
+- name: Configure Jellyfin
+  hosts: media_nodes
+  gather_facts: false
+  tags: [media]
+  roles:
+    - jellyfin_configure
+
 - name: Provision WireGuard LXC
   hosts: vpn_nodes
   gather_facts: false

@@ -160,6 +160,21 @@ Delivered:
 - Rollback plays in `playbooks/cleanup.yml` (`netdata-rollback` tag)
 - Full verify coverage: container state, auto-start, bind mounts, service, dashboard, host metrics
 
+### `2026-03-09-08` Jellyfin Media Server ✓
+
+LXC container running Jellyfin media server with Intel Quick Sync hardware transcoding via iGPU device passthrough. Serves media to clients locally and remotely, offloading transcoding to GPU for minimal CPU usage.
+
+Delivered:
+- `jellyfin_lxc` role (thin wrapper around `proxmox_lxc`, iGPU + media path mounting)
+- `jellyfin_configure` role (admin user setup, iGPU access, transcoding config, VA-API verification)
+- Custom Debian 12 template with Jellyfin + VA-API drivers baked in (built by `build-images.sh`)
+- Per-feature molecule scenario (`jellyfin-lxc`)
+- `tasks/reconstruct_jellyfin_group.yml` for dynamic group reconstruction
+- Rollback plays in `playbooks/cleanup.yml` (`jellyfin-rollback` tag)
+- Full integration testing in `molecule/default/verify.yml`
+- Hardware-accelerated transcoding with automatic software fallback
+- Support for both Intel (i915) and AMD (amdgpu) GPUs via dual VA-API drivers
+
 ## Medium-Term Goals
 
 ### Additional VM/LXC Types

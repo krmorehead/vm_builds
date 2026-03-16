@@ -551,3 +551,82 @@ is baked into the image by `build-images.sh` — it is NOT deployed by this role
 - `netdata.conf` with dbengine retention (1 hour), proc/sys paths, dashboard port 19999
 - Cgroups plugin for per-container metrics
 - Web dashboard server
+
+---
+
+## jellyfin_lxc
+
+**Purpose:** Provision a Jellyfin media server LXC container on Proxmox via the shared `proxmox_lxc` role, with iGPU device passthrough for hardware-accelerated transcoding.
+
+### How It Works
+
+1. Verifies the custom Jellyfin template exists on the controller (hard-fails if missing).
+2. Reads LAN gateway/CIDR from `env_generated_path`.
+3. Branches on host topology: LAN hosts (behind OpenWrt) use the LAN bridge and OpenWrt LAN subnet; WAN hosts use `proxmox_wan_bridge` and the host's WAN subnet with IP offset +200.
+4. Delegates to `proxmox_lxc` with service-specific vars: VMID 300, hostname `jellyfin`, 2048 MB RAM, 2 cores, 8 GB disk, auto-start priority 5.
+5. `proxmox_lxc` handles template upload, `pct create`, iGPU device mount (`/dev/dri/renderD128`), media path mount (`/mnt/media` → `/media`), start, and `add_host` registration in the `jellyfin` dynamic group with `pct_remote` connection.
+
+### Key Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `jellyfin_ct_hostname` | `jellyfin` | Container hostname |
+| `jellyfin_ct_memory` | `2048` | RAM in MB |
+| `jellyfin_ct_cores` | `2` | CPU cores |
+| `jellyfin_ct_disk` | `"8"` | Root disk size in GB |
+| `jellyfin_ct_template` | `jellyfin_lxc_template` | Custom Jellyfin template (built by `build-images.sh`) |
+| `jellyfin_ct_onboot` | `true` | Start on host boot |
+| `jellyfin_ct_startup_order` | `5` | Boot priority |
+| `jellyfin_media_path` | `/mnt/media` | Host-side media mount path |
+
+### Exported Facts
+
+| Fact | Type | Description |
+|------|------|-------------|
+| `jellyfin_static_ip` | string | Computed container IP for downstream media client config |
+
+### Host State Changes
+
+None — Jellyfin is pure userspace. No kernel modules, no host config files. The iGPU device and media path mounts are container-level configuration managed by `pct set`.
+
+---
+
+## jellyfin_configure
+
+**Purpose:** Configure Jellyfin media server with host-specific settings (admin user, iGPU access, transcoding configuration, media libraries). Base config (packages, VA-API drivers, web interface) is baked into the image.
+
+**Connection pattern:** Runs on the Proxmox host (targets `media_nodes`, not the `jellyfin` dynamic group) and uses `pct exec` to run commands inside the container. This is because the role needs host-side `igpu_render_gid` and `igpu_render_device` facts from `proxmox_igpu`. Same pattern as `homeassistant_configure`.
+
+### How It Works
+
+1. Verifies Jellyfin service is available in the container via `pct exec`.
+2. Configures iGPU access by creating render group with GID from `igpu_render_gid` and adding jellyfin user to the group.
+3. Verifies VA-API drivers are working with `vainfo`.
+4. Handles admin password: uses `JELLYFIN_ADMIN_PASSWORD` env var or auto-generates random password for testing.
+5. Configures Jellyfin XML settings:
+   - `network.xml`: Web port 8096, base URL `/`
+   - `transcoding.xml`: Hardware encoding enabled, VA-API device `/dev/dri/renderD128`
+   - `library.xml`: Media library path `/media`
+6. Sets up admin user with configured password.
+7. Enables and starts Jellyfin service.
+8. Waits for web interface to be ready.
+9. Writes generated password to `env_generated_path` for testing.
+
+### Key Variables
+
+| Variable | Env Var | Default | Description |
+|----------|---------|---------|-------------|
+| `jellyfin_admin_password` | `JELLYFIN_ADMIN_PASSWORD` | `""` | Admin user password (auto-generated for testing when empty) |
+
+### Hardware Requirements
+
+- **iGPU Required:** Jellyfin requires an Intel iGPU (i915) or AMD GPU (amdgpu) for hardware transcoding
+- **VA-API Drivers:** Intel (`intel-media-va-driver`) and AMD (`mesa-va-drivers`) drivers included in image
+- **Fallback:** Automatically falls back to software transcoding when iGPU unavailable
+
+### What Is NOT in This Role (Baked in Image)
+
+- Jellyfin server packages (`jellyfin`, `jellyfin-web`, `jellyfin-ffmpeg`)
+- VA-API drivers (`intel-media-va-driver`, `mesa-va-drivers`, `vainfo`)
+- Base web port 8096 configuration
+- Service enablement (prepared but not started)

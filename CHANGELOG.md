@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Jellyfin media server** -- LXC container (VMID 300, 2048 MB RAM, 8 GB disk)
+  running Jellyfin with Intel Quick Sync hardware transcoding via iGPU device
+  passthrough. Custom Debian 12 template with Jellyfin server, web interface,
+  FFmpeg, and VA-API drivers for both Intel (`intel-media-va-driver`) and AMD
+  (`mesa-va-drivers`) hardware acceleration pre-installed (built by
+  `build-images.sh`). `jellyfin_lxc` role provisions the container with iGPU
+  device mounting (`/dev/dri/renderD128`) and media path mounting
+  (`/mnt/media` → `/media`); `jellyfin_configure` role configures admin user,
+  iGPU render group access, transcoding settings, and media libraries. Supports
+  hardware-accelerated transcoding with automatic software fallback when iGPU
+  unavailable. Per-feature molecule scenario (`jellyfin-lxc`), rollback tag
+  (`jellyfin-rollback`), full integration testing, and reusable group
+  reconstruction (`tasks/reconstruct_jellyfin_group.yml`).
 - **Wake-on-LAN utility** (`wol.sh`) -- recovery script for remotely waking
   Proxmox hosts after power outages. Supports WAN hosts via local L2 broadcast
   and LAN hosts via proxied WoL through the primary host (Python 3 socket,

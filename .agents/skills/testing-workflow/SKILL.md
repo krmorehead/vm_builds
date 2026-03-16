@@ -34,6 +34,12 @@ Use when running molecule tests, implementing TDD workflow, diagnosing test fail
 14. ALWAYS check dmesg first when diagnosing test failures
 15. NEVER assume ICMP working means TCP works - test with actual protocols
 
+**Recent Testing Lessons:**
+16. ALWAYS validate missing variables in role defaults - undefined variables in Jinja2 templates cause test failures
+17. ALWAYS test environment setup BEFORE running molecule (dependency installation, template availability)
+18. ALWAYS use default values for hardware-dependent variables (igpu_render_device) to prevent test failures
+19. ALWAYS validate generated env file paths exist before relying on dynamic network configuration
+
 ## Patterns
 
 TDD iteration pattern:

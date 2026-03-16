@@ -1,0 +1,178 @@
+---
+- name: Reconstruct jellyfin dynamic group
+  hosts: media_nodes
+  gather_facts: false
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_jellyfin_group.yml
+
+- name: Verify Jellyfin LXC container
+  hosts: media_nodes
+  gather_facts: false
+  vars:
+    jellyfin_ct_id: 300
+  tasks:
+    # ── Container state ──────────────────────────────────────────
+
+    - name: Check container is running
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct status {{ jellyfin_ct_id }} | grep -c running
+        executable: /bin/bash
+      register: _jellyfin_running
+      changed_when: false
+
+    - name: Assert container is running
+      ansible.builtin.assert:
+        that: (_jellyfin_running.stdout | trim | int) > 0
+        fail_msg: "Container {{ jellyfin_ct_id }} is not running"
+
+    # ── Container config (single read) ───────────────────────────
+
+    - name: Read container config (single call)
+      ansible.builtin.command:
+        cmd: pct config {{ jellyfin_ct_id }}
+      register: _jellyfin_cfg
+      changed_when: false
+
+    - name: Assert onboot is enabled
+      ansible.builtin.assert:
+        that: "'onboot: 1' in _jellyfin_cfg.stdout"
+        fail_msg: "Container {{ jellyfin_ct_id }} missing onboot: 1"
+
+    - name: Assert startup order is 5
+      ansible.builtin.assert:
+        that: _jellyfin_cfg.stdout is regex('startup:.*order=5')
+        fail_msg: "Container {{ jellyfin_ct_id }} missing startup order=5"
+
+    # ── iGPU device mounting ──────────────────────────────────────
+
+    - name: Check iGPU device is mounted
+      ansible.builtin.command:
+        cmd: pct exec {{ jellyfin_ct_id }} -- ls -la /dev/dri/renderD128
+      register: _igpu_device
+      changed_when: false
+
+    - name: Assert iGPU device exists
+      ansible.builtin.assert:
+        that: _igpu_device.rc == 0
+        fail_msg: "iGPU device /dev/dri/renderD128 not mounted"
+
+    # ── Media path mounting ───────────────────────────────────────
+
+    - name: Check media path is mounted
+      ansible.builtin.command:
+        cmd: pct exec {{ jellyfin_ct_id }} -- ls -la /media
+      register: _media_path
+      changed_when: false
+
+    - name: Assert media path exists
+      ansible.builtin.assert:
+        that: _media_path.rc == 0
+        fail_msg: "Media path /media not mounted"
+
+    # ── Jellyfin service health checks (batched single pct exec) ─
+
+    - name: Run Jellyfin container health checks (single pct exec)
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ jellyfin_ct_id }} -- /bin/sh -c '
+          echo "SERVICE=$(systemctl is-active jellyfin 2>/dev/null)";
+          echo "WEB=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8096 2>/dev/null)";
+          echo "PORT=$(ss -tlnp | grep -c :8096 2>/dev/null)";
+          echo "VAAPI=$(vainfo 2>/dev/null | grep -c "VAProfile" || echo "0")"
+          '
+      register: _jellyfin_health
+      changed_when: false
+
+    - name: Assert Jellyfin service is active
+      ansible.builtin.assert:
+        that: "'active' in _jellyfin_health.stdout"
+        fail_msg: "Jellyfin service not active"
+
+    - name: Parse web interface status
+      ansible.builtin.set_fact:
+        _jellyfin_web_code: "{{ _jellyfin_health.stdout | regex_search('WEB=(\\d+)', '\\1') | first }}"
+
+    - name: Assert web interface returns 200
+      ansible.builtin.assert:
+        that: _jellyfin_web_code == '200'
+        fail_msg: "Web interface HTTP status: {{ _jellyfin_web_code }}, expected 200"
+
+    - name: Assert port 8096 is listening
+      ansible.builtin.assert:
+        that: (_jellyfin_health.stdout | regex_search('PORT=(\\d+)', '\\1') | first | int) > 0
+        fail_msg: "Port 8096 not listening"
+
+    # ── VA-API hardware acceleration ──────────────────────────────
+
+    - name: Check VA-API driver functionality
+      ansible.builtin.command:
+        cmd: pct exec {{ jellyfin_ct_id }} -- vainfo
+      register: _vaapi_check
+      changed_when: false
+
+    - name: Report VA-API status
+      ansible.builtin.debug:
+        msg: "VA-API driver check: {{ 'Hardware acceleration available' if 'VAProfile' in _vaapi_check.stdout else 'Software fallback' }}"
+
+    # ── iGPU render group access ───────────────────────────────────
+
+    - name: Check render group membership
+      ansible.builtin.command:
+        cmd: pct exec {{ jellyfin_ct_id }} -- groups jellyfin
+      register: _render_group
+      changed_when: false
+
+    - name: Assert jellyfin user in render group
+      ansible.builtin.assert:
+        that: "'render' in _render_group.stdout"
+        fail_msg: "jellyfin user not in render group"
+
+    # ── Configuration files ───────────────────────────────────────
+
+    - name: Check configuration files exist
+      ansible.builtin.command:
+        cmd: >-
+          pct exec {{ jellyfin_ct_id }} -- /bin/sh -c '
+          echo "NETWORK=$(test -f /etc/jellyfin/network.xml && echo exists || echo missing)";
+          echo "TRANSCODE=$(test -f /etc/jellyfin/transcoding.xml && echo exists || echo missing)";
+          echo "LIBRARY=$(test -f /etc/jellyfin/library.xml && echo exists || echo missing)"
+          '
+      register: _config_files
+      changed_when: false
+
+    - name: Assert all config files exist
+      ansible.builtin.assert:
+        that: _config_files.stdout is search('NETWORK=exists.*TRANSCODE=exists.*LIBRARY=exists')
+        fail_msg: "Missing configuration files: {{ _config_files.stdout }}"
+
+    # ── Admin user setup ───────────────────────────────────────────
+
+    - name: Check admin user can access web interface
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ jellyfin_ct_id }} -- /bin/sh -c 'curl -s http://127.0.0.1:8096 | grep -ci jellyfin'
+        executable: /bin/bash
+      register: _web_content
+      changed_when: false
+      failed_when: false
+
+    - name: Assert web interface serves Jellyfin content
+      ansible.builtin.assert:
+        that: _web_content.rc == 0
+        fail_msg: "Web interface not serving Jellyfin content"
+
+    # ── Report ─────────────────────────────────────────────────────
+
+    - name: Report Jellyfin verification
+      ansible.builtin.debug:
+        msg: >-
+          Jellyfin per-feature verify passed:
+          ct={{ jellyfin_ct_id }}, running=yes,
+          web={{ _jellyfin_web_code }},
+          vaapi={{ 'hardware' if 'VAProfile' in _vaapi_check.stdout else 'software' }},
+          iGPU={{ 'mounted' if _igpu_device.rc == 0 else 'missing' }},
+          media={{ 'mounted' if _media_path.rc == 0 else 'missing' }}

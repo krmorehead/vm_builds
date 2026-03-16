@@ -1,0 +1,12 @@
+---
+- name: Provision Jellyfin LXC container
+  hosts: media_nodes
+  gather_facts: false
+  roles:
+    - jellyfin_lxc
+
+- name: Configure Jellyfin
+  hosts: media_nodes
+  gather_facts: false
+  roles:
+    - jellyfin_configure

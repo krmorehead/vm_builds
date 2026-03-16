@@ -513,7 +513,7 @@ site.yml (target)
 │
 ├── Phase: Media
 │   ├── Play 15: media_nodes      [media]       jellyfin_lxc, kodi_lxc, moonlight_lxc, deploy_stamp
-│   ├── Play 16: jellyfin         [media]       jellyfin_configure
+│   ├── Play 16: media_nodes      [media]       jellyfin_configure
 │   ├── Play 17: kodi             [media]       kodi_configure
 │   └── Play 18: moonlight        [media]       moonlight_configure
 │
@@ -609,7 +609,7 @@ Service Roles
 │   └── homeassistant_lxc / homeassistant_configure  LXC  VMID 200  service_nodes → homeassistant
 │
 ├── Media Tier
-│   ├── jellyfin_lxc / jellyfin_configure         LXC  VMID 300   media_nodes    → jellyfin
+│   ├── jellyfin_lxc / jellyfin_configure         LXC  VMID 300   media_nodes    → media_nodes (pct exec)
 │   ├── kodi_lxc / kodi_configure                 LXC  VMID 301   media_nodes    → kodi
 │   └── moonlight_lxc / moonlight_configure       LXC  VMID 302   media_nodes    → moonlight
 │

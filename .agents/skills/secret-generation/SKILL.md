@@ -18,6 +18,12 @@ Use when generating secrets/keys during Ansible runs, managing dynamic configura
 7. NEVER fail if generated file is missing - degrade to defaults
 8. NEVER put dynamic/computed values in group_vars/all.yml as constants
 
+**Recent Variable Management Lessons:**
+9. ALWAYS provide default values for hardware-dependent variables (igpu_render_device: "/dev/dri/renderD128")
+10. ALWAYS use `| default('value', true)` for environment lookups to prevent Jinja2 template failures
+11. ALWAYS test with missing generated env files - test scenarios don't always have complete environment setup
+12. ALWAYS validate network configuration computation works with default gateway values
+
 ## Patterns
 
 Writing generated values:

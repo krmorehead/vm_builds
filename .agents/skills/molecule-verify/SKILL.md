@@ -185,3 +185,5 @@ Verify remote messages don't pollute local logs:
 - `igpu_available not defined` → re-include role in verify
 - Wrong IP for WAN hosts → use `pct config` extraction
 - Per-feature scenario missing `router_nodes` group → LAN/WAN detection takes wrong path
+- Register result used as string → ALWAYS use `_var.stdout | trim`, not `_var` directly. Register results are dicts, not strings. Previous bug: `_jellyfin_verify_ip.split('.')` failed because `_jellyfin_verify_ip` was a register result (dict), not the stdout string.
+- `set -o pipefail` on non-pipeline commands → use `ansible.builtin.command` for single commands without pipes. Pipefail on non-pipeline commands adds noise and obscures the convention that pipefail signals a pipeline.

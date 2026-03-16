@@ -162,7 +162,9 @@ alwaysApply: true
 - ALWAYS add `paramiko` to `requirements.txt` when using `pct_remote`.
 - `pct_remote` SSHes to the Proxmox host and runs `pct exec` inside the container. No SSH server or bootstrap IP needed inside the container.
 - When `add_host` registers a container for `pct_remote`, it MUST set `ansible_connection: community.proxmox.proxmox_pct_remote`, `ansible_host: <proxmox_host_ip>`, `proxmox_vmid: <container_id>`, and `ansible_user: root`.
+- NEVER use `pct exec` wrapping in tasks that run on a `pct_remote` connection. The plugin already wraps commands in `pct exec`, so manual wrapping causes double execution: `pct exec 300 -- pct exec 300 -- cmd`. If a configure role needs host-side facts (e.g., `igpu_render_gid` from `proxmox_igpu`), target the Proxmox host group (`media_nodes`, `service_nodes`) instead of the dynamic group, and use `pct exec` commands.
 - Previous bug: `ModuleNotFoundError: No module named 'paramiko'` at runtime. The dependency wasn't in `requirements.txt` because it wasn't needed until LXC containers were added.
+- Previous bug: Jellyfin configure targeted `hosts: jellyfin` (pct_remote) but used `pct exec {{ jellyfin_ct_id }} --` wrapping. Would have caused double-wrapped commands at runtime. Fix: target `media_nodes` instead.
 
 ## Backup before changes
 - Every playbook run should back up host config and existing VMs first (Play 0: `proxmox_backup`).

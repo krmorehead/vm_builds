@@ -1,0 +1,3 @@
+---
+# Jellyfin admin password - auto-generated for testing when empty
+jellyfin_admin_password: "{{ lookup('env', 'JELLYFIN_ADMIN_PASSWORD') | default('', true) }}"

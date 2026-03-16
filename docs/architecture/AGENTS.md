@@ -170,7 +170,7 @@ All VMIDs defined in `group_vars/all.yml`.
 | `setup.sh` | Bootstrap .venv + pip + ansible-galaxy |
 | `run.sh` | Convenience wrapper — delegates to `build.py` |
 | `cleanup.sh` | Restore / full-restore / clean / rollback — delegates to `build.py` |
-| `build-images.sh` | Builds custom images (mesh LXC, router VM, Pi-hole, rsyslog, Netdata, WireGuard, Home Assistant) |
+| `build-images.sh` | Builds custom images (mesh LXC, router VM, Pi-hole, rsyslog, Jellyfin, Netdata, WireGuard, Home Assistant) |
 | `test.env` | Test machine config (committed, IP: 192.168.86.201) |
 | `.env` | Production secrets (gitignored) |
 | `test.env.generated` | Auto-generated secrets during test runs (gitignored) |

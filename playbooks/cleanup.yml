@@ -284,6 +284,22 @@
         executable: /bin/bash
       changed_when: true
 
+# ── Per-feature rollback: Jellyfin LXC ───────────────────────────
+
+- name: Rollback Jellyfin container
+  hosts: media_nodes
+  gather_facts: false
+  tags: [jellyfin-rollback, never]
+  tasks:
+    - name: Stop and destroy Jellyfin container
+      ansible.builtin.shell:
+        cmd: |
+          pct stop {{ jellyfin_ct_id }} 2>/dev/null || true
+          sleep 2
+          pct destroy {{ jellyfin_ct_id }} --purge 2>/dev/null || true
+        executable: /bin/bash
+      changed_when: true
+
 # ── Full host restore (existing) ────────────────────────────────
 
 - name: Restore Proxmox host from backup
@@ -439,7 +455,10 @@
                /var/lib/vz/template/cache/openwrt-*.tar.gz \
                /var/lib/vz/template/cache/pihole-*.tar.zst \
                /var/lib/vz/template/cache/rsyslog-*.tar.zst \
-               /var/lib/vz/template/cache/netdata-*.tar.zst
+               /var/lib/vz/template/cache/netdata-*.tar.zst \
+               /var/lib/vz/template/cache/jellyfin-*.tar.zst \
+               /var/lib/vz/template/cache/homeassistant-*.tar.zst \
+               /var/lib/vz/template/cache/wireguard-*.tar.zst
         executable: /bin/bash
       changed_when: true
       failed_when: false

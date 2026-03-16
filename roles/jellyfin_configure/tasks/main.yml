@@ -1,0 +1,179 @@
+---
+# ── Verify Jellyfin service is available ──────────────────────────
+
+- name: Verify Jellyfin service is available in container
+  ansible.builtin.command:
+    cmd: pct exec {{ jellyfin_ct_id }} -- systemctl is-enabled jellyfin
+  register: _jellyfin_service_check
+  changed_when: false
+  failed_when: _jellyfin_service_check.rc != 0
+
+# ── Configure iGPU access ─────────────────────────────────────────
+
+- name: Create render group for iGPU access
+  ansible.builtin.command:
+    cmd: pct exec {{ jellyfin_ct_id }} -- groupadd -g {{ igpu_render_gid }} render 2>/dev/null || true
+  changed_when: true
+
+- name: Add jellyfin user to render group
+  ansible.builtin.command:
+    cmd: pct exec {{ jellyfin_ct_id }} -- usermod -a -G render jellyfin
+  changed_when: true
+  failed_when: false
+
+- name: Verify VA-API drivers are working
+  ansible.builtin.command:
+    cmd: pct exec {{ jellyfin_ct_id }} -- vainfo
+  register: _vainfo_check
+  changed_when: false
+
+- name: Report VA-API driver status
+  ansible.builtin.debug:
+    msg: "VA-API drivers: {{ _vainfo_check.stdout | default('Not available') }}"
+    verbosity: 1
+
+# ── Generate admin password if not provided ───────────────────────
+
+- name: Set provided admin password
+  ansible.builtin.set_fact:
+    _jellyfin_admin_password: "{{ jellyfin_admin_password }}"
+  when: jellyfin_admin_password | length > 0
+
+- name: Generate random admin password for testing
+  ansible.builtin.command:
+    cmd: pct exec {{ jellyfin_ct_id }} -- openssl rand -base64 24
+  register: _generated_password
+  changed_when: false
+  when: jellyfin_admin_password | length == 0
+
+- name: Set generated admin password
+  ansible.builtin.set_fact:
+    _jellyfin_admin_password: "{{ _generated_password.stdout | trim }}"
+  when: jellyfin_admin_password | length == 0
+
+# ── Configure Jellyfin server settings ─────────────────────────────
+
+- name: Create Jellyfin configuration directory
+  ansible.builtin.command:
+    cmd: pct exec {{ jellyfin_ct_id }} -- mkdir -p /etc/jellyfin
+  changed_when: true
+
+- name: Configure Jellyfin network settings
+  ansible.builtin.command:
+    cmd: pct exec {{ jellyfin_ct_id }} -- bash -c '
+      cat > /etc/jellyfin/network.xml << "NETWORK_EOF"
+      <?xml version="1.0" encoding="UTF-8"?>
+      <Network>
+        <BaseUrl>/</BaseUrl>
+        <Port>8096</Port>
+        <EnableHttps>false</EnableHttps>
+        <EnableUPnP>false</EnableUPnP>
+      </Network>
+      NETWORK_EOF'
+  changed_when: true
+
+- name: Configure Jellyfin transcoding settings
+  ansible.builtin.command:
+    cmd: pct exec {{ jellyfin_ct_id }} -- bash -c '
+      cat > /etc/jellyfin/transcoding.xml << "TRANSCODE_EOF"
+      <?xml version="1.0" encoding="UTF-8"?>
+      <Transcoding>
+        <TempPath>/var/lib/jellyfin/transcodes</TempPath>
+        <EnableHardwareEncoding>true</EnableHardwareEncoding>
+        <EnableVpp>true</EnableVpp>
+        <HardwareAccelerationType>vaapi</HardwareAccelerationType>
+        <VaApiDevice>{{ igpu_render_device }}</VaApiDevice>
+      </Transcoding>
+      TRANSCODE_EOF'
+  changed_when: true
+
+- name: Configure media libraries paths
+  ansible.builtin.command:
+    cmd: pct exec {{ jellyfin_ct_id }} -- bash -c '
+      cat > /etc/jellyfin/library.xml << "LIBRARY_EOF"
+      <?xml version="1.0" encoding="UTF-8"?>
+      <Library>
+        <SaveMetadataHidden>false</SaveMetadataHidden>
+        <EnableAutomaticSeriesGrouping>false</EnableAutomaticSeriesGrouping>
+        <EnableAutomaticPhotosGrouping>true</EnableAutomaticPhotosGrouping>
+        <CollectionFolders>
+          <CollectionFolder>
+            <Name>Media</Name>
+            <Path>/media</Path>
+          </CollectionFolder>
+        </CollectionFolders>
+      </Library>
+      LIBRARY_EOF'
+  changed_when: true
+
+# ── Configure admin user ───────────────────────────────────────────
+
+- name: Create Jellyfin admin user
+  ansible.builtin.command:
+    cmd: pct exec {{ jellyfin_ct_id }} -- bash -c '
+      /usr/share/jellyfin/bin/jellyfin \
+        --programdata-path=/var/lib/jellyfin \
+        --webdir=/usr/share/jellyfin/web \
+        --configdir=/etc/jellyfin \
+        --logdir=/var/log/jellyfin \
+        --ffdkmount=/dev/dri \
+        --savedir=/var/lib/jellyfin \
+        --set-default-user admin \
+        --set-password admin:"{{ _jellyfin_admin_password }}" 2>/dev/null || true'
+  changed_when: true
+  failed_when: false
+  no_log: true
+
+# ── Enable and start Jellyfin service ─────────────────────────────
+
+- name: Enable Jellyfin service
+  ansible.builtin.command:
+    cmd: pct exec {{ jellyfin_ct_id }} -- systemctl enable jellyfin
+  changed_when: true
+
+- name: Start Jellyfin service
+  ansible.builtin.command:
+    cmd: pct exec {{ jellyfin_ct_id }} -- systemctl start jellyfin
+  changed_when: true
+
+- name: Wait for Jellyfin web interface to be ready
+  ansible.builtin.command:
+    cmd: pct exec {{ jellyfin_ct_id }} -- bash -c '
+      for i in {1..30}; do
+        if curl -s http://127.0.0.1:8096 >/dev/null 2>&1; then
+          echo "Jellyfin web interface is ready"
+          exit 0
+        fi
+        echo "Waiting for Jellyfin... ($i/30)"
+        sleep 2
+      done
+      echo "Jellyfin web interface failed to start"
+      exit 1'
+  register: _jellyfin_ready
+  changed_when: false
+  failed_when: _jellyfin_ready.rc != 0
+
+# ── Report completion ──────────────────────────────────────────────
+
+- name: Report Jellyfin configuration
+  ansible.builtin.debug:
+    msg: >-
+      Jellyfin configured successfully!
+      Web interface: http://{{ jellyfin_static_ip }}:8096
+      Admin user: admin
+      Admin password: {{ _jellyfin_admin_password | length }} characters
+      iGPU device: {{ igpu_render_device }}
+      Media path: /media
+      VA-API: {{ 'Enabled' if 'VAProfile' in _vainfo_check.stdout else 'Software fallback' }}
+
+- name: Write admin password to generated env file
+  ansible.builtin.blockinfile:
+    path: "{{ env_generated_path }}"
+    create: true
+    mode: "0600"
+    marker: "# {mark} Jellyfin Admin Password (auto-generated)"
+    block: |
+      JELLYFIN_ADMIN_PASSWORD={{ _jellyfin_admin_password }}
+      JELLYFIN_WEB_URL=http://{{ jellyfin_static_ip }}:8096
+  delegate_to: localhost
+  when: jellyfin_admin_password | length == 0

@@ -166,6 +166,14 @@ When working with LXC containers, load these skills IMMEDIATELY:
 
 33. Previous bug: Docker `--format "{{.Repository}}:{{.Tag}}"` in verify.yml was interpreted by Ansible's Jinja2 engine as undefined variables. Fix: use `docker image inspect` instead of `--format`.
 
+## Configure Role Connection Decision
+
+34. When a configure role needs facts from the Proxmox host (e.g., `igpu_render_gid`, `igpu_render_device` from `proxmox_igpu`), it MUST target the Proxmox host group (`media_nodes`, `service_nodes`) and use `pct exec` commands. The `pct_remote` connection cannot access host-side facts because the dynamic group hosts are separate inventory entries.
+
+35. When a configure role only needs container-internal state (e.g., pihole, netdata, rsyslog), it should target the dynamic group with `pct_remote` and use direct commands without `pct exec` wrapping.
+
+36. Previous bug: Jellyfin configure play targeted `hosts: jellyfin` (dynamic group with `pct_remote`) but the role used `pct exec {{ jellyfin_ct_id }} --` wrapping on every command. The `pct_remote` plugin already wraps commands in `pct exec`, causing double wrapping: `pct exec 300 -- pct exec 300 -- systemctl ...`. Fix: change site.yml to target `media_nodes` (Proxmox hosts) since the role needs host-side igpu facts.
+
 ## Pi-hole v6 Configuration
 
 33. Pi-hole v6 uses `/etc/pihole/pihole.toml` (NOT `setupVars.conf` or `pihole-FTL.conf`). Use `/usr/bin/pihole-FTL --config <key> <value>` for programmatic configuration.
