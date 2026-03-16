@@ -5,6 +5,33 @@ description: LXC container provisioning and configuration patterns. Use when cre
 
 # LXC Container Patterns
 
+## When to Test (Proactive Testing Triggers)
+
+**Test IMMEDIATELY when:**
+- Creating new LXC container services
+- Adding Docker-in-LXC functionality  
+- Modifying container networking or provisioning
+- Using `pct exec` commands in configuration
+- Encountering variable scoping issues with containers
+- Any container-related Ansible code changes
+
+**Previous lesson**: We should have tested after creating the `homeassistant_configure` role instead of debugging blind. Always test after container provisioning code changes.
+
+**Environment validation for LXC work:**
+```bash
+set -a && source test.env && set +a
+ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST "pct list"
+ansible home -m ping
+```
+
+## Load Relevant Skills Proactively
+
+When working with LXC containers, load these skills IMMEDIATELY:
+- `lxc-container-patterns` (this skill)
+- `molecule-testing` for test patterns
+- `ansible-conventions` for coding standards
+- `proxmox-safety-rules` for Proxmox operations
+
 ## LXC Provisioning Pattern
 
 1. LXC containers use the shared `proxmox_lxc` role via `include_role`. Each service's `<type>_lxc` role is a thin wrapper:
@@ -108,14 +135,45 @@ description: LXC container provisioning and configuration patterns. Use when cre
 
 26. Previous bug: `ModuleNotFoundError: No module named 'paramiko'` at runtime because the dependency wasn't in `requirements.txt`.
 
+## Docker-in-LXC Configuration Patterns
+
+27. **Docker-in-LXC configure play target**: Configure plays for Docker-in-LXC services MUST target the Proxmox HOST group (e.g., `service_nodes`), NOT the container dynamic group (e.g., `homeassistant`). The role uses `pct exec` commands which only exist on the Proxmox host.
+
+28. **Container ID handling**: Use `homeassistant_ct_id` from `group_vars/all.yml`. NEVER reference undefined `proxmox_vmid` variable in configure roles that run on the host.
+
+29. **File deployment in containers**: Use `pct exec -- bash -c 'cat > file << "EOF" ... EOF'` (heredoc) instead of chained `echo` commands. This preserves YAML structure and avoids quoting nightmares:
+
+    ```yaml
+    - name: Create config file in container
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ ct_id }} -- bash -c 'cat > /path/config.yml << "CONFIG_EOF"
+          key: value
+          nested:
+            item: data
+          CONFIG_EOF
+          chmod 0644 /path/config.yml'
+        executable: /bin/bash
+      changed_when: true
+    ```
+
+30. **LXC nesting requirements**: Docker-in-LXC requires `nesting=1` feature. Pass via `lxc_ct_features: ["nesting=1"]` to `proxmox_lxc`. Configure Docker daemon with `cgroupfs` driver for cgroup v2 compatibility (bake into image).
+
+31. **Jinja2 conflicts with Docker templates**: Docker Go template syntax (`{{.Repository}}`) uses the same delimiters as Jinja2. In Ansible tasks, escape with `{{ "{{" }}` and `{{ "}}" }}`, or avoid Docker `--format` flags entirely (use `docker image inspect` instead).
+
+32. Previous bug: Configure play targeted `homeassistant` group (pct_remote connection), but the role used `pct exec` commands. `pct` only exists on the Proxmox host, not inside the container. Fix: change site.yml to target `service_nodes` (host).
+
+33. Previous bug: Docker `--format "{{.Repository}}:{{.Tag}}"` in verify.yml was interpreted by Ansible's Jinja2 engine as undefined variables. Fix: use `docker image inspect` instead of `--format`.
+
 ## Pi-hole v6 Configuration
 
-27. Pi-hole v6 uses `/etc/pihole/pihole.toml` (NOT `setupVars.conf` or `pihole-FTL.conf`). Use `/usr/bin/pihole-FTL --config <key> <value>` for programmatic configuration.
+33. Pi-hole v6 uses `/etc/pihole/pihole.toml` (NOT `setupVars.conf` or `pihole-FTL.conf`). Use `/usr/bin/pihole-FTL --config <key> <value>` for programmatic configuration.
 
-28. Pi-hole v6 uses FTL's embedded web server (NOT lighttpd). Do not manage `lighttpd.service`.
+34. Pi-hole v6 uses FTL's embedded web server (NOT lighttpd). Do not manage `lighttpd.service`.
 
-29. ALWAYS run `pihole -g` (gravity update) BEFORE switching the container's `resolv.conf` to `127.0.0.1`. Gravity downloads blocklists from the internet, which needs working DNS.
+35. ALWAYS run `pihole -g` (gravity update) BEFORE switching the container's `resolv.conf` to `127.0.0.1`. Gravity downloads blocklists from the internet, which needs working DNS.
 
-30. For unattended install, pre-seed `/etc/pihole/pihole.toml` with at least `dns.upstreams` before running the installer. Use `PIHOLE_SKIP_OS_CHECK=true` in LXC containers.
+36. For unattended install, pre-seed `/etc/pihole/pihole.toml` with at least `dns.upstreams` before running the installer. Use `PIHOLE_SKIP_OS_CHECK=true` in LXC containers.
 
-31. Previous bug: Configure role set `resolv.conf` to `127.0.0.1`, then ran `pihole -g`. Gravity hung because FTL's DNS wasn't fully initialized.
+37. Previous bug: Configure role set `resolv.conf` to `127.0.0.1`, then ran `pihole -g`. Gravity hung because FTL's DNS wasn't fully initialized.

@@ -1,0 +1,38 @@
+---
+# Reusable task file: reconstruct the homeassistant dynamic group.
+#
+# Consumed by:
+#   - Per-feature molecule converge.yml
+#   - Per-feature molecule verify.yml
+#   - playbooks/cleanup.yml (rollback plays)
+#
+# Must run on a host in the service_nodes/proxmox group that has
+# access to pct commands and container state.
+
+- name: Verify Home Assistant container is running
+  ansible.builtin.command:
+    cmd: pct status {{ homeassistant_ct_id }}
+  register: _ct_status
+  changed_when: false
+  failed_when: "'running' not in _ct_status.stdout"
+
+- name: Add Home Assistant to dynamic group
+  ansible.builtin.add_host:
+    name: "homeassistant-{{ inventory_hostname }}"
+    groups: homeassistant
+    ansible_connection: community.proxmox.proxmox_pct_remote
+    ansible_host: "{{ ansible_host }}"
+    ansible_user: root
+    proxmox_vmid: "{{ homeassistant_ct_id }}"
+    ansible_paramiko_host_key_checking: false
+    ansible_paramiko_proxy_command: >-
+      {{ 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@'
+         + lookup('env', 'PRIMARY_HOST')
+         if 'lan_hosts' in (group_names | default([]))
+         else omit }}
+
+- name: Report reconstructed group
+  ansible.builtin.debug:
+    msg: >-
+      Reconstructed homeassistant group: container={{ homeassistant_ct_id }},
+      connection=pct_remote via {{ ansible_host }}

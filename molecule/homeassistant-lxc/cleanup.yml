@@ -1,0 +1,22 @@
+---
+- name: Destroy Home Assistant container
+  hosts: proxmox:!lan_hosts
+  gather_facts: false
+  vars:
+    homeassistant_ct_id: 200
+  tasks:
+    - name: Stop Home Assistant container
+      ansible.builtin.command:
+        cmd: pct stop {{ homeassistant_ct_id }}
+      failed_when: false
+      changed_when: true
+
+    - name: Wait for container to stop
+      ansible.builtin.pause:
+        seconds: 2
+
+    - name: Destroy Home Assistant container
+      ansible.builtin.command:
+        cmd: pct destroy {{ homeassistant_ct_id }} --purge
+      failed_when: false
+      changed_when: true

@@ -1,0 +1,19 @@
+---
+- name: Provision Home Assistant LXC container
+  hosts: service_nodes
+  gather_facts: false
+  roles:
+    - homeassistant_lxc
+
+- name: Reconstruct homeassistant dynamic group
+  hosts: service_nodes
+  gather_facts: false
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_homeassistant_group.yml
+
+- name: Configure Home Assistant
+  hosts: service_nodes
+  gather_facts: false
+  roles:
+    - homeassistant_configure

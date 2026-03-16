@@ -114,6 +114,7 @@ This tree organizes all skills by domain area to help agents quickly find releva
 ### **Learning & Development**
 - **learn-from-mistakes** — Update skills and rules when encountering new issues to prevent recurrence
 - **opencode-rules-writing** — Skill writing patterns and LLM-optimized skills
+- **early-validation-patterns** — Proactive validation patterns to catch issues early and prevent debugging blind
 
 ## Project Structure
 
@@ -177,11 +178,29 @@ pytest tests/ -v
 ```
 
 ### Critical Testing Rules
+
+**MANDATORY: Test-First Development (TDD)**
+- Write verify assertions BEFORE implementing features
+- Test immediately when encountering failures - never debug blind
 - ALWAYS reproduce production bugs on test machine first
 - NEVER consider fix complete until `molecule test` passes end-to-end
-- Write verify assertions BEFORE implementing features (TDD)
-- Use `molecule converge + verify` for day-to-day iteration
-- Use `molecule test` only for clean-state validation
+
+**MANDATORY: Environment Validation**
+- ALWAYS run `set -a && source test.env && set +a` before ANY molecule commands
+- Test environment setup immediately: SSH connectivity, Ansible ping, variable export
+- Validate with: `ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST "echo test"` and `ansible home -m ping`
+
+**MANDATORY: Testing Workflow**
+- Use `molecule converge + verify` for day-to-day iteration (preserves baseline)
+- Use `molecule test` only for clean-state validation (destroys all)
+- Run lint checks (`ansible-lint && yamllint .`) after ANY code changes
+- Load relevant skills proactively when working with LXC, Docker, or new service types
+
+**PROMPT YOURSELF:**
+- "Should I test this right now?" YES - test after every significant change
+- "Do I need to validate the environment?" YES - always before molecule commands
+- "Should I load skills for this pattern?" YES - especially for LXC/Docker/Container work
+- "Am I debugging blind?" NO - reproduce on test machine first
 
 ## Safety and Architecture Rules
 
@@ -198,6 +217,8 @@ pytest tests/ -v
 - **One path, no fallbacks**: Never add fallback logic - fail with clear messages
 - **Deploy_stamp pattern**: Include as last role in provision plays
 - **Hard-fail over graceful degradation**: Expected hardware (iGPU, WiFi) must be present
+- **Docker-in-LXC configure**: Target the HOST group (e.g., `service_nodes`), NOT the container dynamic group. `pct exec` only exists on the Proxmox host
+- **Jinja2 vs Docker templates**: Docker `--format "{{.X}}"` conflicts with Jinja2. Use `docker image inspect` or escape with `{{ "{{" }}`
 
 ### Network and Bridge Management
 - WAN bridge auto-detected via host default route device

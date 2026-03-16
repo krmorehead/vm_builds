@@ -18,6 +18,7 @@
       - "{{ meshwifi_ct_id }}"
       - "{{ netdata_ct_id }}"
       - "{{ rsyslog_ct_id }}"
+      - "{{ homeassistant_ct_id }}"
   tasks:
     - name: Check for backup manifest
       ansible.builtin.stat:

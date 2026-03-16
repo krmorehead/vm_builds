@@ -1,0 +1,177 @@
+---
+- name: Reconstruct homeassistant dynamic group
+  hosts: service_nodes
+  gather_facts: false
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_homeassistant_group.yml
+
+- name: Verify Home Assistant LXC container
+  hosts: service_nodes
+  gather_facts: false
+  vars:
+    homeassistant_ct_id: 200
+  tasks:
+    # ── Container state ──────────────────────────────────────────
+
+    - name: Check container is running
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct status {{ homeassistant_ct_id }} | grep -c running
+        executable: /bin/bash
+      register: _ha_running
+      changed_when: false
+
+    - name: Assert container is running
+      ansible.builtin.assert:
+        that: (_ha_running.stdout | trim | int) > 0
+        fail_msg: "Container {{ homeassistant_ct_id }} is not running"
+
+    # ── Container config (single read) ───────────────────────────
+
+    - name: Read container config (single call)
+      ansible.builtin.command:
+        cmd: pct config {{ homeassistant_ct_id }}
+      register: _ha_cfg
+      changed_when: false
+
+    - name: Assert onboot is enabled
+      ansible.builtin.assert:
+        that: "'onboot: 1' in _ha_cfg.stdout"
+        fail_msg: "Container {{ homeassistant_ct_id }} missing onboot: 1"
+
+    - name: Assert startup order is 5
+      ansible.builtin.assert:
+        that: _ha_cfg.stdout is regex('startup:.*order=5')
+        fail_msg: "Container {{ homeassistant_ct_id }} missing startup order=5"
+
+    - name: Assert nesting is enabled
+      ansible.builtin.assert:
+        that: "'nesting=1' in _ha_cfg.stdout"
+        fail_msg: "Container {{ homeassistant_ct_id }} missing nesting=1"
+
+    # ── Docker installation verification ───────────────────────────
+
+    - name: Check Docker version
+      ansible.builtin.command:
+        cmd: pct exec {{ homeassistant_ct_id }} -- docker --version
+      register: _ha_docker_version
+      changed_when: false
+      failed_when: false
+
+    - name: Check Docker Compose
+      ansible.builtin.command:
+        cmd: pct exec {{ homeassistant_ct_id }} -- docker compose version
+      register: _ha_compose_version
+      changed_when: false
+      failed_when: false
+
+    - name: Check Docker daemon status
+      ansible.builtin.command:
+        cmd: pct exec {{ homeassistant_ct_id }} -- systemctl is-active docker
+      register: _ha_docker_daemon
+      changed_when: false
+      failed_when: false
+
+    - name: Check HA image exists
+      ansible.builtin.command:
+        cmd: pct exec {{ homeassistant_ct_id }} -- docker images homeassistant/home-assistant:stable
+      register: _ha_image_check
+      changed_when: false
+      failed_when: false
+
+    - name: Assert Docker CE is installed
+      ansible.builtin.assert:
+        that: "'Docker version' in _ha_docker_version.stdout"
+        fail_msg: "Docker CE not installed: {{ _ha_docker_version.stdout | default('missing') }}"
+
+    - name: Assert Docker Compose plugin is installed
+      ansible.builtin.assert:
+        that: "'Compose version' in _ha_compose_version.stdout"
+        fail_msg: "Docker Compose plugin not installed: {{ _ha_compose_version.stdout | default('missing') }}"
+
+    - name: Assert Docker daemon is active
+      ansible.builtin.assert:
+        that: "_ha_docker_daemon.stdout == 'active'"
+        fail_msg: "Docker daemon not active: {{ _ha_docker_daemon.stdout | default('inactive') }}"
+
+    - name: Assert HA container image check can run
+      ansible.builtin.assert:
+        that: _ha_image_check.rc == 0
+        fail_msg: "HA image check failed (expected for Milestone 1): {{ _ha_image_check.stderr | default(_ha_image_check.stdout) }}"
+
+    # ── Container IP validation ──────────────────────────────────
+
+    - name: Extract container IP from config
+      ansible.builtin.set_fact:
+        _ha_verify_ip: "{{ _ha_cfg.stdout | regex_search('ip=([^/,]+)', '\\1') | first }}"
+
+    - name: Assert container IP has correct offset (14)
+      ansible.builtin.set_fact:
+        _ha_expected_ip: "{{ _ha_verify_ip.split('.')[0:3] | join('.') }}.14"
+
+    - name: Assert container IP matches expected
+      ansible.builtin.assert:
+        that: _ha_verify_ip == _ha_expected_ip
+        fail_msg: >-
+          Container IP {{ _ha_verify_ip }} != expected {{ _ha_expected_ip }}
+
+    # ── Network connectivity ──────────────────────────────────────
+
+    - name: Test container network connectivity
+      ansible.builtin.command:
+        cmd: pct exec {{ homeassistant_ct_id }} -- ping -c 1 -W 3 8.8.8.8
+      register: _ha_network
+      changed_when: false
+      retries: 3
+      delay: 5
+      failed_when: false
+
+    - name: Report container network status
+      ansible.builtin.debug:
+        msg: "Container network test: {{ 'ok' if _ha_network.rc == 0 else 'limited (expected in test environment)' }}"
+
+    # ── Docker functionality test ─────────────────────────────────
+
+    - name: Test Docker can run containers
+      ansible.builtin.command:
+        cmd: pct exec {{ homeassistant_ct_id }} -- docker run --rm hello-world
+      register: _ha_docker_test
+      changed_when: false
+      failed_when: false
+
+    - name: Report Docker functionality test
+      ansible.builtin.debug:
+        msg: "Docker test result: {{ _ha_docker_test.stdout | default('failed') | trim }}"
+
+    # ── Resource usage check ──────────────────────────────────────
+
+    - name: Check container resource usage
+      ansible.builtin.command:
+        cmd: pct exec {{ homeassistant_ct_id }} -- /bin/sh -c "free -m | awk '/^Mem:/{print \$3}'"
+      register: _ha_memory
+      changed_when: false
+      failed_when: false
+
+    - name: Assert memory usage is reasonable
+      ansible.builtin.assert:
+        that: (_ha_memory.stdout | trim | int) < 900
+        fail_msg: >-
+          Home Assistant container using {{ _ha_memory.stdout | trim }}MB
+          of 1024MB — potential memory pressure
+
+    # ── Report ───────────────────────────────────────────────────
+
+    - name: Report Home Assistant verification
+      ansible.builtin.debug:
+        msg: >-
+          Home Assistant per-feature verify passed:
+          ct={{ homeassistant_ct_id }}, running=yes,
+          ip={{ _ha_verify_ip }},
+          docker={{ 'ok' if 'Docker version' in _ha_docker_version.stdout else 'fail' }},
+          compose={{ 'ok' if 'Compose version' in _ha_compose_version.stdout else 'fail' }},
+          daemon={{ 'active' if _ha_docker_daemon.stdout == 'active' else 'inactive' }},
+          ha_image={{ 'checked' if _ha_image_check.rc == 0 else 'not-pre-pulled' }},
+          network={{ 'ok' if _ha_network.rc == 0 else 'limited' }},
+          memory={{ _ha_memory.stdout | trim }}MB

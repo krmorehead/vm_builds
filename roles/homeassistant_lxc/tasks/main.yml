@@ -1,0 +1,86 @@
+---
+# ── Verify Home Assistant template exists ─────────────────────────
+- name: Check Home Assistant LXC template exists on controller
+  ansible.builtin.stat:
+    path: "{{ role_path }}/../../{{ homeassistant_ct_template_path }}"
+  register: _ha_template_stat
+  delegate_to: localhost
+
+- name: Fail if Home Assistant template is missing
+  ansible.builtin.fail:
+    msg: >-
+      Home Assistant template not found: {{ homeassistant_ct_template_path }}.
+      Run ./build-images.sh to build it.
+  when: not (_ha_template_stat.stat.exists | default(false))
+
+# ── Determine container network ─────────────────────────────────
+# service_nodes are always behind OpenWrt. No WAN-connected case needed.
+
+- name: Read LAN gateway from generated env
+  ansible.builtin.set_fact:
+    _lan_gateway: >-
+      {{ lookup('pipe', 'grep "^LAN_GATEWAY=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
+         | default('10.10.10.1', true) }}
+    _lan_cidr: >-
+      {{ lookup('pipe', 'grep "^LAN_CIDR=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
+         | default('24', true) }}
+
+- name: Compute Home Assistant container IP
+  ansible.builtin.set_fact:
+    _ha_ct_ip: >-
+      {{ _lan_gateway.split('.')[0:3] | join('.') }}.{{ homeassistant_ct_ip_offset }}
+
+- name: Report Home Assistant container IP assignment
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: homeassistant IP={{ _ha_ct_ip }}/{{ _lan_cidr }}
+      gw={{ _lan_gateway }} (OpenWrt LAN)
+
+# ── Build USB device mount entries (optional) ────────────────────
+- name: Build USB device mount entries
+  ansible.builtin.set_fact:
+    _ha_mount_entries: >-
+      {% set entries = [] %}
+      {% for device in homeassistant_usb_devices %}
+      {% set _ = entries.append(device + ',mp=' + device) %}
+      {% endfor %}
+      {{ entries }}
+  when: homeassistant_usb_devices | length > 0
+
+- name: Set empty mount entries when no USB devices
+  ansible.builtin.set_fact:
+    _ha_mount_entries: []
+  when: homeassistant_usb_devices | length == 0
+
+- name: Display USB mount configuration
+  ansible.builtin.debug:
+    msg: "USB devices: {{ homeassistant_usb_devices }} → Mount entries: {{ _ha_mount_entries }}"
+  when: homeassistant_usb_devices | length > 0
+
+# ── Provision via shared proxmox_lxc role ────────────────────────
+
+- name: Provision Home Assistant LXC container
+  ansible.builtin.include_role:
+    name: proxmox_lxc
+  vars:
+    lxc_ct_id: "{{ homeassistant_ct_id }}"
+    lxc_ct_hostname: "{{ homeassistant_ct_hostname }}"
+    lxc_ct_dynamic_group: homeassistant
+    lxc_ct_memory: "{{ homeassistant_ct_memory }}"
+    lxc_ct_cores: "{{ homeassistant_ct_cores }}"
+    lxc_ct_disk: "{{ homeassistant_ct_disk }}"
+    lxc_ct_onboot: "{{ homeassistant_ct_onboot }}"
+    lxc_ct_startup_order: "{{ homeassistant_ct_startup_order }}"
+    lxc_ct_features: "{{ homeassistant_ct_features }}"
+    lxc_ct_template: "{{ homeassistant_ct_template }}"
+    lxc_ct_template_path: "{{ homeassistant_ct_template_path }}"
+    lxc_ct_ip: "{{ _ha_ct_ip }}/{{ _lan_cidr }}"
+    lxc_ct_gateway: "{{ _lan_gateway }}"
+    lxc_ct_nameserver: "{{ _lan_gateway }}"
+    lxc_ct_bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
+    lxc_ct_mount_entries: "{{ _ha_mount_entries }}"
+
+- name: Export Home Assistant static IP for downstream roles
+  ansible.builtin.set_fact:
+    homeassistant_static_ip: "{{ _ha_ct_ip }}"
+    cacheable: true

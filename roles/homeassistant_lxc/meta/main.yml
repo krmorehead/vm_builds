@@ -1,0 +1,13 @@
+---
+dependencies: []
+
+galaxy_info:
+  author: kyle
+  license: proprietary
+  role_name: homeassistant_lxc
+  description: Provision a Home Assistant LXC container with Docker support on Proxmox VE
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm

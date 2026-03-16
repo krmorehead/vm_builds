@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  home-assistant:
+    image: {{ homeassistant_image }}
+    container_name: home-assistant
+    restart: {{ homeassistant_restart_policy }}
+    network_mode: {{ homeassistant_network_mode }}
+    volumes:
+      - {{ homeassistant_config_volume }}
+    {% if homeassistant_usb_devices | length > 0 %}
+    devices:
+    {% for device in homeassistant_usb_devices %}
+      - {{ device }}:{{ device }}
+    {% endfor %}
+    {% endif %}
+    environment:
+      - TZ=UTC
+    privileged: false
+    security_opt:
+      - no-new-privileges:true
+    cap_add:
+      - SYS_TIME
+    groups:
+      - dialout
+    labels:
+      - "com.home-assistant.name=Home Assistant"
+      - "com.home-assistant.description=Home automation platform"

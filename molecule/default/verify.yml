@@ -277,6 +277,12 @@
         - "'wifi_nodes' in group_names"
         - "'router_nodes' not in group_names"
 
+    - name: Assert stamp contains homeassistant_lxc (service nodes only)
+      ansible.builtin.assert:
+        that: "'homeassistant_lxc' in stamp.plays"
+        fail_msg: "deploy_stamp missing homeassistant_lxc entry: {{ stamp.plays.keys() | list }}"
+      when: "'service_nodes' in group_names"
+
     - name: Report deploy_stamp contents
       ansible.builtin.debug:
         msg: >-
@@ -1718,3 +1724,129 @@
           Mesh LXC verification passed on {{ inventory_hostname }}:
           container={{ meshwifi_ct_id }}, running=yes,
           privileged=yes, hookscript=deployed
+
+# ── Play 7: Home Assistant assertions (service_nodes) ─────────────
+
+- name: Verify Home Assistant LXC on service nodes
+  hosts: service_nodes
+  gather_facts: false
+  tasks:
+    # ── Home Assistant container ─────────────────────────────────────
+
+    - name: Check Home Assistant container is running
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct status {{ homeassistant_ct_id }} | grep -c running
+        executable: /bin/bash
+      register: ha_ct_running
+      changed_when: false
+
+    - name: Assert Home Assistant container is running
+      ansible.builtin.assert:
+        that: (ha_ct_running.stdout | trim | int) > 0
+        fail_msg: "Container {{ homeassistant_ct_id }} is not running on {{ inventory_hostname }}"
+
+    - name: Read Home Assistant container config (single call)
+      ansible.builtin.command:
+        cmd: pct config {{ homeassistant_ct_id }}
+      register: ha_ct_cfg
+      changed_when: false
+
+    - name: Assert Home Assistant container starts on boot
+      ansible.builtin.assert:
+        that: "'onboot: 1' in ha_ct_cfg.stdout"
+        fail_msg: "Container {{ homeassistant_ct_id }} on {{ inventory_hostname }} missing onboot: 1"
+
+    - name: Assert Home Assistant container has startup order 5
+      ansible.builtin.assert:
+        that: ha_ct_cfg.stdout is regex('startup:.*order=5')
+        fail_msg: "Container {{ homeassistant_ct_id }} on {{ inventory_hostname }} missing startup order=5"
+
+    - name: Assert Home Assistant container has nesting enabled
+      ansible.builtin.assert:
+        that: "'nesting=1' in ha_ct_cfg.stdout"
+        fail_msg: "Container {{ homeassistant_ct_id }} on {{ inventory_hostname }} missing nesting=1"
+
+    # ── Docker installation verification ────────────────────────────
+
+    - name: Run Docker installation verification (single pct exec)
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ homeassistant_ct_id }} -- /bin/sh -c '
+          echo "DOCKER=$(docker --version 2>/dev/null || echo missing)";
+          echo "COMPOSE=$(docker compose version 2>/dev/null || echo missing)";
+          echo "DAEMON=$(systemctl is-active docker 2>/dev/null || echo inactive)";
+          echo "HA_IMAGE=$(docker image inspect homeassistant/home-assistant:stable
+          >/dev/null 2>&1 && echo present || echo missing)";
+          echo "CGROUPFS=$(test -f /etc/docker/daemon.json &&
+          grep -q cgroupfs /etc/docker/daemon.json &&
+          echo present || echo missing)"
+          '
+      register: ha_docker_check
+      changed_when: false
+
+    - name: Assert Docker CE is installed
+      ansible.builtin.assert:
+        that: "'DOCKER=Docker version' in ha_docker_check.stdout"
+        fail_msg: "Docker CE not installed in Home Assistant container on {{ inventory_hostname }}"
+
+    - name: Assert Docker Compose plugin is installed
+      ansible.builtin.assert:
+        that: "'COMPOSE=Docker Compose version' in ha_docker_check.stdout"
+        fail_msg: "Docker Compose plugin not installed in Home Assistant container on {{ inventory_hostname }}"
+
+    - name: Assert Docker daemon is active
+      ansible.builtin.assert:
+        that: "'DAEMON=active' in ha_docker_check.stdout"
+        fail_msg: "Docker daemon not active in Home Assistant container on {{ inventory_hostname }}"
+
+    - name: Assert HA container image is pre-pulled
+      ansible.builtin.assert:
+        that: "'HA_IMAGE=present' in ha_docker_check.stdout"
+        fail_msg: "Home Assistant container image not pre-pulled in template on {{ inventory_hostname }}"
+
+    - name: Assert cgroupfs driver is configured
+      ansible.builtin.assert:
+        that: "'CGROUPFS=present' in ha_docker_check.stdout"
+        fail_msg: "Docker cgroupfs driver not configured in Home Assistant container on {{ inventory_hostname }}"
+
+    # ── Container IP validation ─────────────────────────────────────
+
+    - name: Extract Home Assistant container IP from cached config
+      ansible.builtin.set_fact:
+        _ha_verify_ip: "{{ ha_ct_cfg.stdout | regex_search('ip=([^/,]+)', '\\1') | first }}"
+
+    - name: Assert container IP is not empty
+      ansible.builtin.assert:
+        that: (_ha_verify_ip | length) > 0
+        fail_msg: "Could not determine Home Assistant container IP from pct config on {{ inventory_hostname }}"
+
+    - name: Assert container IP does not collide with host IP
+      ansible.builtin.assert:
+        that: _ha_verify_ip != ansible_host
+        fail_msg: >-
+          Container IP {{ _ha_verify_ip }} collides with host IP
+          {{ ansible_host }} on {{ inventory_hostname }}
+
+    - name: Assert Home Assistant IP matches expected offset (14)
+      ansible.builtin.set_fact:
+        _ha_expected_ip: "{{ _ha_verify_ip.split('.')[0:3] | join('.') }}.14"
+
+    - name: Assert container IP has correct offset
+      ansible.builtin.assert:
+        that: _ha_verify_ip == _ha_expected_ip
+        fail_msg: >-
+          Home Assistant container IP {{ _ha_verify_ip }} does not match
+          expected {{ _ha_expected_ip }} (offset 14) on {{ inventory_hostname }}
+
+    - name: Report Home Assistant verification
+      ansible.builtin.debug:
+        msg: >-
+          Home Assistant verification passed on {{ inventory_hostname }}:
+          container={{ homeassistant_ct_id }}, running=yes,
+          ip={{ _ha_verify_ip }},
+          docker={{ 'installed' if 'DOCKER=Docker version' in ha_docker_check.stdout else 'missing' }},
+          compose={{ 'installed' if 'COMPOSE=Docker Compose version' in ha_docker_check.stdout else 'missing' }},
+          daemon={{ 'active' if 'DAEMON=active' in ha_docker_check.stdout else 'inactive' }},
+          ha_image={{ 'pre-pulled' if 'HA_IMAGE=present' in ha_docker_check.stdout else 'missing' }}

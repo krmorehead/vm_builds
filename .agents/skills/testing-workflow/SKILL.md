@@ -9,14 +9,30 @@ Use when running molecule tests, implementing TDD workflow, diagnosing test fail
 
 ## Rules
 
+**TDD and Test-First Development:**
 1. ALWAYS reproduce production bugs on test machine first using `molecule test` or `molecule converge`
-2. NEVER iterate on production when test machine is available
+2. NEVER iterate on production when test machine is available  
 3. ALWAYS write verify assertions before implementing features (TDD)
 4. NEVER consider a fix complete until `molecule test` passes end-to-end
-5. NEVER use blanket cleanup that destroys all resources - use explicit VMIDs
-6. NEVER add graceful degradation for expected hardware (iGPU, WiFi, VT-d)
-7. ALWAYS check dmesg first when diagnosing test failures
-8. NEVER assume ICMP working means TCP works - test with actual protocols
+
+**Environment and Setup Validation:**
+5. ALWAYS validate environment before ANY molecule commands: `set -a && source test.env && set +a`
+6. ALWAYS test SSH and Ansible connectivity before running molecule: `ansible home -m ping`
+7. ALWAYS run lint checks (`ansible-lint && yamllint .`) after ANY code changes
+
+**Proactive Testing Triggers:**
+8. Test IMMEDIATELY when creating new service roles or container types
+9. Test IMMEDIATELY when adding Docker-in-LXC or container-specific patterns  
+10. Test IMMEDIATELY when you see variable scoping issues or undefined variable errors
+11. NEVER proceed with development when environment validation fails
+
+**Cleanup and Safety:**
+12. NEVER use blanket cleanup that destroys all resources - use explicit VMIDs
+13. NEVER add graceful degradation for expected hardware (iGPU, WiFi, VT-d)
+
+**Failure Diagnosis:**
+14. ALWAYS check dmesg first when diagnosing test failures
+15. NEVER assume ICMP working means TCP works - test with actual protocols
 
 ## Patterns
 
@@ -63,9 +79,32 @@ Diagnostic order:
 6. Add permanent diagnostics
 ```
 
+## Early Bug Detection Patterns
+
+**Environment Issues (Catch Early):**
+- "Could not resolve hostname none" → Environment variables not exported
+- SSH connection failures → PRIMARY_HOST or HOME_API_TOKEN issues
+- "ansible_date_time is undefined" → Facts not gathered, wrong host context
+
+**Container/Docker Issues (Catch Early):**
+- "pct: command not found" → Running on container instead of Proxmox host
+- "proxmox_vmid is undefined" → Variable scoping issues, use `homeassistant_ct_id`
+- Docker daemon access fails → Wrong execution context for `pct exec` commands
+
+**File Deployment Issues (Catch Early):**
+- Template deployment fails in containers → Use shell commands with `pct exec`
+- "Recursive loop detected" → Self-referencing variables in defaults/main.yml
+- YAML parsing errors → Avoid Jinja2 templates for container file writing
+
+**Testing Strategy:**
+- Run `molecule converge` after ANY container/Docker code changes
+- Run `molecule verify` immediately when assertions fail
+- Test with actual protocol (HTTP, Docker commands) not just connectivity
+
 ## Anti-patterns
 
 NEVER explain what TDD is in testing workflow rules
 NEVER use graceful skip for hardware expected on every host
 NEVER just poll during long-running commands - use idle time productively
 NEVER add failed_when: false on connection tests (let real errors fail immediately)
+NEVER debug container issues without testing on the actual host first

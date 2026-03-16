@@ -94,12 +94,15 @@ Phase 3: Services (flavor groups span both primary + LAN hosts)
   Play 11: netdata_lxc (monitoring_nodes)  tag: monitoring
            deploy_stamp: netdata_lxc
   Play 12: netdata_configure (netdata)    tag: monitoring
-  Play 13: wireguard_lxc (vpn_nodes)      tag: wireguard
+  Play 13: homeassistant_lxc (service_nodes) tag: homeassistant
+           deploy_stamp: homeassistant_lxc
+  Play 14: homeassistant_configure (service_nodes) tag: homeassistant
+  Play 15: wireguard_lxc (vpn_nodes)      tag: wireguard
            deploy_stamp: wireguard_lxc
-  Play 14: wireguard_configure (wireguard) tag: wireguard
-  Play 15: openwrt_mesh_lxc (wifi_nodes:!router_nodes) tag: mesh-wifi
+  Play 16: wireguard_configure (wireguard) tag: wireguard
+  Play 17: openwrt_mesh_lxc (wifi_nodes:!router_nodes) tag: mesh-wifi
            deploy_stamp: openwrt_mesh_lxc
-  Play 16: openwrt_mesh_configure (openwrt_mesh) tag: mesh-wifi
+  Play 18: openwrt_mesh_configure (openwrt_mesh) tag: mesh-wifi
 
 Per-feature plays (opt-in via --tags, tagged with [never])
 Bootstrap cleanup (proxmox:!lan_hosts)    tag: cleanup
@@ -191,7 +194,7 @@ All VMIDs defined in `group_vars/all.yml`.
 | `setup.sh` | Bootstrap .venv + pip + ansible-galaxy |
 | `run.sh` | Convenience wrapper — delegates to `build.py` |
 | `cleanup.sh` | Restore / full-restore / clean / rollback — delegates to `build.py` |
-| `build-images.sh` | Builds custom images (mesh LXC, router VM, Pi-hole, rsyslog, Netdata, WireGuard). Use `--only <target>` for selective rebuilds |
+| `build-images.sh` | Builds custom images (mesh LXC, router VM, Pi-hole, rsyslog, Netdata, WireGuard, Home Assistant). Use `--only <target>` for selective rebuilds |
 | `test.env` | Test machine config (committed, IP: 192.168.86.201) |
 | `.env` | Production secrets (gitignored) |
 | `test.env.generated` | Auto-generated secrets during test runs (gitignored) |
@@ -202,6 +205,7 @@ All VMIDs defined in `group_vars/all.yml`.
 | `tasks/reconstruct_pihole_group.yml` | Reusable dynamic group reconstruction for Pi-hole |
 | `tasks/reconstruct_rsyslog_group.yml` | Reusable dynamic group reconstruction for rsyslog |
 | `tasks/reconstruct_netdata_group.yml` | Reusable dynamic group reconstruction for Netdata |
+| `tasks/reconstruct_homeassistant_group.yml` | Reusable dynamic group reconstruction for Home Assistant |
 | `tasks/bootstrap_lan_host.yml` | Reusable bootstrap for LAN hosts (DHCP lease + API token) |
 | `tasks/cleanup_lan_host.yml` | Reusable per-LAN-host cleanup (SSH from primary host) |
 | `molecule/default/` | Full integration tests (home, mesh1, ai, mesh2 — 4-node) |
@@ -212,6 +216,7 @@ All VMIDs defined in `group_vars/all.yml`.
 | `molecule/openwrt-pihole-dns/` | Per-feature scenario for OpenWrt DNS forwarding to Pi-hole |
 | `molecule/rsyslog-lxc/` | Per-feature scenario for rsyslog log collector container |
 | `molecule/netdata-lxc/` | Per-feature scenario for Netdata monitoring agent container |
+| `molecule/homeassistant-lxc/` | Per-feature scenario for Home Assistant LXC container |
 | `molecule/openwrt-syslog/` | Per-feature scenario for OpenWrt syslog forwarding to rsyslog |
 | `molecule/mesh1-infra/` | Lightweight infra-only on mesh1 (quick iteration) |
 | `wol.sh` | Wake-on-LAN utility: wake hosts by alias or MAC. Proxied WoL for LAN hosts via PRIMARY_HOST |
@@ -258,7 +263,7 @@ All VMIDs defined in `group_vars/all.yml`.
 - NEVER use `pveam download` — the host may lack internet (router VM destroyed) or have unreachable enterprise repos (no subscription).
 - Image paths are defined in `group_vars/all.yml` (e.g., `openwrt_image_path`, `openwrt_lxc_template_path`). Roles verify the image exists and fail with a clear message pointing to `./build-images.sh` if missing.
 - ALWAYS use `role_path` for source paths in tasks. Bare relative paths break when Molecule runs from non-default scenarios.
-- Use `./build-images.sh --only <target>` to rebuild a single image (~2-3 min vs ~15 min for all). Targets: mesh, router, pihole, rsyslog, netdata, wireguard.
+- Use `./build-images.sh --only <target>` to rebuild a single image (~2-3 min vs ~15 min for all). Targets: mesh, router, pihole, rsyslog, netdata, wireguard, homeassistant.
 - See `vm-lifecycle` skill, Image management section, for the full pattern.
 
 ## NTP synchronization

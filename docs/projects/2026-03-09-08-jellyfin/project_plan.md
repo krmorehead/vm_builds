@@ -214,7 +214,7 @@ See: `image-management-patterns` skill.
 **Build approach:**
 Remote build on Proxmox via `pct create` + `pct exec` + `vzdump` (same
 pattern as Pi-hole and rsyslog). Steps:
-1. Create temp container (VMID 998) from Debian 12 standard template
+1. Create temp container (VMID 993) from Debian 12 standard template
 2. Add Jellyfin official repo (GPG key + apt source)
 3. Install Jellyfin server and web packages
 4. Install VA-API drivers — include BOTH Intel (`intel-media-va-driver`)
@@ -334,10 +334,10 @@ dynamic groups (`jellyfin`, `kodi`, `moonlight`).
 
 **Rollback:**
 
-Container destruction handled by generic LXC cleanup in
-`molecule/default/cleanup.yml` (`pct list` iteration → `pct stop` +
-`pct destroy`). Host-side cleanup: **none** — Jellyfin does not deploy
-host-side files (no kernel modules, no host config). Container cleanup is generic.
+Container destruction handled by explicit VMID cleanup in
+`molecule/default/cleanup.yml` (VMID 300 in `project_ct_ids` list).
+Host-side cleanup: **none** — Jellyfin does not deploy host-side files
+(no kernel modules, no host config).
 
 ---
 
@@ -422,7 +422,7 @@ Assumes baseline exists (OpenWrt running, LAN bridge up).
     env:
       HOME_API_TOKEN: ${HOME_API_TOKEN}
       PRIMARY_HOST: ${PRIMARY_HOST}
-      JELLYFIN_ADMIN_PASSWORD: ${JELLYFIN_ADMIN_PASSWORD:-}
+      JELLYFIN_ADMIN_PASSWORD: ${JELLYFIN_ADMIN_PASSWORD}
   scenario:
     test_sequence:
       - dependency

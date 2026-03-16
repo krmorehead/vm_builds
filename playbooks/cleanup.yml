@@ -268,6 +268,22 @@
       changed_when: true
       failed_when: false
 
+# ── Per-feature rollback: Home Assistant LXC ─────────────────────
+
+- name: Rollback Home Assistant container
+  hosts: service_nodes
+  gather_facts: false
+  tags: [homeassistant-rollback, never]
+  tasks:
+    - name: Stop and destroy Home Assistant container
+      ansible.builtin.shell:
+        cmd: |
+          pct stop {{ homeassistant_ct_id }} 2>/dev/null || true
+          sleep 2
+          pct destroy {{ homeassistant_ct_id }} --purge 2>/dev/null || true
+        executable: /bin/bash
+      changed_when: true
+
 # ── Full host restore (existing) ────────────────────────────────
 
 - name: Restore Proxmox host from backup

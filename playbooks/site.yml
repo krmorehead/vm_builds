@@ -184,6 +184,23 @@
   roles:
     - netdata_configure
 
+- name: Provision Home Assistant LXC
+  hosts: service_nodes
+  gather_facts: false
+  tags: [homeassistant]
+  roles:
+    - homeassistant_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: homeassistant_lxc
+
+- name: Configure Home Assistant
+  hosts: service_nodes
+  gather_facts: false
+  tags: [homeassistant]
+  roles:
+    - homeassistant_configure
+
 - name: Provision WireGuard LXC
   hosts: vpn_nodes
   gather_facts: false

@@ -207,7 +207,9 @@ rebuild the template or pull at configure time (idempotent).
 - [ ] Add `homeassistant_lxc_template` and `homeassistant_lxc_template_path`
   to `group_vars/all.yml`
 - [ ] Add `homeassistant_ct_ip_offset: 14` to `group_vars/all.yml`
-  (after meshwifi at 13)
+  (after meshwifi at 13) — VERIFIED: No collision with existing allocations:
+  - Current: Netdata=13, Pi-hole=10, rsyslog=12, WireGuard=3-6
+  - Proposed: HA=14 (between Netdata and planned Jellyfin=15)
 - [ ] Build template and place in `images/` (gitignored)
 - [ ] Document build prerequisites in `docs/architecture/homeassistant-build.md`
 
@@ -269,8 +271,11 @@ See: `lxc-container-patterns` skill (LXC provisioning pattern, deploy_stamp).
 - [ ] Create `roles/homeassistant_lxc/meta/main.yml` with required metadata
 - [ ] Add provision play to `site.yml` Phase 3, targeting `service_nodes`,
   tagged `[homeassistant]`, with `homeassistant_lxc` role and `deploy_stamp`
+  - Position: After `netdata_lxc` provision, before `homeassistant_configure`
+  - Phase 3 ensures OpenWrt network is available before service provisioning
 - [ ] Add configure play to `site.yml` Phase 3, targeting `homeassistant`
   dynamic group, tagged `[homeassistant]`, `gather_facts: true`, after provision play
+  - Position: After `homeassistant_lxc` provision play completes
 - [ ] Create `tasks/reconstruct_homeassistant_group.yml`:
   - Verify container 200 is running (`pct status {{ homeassistant_ct_id }}`)
   - Register via `add_host` with:
@@ -461,12 +466,25 @@ Assumes baseline exists (OpenWrt running, LAN bridge up).
         changed_when: true
   ```
 
-#### 3d. Molecule env passthrough
+#### 3d. Molecule cleanup playbook extension
+
+- [ ] Add Home Assistant container to `molecule/default/cleanup.yml`:
+  ```yaml
+  project_ct_ids:
+    - "{{ wireguard_ct_id }}"
+    - "{{ pihole_ct_id }}"
+    - "{{ meshwifi_ct_id }}"
+    - "{{ netdata_ct_id }}"
+    - "{{ rsyslog_ct_id }}"
+    - "{{ homeassistant_ct_id }}"  # ADD THIS LINE
+  ```
+
+#### 3e. Molecule env passthrough
 
 - [ ] Add `HA_ADMIN_PASSWORD` to `molecule/default/molecule.yml`
   `provisioner.env` (optional, empty for tests)
 
-#### 3e. Final validation
+#### 3f. Final validation
 
 - [ ] Run `molecule test` — full 4-node integration passes with exit code 0
 - [ ] Run `molecule test -s homeassistant-lxc` — per-feature cycle passes

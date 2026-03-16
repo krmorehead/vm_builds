@@ -57,9 +57,39 @@ Detached restart pattern:
   ignore_unreachable: true
 ```
 
+## Container File Deployment Patterns
+
+When writing files inside LXC containers via `pct exec`:
+
+```yaml
+# GOOD: heredoc via pct exec (preserves YAML structure)
+- name: Create config file in container
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct exec {{ ct_id }} -- bash -c 'cat > /path/config.yml << "EOF"
+      key: value
+      nested:
+        item: data
+      EOF
+      chmod 0644 /path/config.yml'
+    executable: /bin/bash
+  changed_when: true
+```
+
+NEVER use Ansible `template`/`copy` modules for files inside containers
+when running from the host context — they write to the HOST filesystem.
+
+For Docker-in-LXC services, the configure play runs on the HOST (e.g.,
+`service_nodes`), not on the container dynamic group. Use `pct exec`
+with the container ID from `group_vars/all.yml`.
+
 ## Anti-patterns
 
 NEVER explain what Ansible is in coding conventions
 NEVER use heredocs in YAML | blocks for OpenWrt scripts (indentation breaks shebang)
 NEVER install packages during configure roles
 NEVER hardcode bridge names (vmbr0, vmbr1) - use auto-detection
+NEVER use Ansible template/copy modules for files inside containers from host context
+NEVER target container dynamic group when role uses `pct exec` - target the host group
+NEVER use Docker `--format "{{.X}}"` in Ansible tasks without Jinja2 escaping

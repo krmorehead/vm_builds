@@ -53,6 +53,14 @@ netdata_lxc_template: netdata-debian-12-amd64.tar.zst
 netdata_lxc_template_path: images/netdata-debian-12-amd64.tar.zst
 netdata_ct_ip_offset: 13
 
+# ── Home Assistant LXC ──────────────────────────────────────────
+# Custom image built by build-images.sh: Debian 12 + Docker CE pre-installed
+# with HA container pre-pulled. Docker-in-LXC requires nesting=1 feature.
+# Run ./build-images.sh before first deploy.
+homeassistant_lxc_template: homeassistant-debian-12-amd64.tar.zst
+homeassistant_lxc_template_path: images/homeassistant-debian-12-amd64.tar.zst
+homeassistant_ct_ip_offset: 14
+
 # ── OpenWrt Router (VM) ──────────────────────────────────────────
 # Custom image built by build-images.sh: mesh/security/DNS packages baked in.
 # Run ./build-images.sh before first deploy.

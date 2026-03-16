@@ -33,7 +33,7 @@
   ansible.builtin.shell:
     cmd: >-
       {{ _cleanup_ssh }} "
-      for ct in {{ wireguard_ct_id }} {{ meshwifi_ct_id }} {{ netdata_ct_id }} {{ rsyslog_ct_id }} {{ pihole_ct_id }}; do
+      for ct in {{ wireguard_ct_id }} {{ meshwifi_ct_id }} {{ netdata_ct_id }} {{ rsyslog_ct_id }} {{ pihole_ct_id }} {{ homeassistant_ct_id }}; do
         pct status \$ct >/dev/null 2>&1 || continue;
         pct stop \$ct 2>/dev/null || true;
         sleep 2;

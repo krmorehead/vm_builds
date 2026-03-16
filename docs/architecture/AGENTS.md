@@ -105,10 +105,12 @@ Run once per host before any service roles:
 - Play 10: `rsyslog_configure` (rsyslog) — tag: `monitoring`
 - Play 11: `netdata_lxc` (monitoring_nodes) — tag: `monitoring`, deploy_stamp: `netdata_lxc`
 - Play 12: `netdata_configure` (netdata) — tag: `monitoring`
-- Play 13: `wireguard_lxc` (vpn_nodes) — tag: `wireguard`, deploy_stamp: `wireguard_lxc`
-- Play 14: `wireguard_configure` (wireguard) — tag: `wireguard`
-- Play 15: `openwrt_mesh_lxc` (wifi_nodes:!router_nodes) — tag: `mesh-wifi`, deploy_stamp: `openwrt_mesh_lxc`
-- Play 16: `openwrt_mesh_configure` (openwrt_mesh) — tag: `mesh-wifi`
+- Play 13: `homeassistant_lxc` (service_nodes) — tag: `homeassistant`, deploy_stamp: `homeassistant_lxc`
+- Play 14: `homeassistant_configure` (service_nodes) — tag: `homeassistant`
+- Play 15: `wireguard_lxc` (vpn_nodes) — tag: `wireguard`, deploy_stamp: `wireguard_lxc`
+- Play 16: `wireguard_configure` (wireguard) — tag: `wireguard`
+- Play 17: `openwrt_mesh_lxc` (wifi_nodes:!router_nodes) — tag: `mesh-wifi`, deploy_stamp: `openwrt_mesh_lxc`
+- Play 18: `openwrt_mesh_configure` (openwrt_mesh) — tag: `mesh-wifi`
 
 ## Network Topology
 
@@ -168,7 +170,7 @@ All VMIDs defined in `group_vars/all.yml`.
 | `setup.sh` | Bootstrap .venv + pip + ansible-galaxy |
 | `run.sh` | Convenience wrapper — delegates to `build.py` |
 | `cleanup.sh` | Restore / full-restore / clean / rollback — delegates to `build.py` |
-| `build-images.sh` | Builds custom images (mesh LXC, router VM, Pi-hole, rsyslog, Netdata, WireGuard) |
+| `build-images.sh` | Builds custom images (mesh LXC, router VM, Pi-hole, rsyslog, Netdata, WireGuard, Home Assistant) |
 | `test.env` | Test machine config (committed, IP: 192.168.86.201) |
 | `.env` | Production secrets (gitignored) |
 | `test.env.generated` | Auto-generated secrets during test runs (gitignored) |

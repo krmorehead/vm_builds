@@ -1,0 +1,163 @@
+---
+# ── Verify Docker is available in container ──────────────────────
+
+- name: Verify Docker is available in container
+  ansible.builtin.command:
+    cmd: pct exec {{ homeassistant_ct_id }} -- docker --version
+  register: _docker_check
+  changed_when: false
+  failed_when: _docker_check.rc != 0
+
+# ── Generate admin password if not provided ──────────────────────
+
+- name: Set provided admin password
+  ansible.builtin.set_fact:
+    _ha_admin_password: "{{ ha_admin_password }}"
+  when: ha_admin_password | length > 0
+
+- name: Generate random admin password
+  ansible.builtin.command:
+    cmd: pct exec {{ homeassistant_ct_id }} -- openssl rand -base64 32
+  register: _generated_password
+  changed_when: false
+  when: ha_admin_password | length == 0
+
+- name: Set generated admin password
+  ansible.builtin.set_fact:
+    _ha_admin_password: "{{ _generated_password.stdout | trim }}"
+  when: ha_admin_password | length == 0
+
+# ── Create Home Assistant configuration directory ────────────────
+
+- name: Create Home Assistant config directory
+  ansible.builtin.command:
+    cmd: pct exec {{ homeassistant_ct_id }} -- mkdir -p {{ homeassistant_config_path }}
+  changed_when: true
+
+# ── Deploy Docker Compose configuration ──────────────────────────
+
+- name: Create Docker Compose file in container
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct exec {{ homeassistant_ct_id }} -- bash -c 'cat > {{ homeassistant_config_path }}/docker-compose.yml << "COMPOSE_EOF"
+      services:
+        home-assistant:
+          image: {{ homeassistant_image }}
+          container_name: home-assistant
+          restart: {{ homeassistant_restart_policy }}
+          network_mode: {{ homeassistant_network_mode }}
+          volumes:
+            - {{ homeassistant_config_volume }}
+          environment:
+            - TZ=UTC
+          privileged: false
+          security_opt:
+            - no-new-privileges:true
+          cap_add:
+            - SYS_TIME
+      COMPOSE_EOF
+      chmod 0644 {{ homeassistant_config_path }}/docker-compose.yml'
+    executable: /bin/bash
+  changed_when: true
+
+- name: Deploy Home Assistant configuration.yaml
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct exec {{ homeassistant_ct_id }} -- bash -c 'cat > {{ homeassistant_config_path }}/configuration.yaml << "HA_CONFIG_EOF"
+      default_config:
+
+      http:
+        server_port: 8123
+        ip_ban_enabled: true
+        login_attempts_threshold: 5
+        use_x_forwarded_for: true
+        trusted_proxies:
+          - 127.0.0.1
+          - "::1"
+
+      recorder:
+        db_url: sqlite:///config/home-assistant_v2.db
+        purge_keep_days: {{ homeassistant_recorder_purge_days }}
+        exclude:
+          entities:
+            - sensor.date
+            - sensor.time
+            - sun.sun
+          domains:
+            - updater
+
+      logger:
+        default: {{ homeassistant_log_level }}
+        logs:
+          homeassistant.core: WARNING
+          homeassistant.components.recorder: WARNING
+          homeassistant.components.http: WARNING
+
+      automation: []
+      HA_CONFIG_EOF
+      chmod 0644 {{ homeassistant_config_path }}/configuration.yaml'
+    executable: /bin/bash
+  changed_when: true
+
+# ── Start Home Assistant via Docker Compose ──────────────────────
+
+- name: Start Home Assistant container
+  ansible.builtin.command:
+    cmd: >-
+      pct exec {{ homeassistant_ct_id }} --
+      docker compose -f {{ homeassistant_config_path }}/docker-compose.yml up -d
+  changed_when: true
+
+- name: Wait for Home Assistant Docker container to be running
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct exec {{ homeassistant_ct_id }} -- docker compose \
+        -f {{ homeassistant_config_path }}/docker-compose.yml \
+        ps --services --filter "status=running" | grep -c home-assistant
+    executable: /bin/bash
+  register: _ha_services
+  retries: 30
+  delay: 10
+  until: (_ha_services.stdout | trim | int) > 0
+  changed_when: false
+
+# ── Wait for web UI and create admin user ────────────────────────
+
+- name: Wait for Home Assistant web interface
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct exec {{ homeassistant_ct_id }} -- \
+        curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8123 | grep -cE '(200|301|302)'
+    executable: /bin/bash
+  register: _ha_http_check
+  retries: 15
+  delay: 10
+  until: (_ha_http_check.stdout | trim | int) > 0
+  changed_when: false
+
+- name: Create admin user via Home Assistant onboarding API
+  ansible.builtin.command:
+    cmd: >-
+      pct exec {{ homeassistant_ct_id }} -- /bin/sh -c '
+      curl -s -X POST -H "Content-Type: application/json"
+      -d "{\"client_id\": \"http://homeassistant.local/\",
+           \"name\": \"Administrator\",
+           \"username\": \"admin\",
+           \"password\": \"{{ _ha_admin_password }}\",
+           \"language\": \"en\"}"
+      http://127.0.0.1:8123/api/onboarding/users 2>/dev/null || true'
+  failed_when: false
+  changed_when: false
+
+# ── Report completion ────────────────────────────────────────────
+
+- name: Report Home Assistant configuration
+  ansible.builtin.debug:
+    msg: >-
+      Home Assistant configured: ct={{ homeassistant_ct_id }},
+      web=http://localhost:8123, admin=admin,
+      config={{ homeassistant_config_path }}

@@ -25,6 +25,29 @@ molecule verify        # run assertions
 molecule cleanup       # reset host
 ```
 
+## Environment Setup Patterns
+
+38. **CRITICAL**: Always use `set -a; source test.env; set +a` before running molecule. This ensures all environment variables are exported and available to Ansible.
+
+39. **Variable export**: The `set -a` flag automatically exports all variables from the sourced file, making them available to child processes.
+
+40. **Molecule env handling**: Molecule provisioner uses `${VAR}` syntax in molecule.yml. Environment variables must be properly exported for molecule to access them.
+
+41. Previous bug: `molecule test` failed with "Could not resolve hostname none" because environment variables weren't exported. Solution: `set -a && source test.env && set +a`.
+
+42. Test environment validation:
+    ```bash
+    # Verify environment is loaded
+    echo "HOME_API_TOKEN: $HOME_API_TOKEN"
+    echo "PRIMARY_HOST: $PRIMARY_HOST"
+    
+    # Test SSH connectivity
+    ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST "echo 'SSH test successful'"
+    
+    # Test Ansible connectivity  
+    ansible home -m ping
+    ```
+
 ## Baseline workflow
 
 ```bash
@@ -55,13 +78,49 @@ No lint phase — run `ansible-lint && yamllint .` separately.
 - No baseline dependency
 - Cleanup restores host state
 
-## Pre-test checklist
+## Pre-test checklist (MANDATORY BEFORE ANY MOLECULE COMMANDS)
 
 ```bash
 set -a; source test.env; set +a
 ssh root@$PRIMARY_HOST hostname
 ./build-images.sh
 ```
+
+## Early Validation Commands (RUN IMMEDIATELY)
+
+Before any molecule work, ALWAYS verify environment:
+
+```bash
+# Verify environment variables are loaded
+echo "HOME_API_TOKEN: $HOME_API_TOKEN"
+echo "PRIMARY_HOST: $PRIMARY_HOST"
+
+# Test SSH connectivity  
+ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST "echo 'SSH test successful'"
+
+# Test Ansible connectivity
+ansible home -m ping
+```
+
+**CRITICAL**: If any of these fail, DO NOT proceed with molecule commands. Fix environment first.
+
+## When to Test (PROACTIVE TRIGGERS)
+
+**Test IMMEDIATELY when:**
+- Environment variables are changed or added
+- New service role is created
+- Container/VM provisioning code is modified  
+- Docker-in-LXC or container-specific patterns are used
+- Any `pct exec` or container commands are added
+- Variable scoping issues are suspected
+- After ANY code changes that affect testing
+
+**Test IMMEDIATELY when you see:**
+- "Could not resolve hostname none" (environment not exported)
+- "UNREACHABLE" during converge (SSH or host issues)
+- Template deployment failures in containers
+- Variable undefined errors (`proxmox_vmid` vs `homeassistant_ct_id`)
+- Docker daemon access issues in containers
 
 ## Platform groups
 
@@ -95,6 +154,17 @@ Use `role_path` for project-relative paths:
 ```yaml
 src: "{{ role_path }}/../../images/{{ lxc_ct_template }}"
 ```
+
+## Proactive Skill Loading
+
+When working on new service types, read relevant skills before writing code:
+
+- **LXC containers**: `lxc-container-patterns` (provisioning, networking, Docker-in-LXC)
+- **Proxmox operations**: `proxmox-safety-rules`, `proxmox-system-safety`
+- **Ansible development**: `ansible-conventions`, `ansible-shell-safety`
+- **Service configuration**: `service-config-validation`
+
+Previous lesson: Docker-in-LXC configure play targeted the container dynamic group instead of the host group. The `lxc-container-patterns` skill now documents this pattern explicitly.
 
 ## Performance optimization
 
