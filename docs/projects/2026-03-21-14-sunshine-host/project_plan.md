@@ -100,7 +100,7 @@ Decisions
 │   ├── Build once: ISO + autounattend → install → drivers → Sunshine → sysprep → export
 │   ├── Deploy fast: qm importdisk from pre-built qcow2 (~2-3 min vs ~30 min ISO install)
 │   ├── Same cache-and-reuse pattern as LXC template builds
-│   └── Build VMID 993 (temp container, destroyed after build)
+│   └── Build VMID 992 (temp VM, destroyed after build)
 │
 ├── GPU passthrough: iGPU via vfio-pci (NOT discrete GPU)
 │   ├── All 4 test nodes have iGPUs; no discrete GPUs available for testing
@@ -279,7 +279,7 @@ See: `image-management-patterns` skill.
 
 **Build approach (remote on Proxmox):**
 1. Upload Windows 11 evaluation ISO and virtio-win ISO to Proxmox host
-2. Create temp VM (VMID 993) with q35, OVMF, 64GB disk, 4GB RAM, 4 cores
+2. Create temp VM (VMID 992) with q35, OVMF, 64GB disk, 4GB RAM, 4 cores
 3. Attach Windows ISO (ide2) and virtio-win ISO (ide3)
 4. Inject autounattend.xml via floppy image or secondary ISO
 5. Boot and wait for unattended installation
@@ -297,9 +297,9 @@ See: `image-management-patterns` skill.
    - Windows Firewall rules for Sunshine ports (47984-47990)
 8. Sysprep (generalize) the installation
 9. Shut down VM and export disk:
-   `cp /var/lib/vz/images/993/vm-993-disk-0.qcow2 /tmp/`
+   `cp /var/lib/vz/images/992/vm-992-disk-0.qcow2 /tmp/`
 10. Download to controller: `scp` to `images/sunshine-win11-amd64.qcow2`
-11. Cleanup: destroy temp VM 993
+11. Cleanup: destroy temp VM 992
 
 **autounattend.xml key settings:**
 - `<DiskConfiguration>`: single UEFI/GPT partition, 64GB
@@ -356,8 +356,8 @@ See: `proxmox-system-safety` skill (IOMMU validation, vfio-pci binding, q35).
 
 **iGPU passthrough flow:**
 1. Read `igpu_pci_address` from `proxmox_igpu` facts (set during infrastructure).
-   If running standalone (per-feature scenario without infrastructure plays),
-   detect iGPU internally using the same sysfs logic as `proxmox_igpu`.
+   Hard-fail if `igpu_pci_address` is not defined — `proxmox_igpu` must run
+   first (the per-feature converge runs it explicitly).
 2. Validate IOMMU is active: check `/sys/class/iommu/` is non-empty.
    Hard-fail if IOMMU not active — masks fixable BIOS settings.
 3. Validate iGPU IOMMU group is isolated (single device in group, no shared
@@ -397,7 +397,7 @@ See: `proxmox-system-safety` skill (IOMMU validation, vfio-pci binding, q35).
   - `gaming_vm_admin_password` via `lookup('env', ...) | default('Passw0rd!', true)`
 - [ ] Create `roles/gaming_vm/tasks/main.yml`:
   - Verify image exists, hard-fail with message pointing to `./build-images.sh`
-  - Detect iGPU PCI address (use `igpu_pci_address` if available, else auto-detect)
+  - Assert `igpu_pci_address` is defined (hard-fail if proxmox_igpu hasn't run)
   - Validate IOMMU active and iGPU group isolated
   - Bind iGPU to vfio-pci
   - Check if VM exists (`qm status`); skip creation if present
@@ -475,7 +475,9 @@ See: `vm-lifecycle-architecture` skill (configure role, dynamic group targeting)
 | `WINDOWS_PRODUCT_KEY` | no | Windows 11 license (omit for eval) | `XXXXX-XXXXX-...` |
 
 For testing: `SUNSHINE_USER` and `SUNSHINE_PASSWORD` auto-generate random
-values if empty.
+values if empty and persist to `{{ env_generated_path }}` via `blockinfile`
+(same pattern as WireGuard keys). This ensures Moonlight pairing (project 10)
+can read the same credentials across runs.
 
 **What M2 configures (host-specific):**
 - Sunshine credentials (`SUNSHINE_USER`, `SUNSHINE_PASSWORD` from `.env`)
@@ -616,7 +618,13 @@ See: `molecule-testing` skill (per-feature scenario setup, baseline workflow),
       - gaming_configure
   ```
 
-- [ ] Create `molecule/sunshine-vm/verify.yml`
+- [ ] Create `molecule/sunshine-vm/verify.yml`:
+  Verify runs on `gaming_nodes` (the Proxmox host), NOT on the `gaming`
+  dynamic group (which is lost between playbook invocations). Uses
+  `qm status`/`qm config` for VM state assertions and `qm guest exec`
+  for in-VM checks (same pattern as LXC verify using `pct exec`).
+  Reconstruct `gaming` group first for IP discovery, then run host-side
+  `qm` commands for assertions.
 - [ ] Create `molecule/sunshine-vm/cleanup.yml`:
   Destroys VM 600 on each node + PCI cleanup (unbind vfio-pci, reload
   GPU driver, rescan PCI bus).
