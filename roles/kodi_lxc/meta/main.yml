@@ -1,0 +1,13 @@
+---
+dependencies: []
+
+galaxy_info:
+  author: kyle
+  license: proprietary
+  role_name: kodi_lxc
+  description: Provision a Kodi media player LXC container on Proxmox VE with GBM/DRM display output and iGPU access
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm

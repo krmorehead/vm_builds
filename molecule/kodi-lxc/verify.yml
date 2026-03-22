@@ -1,0 +1,179 @@
+---
+- name: Reconstruct kodi dynamic group
+  hosts: media_nodes
+  gather_facts: false
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_kodi_group.yml
+
+- name: Verify Kodi LXC container
+  hosts: media_nodes
+  gather_facts: false
+  vars:
+    kodi_ct_id: 301
+  tasks:
+    # ── Container state ──────────────────────────────────────────
+
+    - name: Check container is running
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct status {{ kodi_ct_id }} | grep -c running
+        executable: /bin/bash
+      register: _kodi_running
+      changed_when: false
+
+    - name: Assert container is running
+      ansible.builtin.assert:
+        that: (_kodi_running.stdout | trim | int) > 0
+        fail_msg: "Container {{ kodi_ct_id }} is not running"
+
+    # ── Container config (single read) ───────────────────────────
+
+    - name: Read container config (single call)
+      ansible.builtin.command:
+        cmd: pct config {{ kodi_ct_id }}
+      register: _kodi_cfg
+      changed_when: false
+
+    - name: Assert onboot is disabled (on-demand container)
+      ansible.builtin.assert:
+        that: "'onboot: 0' in _kodi_cfg.stdout"
+        fail_msg: "Container {{ kodi_ct_id }} should have onboot: 0"
+
+    # ── Device mounts ────────────────────────────────────────────
+
+    - name: Check DRI devices are mounted
+      ansible.builtin.command:
+        cmd: pct exec {{ kodi_ct_id }} -- ls /dev/dri/
+      register: _dri_devices
+      changed_when: false
+
+    - name: Assert DRI devices exist
+      ansible.builtin.assert:
+        that: _dri_devices.rc == 0
+        fail_msg: "DRI devices not mounted at /dev/dri/"
+
+    - name: Check sound devices are mounted
+      ansible.builtin.command:
+        cmd: pct exec {{ kodi_ct_id }} -- ls /dev/snd/
+      register: _snd_devices
+      changed_when: false
+
+    - name: Assert sound devices exist
+      ansible.builtin.assert:
+        that: _snd_devices.rc == 0
+        fail_msg: "Sound devices not mounted at /dev/snd/"
+
+    - name: Check input devices are mounted
+      ansible.builtin.command:
+        cmd: pct exec {{ kodi_ct_id }} -- ls /dev/input/
+      register: _input_devices
+      changed_when: false
+      failed_when: false
+
+    # ── lxc.mount.entry device bind mounts ────────────────────────
+
+    - name: Check lxc.mount.entry device bind mounts
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ kodi_ct_id }} | grep -c 'lxc.mount.entry.*dev/'
+        executable: /bin/bash
+      register: _mount_entries
+      changed_when: false
+
+    - name: Assert device bind mounts are configured
+      ansible.builtin.assert:
+        that: (_mount_entries.stdout | trim | int) >= 3
+        fail_msg: "Expected at least 3 lxc.mount.entry device rules, got {{ _mount_entries.stdout | trim }}"
+
+    # ── cgroup device allowlist ──────────────────────────────────
+
+    - name: Check cgroup device allowlist
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ kodi_ct_id }} | grep -c 'lxc.cgroup2.devices.allow'
+        executable: /bin/bash
+      register: _cgroup_rules
+      changed_when: false
+
+    - name: Assert cgroup allowlist has device rules
+      ansible.builtin.assert:
+        that: (_cgroup_rules.stdout | trim | int) >= 3
+        fail_msg: "Expected at least 3 cgroup device rules, got {{ _cgroup_rules.stdout | trim }}"
+
+    # ── Kodi packages and service ────────────────────────────────
+
+    - name: Run Kodi container health checks (single pct exec)
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ kodi_ct_id }} -- /bin/sh -c '
+          echo "KODI_PKG=$(dpkg -l kodi 2>/dev/null | grep -c ^ii)";
+          echo "SERVICE=$(systemctl is-enabled kodi-standalone 2>/dev/null)";
+          echo "SETTINGS=$(test -f /home/kodi/.kodi/userdata/advancedsettings.xml && echo exists || echo missing)";
+          echo "KODI_USER=$(id kodi 2>/dev/null && echo exists || echo missing)"
+          '
+      register: _kodi_health
+      changed_when: false
+
+    - name: Assert Kodi package is installed
+      ansible.builtin.assert:
+        that: "'KODI_PKG=1' in _kodi_health.stdout"
+        fail_msg: "kodi package not installed"
+
+    - name: Assert kodi-standalone service is enabled
+      ansible.builtin.assert:
+        that: "'enabled' in _kodi_health.stdout"
+        fail_msg: "kodi-standalone service not enabled"
+
+    - name: Assert advancedsettings.xml exists
+      ansible.builtin.assert:
+        that: "'SETTINGS=exists' in _kodi_health.stdout"
+        fail_msg: "advancedsettings.xml not found"
+
+    - name: Assert kodi user exists
+      ansible.builtin.assert:
+        that: "'KODI_USER=exists' in _kodi_health.stdout or 'uid=' in _kodi_health.stdout"
+        fail_msg: "kodi user not found"
+
+    # ── Web interface config ─────────────────────────────────────
+
+    - name: Check web interface config
+      ansible.builtin.command:
+        cmd: pct exec {{ kodi_ct_id }} -- test -f /home/kodi/.kodi/userdata/guisettings.xml
+      register: _gui_settings
+      changed_when: false
+      failed_when: false
+
+    - name: Assert web interface config exists
+      ansible.builtin.assert:
+        that: _gui_settings.rc == 0
+        fail_msg: "guisettings.xml not found"
+
+    # ── ALSA config ──────────────────────────────────────────────
+
+    - name: Check ALSA config
+      ansible.builtin.command:
+        cmd: pct exec {{ kodi_ct_id }} -- test -f /home/kodi/.asoundrc
+      register: _alsa_config
+      changed_when: false
+      failed_when: false
+
+    - name: Assert ALSA config exists
+      ansible.builtin.assert:
+        that: _alsa_config.rc == 0
+        fail_msg: "ALSA config .asoundrc not found"
+
+    # ── Report ───────────────────────────────────────────────────
+
+    - name: Report Kodi verification
+      ansible.builtin.debug:
+        msg: >-
+          Kodi per-feature verify passed:
+          ct={{ kodi_ct_id }}, running=yes,
+          kodi={{ 'installed' if 'KODI_PKG=1' in _kodi_health.stdout else 'missing' }},
+          service={{ 'enabled' if 'enabled' in _kodi_health.stdout else 'disabled' }},
+          dri={{ 'mounted' if _dri_devices.rc == 0 else 'missing' }},
+          snd={{ 'mounted' if _snd_devices.rc == 0 else 'missing' }}

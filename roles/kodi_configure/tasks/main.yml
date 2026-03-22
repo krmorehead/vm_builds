@@ -1,0 +1,105 @@
+---
+# ── Verify Kodi packages are available ───────────────────────────
+
+- name: Verify Kodi packages installed in container
+  ansible.builtin.command:
+    cmd: pct exec {{ kodi_ct_id }} -- dpkg -l kodi
+  register: _kodi_pkg_check
+  changed_when: false
+  failed_when: _kodi_pkg_check.rc != 0
+
+# ── Configure iGPU access ───────────────────────────────────────
+
+- name: Create render group and add kodi user to groups
+  ansible.builtin.shell:
+    cmd: |
+      pct exec {{ kodi_ct_id }} -- bash -c '
+        groupadd -g {{ igpu_render_gid }} render 2>/dev/null || true
+        usermod -a -G render,video,audio,input kodi 2>/dev/null || true
+      '
+    executable: /bin/bash
+  changed_when: true
+
+# ── Configure Kodi web interface ─────────────────────────────────
+# Use copy + pct push to avoid shell escaping issues with heredocs
+
+- name: Ensure Kodi user dirs exist
+  ansible.builtin.command:
+    cmd: pct exec {{ kodi_ct_id }} -- bash -c 'mkdir -p /home/kodi/.kodi/userdata && chown -R kodi:kodi /home/kodi/.kodi'
+  changed_when: true
+
+- name: Write Kodi GUI settings to host temp
+  ansible.builtin.copy:
+    content: |
+      <settings version="2">
+        <setting id="services.webserver">true</setting>
+        <setting id="services.webserverport">{{ kodi_web_port }}</setting>
+        <setting id="services.esallinterfaces">true</setting>
+        <setting id="services.esenabled">true</setting>
+        <setting id="services.esport">9090</setting>
+      </settings>
+    dest: /tmp/kodi_guisettings.xml
+    mode: "0644"
+
+- name: Push GUI settings into container
+  ansible.builtin.command:
+    cmd: pct push {{ kodi_ct_id }} /tmp/kodi_guisettings.xml /home/kodi/.kodi/userdata/guisettings.xml
+  changed_when: true
+
+- name: Set Kodi ownership on GUI settings
+  ansible.builtin.command:
+    cmd: pct exec {{ kodi_ct_id }} -- chown kodi:kodi /home/kodi/.kodi/userdata/guisettings.xml
+  changed_when: true
+
+# ── Configure ALSA HDMI audio output ────────────────────────────
+
+- name: Write ALSA config to host temp
+  ansible.builtin.copy:
+    content: |
+      pcm.!default {
+        type hw
+        card 0
+        device 3
+      }
+      ctl.!default {
+        type hw
+        card 0
+      }
+    dest: /tmp/kodi_asoundrc
+    mode: "0644"
+
+- name: Push ALSA config into container
+  ansible.builtin.command:
+    cmd: pct push {{ kodi_ct_id }} /tmp/kodi_asoundrc /home/kodi/.asoundrc
+  changed_when: true
+
+- name: Set Kodi ownership on ALSA config
+  ansible.builtin.command:
+    cmd: pct exec {{ kodi_ct_id }} -- chown kodi:kodi /home/kodi/.asoundrc
+  changed_when: true
+
+- name: Clean up host temp files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /tmp/kodi_guisettings.xml
+    - /tmp/kodi_asoundrc
+
+# ── Enable kodi-standalone service ───────────────────────────────
+
+- name: Enable kodi-standalone service
+  ansible.builtin.command:
+    cmd: pct exec {{ kodi_ct_id }} -- systemctl enable kodi-standalone
+  changed_when: true
+
+# ── Report completion ────────────────────────────────────────────
+
+- name: Report Kodi configuration
+  ansible.builtin.debug:
+    msg: >-
+      Kodi configured successfully!
+      Web interface: http://{{ kodi_static_ip | default('unknown') }}:{{ kodi_web_port }}
+      Display: GBM/DRM via /dev/dri
+      Audio: ALSA via /dev/snd (HDMI)
+      Service: kodi-standalone (enabled, on-demand start)

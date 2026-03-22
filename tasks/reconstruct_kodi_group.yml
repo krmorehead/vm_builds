@@ -1,0 +1,45 @@
+---
+# Reusable task file: reconstruct the kodi dynamic group.
+#
+# Consumed by:
+#   - Per-feature molecule converge.yml (kodi-lxc scenario)
+#   - Per-feature molecule verify.yml
+#   - playbooks/cleanup.yml (rollback plays)
+#
+# Must run on a host in the media_nodes/proxmox group.
+# Simpler than OpenWrt reconstruction: pct_remote is always the
+# connection method (no SSH auth detection needed).
+
+- name: Verify Kodi container is running
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct status {{ kodi_ct_id | default(301) }} | grep -c running
+    executable: /bin/bash
+  register: _kodi_ct_status
+  changed_when: false
+  failed_when: (_kodi_ct_status.stdout | trim | int) == 0
+
+- name: Add Kodi containers to dynamic group
+  ansible.builtin.add_host:
+    name: "kodi-{{ item }}"
+    groups: kodi
+    ansible_connection: community.proxmox.proxmox_pct_remote
+    ansible_host: "{{ hostvars[item].ansible_host }}"
+    ansible_user: root
+    proxmox_vmid: "{{ kodi_ct_id | default(301) }}"
+    ansible_paramiko_host_key_checking: false
+    ansible_paramiko_proxy_command: >-
+      {{ 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@'
+         + lookup('env', 'PRIMARY_HOST')
+         if 'lan_hosts' in (hostvars[item].group_names | default([]))
+         else omit }}
+  loop: "{{ ansible_play_hosts }}"
+
+- name: Report reconstructed kodi group
+  ansible.builtin.debug:
+    msg: >-
+      Reconstructed kodi group: host=kodi-{{ inventory_hostname }},
+      proxmox_host={{ ansible_host }},
+      vmid={{ kodi_ct_id | default(301) }},
+      connection=pct_remote

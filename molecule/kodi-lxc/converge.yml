@@ -1,0 +1,12 @@
+---
+- name: Provision Kodi LXC container
+  hosts: media_nodes
+  gather_facts: false
+  roles:
+    - kodi_lxc
+
+- name: Configure Kodi
+  hosts: media_nodes
+  gather_facts: false
+  roles:
+    - kodi_configure

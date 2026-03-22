@@ -14,7 +14,6 @@
   when: not (_jellyfin_template_stat.stat.exists | default(false))
 
 # ── Determine container network ─────────────────────────────────
-# media_nodes are always behind OpenWrt. No WAN-connected case needed.
 
 - name: Read LAN gateway from generated env
   ansible.builtin.set_fact:
@@ -36,18 +35,22 @@
       {{ inventory_hostname }}: jellyfin IP={{ _jellyfin_ct_ip }}/{{ _lan_cidr }}
       gw={{ _lan_gateway }} (OpenWrt LAN)
 
-# ── Build device and media mount entries ─────────────────────────
-- name: Build mount entries for iGPU device and media storage
+# ── Ensure media path exists on host ──────────────────────────────
+- name: Ensure media directory exists on host
+  ansible.builtin.file:
+    path: "{{ jellyfin_media_path }}"
+    state: directory
+    mode: "0755"
+
+# ── Build media mount entries ──────────────────────────────────────
+- name: Build mount entries for media storage
   ansible.builtin.set_fact:
-    _jellyfin_mount_entries: >-
-      {% set entries = [] %}
-      {% set _ = entries.append(igpu_render_device + ',mp=' + igpu_render_device) %}
-      {% set _ = entries.append(jellyfin_media_path + ',mp=/media') %}
-      {{ entries }}
+    _jellyfin_mount_entries:
+      - "{{ jellyfin_media_path }},mp=/media"
 
 - name: Display mount configuration
   ansible.builtin.debug:
-    msg: "iGPU device: {{ igpu_render_device }} → {{ igpu_render_device }}, Media: {{ jellyfin_media_path }} → /media"
+    msg: "iGPU: /dev/dri (via lxc.mount.entry), Media: {{ jellyfin_media_path }} → /media"
 
 # ── Provision via shared proxmox_lxc role ────────────────────────
 
@@ -69,7 +72,59 @@
     lxc_ct_gateway: "{{ _lan_gateway }}"
     lxc_ct_nameserver: "{{ _lan_gateway }}"
     lxc_ct_bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
+    lxc_ct_unprivileged: "{{ jellyfin_ct_unprivileged }}"
+    lxc_ct_features: "{{ jellyfin_ct_features }}"
     lxc_ct_mount_entries: "{{ _jellyfin_mount_entries }}"
+
+# ── Device passthrough via lxc.mount.entry + cgroup allowlist ────
+# Proxmox -mp mount points fail for /dev/* device directories
+# (pre-start hook exits 32). Use raw lxc.mount.entry instead.
+
+- name: Check for existing DRI mount entry
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      grep -c 'lxc.mount.entry.*dev/dri' /etc/pve/lxc/{{ jellyfin_ct_id }}.conf 2>/dev/null || echo 0
+    executable: /bin/bash
+  register: _jellyfin_dev_mounts
+  changed_when: false
+  failed_when: false
+
+- name: Stop container for device mount config
+  ansible.builtin.command:
+    cmd: pct stop {{ jellyfin_ct_id }}
+  when: (_jellyfin_dev_mounts.stdout | trim | int) == 0
+  failed_when: false
+  changed_when: true
+
+- name: Apply DRI device bind mount and cgroup allowlist
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      lxc_conf="/etc/pve/lxc/{{ jellyfin_ct_id }}.conf"
+      for entry in \
+        "lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir" \
+        "lxc.cgroup2.devices.allow: c 226:* rwm"; do
+        grep -qF "$entry" "$lxc_conf" 2>/dev/null || echo "$entry" >> "$lxc_conf"
+      done
+    executable: /bin/bash
+  when: (_jellyfin_dev_mounts.stdout | trim | int) == 0
+  changed_when: true
+
+- name: Start container with device mounts
+  ansible.builtin.command:
+    cmd: pct start {{ jellyfin_ct_id }}
+  when: (_jellyfin_dev_mounts.stdout | trim | int) == 0
+
+- name: Wait for container to be ready after restart
+  ansible.builtin.command:
+    cmd: pct exec {{ jellyfin_ct_id }} -- ls /
+  register: _jellyfin_ready
+  retries: 10
+  delay: 3
+  until: _jellyfin_ready.rc == 0
+  changed_when: false
+  when: (_jellyfin_dev_mounts.stdout | trim | int) == 0
 
 - name: Export Jellyfin static IP for downstream roles
   ansible.builtin.set_fact:

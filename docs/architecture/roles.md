@@ -630,3 +630,68 @@ None — Jellyfin is pure userspace. No kernel modules, no host config files. Th
 - VA-API drivers (`intel-media-va-driver`, `mesa-va-drivers`, `vainfo`)
 - Base web port 8096 configuration
 - Service enablement (prepared but not started)
+
+## kodi_lxc
+
+**Purpose:** Provision a Kodi media player LXC container on Proxmox via the shared `proxmox_lxc` role, with iGPU display output and HDMI audio passthrough. On-demand container for media playback.
+
+### How It Works
+
+1. Verifies the custom Kodi template exists locally; hard-fails with build instructions if missing.
+2. Reads LAN gateway/CIDR from the generated env file (media_nodes are always behind OpenWrt).
+3. Computes container IP from `kodi_ct_ip_offset` on the LAN subnet.
+4. Delegates to `proxmox_lxc` with service-specific vars: VMID 301, hostname `kodi`, 1024 MB RAM, 2 cores, 4 GB disk, `onboot: false` (on-demand).
+5. `proxmox_lxc` handles template upload, `pct create`, device mounts (`/dev/dri`, `/dev/snd`, `/dev/input`), start, and `add_host` registration in the `kodi` dynamic group.
+6. Applies cgroup device allowlists for DRI (`c 226:* rwm`), sound (`c 116:* rwm`), and input (`c 13:* rwm`).
+
+### Key Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `kodi_ct_hostname` | `kodi` | Container hostname |
+| `kodi_ct_memory` | `1024` | RAM in MB |
+| `kodi_ct_cores` | `2` | CPU cores |
+| `kodi_ct_disk` | `"4"` | Root disk size in GB |
+| `kodi_ct_template` | `kodi_lxc_template` | Custom Kodi template (built by `build-images.sh`) |
+| `kodi_ct_onboot` | `false` | On-demand, not auto-start |
+| `kodi_ct_ip_offset` | `16` | IP offset on the LAN subnet |
+
+### Exported Facts
+
+| Fact | Type | Description |
+|------|------|-------------|
+| `kodi_static_ip` | string | Computed container IP for downstream config |
+
+### Host State Changes
+
+- Container 301 created and running
+- cgroup device allowlists added to container config
+
+## kodi_configure
+
+**Purpose:** Configure Kodi media player with host-specific settings (iGPU render group, ALSA HDMI audio, web interface). Base config (packages, GBM/DRM stack, systemd service, advancedsettings.xml) is baked into the image.
+
+**Connection pattern:** Runs on the Proxmox host (targets `media_nodes`) and uses `pct exec` to run commands inside the container. This is because the role needs host-side `igpu_render_gid` from `proxmox_igpu`.
+
+### How It Works
+
+1. Verifies Kodi packages (kodi, kodi-gbm) are installed in the container.
+2. Configures iGPU access by creating render group with GID from `igpu_render_gid` and adding kodi user to render, video, audio, and input groups.
+3. Deploys `guisettings.xml` to enable Kodi web interface on port 8080 with EventServer.
+4. Deploys `.asoundrc` for ALSA HDMI audio output.
+5. Enables the `kodi-standalone` systemd service.
+
+### Key Variables
+
+| Variable | Env Var | Default | Description |
+|----------|---------|---------|-------------|
+| `kodi_web_port` | -- | `8080` | Web interface port |
+
+### Baked into Image (NOT configured here)
+
+- Kodi packages (`kodi`, `kodi-gbm`, `kodi-peripheral-joystick`)
+- VA-API drivers (`intel-media-va-driver`, `mesa-va-drivers`, `vainfo`)
+- libcec and cec-utils
+- `kodi-standalone` systemd service unit
+- `advancedsettings.xml` buffer/cache tuning
+- `kodi` system user

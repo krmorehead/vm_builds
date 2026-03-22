@@ -61,6 +61,11 @@ Gaming Rig always uses the WAN bridge.
 
 ## Prerequisites
 
+- Sunshine Streaming Server project (2026-03-21-14) — creates the `gaming_vm`
+  and `gaming_configure` roles, the pre-built Windows disk image with Sunshine
+  baked in, and validates iGPU PCI passthrough on all 4 test nodes. This
+  project extends that foundation with discrete GPU passthrough on dedicated
+  gaming hardware.
 - Shared infrastructure: `proxmox_pci_passthrough` role (project 00) — extended
   to handle discrete GPU binding via vfio-pci (exports `gpu_pci_devices` or
   equivalent for gaming hosts)
@@ -230,6 +235,15 @@ See: `image-management-patterns` skill.
 _Depends on M1 (images ready). Requires `proxmox_pci_passthrough` extended
 for discrete GPU._ Add the provision and configure plays to `site.yml`.
 Integration is consolidated here.
+
+**Foundation from Sunshine project (2026-03-21-14):** The `gaming_vm` role,
+`gaming_configure` role, pre-built Windows disk image, and iGPU PCI
+passthrough (vfio-pci binding, IOMMU validation, q35/OVMF VM creation) are
+created and validated on all 4 test nodes by the Sunshine project. This
+milestone extends the role to support discrete GPU passthrough on dedicated
+gaming hardware — replacing `igpu_pci_address` with `gpu_pci_devices` from
+`proxmox_pci_passthrough`, increasing VM resources (8+ cores, 8+ GB RAM,
+128+ GB disk), and adding NVIDIA/AMD-specific IOMMU group handling.
 
 Create the `gaming_vm` role: q35 machine type, OVMF UEFI, virtio-scsi, discrete
 GPU via hostpci. The GPU PCI address comes from `proxmox_pci_passthrough`
@@ -551,6 +565,15 @@ _Depends on M1–M7._
 
 ## Future Integration Considerations
 
+- **Sunshine project (2026-03-21-14)**: Creates the `gaming_vm` and
+  `gaming_configure` roles, the pre-built Windows disk image with Sunshine
+  and GZDoom baked in, and validates iGPU PCI passthrough on all 4 test
+  nodes. This Gaming Rig project extends that foundation: discrete GPU
+  passthrough replaces iGPU, VM resources scale up, and Steam + full game
+  library are added. The iGPU passthrough flow (vfio-pci binding, IOMMU
+  validation, q35/OVMF creation, QEMU Guest Agent IP discovery) is already
+  proven by the Sunshine project — discrete GPU passthrough adds
+  NVIDIA/AMD-specific driver blacklisting and IOMMU group handling.
 - **Moonlight client**: The Moonlight client (project 10) on the Home
   Entertainment Box streams from this Gaming Rig's Sunshine server.
   Pairing requires both services operational on the LAN.

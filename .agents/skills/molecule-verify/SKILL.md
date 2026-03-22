@@ -178,6 +178,56 @@ Verify remote messages don't pollute local logs:
 - _output | regex_search('RADIOS=phy') is not none
 ```
 
+## grep -c with find -exec in containers
+
+When using `find ... -exec grep -c 'pattern' {} +` inside a container (via `pct exec`), `grep -c` outputs `filename:count` when multiple files match, but just `count` for a single file. Jinja2's `| int` filter returns 0 for `filename:count` strings, silently breaking assertions.
+
+ALWAYS use `grep -rch` with `awk` sum instead:
+
+```yaml
+# BAD — breaks when multiple files match
+pct exec {{ ct_id }} -- find /var/log/remote/ -name '*.log' -exec grep -c 'pattern' {} + 2>/dev/null | head -1
+
+# GOOD — numeric output regardless of file count
+pct exec {{ ct_id }} -- grep -rch 'pattern' /var/log/remote/ 2>/dev/null | awk '{sum+=$1} END {print sum+0}'
+```
+
+Previous bug: rsyslog separation test used `find -exec grep -c`. On mesh1, multiple log files existed under different hostname directories. `grep -c` output `/var/log/remote/home/e2e_daemon_a.log:11`. Jinja2 `| int` converted this to 0, failing the assertion.
+
+## Host-to-container TCP fallback pattern
+
+When verifying TCP-based services in containers, host-to-container TCP may fail on specific hosts (e.g., mesh1) even when ICMP ping succeeds and br_netfilter is disabled. Add a fallback path:
+
+```yaml
+- name: Send log via host TCP
+  ansible.builtin.shell:
+    cmd: logger --tcp -n {{ container_ip }} -P 514 "test message"
+  register: _send
+  failed_when: false
+  retries: 5
+  delay: 5
+  until: _send.rc == 0
+
+- name: Diagnose TCP failure
+  ansible.builtin.shell:
+    cmd: |
+      echo "=== nft ruleset ==="
+      nft list ruleset 2>/dev/null | head -40
+      echo "=== raw TCP ==="
+      timeout 3 bash -c "echo test > /dev/tcp/{{ container_ip }}/514" 2>&1 && echo "ok" || echo "fail"
+    executable: /bin/bash
+  when: _send.rc != 0
+
+- name: Fallback via pct exec
+  ansible.builtin.shell:
+    cmd: >-
+      pct exec {{ ct_id }} --
+      logger --tcp -n 127.0.0.1 -P 514 "test message"
+  when: _send.rc != 0
+```
+
+Previous bug: mesh1 host consistently failed `logger --tcp` to its rsyslog container (10.10.10.14) despite ping succeeding and br_netfilter disabled. Root cause unresolved (likely nftables or conntrack). Fallback via `pct exec` with localhost TCP verifies rsyslog works without host-level network dependency.
+
 ## Common failures
 
 - 0 assertions ran → dynamic group empty (add reconstruction)

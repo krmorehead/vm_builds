@@ -10,16 +10,15 @@
 
 # ── Configure iGPU access ─────────────────────────────────────────
 
-- name: Create render group for iGPU access
-  ansible.builtin.command:
-    cmd: pct exec {{ jellyfin_ct_id }} -- groupadd -g {{ igpu_render_gid }} render 2>/dev/null || true
+- name: Create render group and add jellyfin user
+  ansible.builtin.shell:
+    cmd: |
+      pct exec {{ jellyfin_ct_id }} -- bash -c '
+        groupadd -g {{ igpu_render_gid }} render 2>/dev/null || true
+        usermod -a -G render jellyfin 2>/dev/null || true
+      '
+    executable: /bin/bash
   changed_when: true
-
-- name: Add jellyfin user to render group
-  ansible.builtin.command:
-    cmd: pct exec {{ jellyfin_ct_id }} -- usermod -a -G render jellyfin
-  changed_when: true
-  failed_when: false
 
 - name: Verify VA-API drivers are working
   ansible.builtin.command:
@@ -52,16 +51,16 @@
   when: jellyfin_admin_password | length == 0
 
 # ── Configure Jellyfin server settings ─────────────────────────────
+# Use copy + pct push to avoid shell escaping issues with heredocs
 
-- name: Create Jellyfin configuration directory
+- name: Ensure config directory exists in container
   ansible.builtin.command:
     cmd: pct exec {{ jellyfin_ct_id }} -- mkdir -p /etc/jellyfin
   changed_when: true
 
-- name: Configure Jellyfin network settings
-  ansible.builtin.command:
-    cmd: pct exec {{ jellyfin_ct_id }} -- bash -c '
-      cat > /etc/jellyfin/network.xml << "NETWORK_EOF"
+- name: Write network config to host temp
+  ansible.builtin.copy:
+    content: |
       <?xml version="1.0" encoding="UTF-8"?>
       <Network>
         <BaseUrl>/</BaseUrl>
@@ -69,13 +68,17 @@
         <EnableHttps>false</EnableHttps>
         <EnableUPnP>false</EnableUPnP>
       </Network>
-      NETWORK_EOF'
+    dest: /tmp/jellyfin_network.xml
+    mode: "0644"
+
+- name: Push network config into container
+  ansible.builtin.command:
+    cmd: pct push {{ jellyfin_ct_id }} /tmp/jellyfin_network.xml /etc/jellyfin/network.xml
   changed_when: true
 
-- name: Configure Jellyfin transcoding settings
-  ansible.builtin.command:
-    cmd: pct exec {{ jellyfin_ct_id }} -- bash -c '
-      cat > /etc/jellyfin/transcoding.xml << "TRANSCODE_EOF"
+- name: Write transcoding config to host temp
+  ansible.builtin.copy:
+    content: |
       <?xml version="1.0" encoding="UTF-8"?>
       <Transcoding>
         <TempPath>/var/lib/jellyfin/transcodes</TempPath>
@@ -84,13 +87,17 @@
         <HardwareAccelerationType>vaapi</HardwareAccelerationType>
         <VaApiDevice>{{ igpu_render_device }}</VaApiDevice>
       </Transcoding>
-      TRANSCODE_EOF'
+    dest: /tmp/jellyfin_transcoding.xml
+    mode: "0644"
+
+- name: Push transcoding config into container
+  ansible.builtin.command:
+    cmd: pct push {{ jellyfin_ct_id }} /tmp/jellyfin_transcoding.xml /etc/jellyfin/transcoding.xml
   changed_when: true
 
-- name: Configure media libraries paths
-  ansible.builtin.command:
-    cmd: pct exec {{ jellyfin_ct_id }} -- bash -c '
-      cat > /etc/jellyfin/library.xml << "LIBRARY_EOF"
+- name: Write library config to host temp
+  ansible.builtin.copy:
+    content: |
       <?xml version="1.0" encoding="UTF-8"?>
       <Library>
         <SaveMetadataHidden>false</SaveMetadataHidden>
@@ -103,26 +110,22 @@
           </CollectionFolder>
         </CollectionFolders>
       </Library>
-      LIBRARY_EOF'
-  changed_when: true
+    dest: /tmp/jellyfin_library.xml
+    mode: "0644"
 
-# ── Configure admin user ───────────────────────────────────────────
-
-- name: Create Jellyfin admin user
+- name: Push library config into container
   ansible.builtin.command:
-    cmd: pct exec {{ jellyfin_ct_id }} -- bash -c '
-      /usr/share/jellyfin/bin/jellyfin \
-        --programdata-path=/var/lib/jellyfin \
-        --webdir=/usr/share/jellyfin/web \
-        --configdir=/etc/jellyfin \
-        --logdir=/var/log/jellyfin \
-        --ffdkmount=/dev/dri \
-        --savedir=/var/lib/jellyfin \
-        --set-default-user admin \
-        --set-password admin:"{{ _jellyfin_admin_password }}" 2>/dev/null || true'
+    cmd: pct push {{ jellyfin_ct_id }} /tmp/jellyfin_library.xml /etc/jellyfin/library.xml
   changed_when: true
-  failed_when: false
-  no_log: true
+
+- name: Clean up host temp files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /tmp/jellyfin_network.xml
+    - /tmp/jellyfin_transcoding.xml
+    - /tmp/jellyfin_library.xml
 
 # ── Enable and start Jellyfin service ─────────────────────────────
 
@@ -137,18 +140,20 @@
   changed_when: true
 
 - name: Wait for Jellyfin web interface to be ready
-  ansible.builtin.command:
-    cmd: pct exec {{ jellyfin_ct_id }} -- bash -c '
-      for i in {1..30}; do
-        if curl -s http://127.0.0.1:8096 >/dev/null 2>&1; then
-          echo "Jellyfin web interface is ready"
-          exit 0
-        fi
-        echo "Waiting for Jellyfin... ($i/30)"
-        sleep 2
-      done
-      echo "Jellyfin web interface failed to start"
-      exit 1'
+  ansible.builtin.shell:
+    cmd: |
+      pct exec {{ jellyfin_ct_id }} -- bash -c '
+        for i in $(seq 1 30); do
+          if curl -s http://127.0.0.1:8096 >/dev/null 2>&1; then
+            echo "Jellyfin web interface is ready"
+            exit 0
+          fi
+          sleep 2
+        done
+        echo "Jellyfin web interface failed to start"
+        exit 1
+      '
+    executable: /bin/bash
   register: _jellyfin_ready
   changed_when: false
   failed_when: _jellyfin_ready.rc != 0
@@ -160,8 +165,6 @@
     msg: >-
       Jellyfin configured successfully!
       Web interface: http://{{ jellyfin_static_ip }}:8096
-      Admin user: admin
-      Admin password: {{ _jellyfin_admin_password | length }} characters
       iGPU device: {{ igpu_render_device }}
       Media path: /media
       VA-API: {{ 'Enabled' if 'VAProfile' in _vainfo_check.stdout else 'Software fallback' }}

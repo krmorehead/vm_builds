@@ -82,6 +82,55 @@ For required env vars: use `${VAR_NAME}` and ensure the var is always set in `te
 
 Previous bug: `RSYSLOG_HOME_SERVER: ${RSYSLOG_HOME_SERVER:-}` in `molecule.yml` caused "Invalid placeholder in string" and prevented all molecule runs from starting.
 
+## File Deployment via copy + pct push (LXC Containers)
+
+NEVER use heredocs inside `ansible.builtin.command` or `ansible.builtin.shell` for deploying config files into LXC containers via `pct exec -- bash -c 'cat > file << EOF ... EOF'`. YAML string folding (both `>-` and `|`) interacts badly with heredoc syntax, causing bash to receive malformed commands.
+
+ALWAYS use the `ansible.builtin.copy` + `pct push` pattern:
+
+```yaml
+- name: Write config to host temp
+  ansible.builtin.copy:
+    content: |
+      [Section]
+      key = {{ ansible_variable }}
+      static = value
+    dest: /tmp/service_config.conf
+    mode: "0644"
+
+- name: Push into container
+  ansible.builtin.command:
+    cmd: pct push {{ ct_id }} /tmp/service_config.conf /etc/service/config.conf
+  changed_when: true
+
+- name: Clean up temp
+  ansible.builtin.file:
+    path: /tmp/service_config.conf
+    state: absent
+```
+
+This pattern:
+- Preserves Jinja2 variable interpolation (in `copy.content`)
+- Avoids shell escaping across 4 layers (local bash → SSH → pct exec → bash -c)
+- Works reliably for XML, YAML, INI, and any other config format
+- Is idempotent (copy + push overwrites existing files)
+
+Previous bug: `pct exec {{ ct_id }} -- bash -c 'cat > /etc/jellyfin/network.xml << "NETWORK_EOF" ...'` via `ansible.builtin.command` with `>-` folded scalar collapsed all newlines onto a single line. Bash received the heredoc delimiter and content on the same line, causing `syntax error near unexpected token '<'`. Same issue affected Kodi's `guisettings.xml` and `.asoundrc` deployments.
+
+## Shell operators in pct exec
+
+When passing shell operators (`||`, `&&`, `2>/dev/null`, `>`) to `pct exec`, they are interpreted as literal arguments, not shell syntax. ALWAYS wrap in `bash -c '...'`:
+
+```yaml
+# BAD — 2>/dev/null and || true are literal args to groupadd
+cmd: pct exec {{ ct_id }} -- groupadd -g 993 render 2>/dev/null || true
+
+# GOOD — bash interprets the shell operators
+cmd: pct exec {{ ct_id }} -- bash -c 'groupadd -g 993 render 2>/dev/null || true'
+```
+
+Previous bug: `groupadd` received `2>/dev/null` and `||` as arguments, failing with "Usage: groupadd [options] GROUP".
+
 ## build-images.sh Shell Escaping
 
 When writing config files via `pct exec -- bash -c '...'` inside `remote_cmd "..."`, there are 4 layers of shell interpretation: (1) local bash double quotes, (2) SSH, (3) remote bash (parsing single quotes around bash -c), (4) bash -c with heredoc.

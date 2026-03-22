@@ -70,6 +70,14 @@ jellyfin_lxc_template_path: images/jellyfin-debian-12-amd64.tar.zst
 jellyfin_ct_ip_offset: 15
 jellyfin_media_path: /mnt/media
 
+# ── Kodi LXC ───────────────────────────────────────────────────
+# Custom image built by build-images.sh: Debian 12 + kodi-standalone + kodi-gbm
+# + Mesa VA-API drivers + libcec baked in. GBM/DRM direct rendering.
+# Run ./build-images.sh before first deploy.
+kodi_lxc_template: kodi-debian-12-amd64.tar.zst
+kodi_lxc_template_path: images/kodi-debian-12-amd64.tar.zst
+kodi_ct_ip_offset: 16
+
 # ── OpenWrt Router (VM) ──────────────────────────────────────────
 # Custom image built by build-images.sh: mesh/security/DNS packages baked in.
 # Run ./build-images.sh before first deploy.

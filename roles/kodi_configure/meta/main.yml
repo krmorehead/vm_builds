@@ -1,0 +1,13 @@
+---
+dependencies: []
+
+galaxy_info:
+  author: kyle
+  license: proprietary
+  role_name: kodi_configure
+  description: Configure Kodi media player in LXC container with GBM/DRM display, ALSA audio, and web interface
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm

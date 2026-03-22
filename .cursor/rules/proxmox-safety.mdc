@@ -285,6 +285,12 @@ alwaysApply: true
 - NEVER use `failed_when: false` on client send commands (`logger --tcp`, `dig`, `curl`). Let connection errors fail immediately with the real error. Reserve `failed_when: false` for result-checking commands (`grep -c` with expected rc=1).
 - NEVER add `set -o pipefail` to non-pipeline commands. It adds noise and obscures the convention that pipefail signals a pipeline.
 
+## pct_remote gather_facts buffer overflow
+- NEVER use `gather_facts: true` on plays targeting `pct_remote` dynamic groups unless the configure role actually references `ansible_*` facts. The `pct_remote` connection plugin has a limited JSON output buffer. Hosts with many block devices (loop0-7, dm-0 through dm-8, SSD partitions) produce `ansible_devices` output that exceeds the buffer, causing "Module result deserialization failed: No end of json char found".
+- ALWAYS set `gather_facts: false` for `pct_remote` configure plays. None of the current configure roles (wireguard, pihole, rsyslog, netdata) use gathered facts — they only use role variables.
+- If a future role needs specific facts, use `gather_subset: ['!hardware']` to skip the device-heavy hardware facts instead of gathering all facts.
+- Previous bug: `wireguard-ai` failed during fact gathering because the `ai` host (AMD Ryzen, 128GB SSD with LVM thin pool) had 15+ block devices. The full fact JSON exceeded the `pct_remote` buffer. Other hosts with fewer devices succeeded.
+
 ## Documentation accuracy
 - When changing a role's exported facts, bridge names, device paths, or connection patterns, ALWAYS update `docs/architecture/` in the same commit.
 - `overview.md` contains two role-reference diagrams (the GPU decomposition tree and the role catalog). Both MUST list the same exports — if you update one, update the other.

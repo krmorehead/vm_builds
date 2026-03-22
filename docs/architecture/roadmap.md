@@ -175,6 +175,20 @@ Delivered:
 - Hardware-accelerated transcoding with automatic software fallback
 - Support for both Intel (i915) and AMD (amdgpu) GPUs via dual VA-API drivers
 
+### `2026-03-09-09` Kodi Media Player ✓
+
+LXC container running Kodi as a local media player and home theater frontend. Renders directly to the physical display via GBM/DRM using the shared iGPU. HDMI audio output via ALSA bind mount. On-demand container (not auto-start).
+
+Delivered:
+- `kodi_lxc` role (device mounts for DRI/sound/input, cgroup allowlists)
+- `kodi_configure` role (iGPU render group, ALSA HDMI audio, web interface)
+- Custom Debian 12 template with kodi-standalone + GBM/DRM + Mesa + libcec baked in
+- Per-feature molecule scenario (`kodi-lxc`)
+- `tasks/reconstruct_kodi_group.yml` for dynamic group reconstruction
+- Rollback plays in `playbooks/cleanup.yml` (`kodi-rollback` tag)
+- Full integration testing in `molecule/default/verify.yml`
+- Display-exclusive support (hookscript attachment, deployed by Kiosk project)
+
 ## Medium-Term Goals
 
 ### Additional VM/LXC Types

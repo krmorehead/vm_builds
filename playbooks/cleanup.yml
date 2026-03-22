@@ -300,6 +300,22 @@
         executable: /bin/bash
       changed_when: true
 
+# ── Per-feature rollback: Kodi LXC ─────────────────────────────
+
+- name: Rollback Kodi container
+  hosts: media_nodes
+  gather_facts: false
+  tags: [kodi-rollback, never]
+  tasks:
+    - name: Stop and destroy Kodi container
+      ansible.builtin.shell:
+        cmd: |
+          pct stop {{ kodi_ct_id }} 2>/dev/null || true
+          sleep 2
+          pct destroy {{ kodi_ct_id }} --purge 2>/dev/null || true
+        executable: /bin/bash
+      changed_when: true
+
 # ── Full host restore (existing) ────────────────────────────────
 
 - name: Restore Proxmox host from backup

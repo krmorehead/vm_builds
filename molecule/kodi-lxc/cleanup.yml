@@ -1,0 +1,22 @@
+---
+- name: Destroy Kodi container
+  hosts: media_nodes
+  gather_facts: false
+  vars:
+    kodi_ct_id: 301
+  tasks:
+    - name: Stop Kodi container
+      ansible.builtin.command:
+        cmd: pct stop {{ kodi_ct_id }}
+      failed_when: false
+      changed_when: true
+
+    - name: Wait for container to stop
+      ansible.builtin.pause:
+        seconds: 2
+
+    - name: Destroy Kodi container
+      ansible.builtin.command:
+        cmd: pct destroy {{ kodi_ct_id }} --purge
+      failed_when: false
+      changed_when: true

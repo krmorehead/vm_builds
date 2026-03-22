@@ -97,12 +97,18 @@ Phase 3: Services (flavor groups span both primary + LAN hosts)
   Play 13: homeassistant_lxc (service_nodes) tag: homeassistant
            deploy_stamp: homeassistant_lxc
   Play 14: homeassistant_configure (service_nodes) tag: homeassistant
-  Play 15: wireguard_lxc (vpn_nodes)      tag: wireguard
+  Play 15: jellyfin_lxc (media_nodes)    tag: media
+           deploy_stamp: jellyfin_lxc
+  Play 16: jellyfin_configure (media_nodes) tag: media
+  Play 17: kodi_lxc (media_nodes)        tag: media
+           deploy_stamp: kodi_lxc
+  Play 18: kodi_configure (media_nodes)  tag: media
+  Play 19: wireguard_lxc (vpn_nodes)      tag: wireguard
            deploy_stamp: wireguard_lxc
-  Play 16: wireguard_configure (wireguard) tag: wireguard
-  Play 17: openwrt_mesh_lxc (wifi_nodes:!router_nodes) tag: mesh-wifi
+  Play 20: wireguard_configure (wireguard) tag: wireguard
+  Play 21: openwrt_mesh_lxc (wifi_nodes:!router_nodes) tag: mesh-wifi
            deploy_stamp: openwrt_mesh_lxc
-  Play 18: openwrt_mesh_configure (openwrt_mesh) tag: mesh-wifi
+  Play 22: openwrt_mesh_configure (openwrt_mesh) tag: mesh-wifi
 
 Per-feature plays (opt-in via --tags, tagged with [never])
 Bootstrap cleanup (proxmox:!lan_hosts)    tag: cleanup
@@ -207,6 +213,7 @@ All VMIDs defined in `group_vars/all.yml`.
 | `tasks/reconstruct_netdata_group.yml` | Reusable dynamic group reconstruction for Netdata |
 | `tasks/reconstruct_homeassistant_group.yml` | Reusable dynamic group reconstruction for Home Assistant |
 | `tasks/reconstruct_jellyfin_group.yml` | Reusable dynamic group reconstruction for Jellyfin |
+| `tasks/reconstruct_kodi_group.yml` | Reusable dynamic group reconstruction for Kodi |
 | `tasks/bootstrap_lan_host.yml` | Reusable bootstrap for LAN hosts (DHCP lease + API token) |
 | `tasks/cleanup_lan_host.yml` | Reusable per-LAN-host cleanup (SSH from primary host) |
 | `molecule/default/` | Full integration tests (home, mesh1, ai, mesh2 — 4-node) |
@@ -219,6 +226,7 @@ All VMIDs defined in `group_vars/all.yml`.
 | `molecule/netdata-lxc/` | Per-feature scenario for Netdata monitoring agent container |
 | `molecule/homeassistant-lxc/` | Per-feature scenario for Home Assistant LXC container |
 | `molecule/jellyfin-lxc/` | Per-feature scenario for Jellyfin media server container |
+| `molecule/kodi-lxc/` | Per-feature scenario for Kodi media player container |
 | `molecule/openwrt-syslog/` | Per-feature scenario for OpenWrt syslog forwarding to rsyslog |
 | `molecule/mesh1-infra/` | Lightweight infra-only on mesh1 (quick iteration) |
 | `wol.sh` | Wake-on-LAN utility: wake hosts by alias or MAC. Proxied WoL for LAN hosts via PRIMARY_HOST |

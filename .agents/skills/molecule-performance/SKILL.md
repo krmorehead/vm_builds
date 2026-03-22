@@ -70,6 +70,32 @@ Use `./build-images.sh --host <ip> --only <target>` to rebuild a single image. F
 
 Every service MUST have a custom image with ALL packages baked in. ZERO configure roles should install packages at runtime.
 
+## pct_remote gather_facts Avoidance
+
+NEVER use `gather_facts: true` on plays targeting `pct_remote` dynamic groups unless the configure role actually references `ansible_*` facts. The `pct_remote` connection plugin pipes the setup module's JSON through `pct exec` and SSH. Hosts with many block devices (LVM thin pool, loop devices, device-mapper) generate `ansible_devices` output that exceeds the buffer, causing "Module result deserialization failed: No end of json char found".
+
+ALWAYS default to `gather_facts: false` for `pct_remote` configure plays. If specific facts are needed, use `gather_subset: ['!hardware']` to skip the device-heavy hardware facts.
+
+Previous bug: `wireguard-ai` via `pct_remote` — the `ai` host had 15+ block devices, producing ~12KB of `ansible_devices` JSON. The full setup module output (~20KB) was truncated by `pct exec`, causing JSON deserialization failure. Other hosts with fewer devices succeeded.
+
+## serial Throttling for Multi-Container pct_remote
+
+When a configure play targets 4+ `pct_remote` containers, each task opens a NEW paramiko SSH connection. With 4 containers × 8-10 tasks, that's 32-40 SSH connections opening/closing in rapid succession through the same SSH server. This overwhelms `sshd` and causes "Connection reset by peer", "Broken pipe", and "SSH session not active" errors.
+
+ALWAYS add `serial: 2` to configure plays that target 4+ `pct_remote` containers:
+
+```yaml
+- name: Configure WireGuard
+  hosts: wireguard
+  gather_facts: false
+  serial: 2
+  tags: [wireguard]
+  roles:
+    - wireguard_configure
+```
+
+Previous bug: WireGuard configure ran 4 containers in parallel. Two containers (wireguard-home, wireguard-mesh1) both routed SSH through `home`'s sshd. The rapid connection churn caused "Connection reset by peer (104)" on both. Fix: `serial: 2` processes containers in batches, halving simultaneous SSH load.
+
 ## Play Merging
 
 When two verify plays target the same `hosts:` group with the same `gather_facts:` setting, merge them into one play to eliminate startup overhead.

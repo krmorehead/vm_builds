@@ -512,10 +512,11 @@ site.yml (target)
 │   └── Play 14: homeassistant    [services]    homeassistant_configure
 │
 ├── Phase: Media
-│   ├── Play 15: media_nodes      [media]       jellyfin_lxc, kodi_lxc, moonlight_lxc, deploy_stamp
+│   ├── Play 15: media_nodes      [media]       jellyfin_lxc, deploy_stamp
 │   ├── Play 16: media_nodes      [media]       jellyfin_configure
-│   ├── Play 17: kodi             [media]       kodi_configure
-│   └── Play 18: moonlight        [media]       moonlight_configure
+│   ├── Play 17: media_nodes      [media]       kodi_lxc, deploy_stamp
+│   ├── Play 18: media_nodes      [media]       kodi_configure
+│   └── (future) moonlight_lxc, moonlight_configure
 │
 ├── Phase: Desktop
 │   ├── Play 19: desktop_nodes    [desktop]     desktop_vm, kiosk_lxc, deploy_stamp

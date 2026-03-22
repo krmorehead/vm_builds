@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Builds custom images for the vm_builds project.
-# Produces eight outputs:
+# Produces nine outputs:
 #   1. Mesh LXC rootfs        — minimal OpenWrt, no firewall, WiFi packages      (local build)
 #   2. Router VM combined      — full OpenWrt with mesh/security/DNS packages     (local build)
 #   3. Pi-hole LXC template    — Debian 12 with Pi-hole pre-installed             (remote build on Proxmox)
@@ -11,11 +11,12 @@ set -euo pipefail
 #   6. Netdata LXC template    — Debian 12 with Netdata monitoring agent pre-installed (remote build on Proxmox)
 #   7. WireGuard LXC template  — Debian 12 with wireguard-tools + iptables baked in (remote build on Proxmox)
 #   8. Home Assistant template — Debian 12 with Docker CE and HA container pre-pulled (remote build on Proxmox)
+#   9. Kodi LXC template      — Debian 12 with kodi-standalone + GBM/DRM + Mesa + libcec (remote build on Proxmox)
 #
 # Usage: ./build-images.sh [--clean] [--host <proxmox-ip>] [--only <target>]
 #   --clean          Remove cached Image Builder before downloading fresh copy
 #   --host <ip>      Proxmox host for remote image builds. Required for remote-built templates.
-#   --only <target>  Build only the specified target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant).
+#   --only <target>  Build only the specified target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGES_DIR="$(cd "${SCRIPT_DIR}/../images" && pwd)"
@@ -873,10 +874,205 @@ WIREGUARD_BASE_TEMPLATE="debian-12-standard_12.12-1_amd64.tar.zst"
 WIREGUARD_OUTPUT_NAME="wireguard-debian-12-amd64.tar.zst"
 WIREGUARD_BUILD_VMID=995
 
+# Kodi LXC template (built remotely on Proxmox via pct create/exec/vzdump)
+KODI_BASE_TEMPLATE="debian-12-standard_12.12-1_amd64.tar.zst"
+KODI_OUTPUT_NAME="kodi-debian-12-amd64.tar.zst"
+KODI_BUILD_VMID=993
+
 # Home Assistant LXC template (built remotely on Proxmox via pct create/exec/vzdump)
 HOMEASSISTANT_BASE_TEMPLATE="debian-12-standard_12.12-1_amd64.tar.zst"
 HOMEASSISTANT_OUTPUT_NAME="homeassistant-debian-12-amd64.tar.zst"
 HOMEASSISTANT_BUILD_VMID=994
+
+cleanup_kodi_build() {
+    local vmid="${KODI_BUILD_VMID}"
+    if [[ -n "$PROXMOX_HOST" ]]; then
+        log "Cleaning up Kodi build container ${vmid}..."
+        remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
+    fi
+}
+
+build_kodi_lxc() {
+    log "Building Kodi LXC template (remote on Proxmox)..."
+    local base_template="${IMAGES_DIR}/${KODI_BASE_TEMPLATE}"
+    local output="${IMAGES_DIR}/${KODI_OUTPUT_NAME}"
+    local vmid="${KODI_BUILD_VMID}"
+
+    if [[ -f "$output" ]]; then
+        log "Kodi template already exists at ${output}"
+        log "  Delete it and re-run to rebuild."
+        return
+    fi
+
+    if [[ -z "$PROXMOX_HOST" ]]; then
+        die "Kodi build requires --host <proxmox-ip>. Example:
+  ./build-images.sh --host 192.168.86.201"
+    fi
+
+    if [[ ! -f "$base_template" ]]; then
+        die "Base template not found: ${base_template}. Download it first:
+  wget -O ${base_template} \\
+    http://download.proxmox.com/images/system/${KODI_BASE_TEMPLATE}"
+    fi
+
+    trap cleanup_kodi_build EXIT
+
+    remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
+
+    local remote_template="/var/lib/vz/template/cache/${KODI_BASE_TEMPLATE}"
+    if ! remote_cmd "test -f ${remote_template}"; then
+        log "Uploading base template to Proxmox host..."
+        # shellcheck disable=SC2086
+        scp $SSH_OPTS "$base_template" "root@${PROXMOX_HOST}:${remote_template}"
+    fi
+
+    local mgmt_bridge
+    mgmt_bridge=$(remote_cmd "ip -o route show default | awk '{print \$5}' | head -1")
+    log "Management bridge: ${mgmt_bridge}"
+
+    log "Creating temporary build container (VMID ${vmid})..."
+    remote_cmd "pct create ${vmid} local:vztmpl/${KODI_BASE_TEMPLATE} \
+        --hostname kodi-build \
+        --memory 1024 \
+        --cores 2 \
+        --rootfs local-lvm:4 \
+        --net0 name=eth0,bridge=${mgmt_bridge},ip=dhcp \
+        --nameserver 8.8.8.8 \
+        --unprivileged 1 \
+        --start false"
+
+    log "Starting build container..."
+    remote_cmd "pct start ${vmid}"
+
+    log "Waiting for container to start..."
+    local retries=0
+    while ! remote_cmd "pct exec ${vmid} -- ls / >/dev/null 2>&1"; do
+        retries=$((retries + 1))
+        if (( retries > 20 )); then
+            remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
+            die "Build container never became ready after 40s"
+        fi
+        sleep 2
+    done
+    log "Container is ready."
+
+    log "Waiting for network inside build container..."
+    local net_retries=0
+    while ! remote_cmd "pct exec ${vmid} -- bash -c 'getent hosts deb.debian.org >/dev/null 2>&1'"; do
+        net_retries=$((net_retries + 1))
+        if (( net_retries > 15 )); then
+            remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
+            die "Build container never got network after 30s"
+        fi
+        sleep 2
+    done
+    log "Network ready."
+
+    log "Installing Kodi GBM/DRM stack, Mesa drivers, and libcec..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+
+        apt-get install -y --no-install-recommends \
+            kodi \
+            kodi-peripheral-joystick \
+            libcec6 \
+            cec-utils \
+            alsa-utils
+
+        # VA-API drivers for both Intel and AMD iGPU
+        apt-get install -y --no-install-recommends \
+            intel-media-va-driver \
+            mesa-va-drivers \
+            vainfo
+
+        # Create kodi system user for headless operation
+        useradd -r -m -G audio,video,input,render -s /bin/bash kodi 2>/dev/null || true
+
+        # Pre-configure kodi-standalone systemd service
+        cat > /etc/systemd/system/kodi-standalone.service << \"SERVICE_EOF\"
+[Unit]
+Description=Kodi Standalone (GBM/DRM)
+After=systemd-user-sessions.service network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+User=kodi
+Group=kodi
+PAMName=login
+Type=simple
+ExecStart=/usr/bin/kodi-standalone
+Restart=on-failure
+RestartSec=5
+StandardInput=tty
+TTYPath=/dev/tty7
+TTYReset=yes
+TTYVHangup=yes
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+        systemctl daemon-reload
+
+        # Pre-configure advancedsettings.xml template for buffer/cache tuning
+        mkdir -p /home/kodi/.kodi/userdata
+        cat > /home/kodi/.kodi/userdata/advancedsettings.xml << \"SETTINGS_EOF\"
+<advancedsettings version=\"1.0\">
+  <cache>
+    <memorysize>52428800</memorysize>
+    <readfactor>4</readfactor>
+  </cache>
+  <network>
+    <curlclienttimeout>30</curlclienttimeout>
+    <curllowspeedtime>30</curllowspeedtime>
+  </network>
+</advancedsettings>
+SETTINGS_EOF
+        chown -R kodi:kodi /home/kodi/.kodi
+
+        apt-get clean 2>/dev/null || true
+        rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    '"
+
+    log "Verifying Kodi installation..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        dpkg -l kodi | grep -c ^ii || { echo FAIL: kodi not installed; exit 1; }
+        test -f /etc/systemd/system/kodi-standalone.service || { echo FAIL: service missing; exit 1; }
+        test -f /home/kodi/.kodi/userdata/advancedsettings.xml || { echo FAIL: settings missing; exit 1; }
+        id kodi || { echo FAIL: kodi user missing; exit 1; }
+        echo ALL CHECKS PASSED
+    '"
+    log "Kodi smoke test passed."
+
+    log "Stopping build container..."
+    remote_cmd "pct stop ${vmid}"
+    sleep 2
+
+    log "Exporting container as template via vzdump..."
+    remote_cmd "vzdump ${vmid} --dumpdir /tmp --compress zstd --mode stop"
+
+    local vzdump_file
+    vzdump_file=$(remote_cmd "ls -t /tmp/vzdump-lxc-${vmid}-*.tar.zst 2>/dev/null | head -1")
+    if [[ -z "$vzdump_file" ]]; then
+        remote_cmd "pct destroy ${vmid} --purge 2>/dev/null; true"
+        die "vzdump archive not found on Proxmox host"
+    fi
+    log "vzdump archive: ${vzdump_file}"
+
+    log "Downloading template to ${output}..."
+    mkdir -p "$IMAGES_DIR"
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS "root@${PROXMOX_HOST}:${vzdump_file}" "$output"
+
+    log "Cleaning up build container and vzdump archive..."
+    remote_cmd "pct destroy ${vmid} --purge 2>/dev/null; rm -f '${vzdump_file}'; true"
+
+    trap - EXIT
+
+    log "Kodi LXC template: ${output}"
+    log "  Size: $(du -h "$output" | cut -f1)"
+}
 
 cleanup_wireguard_build() {
     local vmid="${WIREGUARD_BUILD_VMID}"
@@ -1210,12 +1406,12 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --only)
-            [[ -n "${2:-}" ]] || die "--only requires a target (mesh, router, pihole, rsyslog, netdata, wireguard, homeassistant)"
+            [[ -n "${2:-}" ]] || die "--only requires a target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi)"
             BUILD_TARGETS+=("$2")
             shift 2
             ;;
         *)
-            die "Unknown argument: $1\nUsage: $0 --host <ip> [--only <target>] [--clean]\n  Targets: mesh, router, pihole, rsyslog, netdata, wireguard, homeassistant"
+            die "Unknown argument: $1\nUsage: $0 --host <ip> [--only <target>] [--clean]\n  Targets: mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi"
             ;;
     esac
 done
@@ -1243,6 +1439,7 @@ should_build jellyfin && build_jellyfin_lxc
 should_build netdata    && build_netdata_lxc
 should_build wireguard  && build_wireguard_lxc
 should_build homeassistant && build_homeassistant_lxc
+should_build kodi         && build_kodi_lxc
 
 log ""
 log "Done. Custom images in ${IMAGES_DIR}/:"
@@ -1250,4 +1447,5 @@ ls -lh "${IMAGES_DIR}/${MESH_OUTPUT_NAME}" "${IMAGES_DIR}/${ROUTER_OUTPUT_NAME}"
     "${IMAGES_DIR}/${PIHOLE_OUTPUT_NAME}" "${IMAGES_DIR}/${RSYSLOG_OUTPUT_NAME}" \
     "${IMAGES_DIR}/${JELLYFIN_OUTPUT_NAME}" "${IMAGES_DIR}/${NETDATA_OUTPUT_NAME}" \
     "${IMAGES_DIR}/${WIREGUARD_OUTPUT_NAME}" "${IMAGES_DIR}/${HOMEASSISTANT_OUTPUT_NAME}" \
+    "${IMAGES_DIR}/${KODI_OUTPUT_NAME}" \
     2>/dev/null || true

@@ -163,6 +163,7 @@
   delay: 3
   until: (_ct_addr.stdout | default('0') | trim | int) > 0
   changed_when: false
+  when: lxc_ct_ostype != 'unmanaged'
 
 # ── Ensure clean apt baseline ────────────────────────────────────
 # Proxmox standard templates may ship with broken kernel metapackages

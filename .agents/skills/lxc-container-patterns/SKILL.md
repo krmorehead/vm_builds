@@ -135,6 +135,64 @@ When working with LXC containers, load these skills IMMEDIATELY:
 
 26. Previous bug: `ModuleNotFoundError: No module named 'paramiko'` at runtime because the dependency wasn't in `requirements.txt`.
 
+## pct_remote gather_facts Buffer Overflow
+
+38. NEVER use `gather_facts: true` on plays targeting `pct_remote` dynamic groups unless the configure role actually references `ansible_*` facts. The `pct_remote` connection plugin has a limited JSON output buffer. Hosts with many block devices (LVM thin pools, loop devices, device-mapper entries) produce `ansible_devices` output that exceeds the buffer, causing "Module result deserialization failed: No end of json char found".
+
+39. ALWAYS set `gather_facts: false` for `pct_remote` configure plays. None of the current configure roles (wireguard, pihole, rsyslog, netdata) use gathered facts — they only use role variables and facts from `set_fact`.
+
+40. If a future role needs specific facts, use `gather_subset: ['!hardware']` to skip the device-heavy hardware facts instead of gathering all facts.
+
+41. Previous bug: `wireguard-ai` failed during fact gathering via `pct_remote` because the `ai` host (AMD Ryzen, 128GB SSD with LVM thin pool) had 15+ block devices. The full setup module JSON exceeded the `pct_remote` buffer. Other hosts with fewer devices succeeded. Fix: set `gather_facts: false` for all pct_remote configure plays.
+
+## SSH Connection Exhaustion with Parallel pct_remote
+
+42. When multiple `pct_remote` containers run in parallel, each task opens a NEW SSH connection to the Proxmox host. With 4+ containers × N tasks, this causes rapid SSH churn that overwhelms the SSH server, resulting in "Connection reset by peer", "Broken pipe", and "SSH session not active" errors.
+
+43. ALWAYS add `serial: 2` to configure plays that target 4+ `pct_remote` containers. This processes containers in batches of 2, reducing simultaneous SSH connections.
+
+44. Previous bug: WireGuard configure play ran 4 containers in parallel (wireguard-home, wireguard-mesh1, wireguard-ai, wireguard-mesh2). Tasks like `wg genkey | wg pubkey` opened 4+ SSH connections through `home`'s SSH server simultaneously. Two connections dropped with "Connection reset by peer (104)" and "Broken pipe". Fix: added `serial: 2` to the WireGuard configure play.
+
+## Device Passthrough in LXC Containers
+
+45. For device passthrough (`/dev/dri`, `/dev/snd`, `/dev/input`) to LXC containers, use `lxc.mount.entry` directives directly in the container config file (`/etc/pve/lxc/<CTID>.conf`), NOT Proxmox's `-mp` mount option. The `-mp` pre-start hook rejects device directories in unprivileged containers (exit code 32).
+
+46. Use privileged containers (`unprivileged: false`) with `nesting=1` for reliable device access. Add both `lxc.mount.entry` bind mounts AND `lxc.cgroup2.devices.allow` rules.
+
+47. Apply device config atomically: stop container → append config → start container. Gate on whether the entries already exist to make tasks idempotent.
+
+48. Previous bug: Jellyfin and Kodi containers failed with `lxc.hook.pre-start` exit code 32 when using Proxmox `-mp` mounts for `/dev/dri`. Fix: switched to privileged containers with `lxc.mount.entry` directives appended directly to the LXC config file.
+
+## File Deployment via copy + pct push
+
+49. NEVER use heredocs inside `pct exec -- bash -c 'cat > file << EOF ... EOF'` in Ansible `command` or `shell` modules. YAML string folding destroys heredoc structure, causing bash syntax errors ("unexpected token `<'").
+
+50. ALWAYS use the `copy` + `pct push` pattern for deploying config files into containers:
+
+    ```yaml
+    - name: Write config to host temp
+      ansible.builtin.copy:
+        content: |
+          <?xml version="1.0" encoding="UTF-8"?>
+          <Config>
+            <Setting>{{ variable }}</Setting>
+          </Config>
+        dest: /tmp/service_config.xml
+        mode: "0644"
+
+    - name: Push config into container
+      ansible.builtin.command:
+        cmd: pct push {{ ct_id }} /tmp/service_config.xml /etc/service/config.xml
+      changed_when: true
+
+    - name: Clean up host temp
+      ansible.builtin.file:
+        path: /tmp/service_config.xml
+        state: absent
+    ```
+
+51. Previous bug: `pct exec {{ ct_id }} -- bash -c 'cat > /etc/jellyfin/network.xml << "NETWORK_EOF" ...'` via `ansible.builtin.command` with `>-` folded scalar collapsed newlines. Bash received `cat > file << "EOF" content EOF` on a single line and failed with `syntax error near unexpected token '<'`. Fix: use `ansible.builtin.copy` to write to host temp, then `pct push` into container.
+
 ## Docker-in-LXC Configuration Patterns
 
 27. **Docker-in-LXC configure play target**: Configure plays for Docker-in-LXC services MUST target the Proxmox HOST group (e.g., `service_nodes`), NOT the container dynamic group (e.g., `homeassistant`). The role uses `pct exec` commands which only exist on the Proxmox host.

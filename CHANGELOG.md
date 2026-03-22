@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Kodi media player** -- LXC container (VMID 301, 1024 MB RAM, 4 GB disk)
+  running Kodi as a local media player and home theater frontend. Renders
+  directly to the physical display via GBM/DRM using the shared iGPU. HDMI
+  audio output via ALSA bind mount. Custom Debian 12 template with
+  kodi-standalone, kodi-gbm, Mesa VA-API drivers (Intel + AMD), and libcec
+  pre-installed (built by `build-images.sh`). `kodi_lxc` role provisions the
+  container with device mounts (`/dev/dri`, `/dev/snd`, `/dev/input`) and
+  cgroup allowlists (DRI, sound, input); `kodi_configure` role configures
+  iGPU render group, ALSA HDMI audio, and web interface. On-demand container
+  (`onboot: false`). Per-feature molecule scenario (`kodi-lxc`), rollback tag
+  (`kodi-rollback`), full integration testing, and reusable group
+  reconstruction (`tasks/reconstruct_kodi_group.yml`).
 - **Jellyfin media server** -- LXC container (VMID 300, 2048 MB RAM, 8 GB disk)
   running Jellyfin with Intel Quick Sync hardware transcoding via iGPU device
   passthrough. Custom Debian 12 template with Jellyfin server, web interface,

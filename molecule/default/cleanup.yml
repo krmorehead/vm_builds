@@ -20,6 +20,7 @@
       - "{{ rsyslog_ct_id }}"
       - "{{ homeassistant_ct_id }}"
       - "{{ jellyfin_ct_id }}"
+      - "{{ kodi_ct_id }}"
   tasks:
     - name: Check for backup manifest
       ansible.builtin.stat:
