@@ -52,11 +52,11 @@ molecule verify -s mesh1-infra     # verify layered scenario
 
 **Clean-state validation (CI, pre-commit, final proof):**
 ```bash
-molecule test                      # full pipeline — destroys everything
-molecule converge                  # restore baseline for further work
+molecule test                      # full pipeline — restores baseline at end
 ```
 
-After `molecule test`: ALWAYS re-run `molecule converge` to restore the baseline before working on layered scenarios.
+`molecule test` ends with a final converge that restores the baseline. No
+manual reconverge needed. mesh1 stays accessible when tests pass.
 
 ## Molecule Pipeline Sequence
 
@@ -66,7 +66,14 @@ After `molecule test`: ALWAYS re-run `molecule converge` to restore the baseline
 3. `syntax` — ansible syntax check
 4. `converge` — run `playbooks/site.yml`
 5. `verify` — run `molecule/default/verify.yml`
-6. `cleanup` — reset host after test (destroys baseline)
+6. `cleanup` — reset host after test
+7. `converge` — restore baseline (proves rebuild works AND keeps mesh1 accessible)
+
+The final converge is NOT optional. It serves as both a rebuild test and
+baseline restoration. NEVER end the test_sequence with just `cleanup`.
+
+Previous bug: test_sequence ended with `cleanup`. Every `molecule test` left
+mesh1 unreachable because OpenWrt was destroyed with no reconverge.
 
 There is NO `lint` phase in the Molecule config. Run `ansible-lint` and `yamllint` separately.
 

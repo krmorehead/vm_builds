@@ -1,0 +1,3 @@
+---
+sunshine_user: "{{ lookup('env', 'SUNSHINE_USER') | default('admin', true) }}"
+sunshine_password: "{{ lookup('env', 'SUNSHINE_PASSWORD') | default('', true) }}"

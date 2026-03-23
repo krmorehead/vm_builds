@@ -1,59 +1,81 @@
 ---
 name: build-testing
-description: Test coverage for build.py functions. Every function needs test class, error paths covered.
+description: Test coverage for build.py functions. Real infrastructure probes, justified mocks only.
 ---
 
 # Build Testing
 
 ## Rules
 
-1. Every public function in build.py MUST have test class in tests/test_build.py.
-2. Every error path MUST have test: missing file, unreachable host, invalid env, corrupt state.
+1. Every public function in build.py MUST have a test class in tests/test_build.py.
+2. Every error path MUST have a test: missing file, unreachable host, invalid env.
+3. NEVER mock `probe_host` to test infrastructure health. Probe the REAL hosts.
+4. Mocking `subprocess.run` is justified — don't actually run `ansible-playbook` from pytest.
+5. Mocking `probe_host` is ONLY justified in `TestMain` error-path tests where you need to
+   isolate a DIFFERENT error (e.g., "missing playbook" needs to get past the probe step).
+6. NEVER write a test that would pass identically if the infrastructure were offline
+   (unless it's testing pure Python logic like string parsing).
 
 ## Coverage matrix
 
-| Function | Test Class | Coverage |
+| Function | Test Class | What it tests |
 |---|---|---|
-| `load_env` | `TestLoadEnv` | Basic, comments, equals-in-value, whitespace, empty, quoted |
-| `validate_env` | `TestValidateEnv` | All present, missing one, all missing, empty |
-| `resolve_playbook` | `TestResolvePlaybook` | Absolute path, name, name without ext, nonexistent |
-| `build_command` | `TestBuildCommand` | Each flag, combined flags |
-| `find_ansible_playbook` | `TestFindAnsiblePlaybook` | Venv found, system fallback, returns None |
-| `resolve_proxmox_host` | `TestResolveProxmoxHost` | Primary reachable, fallback, all unreachable, corrupt |
-| `main` | `TestMain` | Error paths + happy path |
+| `load_env` | `TestLoadEnv` | Real Python parsing: quotes, whitespace, comments, edge cases |
+| `validate_env` | `TestValidateEnv` | Real Python validation: required vars, empty values |
+| `resolve_playbook` | `TestResolvePlaybook` | Real filesystem: actual playbooks/ dir, path resolution |
+| `build_command` | `TestBuildCommand` | Real Python list construction: flags, tags, combined |
+| `find_ansible_playbook` | `TestFindAnsiblePlaybook` | Filesystem + shutil.which: venv, system, missing |
+| `probe_host` | `TestInfrastructureHealth` | REAL TCP probes against REAL hosts from test.env |
+| `resolve_proxmox_host` | `TestInfrastructureHealth` | REAL resolution against REAL PRIMARY_HOST |
+| `main` | `TestMain` | Error paths (mock subprocess.run to avoid running ansible) |
 
 ## Running tests
 
 ```bash
 pytest tests/test_build.py -v
-pytest tests/test_build.py --cov=build --cov-report=term-missing
 ```
 
-## Coverage requirements
+## When tests fail
 
-- Line coverage: 90%+
-- Branch coverage: 85%+
+`TestInfrastructureHealth` failures mean REAL infrastructure problems:
+- `test_primary_host_reachable` FAILED → home is down. Check power/network.
+- `test_ai_host_reachable` FAILED → ai is down. NO WoL. Manual power-on required.
+- `test_mesh2_host_reachable` FAILED → mesh2 is down. Try `./scripts/wol.sh mesh2`.
 
-## Mock patterns
+These are NOT flaky tests. They are the early warning system. If they fail,
+your infrastructure has a real problem.
+
+## Justified mock patterns
 
 ```python
-from unittest.mock import patch, MagicMock
+# JUSTIFIED: prevent pytest from running ansible-playbook
+monkeypatch.setattr("subprocess.run", fake_run)
 
-@patch('subprocess.run')
-def test_main(mock_run):
-    mock_run.return_value.returncode = 0
-    main(['site.yml'])
+# JUSTIFIED: test "missing binary" error path
+monkeypatch.setattr(build, "find_ansible_playbook", lambda: None)
 
-@patch('socket.create_connection')
-def test_probe(mock_conn):
-    mock_conn.return_value.__enter__ = MagicMock()
-    mock_conn.return_value.__exit__ = MagicMock()
-    assert probe_host("10.0.0.1", 22)
+# JUSTIFIED in TestMain ONLY: isolate a different error path
+# (e.g., test "missing playbook" — need to get past probe step)
+monkeypatch.setattr(build, "probe_host", lambda *a, **kw: True)
 ```
 
-## Common failures
+## NEVER-justified mock patterns
 
-- Branch not covered → add error path test
-- Mock not called → check patch path
-- Test flaky → mock all dependencies
-- Coverage false positive → remove or test commented code
+```python
+# NEVER: mocking probe_host to test infrastructure health
+monkeypatch.setattr(build, "probe_host", lambda *a, **kw: True)
+env = {"PRIMARY_HOST": "10.0.0.1"}  # FAKE IP!
+assert build.resolve_proxmox_host(env) == "10.0.0.1"  # TRIVIALLY OBVIOUS
+
+# NEVER: mocking socket to test probe_host itself
+@patch('socket.create_connection')
+def test_probe(mock_conn):  # TESTS NOTHING REAL
+```
+
+## Previous bug
+
+`TestResolveProxmoxHost` (5 tests) monkeypatched `probe_host` with fake IPs.
+All 5 passed while all 3 WAN hosts (home, ai, mesh2) were offline. The ai
+host had been crashed by `modprobe -r amdgpu` and nobody knew because the
+"host probing tests" never actually probed any hosts. Replaced with
+`TestInfrastructureHealth` that probes real hosts from test.env.

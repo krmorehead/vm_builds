@@ -233,60 +233,74 @@ class TestFindAnsiblePlaybook:
         assert build.find_ansible_playbook() is None
 
 
-# ── probe_host / resolve_proxmox_host ───────────────────────────────
+# ── Infrastructure health ────────────────────────────────────────────
+# These tests probe REAL hosts from test.env. When a node is down,
+# these tests FAIL. That's the point — they're the early warning system.
+# mesh1 (10.10.10.210) is behind OpenWrt and only reachable after
+# router deployment. It's tested by the E2E suite, not here.
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-class TestResolveProxmoxHost:
-    def test_returns_primary_when_reachable(self, monkeypatch):
-        monkeypatch.setattr(build, "probe_host", lambda *a, **kw: True)
-        env = {"PRIMARY_HOST": "10.0.0.1"}
-        assert build.resolve_proxmox_host(env) == "10.0.0.1"
+class TestInfrastructureHealth:
+    """Probe real Proxmox nodes. Failures = real infrastructure problems."""
 
-    def test_falls_back_to_cached_ip(self, tmp_path, monkeypatch):
-        probed = []
+    @pytest.fixture
+    def env(self):
+        env_file = REPO_ROOT / "test.env"
+        if not env_file.exists():
+            pytest.fail("test.env not found — cannot validate infrastructure")
+        return build.load_env(env_file)
 
-        def fake_probe(ip, **kw):
-            probed.append(ip)
-            return ip == "10.10.10.2"
+    def test_primary_host_reachable(self, env):
+        """home (PRIMARY_HOST) must always be reachable."""
+        ip = env.get("PRIMARY_HOST", "")
+        assert ip, "PRIMARY_HOST not set in test.env"
+        assert build.probe_host(ip), (
+            f"home ({ip}) is UNREACHABLE. Primary Proxmox node is down. "
+            "Check power, network cable, SSH service."
+        )
 
-        monkeypatch.setattr(build, "probe_host", fake_probe)
-        monkeypatch.setattr(build, "STATE_DIR", tmp_path)
-        state_file = tmp_path / "addresses.json"
-        state_file.write_text('{"host":"home","ips":["10.0.0.1","10.10.10.2"]}')
-        env = {"PRIMARY_HOST": "10.0.0.1"}
+    def test_ai_host_reachable(self, env):
+        """ai (AI_HOST) must always be reachable — no WoL recovery if lost."""
+        ip = env.get("AI_HOST", "")
+        assert ip, "AI_HOST not set in test.env"
+        assert build.probe_host(ip), (
+            f"ai ({ip}) is UNREACHABLE. ai uses USB ethernet — NO Wake-on-LAN. "
+            "Requires physical power-on. If automation crashed it, check "
+            "dmesg for kernel panic (modprobe -r amdgpu on single-GPU host)."
+        )
+
+    def test_mesh2_host_reachable(self, env):
+        """mesh2 (MESH_2_HOST) must always be reachable."""
+        ip = env.get("MESH_2_HOST", "")
+        assert ip, "MESH_2_HOST not set in test.env"
+        assert build.probe_host(ip), (
+            f"mesh2 ({ip}) is UNREACHABLE. Check power/network. "
+            "mesh2 supports WoL: ./scripts/wol.sh mesh2"
+        )
+
+    def test_resolve_returns_primary(self, env):
+        """resolve_proxmox_host must return PRIMARY_HOST when it's up."""
         result = build.resolve_proxmox_host(env)
-        assert result == "10.10.10.2"
-        assert probed == ["10.0.0.1", "10.10.10.2"]
+        assert result == env["PRIMARY_HOST"], (
+            f"Expected PRIMARY_HOST ({env['PRIMARY_HOST']}) but "
+            f"resolve_proxmox_host returned '{result}'. Primary is down "
+            "or fallback logic was triggered — investigate."
+        )
 
-    def test_returns_empty_when_all_unreachable(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(build, "probe_host", lambda *a, **kw: False)
-        monkeypatch.setattr(build, "STATE_DIR", tmp_path)
-        env = {"PRIMARY_HOST": "10.0.0.1"}
-        assert build.resolve_proxmox_host(env) == ""
+    def test_state_file_valid_if_exists(self):
+        """If .state/addresses.json exists, it must contain valid data."""
+        import json
 
-    def test_corrupt_state_file_handled(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(build, "probe_host", lambda *a, **kw: False)
-        monkeypatch.setattr(build, "STATE_DIR", tmp_path)
-        state_file = tmp_path / "addresses.json"
-        state_file.write_text("NOT-JSON{{{")
-        env = {"PRIMARY_HOST": "10.0.0.1"}
-        assert build.resolve_proxmox_host(env) == ""
-
-    def test_skips_primary_in_fallback(self, tmp_path, monkeypatch):
-        probed = []
-
-        def fake_probe(ip, **kw):
-            probed.append(ip)
-            return ip == "10.0.0.1"
-
-        monkeypatch.setattr(build, "probe_host", fake_probe)
-        monkeypatch.setattr(build, "STATE_DIR", tmp_path)
-        state_file = tmp_path / "addresses.json"
-        state_file.write_text('{"ips":["10.0.0.1","10.10.10.2"]}')
-        env = {"PRIMARY_HOST": "10.0.0.1"}
-        result = build.resolve_proxmox_host(env)
-        assert result == "10.0.0.1"
-        assert probed == ["10.0.0.1"]
+        state_file = build.STATE_DIR / "addresses.json"
+        if not state_file.exists():
+            pytest.skip("No state file yet — first successful run creates it")
+        data = json.loads(state_file.read_text())
+        assert "ips" in data, "State file missing 'ips' key"
+        assert isinstance(data["ips"], list), "'ips' must be a list"
+        for ip in data["ips"]:
+            assert isinstance(ip, str) and ip, f"Invalid IP entry: {ip!r}"
 
 
 # ── main (integration-style) ────────────────────────────────────────

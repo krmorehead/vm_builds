@@ -116,6 +116,13 @@ kiosk_ct_id: 401
 netdata_ct_id: 500
 rsyslog_ct_id: 501
 
+# ── Gaming VM (Sunshine host) ────────────────────────────────────
+# Pre-built Windows 11 image with Sunshine, virtio drivers, QEMU GA,
+# and GZDoom baked in. Built via: ./build-images.sh --host <ip> --only sunshine
+gaming_image_path: images/sunshine-win11-amd64.qcow2
+gaming_iso_path: images/Tiny11-2026-03-15.iso
+gaming_virtio_iso_path: images/isos/virtio-win.iso
+
 # ── Gaming (600-699) ─────────────────────────────────────────────
 gaming_vm_id: 600
 

@@ -172,6 +172,26 @@ echo 1 > /sys/bus/pci/rescan
 
 All four steps are required. Step 3 is critical -- `echo 1 > /sys/bus/pci/rescan` alone is insufficient because the kernel won't auto-bind drivers that were explicitly unbound.
 
+## GPU driver cleanup — SEPARATE from WiFi PCI cleanup
+
+GPU driver unload (i915/amdgpu) is NOT the same as WiFi driver unload. WiFi `modprobe -r iwlwifi` is always safe. GPU `modprobe -r amdgpu` on a single-GPU AMD host causes a **kernel panic**.
+
+Rules:
+- NEVER run `modprobe -r amdgpu` or `modprobe -r i915` in broad-scope plays (hosts: proxmox*). PCI bus rescan after vfio-pci unbind is sufficient for E2E cleanup.
+- ONLY run GPU driver unload in per-feature cleanup (e.g., sunshine-vm, gaming-rollback) gated on VGA controller count >= 2.
+- `tests/test_host_safety.py` catches `modprobe -r amdgpu/i915` in broad-scope plays without VGA guards. Run `pytest tests/` to catch this at dev time.
+
+Previous bug: E2E cleanup ran `modprobe -r amdgpu` on ALL hosts including `ai` (single AMD GPU, USB ethernet). Kernel panicked, host crashed. Required physical power-on 3000 miles away.
+
+## Host recoverability
+
+Every host MUST declare `wol_capable` (true/false) in `inventory/host_vars/`. USB ethernet adapters do NOT support WoL. Hosts with `wol_capable: false` (e.g., `ai`) cannot be recovered remotely after a crash or shutdown.
+
+Rules:
+- NEVER run operations that could crash non-WoL hosts (modprobe -r sole GPU, shutdown, poweroff)
+- `scripts/wol.sh` MUST NOT include non-WoL hosts — enforced by `tests/test_wol.py`
+- `tests/test_host_safety.py` enforces GPU cleanup safety — static linter catches the bug class at pytest time
+
 ## Decision tree
 
 ```
@@ -183,5 +203,11 @@ Is this command touching network interfaces?
 │       └── NO → SAFE. Proceed.
 └── NO → Is it modifying LVM on root?
     ├── YES → BLOCK. Use tar + vzdump instead.
-    └── NO → SAFE. Proceed.
+    └── NO → Does it unload GPU drivers (modprobe -r amdgpu/i915)?
+        ├── YES → Is the play broad-scope (hosts: proxmox*)?
+        │   ├── YES → BLOCK. Use PCI bus rescan instead.
+        │   └── NO → Is VGA count >= 2?
+        │       ├── YES → SAFE. Proceed.
+        │       └── NO → BLOCK. Kernel panic on single-GPU AMD.
+        └── NO → SAFE. Proceed.
 ```

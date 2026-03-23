@@ -189,6 +189,22 @@ Delivered:
 - Full integration testing in `molecule/default/verify.yml`
 - Display-exclusive support (hookscript attachment, deployed by Kiosk project)
 
+### `2026-03-21-14` Sunshine Streaming Server
+
+Windows 11 VM with iGPU PCI passthrough running Sunshine as a Moonlight
+streaming host. Uses vfio-pci for hardware encoding on all 4 test nodes.
+In production, this deploys to `gaming_nodes` (dedicated gaming hardware)
+where the Gaming Rig project extends it with discrete GPU passthrough.
+
+Delivered:
+- `gaming_vm` role (q35/OVMF VM, iGPU vfio-pci binding, QEMU Guest Agent IP discovery)
+- `gaming_configure` role (Sunshine credentials, firewall rules, GZDoom verification)
+- Windows 11 image build section in `build-images.sh` (Tiny11 + autounattend + Sunshine + GZDoom)
+- Per-feature molecule scenario (`sunshine-vm`) — all 4 nodes
+- `tasks/reconstruct_gaming_group.yml` for dynamic group reconstruction
+- Rollback plays in `playbooks/cleanup.yml` (`gaming-rollback` tag)
+- Opt-in via `--tags gaming` (mutually exclusive with media container iGPU use)
+
 ## Medium-Term Goals
 
 ### Additional VM/LXC Types

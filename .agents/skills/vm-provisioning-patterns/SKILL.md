@@ -97,3 +97,15 @@ homeassistant_image_path: images/haos.qcow2
     - **Windows VMs via ISO + autounattend.xml**: install-from-ISO IS the bake approach for Windows
 
 11. Any OTHER runtime package installation is rejected. If you need a new package, add it to the image build script.
+
+## Per-Host VMID Collision Avoidance
+
+12. When multiple hosts share a Proxmox node (test environments), a static VMID causes conflicts. Compute per-host VMID as `base_id + groups['flavor_group'].index(inventory_hostname)`. Apply the SAME computation in provision, verify, and cleanup.
+
+13. Previous bug: VMID 600 was used for both `home` and `mesh1` on the same physical Proxmox host. The second `qm create` failed with "Configuration file already exists."
+
+## Upload Path Selection
+
+14. NEVER upload large images (>5 GB) to `/tmp/` on Proxmox — it's typically tmpfs with limited size (~7.8 GB). Use `/var/tmp/` which lives on the root filesystem. This applies to both image uploads and `qemu-img convert` output.
+
+15. Previous bug: `qemu-img convert` of an 18 GB Windows qcow2 to `/tmp/` failed with "No space left on device".

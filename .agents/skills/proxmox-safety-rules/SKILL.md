@@ -52,9 +52,20 @@ ssh host "... awk '{print \$2}' ..."
 ssh host "... awk '{print $2}' ..."
 ```
 
+## GPU Driver and Host Crash Prevention
+
+9. NEVER run `modprobe -r amdgpu` on single-GPU AMD hosts — kernel panic
+10. NEVER run `modprobe -r amdgpu/i915` in broad-scope plays (hosts: proxmox*) — PCI rescan is sufficient for E2E cleanup
+11. ONLY run GPU driver unload in per-feature cleanup gated on VGA count >= 2
+12. Every host has `wol_capable` (true/false) in host_vars — non-WoL hosts cannot be recovered remotely
+13. `tests/test_host_safety.py` catches this pattern statically at pytest time
+14. Previous bug: E2E cleanup `modprobe -r amdgpu` kernel-panicked `ai` (single AMD GPU, USB ethernet). Required physical power-on
+
 ## Anti-patterns
 
 NEVER explain what Proxmox is in safety rules
 NEVER use synchronous firewall restart over SSH when WAN rules change
 NEVER assume PRIMARY_HOST is the only way to reach hosts
 NEVER remove files you didn't deploy in cleanup
+NEVER run modprobe -r for GPU drivers in broad-scope cleanup
+NEVER shut down or crash hosts with wol_capable: false

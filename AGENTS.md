@@ -110,6 +110,7 @@ This tree organizes all skills by domain area to help agents quickly find releva
 
 ### **Container & VM Patterns**
 - **lxc-container-patterns** — LXC container provisioning and configuration patterns
+- **windows-vm-patterns** — Windows 11 VM provisioning, iGPU PCI passthrough, QEMU Guest Agent, PowerShell configuration
 
 ### **Learning & Development**
 - **learn-from-mistakes** — Update skills and rules when encountering new issues to prevent recurrence
@@ -185,6 +186,21 @@ pytest tests/ -v
 - ALWAYS reproduce production bugs on test machine first
 - NEVER consider fix complete until `molecule test` passes end-to-end
 
+**MANDATORY: Anti-Fake-Test Doctrine**
+- NEVER mock `probe_host`, network connectivity, or hardware detection against hosts you control
+- NEVER write tests that check YAML string content instead of running the actual code
+- NEVER write a test that would pass identically if all infrastructure were offline
+  (unless it tests pure Python logic like string parsing or command construction)
+- Tests that probe real hosts MUST fail when those hosts are unreachable — that's the point
+- `pytest tests/` is the infrastructure early warning system. If it passes while
+  machines are down, the tests are lying.
+- When a test mocks something, ask: "Would removing this mock make the test catch real problems?"
+  If yes, remove the mock and test the real thing.
+- Previous catastrophe: `TestResolveProxmoxHost` mocked `probe_host` with fake IPs.
+  All 5 tests passed while `ai` was crashed and all WAN hosts were unreachable.
+  Nobody knew until manual inspection. Those tests were deleted and replaced with
+  `TestInfrastructureHealth` that probes real hosts from test.env.
+
 **MANDATORY: Environment Validation**
 - ALWAYS run `set -a && source test.env && set +a` before ANY molecule commands
 - Test environment setup immediately: SSH connectivity, Ansible ping, variable export
@@ -200,6 +216,7 @@ pytest tests/ -v
 - "Should I test this right now?" YES - test after every significant change
 - "Do I need to validate the environment?" YES - always before molecule commands
 - "Should I load skills for this pattern?" YES - especially for LXC/Docker/Container work
+- "Am I about to mock something I could test for real?" STOP — test the real thing
 - "Am I debugging blind?" NO - reproduce on test machine first
 
 ## Safety and Architecture Rules
@@ -210,6 +227,20 @@ pytest tests/ -v
 - Hardcode specific bridges as WAN - WAN detected at runtime via default route
 - Apply `WAN_MAC` at Proxmox VM NIC level - use MAC conflict detection flow
 - Remove SSH keys or API tokens during cleanup - they're operator prerequisites
+- `modprobe -r amdgpu` on single-GPU AMD hosts - kernel panic, host crash
+- `shutdown`, `poweroff`, `halt` in cleanup or molecule files - bricks non-WoL hosts
+- ANY destructive kernel operation on `wol_capable: false` hosts
+
+### Host Recoverability (CRITICAL — production-breaking if violated)
+- Every host MUST declare `wol_capable` (true/false) in `inventory/host_vars/`
+- `ai` has `wol_capable: false` — USB ethernet only, no Wake-on-LAN
+- NEVER run `modprobe -r amdgpu` or `modprobe -r i915` in broad-scope plays (hosts: proxmox) — use PCI bus rescan instead
+- ONLY run GPU driver unload in per-feature cleanup (gaming_vm) gated on VGA controller count >= 2
+- NEVER shut down or crash hosts that cannot be remotely recovered
+- `scripts/wol.sh` MUST NOT include non-WoL hosts — enforced by `tests/test_wol.py`
+- `tests/test_host_safety.py` is a static linter that catches `modprobe -r amdgpu/i915` in broad-scope plays, `shutdown/poweroff` in cleanup/molecule files, and unrecognized `modprobe -r` modules
+- ALWAYS run `pytest tests/` before committing — the safety linter catches this class of bug at test time, before it touches hardware
+- Previous bug: E2E cleanup ran `modprobe -r amdgpu` on all hosts. `ai` (single AMD GPU, USB ethernet) kernel-panicked. Required physical power-on 3000 miles away
 
 ### Architecture Principles
 - **Bake, don't configure**: NEVER install packages during configure roles

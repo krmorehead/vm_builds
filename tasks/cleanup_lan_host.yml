@@ -33,6 +33,12 @@
   ansible.builtin.shell:
     cmd: >-
       {{ _cleanup_ssh }} "
+      for vm in {{ gaming_vm_id }}; do
+        qm status \$vm >/dev/null 2>&1 || continue;
+        qm stop \$vm 2>/dev/null || true;
+        sleep 3;
+        qm destroy \$vm --purge 2>/dev/null || true;
+      done;
       for ct in {{ wireguard_ct_id }} {{ meshwifi_ct_id }}
       {{ netdata_ct_id }} {{ rsyslog_ct_id }} {{ pihole_ct_id }}
       {{ homeassistant_ct_id }} {{ jellyfin_ct_id }}
@@ -62,15 +68,15 @@
   changed_when: true
   failed_when: false
 
-- name: Remove mesh WiFi PHY hookscripts on LAN host  # noqa command-instead-of-shell
+- name: Remove hookscripts on LAN host  # noqa command-instead-of-shell
   ansible.builtin.shell:
     cmd: >-
-      {{ _cleanup_ssh }} "rm -f /var/lib/vz/snippets/mesh-wifi-phy-*.sh"
+      {{ _cleanup_ssh }} "rm -f /var/lib/vz/snippets/mesh-wifi-phy-*.sh /var/lib/vz/snippets/gpu-passthrough-hook.sh"
   when: _host_reachable | bool
   changed_when: true
   failed_when: false
 
-- name: Unbind vfio-pci devices on LAN host  # noqa command-instead-of-shell
+- name: Unbind vfio-pci devices and restore native drivers on LAN host  # noqa command-instead-of-shell
   ansible.builtin.shell:
     cmd: >-
       {{ _cleanup_ssh }} "
@@ -78,7 +84,10 @@
         [ -d \"\$dev\" ] || continue;
         addr=\$(basename \"\$dev\");
         echo \"\$addr\" > /sys/bus/pci/drivers/vfio-pci/unbind 2>/dev/null || true;
-      done"
+        echo '' > /sys/bus/pci/devices/\${addr}/driver_override 2>/dev/null || true;
+      done;
+      echo 1 > /sys/bus/pci/rescan 2>/dev/null || true;
+      rm -f /run/gpu-passthrough/vm-*.state"
   when: _host_reachable | bool
   changed_when: true
   failed_when: false

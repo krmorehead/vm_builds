@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Builds custom images for the vm_builds project.
-# Produces nine outputs:
+# Produces ten outputs:
 #   1. Mesh LXC rootfs        — minimal OpenWrt, no firewall, WiFi packages      (local build)
 #   2. Router VM combined      — full OpenWrt with mesh/security/DNS packages     (local build)
 #   3. Pi-hole LXC template    — Debian 12 with Pi-hole pre-installed             (remote build on Proxmox)
@@ -12,11 +12,12 @@ set -euo pipefail
 #   7. WireGuard LXC template  — Debian 12 with wireguard-tools + iptables baked in (remote build on Proxmox)
 #   8. Home Assistant template — Debian 12 with Docker CE and HA container pre-pulled (remote build on Proxmox)
 #   9. Kodi LXC template      — Debian 12 with kodi-standalone + GBM/DRM + Mesa + libcec (remote build on Proxmox)
+#  10. Sunshine VM image       — Windows 11 with Sunshine + GZDoom + virtio drivers     (remote build on Proxmox)
 #
 # Usage: ./build-images.sh [--clean] [--host <proxmox-ip>] [--only <target>]
 #   --clean          Remove cached Image Builder before downloading fresh copy
 #   --host <ip>      Proxmox host for remote image builds. Required for remote-built templates.
-#   --only <target>  Build only the specified target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi).
+#   --only <target>  Build only the specified target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, sunshine).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGES_DIR="$(cd "${SCRIPT_DIR}/../images" && pwd)"
@@ -1389,6 +1390,247 @@ DOCKER_EOF
     log "  Size: $(du -h "$output" | cut -f1)"
 }
 
+# Sunshine VM image (built remotely on Proxmox: ISO boot → unattended install → export)
+SUNSHINE_ISO="Tiny11-2026-03-15.iso"
+SUNSHINE_VIRTIO_ISO="virtio-win.iso"
+SUNSHINE_OUTPUT_NAME="sunshine-win11-amd64.qcow2"
+SUNSHINE_BUILD_VMID=992
+SUNSHINE_ANSWER_DIR="${SCRIPT_DIR}/../roles/gaming_vm/files"
+
+cleanup_sunshine_build() {
+    local vmid="${SUNSHINE_BUILD_VMID}"
+    if [[ -n "$PROXMOX_HOST" ]]; then
+        log "Cleaning up Sunshine build VM ${vmid}..."
+        remote_cmd "qm stop ${vmid} 2>/dev/null; sleep 3; qm destroy ${vmid} --purge 2>/dev/null; true"
+        remote_cmd "rm -f /tmp/sunshine-answer.iso /tmp/${SUNSHINE_ISO} /tmp/${SUNSHINE_VIRTIO_ISO} /var/tmp/${SUNSHINE_OUTPUT_NAME}; true"
+    fi
+}
+
+build_sunshine_vm() {
+    log "Building Sunshine VM image (remote on Proxmox)..."
+    local win_iso="${IMAGES_DIR}/${SUNSHINE_ISO}"
+    local virtio_iso="${IMAGES_DIR}/isos/${SUNSHINE_VIRTIO_ISO}"
+    local output="${IMAGES_DIR}/${SUNSHINE_OUTPUT_NAME}"
+    local vmid="${SUNSHINE_BUILD_VMID}"
+
+    if [[ -f "$output" ]]; then
+        log "Sunshine VM image already exists at ${output}"
+        log "  Delete it and re-run to rebuild."
+        return
+    fi
+
+    if [[ -z "$PROXMOX_HOST" ]]; then
+        die "Sunshine build requires --host <proxmox-ip>. Example:
+  ./build-images.sh --host 192.168.86.201 --only sunshine"
+    fi
+
+    if [[ ! -f "$win_iso" ]]; then
+        die "Windows ISO not found: ${win_iso}.
+  Place Tiny11-2026-03-15.iso in images/ directory."
+    fi
+
+    if [[ ! -f "$virtio_iso" ]]; then
+        die "virtio-win ISO not found: ${virtio_iso}.
+  Download from: https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso
+  Save to: images/isos/virtio-win.iso"
+    fi
+
+    if [[ ! -f "${SUNSHINE_ANSWER_DIR}/autounattend.xml" ]]; then
+        die "autounattend.xml not found at ${SUNSHINE_ANSWER_DIR}/autounattend.xml"
+    fi
+
+    command -v genisoimage &>/dev/null || command -v mkisofs &>/dev/null || \
+        die "genisoimage or mkisofs required for answer ISO. Install: apt install genisoimage"
+
+    trap cleanup_sunshine_build EXIT
+
+    remote_cmd "qm stop ${vmid} 2>/dev/null; sleep 2; qm destroy ${vmid} --purge 2>/dev/null; true"
+
+    # Create answer ISO with autounattend.xml and post-install script
+    log "Creating answer ISO..."
+    local answer_tmp
+    answer_tmp=$(mktemp -d)
+    cp "${SUNSHINE_ANSWER_DIR}/autounattend.xml" "${answer_tmp}/"
+    cp "${SUNSHINE_ANSWER_DIR}/post-install.ps1" "${answer_tmp}/"
+    local answer_iso="${answer_tmp}/sunshine-answer.iso"
+    if command -v genisoimage &>/dev/null; then
+        genisoimage -quiet -J -r -o "$answer_iso" "$answer_tmp"
+    else
+        mkisofs -quiet -J -r -o "$answer_iso" "$answer_tmp"
+    fi
+
+    # Upload ISOs to Proxmox host
+    log "Uploading Windows ISO to Proxmox (this may take several minutes)..."
+    if ! remote_cmd "test -f /var/lib/vz/template/iso/${SUNSHINE_ISO} || test -f /tmp/${SUNSHINE_ISO}"; then
+        # shellcheck disable=SC2086
+        scp $SSH_OPTS "$win_iso" "root@${PROXMOX_HOST}:/tmp/${SUNSHINE_ISO}"
+    else
+        log "  Windows ISO already on host, skipping upload."
+    fi
+
+    log "Uploading virtio-win ISO..."
+    if ! remote_cmd "test -f /var/lib/vz/template/iso/${SUNSHINE_VIRTIO_ISO} || test -f /tmp/${SUNSHINE_VIRTIO_ISO}"; then
+        # shellcheck disable=SC2086
+        scp $SSH_OPTS "$virtio_iso" "root@${PROXMOX_HOST}:/tmp/${SUNSHINE_VIRTIO_ISO}"
+    else
+        log "  virtio-win ISO already on host, skipping upload."
+    fi
+
+    log "Uploading answer ISO..."
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS "$answer_iso" "root@${PROXMOX_HOST}:/tmp/sunshine-answer.iso"
+    rm -rf "$answer_tmp"
+
+    # Detect management bridge
+    local mgmt_bridge
+    mgmt_bridge=$(remote_cmd "ip -o route show default | awk '{print \$5}' | head -1")
+    log "Management bridge: ${mgmt_bridge}"
+
+    # Move ISOs to Proxmox ISO storage (must be done BEFORE qm create references them)
+    log "Moving ISOs to Proxmox storage..."
+    remote_cmd "mkdir -p /var/lib/vz/template/iso"
+    remote_cmd "test -f /var/lib/vz/template/iso/${SUNSHINE_ISO} || cp /tmp/${SUNSHINE_ISO} /var/lib/vz/template/iso/${SUNSHINE_ISO}"
+    remote_cmd "test -f /var/lib/vz/template/iso/${SUNSHINE_VIRTIO_ISO} || cp /tmp/${SUNSHINE_VIRTIO_ISO} /var/lib/vz/template/iso/${SUNSHINE_VIRTIO_ISO}"
+    remote_cmd "cp /tmp/sunshine-answer.iso /var/lib/vz/template/iso/sunshine-answer.iso 2>/dev/null || true"
+
+    # Create temporary build VM
+    # Answer ISO on sata0 — Windows PE scans all CD/DVD drives for autounattend.xml
+    log "Creating build VM (VMID ${vmid})..."
+    remote_cmd "qm create ${vmid} \
+        --name sunshine-build \
+        --machine q35 \
+        --bios ovmf \
+        --efidisk0 local-lvm:0,format=raw,efitype=4m,pre-enrolled-keys=0 \
+        --cores 4 \
+        --memory 4096 \
+        --cpu host \
+        --scsihw virtio-scsi-pci \
+        --scsi0 local-lvm:64 \
+        --ide0 local:iso/${SUNSHINE_ISO},media=cdrom \
+        --ide2 local:iso/${SUNSHINE_VIRTIO_ISO},media=cdrom \
+        --sata0 local:iso/sunshine-answer.iso,media=cdrom \
+        --net0 virtio,bridge=${mgmt_bridge} \
+        --agent enabled=1 \
+        --ostype win11 \
+        --boot order='ide0;scsi0'"
+
+    # Start VM and begin Windows installation
+    log "Starting build VM..."
+    remote_cmd "qm start ${vmid}"
+
+    # OVMF shows "Press any key to boot from CD" — send Enter repeatedly
+    log "Sending boot key to OVMF..."
+    sleep 3
+    for _ in 1 2 3 4 5; do
+        remote_cmd "qm sendkey ${vmid} ret 2>/dev/null || true"
+        sleep 2
+    done
+
+    log ""
+    log "======================================================================="
+    log "  Windows unattended installation is now running."
+    log "  This typically takes 15-30 minutes depending on hardware."
+    log ""
+    log "  Monitor via Proxmox console: https://${PROXMOX_HOST}:8006"
+    log "  Open VM ${vmid} console to watch progress."
+    log ""
+    log "  The script will poll for QEMU Guest Agent availability."
+    log "  Once Windows is installed and the guest agent responds,"
+    log "  the disk image will be exported."
+    log "======================================================================="
+    log ""
+
+    # Wait for QEMU Guest Agent (indicates Windows is installed and running)
+    log "Waiting for QEMU Guest Agent (up to 45 minutes)..."
+    local ga_retries=0
+    while ! remote_cmd "qm guest cmd ${vmid} ping >/dev/null 2>&1"; do
+        ga_retries=$((ga_retries + 1))
+        if (( ga_retries > 270 )); then
+            log "ERROR: Guest Agent not responding after 45 minutes."
+            log "Check the VM console for errors. The VM may need manual intervention."
+            die "Build VM guest agent timeout. Check Proxmox console for VM ${vmid}."
+        fi
+        if (( ga_retries % 30 == 0 )); then
+            log "  Still waiting for Guest Agent... (${ga_retries}/270, ~$((ga_retries / 6)) min)"
+        fi
+        sleep 10
+    done
+    log "Guest Agent responding! Windows installation appears complete."
+
+    # Poll for post-install completion (marker file written by post-install.ps1)
+    log "Waiting for post-install scripts to complete (up to 20 minutes)..."
+    local post_retries=0
+    local post_done=false
+    while (( post_retries < 40 )); do
+        post_retries=$((post_retries + 1))
+        sleep 30
+        local post_check
+        post_check=$(remote_cmd "qm guest exec ${vmid} --timeout 10 -- cmd /c 'type C:\\post-install-done.txt' 2>/dev/null" || echo "")
+        if echo "$post_check" | grep -q "COMPLETE"; then
+            log "Post-install script completed successfully."
+            post_done=true
+            break
+        fi
+        if (( post_retries % 6 == 0 )); then
+            log "  Still waiting for post-install... ($((post_retries / 2))/20 min)"
+        fi
+    done
+    if [[ "$post_done" != "true" ]]; then
+        die "Post-install marker not found after 20 minutes. The image is incomplete — check post-install.ps1 output in the VM."
+    fi
+
+    # Shutdown VM for export
+    log "Shutting down build VM..."
+    remote_cmd "qm guest cmd ${vmid} shutdown 2>/dev/null || qm stop ${vmid}"
+    sleep 30
+
+    # Wait for VM to fully stop
+    local stop_retries=0
+    while remote_cmd "qm status ${vmid} 2>/dev/null | grep -q running"; do
+        stop_retries=$((stop_retries + 1))
+        if (( stop_retries > 30 )); then
+            log "Force-stopping VM..."
+            remote_cmd "qm stop ${vmid}"
+            sleep 10
+            break
+        fi
+        sleep 5
+    done
+
+    # Export the disk image
+    log "Exporting VM disk image..."
+    local disk_path disk_vol
+    # Extract storage:volume from qm config (e.g. "local-lvm:vm-992-disk-2")
+    disk_vol=$(remote_cmd "qm config ${vmid} | grep '^scsi0:' | sed 's/^scsi0: //;s/,.*//' 2>/dev/null || echo ''")
+    if [[ -n "$disk_vol" ]]; then
+        disk_path=$(remote_cmd "pvesm path '${disk_vol}' 2>/dev/null || echo ''")
+    fi
+
+    if [[ -z "$disk_path" ]]; then
+        die "Could not determine disk path for VM ${vmid}. Check 'qm config ${vmid}' on the host."
+    fi
+
+    log "Disk path: ${disk_path}"
+    log "Converting to qcow2 and downloading..."
+
+    remote_cmd "rm -f /var/tmp/${SUNSHINE_OUTPUT_NAME}"
+    remote_cmd "qemu-img convert -f raw -O qcow2 '${disk_path}' /var/tmp/${SUNSHINE_OUTPUT_NAME}"
+
+    mkdir -p "$IMAGES_DIR"
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS "root@${PROXMOX_HOST}:/var/tmp/${SUNSHINE_OUTPUT_NAME}" "$output"
+
+    # Cleanup
+    log "Cleaning up build VM and temporary files..."
+    remote_cmd "qm destroy ${vmid} --purge 2>/dev/null; true"
+    remote_cmd "rm -f /var/tmp/${SUNSHINE_OUTPUT_NAME} /tmp/sunshine-answer.iso; true"
+
+    trap - EXIT
+
+    log "Sunshine VM image: ${output}"
+    log "  Size: $(du -h "$output" | cut -f1)"
+}
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 BUILD_TARGETS=()
@@ -1406,12 +1648,12 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --only)
-            [[ -n "${2:-}" ]] || die "--only requires a target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi)"
+            [[ -n "${2:-}" ]] || die "--only requires a target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, sunshine)"
             BUILD_TARGETS+=("$2")
             shift 2
             ;;
         *)
-            die "Unknown argument: $1\nUsage: $0 --host <ip> [--only <target>] [--clean]\n  Targets: mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi"
+            die "Unknown argument: $1\nUsage: $0 --host <ip> [--only <target>] [--clean]\n  Targets: mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, sunshine"
             ;;
     esac
 done
@@ -1440,6 +1682,7 @@ should_build netdata    && build_netdata_lxc
 should_build wireguard  && build_wireguard_lxc
 should_build homeassistant && build_homeassistant_lxc
 should_build kodi         && build_kodi_lxc
+should_build sunshine     && build_sunshine_vm
 
 log ""
 log "Done. Custom images in ${IMAGES_DIR}/:"
@@ -1447,5 +1690,5 @@ ls -lh "${IMAGES_DIR}/${MESH_OUTPUT_NAME}" "${IMAGES_DIR}/${ROUTER_OUTPUT_NAME}"
     "${IMAGES_DIR}/${PIHOLE_OUTPUT_NAME}" "${IMAGES_DIR}/${RSYSLOG_OUTPUT_NAME}" \
     "${IMAGES_DIR}/${JELLYFIN_OUTPUT_NAME}" "${IMAGES_DIR}/${NETDATA_OUTPUT_NAME}" \
     "${IMAGES_DIR}/${WIREGUARD_OUTPUT_NAME}" "${IMAGES_DIR}/${HOMEASSISTANT_OUTPUT_NAME}" \
-    "${IMAGES_DIR}/${KODI_OUTPUT_NAME}" \
+    "${IMAGES_DIR}/${KODI_OUTPUT_NAME}" "${IMAGES_DIR}/${SUNSHINE_OUTPUT_NAME}" \
     2>/dev/null || true

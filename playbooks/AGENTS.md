@@ -54,7 +54,9 @@ Main playbook execution flow with phased deployment:
 - Phase 3: Services (flavor groups span both primary + LAN hosts)
 
 ### cleanup.yml
-Rollback and cleanup operations with tag-based execution
+Rollback and cleanup operations with tag-based execution.
+
+**CRITICAL: GPU driver safety in cleanup.yml** — NEVER add `modprobe -r amdgpu` or `modprobe -r i915` to broad-scope plays (hosts: proxmox*). Only in per-feature rollback plays (e.g., gaming-rollback on gaming_nodes) gated on VGA controller count >= 2. PCI bus rescan is sufficient for E2E cleanup. See @.agents/skills/molecule-cleanup and @.agents/skills/proxmox-system-safety for details.
 
 ## Task Ordering — Dependencies First
 

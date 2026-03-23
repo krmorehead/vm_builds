@@ -61,7 +61,14 @@ Pre-commit: `molecule test && molecule converge`
 
 ## Pipeline sequence
 
-`molecule test` runs: dependency → cleanup → syntax → converge → verify → cleanup
+`molecule test` runs: dependency → cleanup → syntax → converge → verify → cleanup → converge
+
+The final converge is NOT optional — it serves two purposes:
+1. **Tests rebuilding works** after cleanup (proves the build is reproducible)
+2. **Restores the baseline** so mesh1 (behind OpenWrt) remains accessible
+
+NEVER end the test_sequence with just `cleanup`. That leaves the infrastructure
+torn down and mesh1 unreachable. The reconverge at the end is itself a test.
 
 No lint phase — run `ansible-lint && yamllint .` separately.
 

@@ -66,11 +66,9 @@ Converge vs test workflow:
 # Day-to-day iteration (preserves baseline)
 molecule converge && molecule verify
 
-# Clean-state validation (CI, final proof)  
+# Clean-state validation (CI, final proof)
+# Ends with reconverge — baseline restored, mesh1 stays accessible
 molecule test
-
-# After molecule test, restore baseline
-molecule converge
 ```
 
 Diagnostic order:
@@ -107,6 +105,58 @@ Diagnostic order:
 - Run `molecule verify` immediately when assertions fail
 - Test with actual protocol (HTTP, Docker commands) not just connectivity
 
+## Anti-fake-test doctrine
+
+**The cardinal rule: tests must test REAL things.**
+
+A test that mocks the thing it claims to test is a lie. It provides false
+confidence while real problems go undetected. The test suite is an early
+warning system for infrastructure problems — mocking the warnings away
+defeats the entire purpose.
+
+**When mocking is justified:**
+- `subprocess.run` — to prevent `pytest` from actually launching `ansible-playbook`
+- `shutil.which` — to test the "binary not found" error path
+- `VENV_DIR` — to test venv detection with a controlled filesystem
+
+**When mocking is NEVER justified:**
+- `probe_host` against hosts you control — if a host is down, the test MUST fail
+- Network connectivity to your own infrastructure — that's what tests ARE FOR
+- Hardware detection on machines you own — if iGPU is missing, you need to know
+- Reading real config files (inventory, test.env) — parse the real thing
+
+**How to tell if a test is fake:**
+1. Does it mock the very thing it claims to verify? → FAKE
+2. Would it pass identically if the infrastructure were on fire? → FAKE
+3. Does it test string patterns in YAML files instead of running the code? → FAKE
+4. Does the test name say "verify X works" but never actually runs X? → FAKE
+
+**Real test examples (from this project):**
+- `TestInfrastructureHealth.test_ai_host_reachable` — TCP probes 192.168.86.220.
+  When ai crashed, this test FAILED with an actionable message. That's real.
+- `TestWolHostExclusion.test_ai_not_in_wol_script` — Parses the actual wol.sh
+  and asserts ai is excluded. A static linter, but it checks REAL file content
+  against REAL inventory data. That's real.
+- `TestNoUnguardedGPUDriverUnload` — Scans all YAML files for `modprobe -r`
+  without VGA count guards. Catches the exact class of bug that crashed ai. Real.
+
+**Fake test examples (deleted from this project):**
+- `TestResolveProxmoxHost.test_returns_primary_when_reachable` — Mocked
+  `probe_host` to always return True, then asserted resolve returned the IP.
+  Trivially obvious. Meanwhile all 3 WAN hosts were unreachable and this
+  test passed happily. DELETED.
+- `TestJellyfinLxcRole.test_task_uses_fqcn` — Read YAML files and checked
+  if strings contained `ansible.builtin.`. Never ran Ansible. A linter
+  pretending to be a test. DELETED.
+- `TestBuildImages.test_mesh_target_builds` — Checked if bash script contained
+  the string "mesh" in a case statement. Never ran the script. DELETED.
+
+**Previous bug:** `TestResolveProxmoxHost` (5 tests) monkeypatched `probe_host`
+with fake IPs. All 5 passed while `ai` was crashed and unreachable for an
+entire test cycle. The mocked tests gave false confidence that host resolution
+was "tested" when no real probing ever happened. Replaced with
+`TestInfrastructureHealth` that probes real hosts from test.env.
+
 ## Anti-patterns
 
 NEVER explain what TDD is in testing workflow rules
@@ -114,3 +164,7 @@ NEVER use graceful skip for hardware expected on every host
 NEVER just poll during long-running commands - use idle time productively
 NEVER add failed_when: false on connection tests (let real errors fail immediately)
 NEVER debug container issues without testing on the actual host first
+NEVER mock probe_host or network connectivity to hosts you control
+NEVER write tests that check YAML file contents instead of running the code
+NEVER write tests that would pass identically if the infrastructure were offline
+NEVER call a test "verify X works" unless it actually exercises X end-to-end

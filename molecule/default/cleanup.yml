@@ -8,10 +8,15 @@
 - name: Clean reset primary Proxmox hosts
   hosts: proxmox:!lan_hosts
   gather_facts: false
+  ignore_unreachable: true
   vars:
     backup_dir: /var/lib/ansible-backup
     project_vm_ids:
       - "{{ openwrt_vm_id }}"
+      - "{{ gaming_vm_id }}"
+      - "{{ gaming_vm_id | int + 1 }}"
+      - "{{ gaming_vm_id | int + 2 }}"
+      - "{{ gaming_vm_id | int + 3 }}"
     project_ct_ids:
       - "{{ wireguard_ct_id }}"
       - "{{ pihole_ct_id }}"
@@ -22,6 +27,14 @@
       - "{{ jellyfin_ct_id }}"
       - "{{ kodi_ct_id }}"
   tasks:
+    - name: Probe host connectivity
+      ansible.builtin.ping:
+      register: _host_probe
+
+    - name: End cleanup for unreachable hosts
+      ansible.builtin.meta: end_host
+      when: _host_probe.unreachable | default(false)
+
     - name: Check for backup manifest
       ansible.builtin.stat:
         path: "{{ backup_dir }}/manifest.json"
@@ -96,14 +109,39 @@
 
     # ── PCI passthrough cleanup ──────────────────────────────────
 
-    - name: Unbind devices from vfio-pci
+    - name: Unbind devices from vfio-pci and restore native drivers
       ansible.builtin.shell:
         cmd: |
           for dev in /sys/bus/pci/drivers/vfio-pci/0000:*/; do
             [ -d "$dev" ] || continue
             addr=$(basename "$dev")
             echo "$addr" > /sys/bus/pci/drivers/vfio-pci/unbind 2>/dev/null || true
+            echo "" > "/sys/bus/pci/devices/${addr}/driver_override" 2>/dev/null || true
           done
+          echo 1 > /sys/bus/pci/rescan 2>/dev/null || true
+          sleep 2
+          # PCI rescan does not auto-bind when driver module is already loaded.
+          # Rebind unbound VGA devices to their native driver.
+          for dev in /sys/bus/pci/devices/0000:*/; do
+            [ -d "$dev" ] || continue
+            addr=$(basename "$dev")
+            class=$(cat "${dev}/class" 2>/dev/null)
+            [ "${class:0:4}" = "0x03" ] || continue
+            [ -e "${dev}/driver" ] && continue
+            vendor=$(cat "${dev}/vendor" 2>/dev/null)
+            case "$vendor" in
+              0x8086) echo "$addr" > /sys/bus/pci/drivers/i915/bind 2>/dev/null || true ;;
+              0x1002) echo "$addr" > /sys/bus/pci/drivers/amdgpu/bind 2>/dev/null || true ;;
+            esac
+          done
+          sleep 2
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Remove GPU hookscript state files
+      ansible.builtin.shell:
+        cmd: rm -f /run/gpu-passthrough/vm-*.state
         executable: /bin/bash
       changed_when: true
       failed_when: false
@@ -131,9 +169,11 @@
         - /tmp/openwrt-router-24.10.0-x86-64-combined.img.gz
         - /tmp/openwrt-router-24.10.0-x86-64-combined.img
 
-    - name: Remove mesh WiFi PHY hookscripts
+    - name: Remove hookscripts from snippets
       ansible.builtin.shell:
-        cmd: rm -f /var/lib/vz/snippets/mesh-wifi-phy-*.sh
+        cmd: |
+          rm -f /var/lib/vz/snippets/mesh-wifi-phy-*.sh
+          rm -f /var/lib/vz/snippets/gpu-passthrough-hook.sh
         executable: /bin/bash
       changed_when: true
       failed_when: false
@@ -219,6 +259,7 @@
 - name: Clean up LAN satellite hosts
   hosts: router_nodes
   gather_facts: false
+  ignore_unreachable: true
   tasks:
     - name: Process each LAN host
       ansible.builtin.include_tasks: cleanup_lan_host.yml

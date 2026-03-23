@@ -148,6 +148,15 @@ Always resolve dependencies top-down:
 - Apply @.agents/skills/vm-cleanup-maintenance for VM cleanup patterns
 - Always follow @.agents/skills/molecule-cleanup requirements for test cleanup
 
+## GPU Driver and Host Crash Prevention (CRITICAL)
+
+- NEVER run `modprobe -r amdgpu` on single-GPU AMD hosts — causes kernel panic
+- NEVER run `modprobe -r i915` or `modprobe -r amdgpu` in broad-scope cleanup (hosts: proxmox*) — PCI bus rescan is sufficient
+- ONLY run GPU driver unload in per-feature cleanup (e.g., sunshine-vm) gated on VGA controller count >= 2
+- Every host declares `wol_capable` in host_vars. Hosts with `wol_capable: false` CANNOT be recovered remotely — never run operations that could crash them
+- `tests/test_host_safety.py` is a static linter that catches this pattern. Run `pytest tests/` to verify safety
+- Previous bug: `modprobe -r amdgpu` in E2E cleanup kernel-panicked `ai` (single AMD GPU, USB ethernet). Required physical power-on
+
 ## Build vs Configure Pattern
 
 - **NEVER** install packages during configure roles - bake them into images instead

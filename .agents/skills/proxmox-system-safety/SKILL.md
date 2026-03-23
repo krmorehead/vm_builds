@@ -67,3 +67,33 @@ description: Proxmox system safety operations and hardware detection patterns. U
 19. ALWAYS detect devices dynamically by querying sysfs driver bindings: iterate `/dev/dri/card*`, check `readlink -f /sys/class/drm/cardN/device/driver`, and match on the driver name.
 
 20. Previous bug: `/dev/dri/card0` was assumed to be the Intel iGPU, but on a multi-GPU system `card0` was the discrete GPU. Sysfs-based detection finds the correct device regardless of probe order.
+
+## iGPU PCI Passthrough (vfio-pci)
+
+21. Prefer runtime sysfs manipulation over persistent modprobe configs for iGPU passthrough. Writing to `/sys/bus/pci/drivers/vfio-pci/new_id` and `/sys/bus/pci/drivers/vfio-pci/bind` is reversible without initramfs updates. Modprobe blacklists require `update-initramfs` and a reboot.
+
+22. Single-GPU passthrough is supported for Intel iGPUs and discrete GPUs via Proxmox hookscripts. The hookscript pattern: `pre-start` unbinds the GPU from the native driver via sysfs and binds to vfio-pci; `post-stop` reverses the operation. The host runs headless (SSH/web only) while the VM has the GPU. NEVER attempt GPU passthrough on AMD APU iGPUs (Raven Ridge, etc.) — the GPU shares the SoC die and ANY unbind path (sysfs or modprobe -r) hangs the entire system. This is a hardware limitation, not fixable with hookscripts.
+
+23. NEVER run `modprobe -r amdgpu` or `modprobe -r i915` as GPU cleanup. ALWAYS use sysfs operations: unbind from vfio-pci, clear `driver_override`, PCI rescan. The rescan triggers the kernel to auto-bind the native driver. This is safe on ANY host regardless of GPU count.
+
+24. GPU passthrough hookscript (`/var/lib/vz/snippets/gpu-passthrough-hook.sh`) manages the full lifecycle: discovers hostpci devices from VM config, stops GPU-consuming LXC containers, suspends conflicting VMs, binds/unbinds via sysfs, persists state in `/run/gpu-passthrough/vm-<VMID>.state` for post-stop recovery. The hookscript is generalized — works with any GPU vendor (Intel, AMD, NVIDIA) and any VM that uses `--hostpci`.
+
+25. Previous bug: cleanup ran `modprobe -r amdgpu` on ALL hosts via E2E cleanup. On `ai` (single AMD GPU, USB ethernet), this caused a kernel panic. Fix: replaced all GPU `modprobe -r` with sysfs unbind + PCI rescan.
+
+26. Previous bug: sysfs unbind of AMD Raven Ridge APU iGPU (1002:15dd) via hookscript pre-start hung the entire system. Unlike discrete GPUs, APU iGPUs share the SoC die with the CPU — even sysfs unbind triggers a GPU reset that freezes the NBIO, killing the entire system including USB ethernet (EHOSTUNREACH). This is the same class of failure as `modprobe -r amdgpu` but at the hardware level.
+
+27. Previous bug: PCI rescan after vfio-pci unbind did NOT auto-bind the native driver when the module was already loaded. DRI devices (`/dev/dri/renderD128`) did not reappear. Fix: explicitly bind to the native driver after rescan (`echo PCI_ADDR > /sys/bus/pci/drivers/i915/bind`). The cleanup and hookscript post-stop both must do explicit rebinding, not rely on auto-binding.
+
+27. Cleanup MUST match deployment scope. If the role uses sysfs-only binding (no modprobe configs), cleanup MUST NOT remove modprobe config files. Cleanup MUST also remove hookscript state files from `/run/gpu-passthrough/` and the hookscript itself from `/var/lib/vz/snippets/`.
+
+## Host Recoverability
+
+28. Every host MUST declare `wol_capable` (true/false) in host_vars. This tracks whether the host can be remotely recovered via Wake-on-LAN after a crash or shutdown.
+
+29. USB ethernet adapters do NOT support WoL. The USB host controller powers down in S5 (standby) and lacks magic packet detection circuitry. Hosts connected exclusively via USB ethernet (e.g., `ai`) MUST have `wol_capable: false`.
+
+30. NEVER run operations that could crash a non-WoL host from automation. This includes `modprobe -r` of the sole GPU driver, `shutdown`, `poweroff`, or any operation that could trigger a kernel panic. Non-WoL hosts require physical intervention to recover.
+
+31. `scripts/wol.sh` MUST NOT include non-WoL hosts. Unit tests in `tests/test_wol.py` enforce this. The E2E verify playbook also asserts `wol_capable` is defined for every host and that non-WoL hosts don't appear in wol.sh.
+
+32. Previous bug: `ai` was listed in `wol.sh` with its PCIe NIC MAC, but `ai` is connected via USB ethernet only. The PCIe NIC is not connected to the network, making WoL impossible.

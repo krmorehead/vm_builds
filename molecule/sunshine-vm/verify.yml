@@ -1,0 +1,198 @@
+---
+- name: Verify Gaming VM on all nodes
+  hosts: gaming_nodes
+  gather_facts: false
+  tasks:
+    # ── Compute per-host VMID ────────────────────────────────────
+
+    - name: Set per-host Gaming VM ID
+      ansible.builtin.set_fact:
+        gaming_vm_id: "{{ (gaming_vm_id | int) + groups['gaming_nodes'].index(inventory_hostname) }}"
+
+    # ── VM state ──────────────────────────────────────────────────
+
+    - name: Check VM is running
+      ansible.builtin.command:
+        cmd: qm status {{ gaming_vm_id }}
+      register: _gvm_verify_status
+      changed_when: false
+
+    - name: Assert VM is running
+      ansible.builtin.assert:
+        that: "'running' in _gvm_verify_status.stdout"
+        fail_msg: "Gaming VM {{ gaming_vm_id }} is not running"
+
+    # ── VM configuration ──────────────────────────────────────────
+
+    - name: Get VM configuration
+      ansible.builtin.command:
+        cmd: qm config {{ gaming_vm_id }}
+      register: _gvm_config
+      changed_when: false
+
+    - name: Assert machine type is q35
+      ansible.builtin.assert:
+        that: "'q35' in _gvm_config.stdout"
+        fail_msg: "VM machine type is not q35"
+
+    - name: Assert OVMF UEFI bios
+      ansible.builtin.assert:
+        that: "'ovmf' in _gvm_config.stdout"
+        fail_msg: "VM bios is not OVMF"
+
+    - name: Assert hostpci0 is configured
+      ansible.builtin.assert:
+        that: "'hostpci0' in _gvm_config.stdout"
+        fail_msg: "No hostpci0 (iGPU passthrough) configured on VM"
+
+    - name: Assert auto-start is configured
+      ansible.builtin.assert:
+        that: "'onboot: 1' in _gvm_config.stdout"
+        fail_msg: "onboot not set to 1"
+
+    - name: Assert QEMU Guest Agent is enabled
+      ansible.builtin.assert:
+        that: "'agent: 1' in _gvm_config.stdout or 'agent: enabled=1' in _gvm_config.stdout"
+        fail_msg: "QEMU Guest Agent not enabled in VM config"
+
+    # ── Hookscript verification ──────────────────────────────────
+
+    - name: Assert hookscript is attached to VM
+      ansible.builtin.assert:
+        that: "'hookscript: local:snippets/gpu-passthrough-hook.sh' in _gvm_config.stdout"
+        fail_msg: >-
+          GPU passthrough hookscript not attached to VM {{ gaming_vm_id }}.
+          Expected hookscript: local:snippets/gpu-passthrough-hook.sh
+
+    - name: Verify hookscript file exists on host
+      ansible.builtin.stat:
+        path: /var/lib/vz/snippets/gpu-passthrough-hook.sh
+      register: _hookscript_stat
+
+    - name: Assert hookscript file is present and executable
+      ansible.builtin.assert:
+        that:
+          - _hookscript_stat.stat.exists
+          - _hookscript_stat.stat.executable
+        fail_msg: >-
+          Hookscript not found or not executable at
+          /var/lib/vz/snippets/gpu-passthrough-hook.sh
+
+    # ── QEMU Guest Agent ──────────────────────────────────────────
+
+    - name: Ping QEMU Guest Agent
+      ansible.builtin.command:
+        cmd: qm guest cmd {{ gaming_vm_id }} ping
+      register: _gvm_ga_verify
+      changed_when: false
+
+    - name: Assert Guest Agent responds
+      ansible.builtin.assert:
+        that: _gvm_ga_verify.rc == 0
+        fail_msg: "QEMU Guest Agent is not responding"
+
+    # ── VM IP ─────────────────────────────────────────────────────
+
+    - name: Discover VM IP
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          qm guest cmd {{ gaming_vm_id }} network-get-interfaces | \
+            python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          for iface in data:
+              if iface.get('name', '').startswith('Loopback'):
+                  continue
+              for addr in iface.get('ip-addresses', []):
+                  ip = addr.get('ip-address', '')
+                  if (addr.get('ip-address-type') == 'ipv4'
+                      and not ip.startswith('127.')
+                      and not ip.startswith('169.254.')):
+                      print(ip)
+                      sys.exit(0)
+          sys.exit(1)
+          "
+        executable: /bin/bash
+      register: _gvm_verify_ip
+      changed_when: false
+
+    - name: Assert VM has an IP address
+      ansible.builtin.assert:
+        that:
+          - _gvm_verify_ip.rc == 0
+          - _gvm_verify_ip.stdout | trim | length > 0
+        fail_msg: "Gaming VM has no IPv4 address"
+
+    - name: Display verified VM IP
+      ansible.builtin.debug:
+        msg: "Gaming VM {{ gaming_vm_id }} on {{ inventory_hostname }}: {{ _gvm_verify_ip.stdout | trim }}"
+
+    # ── In-VM connectivity (via QEMU Guest Agent) ──────────────────
+
+    - name: Test command execution inside VM via Guest Agent
+      ansible.builtin.command:
+        cmd: qm guest exec {{ gaming_vm_id }} --timeout 15 -- cmd /c "echo vm-ok"
+      register: _gvm_exec_test
+      changed_when: false
+      failed_when: false
+
+    - name: Assert in-VM command execution works
+      ansible.builtin.assert:
+        that: "'vm-ok' in _gvm_exec_test.stdout"
+        fail_msg: >-
+          Command execution inside Gaming VM failed via QEMU Guest Agent.
+          stdout={{ _gvm_exec_test.stdout | default('') }},
+          stderr={{ _gvm_exec_test.stderr | default('') }}
+
+    # ── iGPU passthrough verification ─────────────────────────────
+
+    - name: Find vfio-pci bound devices
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ls /sys/bus/pci/drivers/vfio-pci/ 2>/dev/null | grep -c '^0000:' || echo 0
+        executable: /bin/bash
+      register: _vfio_bound_count
+      changed_when: false
+
+    - name: Assert at least one device bound to vfio-pci
+      ansible.builtin.assert:
+        that: (_vfio_bound_count.stdout | trim | int) > 0
+        fail_msg: "No PCI devices bound to vfio-pci — iGPU passthrough failed"
+
+    - name: Get hostpci0 address from VM config
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          qm config {{ gaming_vm_id }} | grep hostpci0 | sed 's/.*: //;s/,.*//'
+        executable: /bin/bash
+      register: _hostpci0_addr
+      changed_when: false
+
+    - name: Verify hostpci0 device is bound to vfio-pci
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          readlink /sys/bus/pci/devices/0000:{{ _hostpci0_addr.stdout | trim }}/driver 2>/dev/null | xargs basename 2>/dev/null
+        executable: /bin/bash
+      register: _igpu_driver_verify
+      changed_when: false
+
+    - name: Assert iGPU bound to vfio-pci
+      ansible.builtin.assert:
+        that: _igpu_driver_verify.stdout | trim == "vfio-pci"
+        fail_msg: >-
+          iGPU at {{ _hostpci0_addr.stdout | trim }} is not bound to vfio-pci
+          (current: {{ _igpu_driver_verify.stdout | trim }})
+
+    # ── deploy_stamp ──────────────────────────────────────────────
+
+    - name: Check deploy_stamp file exists
+      ansible.builtin.stat:
+        path: /etc/ansible/facts.d/vm_builds.fact
+      register: _stamp_stat
+
+    - name: Display deploy_stamp status
+      ansible.builtin.debug:
+        msg: "deploy_stamp exists: {{ _stamp_stat.stat.exists }}"

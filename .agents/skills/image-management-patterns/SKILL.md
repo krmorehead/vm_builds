@@ -79,3 +79,13 @@ description: Image management and local storage patterns for VM and LXC images. 
     AMD: `mesa-va-drivers` + `vainfo`
 
 14. This avoids rebuilding images when a container is moved to different hardware. The configure role reads `igpu_vendor` to set `LIBVA_DRIVER_NAME` appropriately.
+
+## Windows VM Images
+
+15. Windows images are built via unattended install on the Proxmox host: create temp VM, boot Tiny11 ISO + virtio-win ISO + answer ISO, wait for Guest Agent + post-install marker, export disk via `qemu-img convert` to qcow2. Build VMID 992 is reserved for this.
+
+16. Windows qcow2 images are 8-18 GB. Upload to `/var/tmp/` (real disk), NOT `/tmp/` (tmpfs, typically ~7.8 GB). Same applies to `qemu-img convert` output during the build.
+
+17. EFI disks on LVM-thin storage MUST use `format=raw`. The `qcow2` format is unsupported and causes build failures.
+
+18. Post-install validation: the build script MUST hard-fail if the post-install marker file is missing after timeout. Proceeding without it produces an incomplete image (no SSH server, no Guest Agent, no software) that fails silently during deployment.

@@ -64,13 +64,21 @@ alwaysApply: true
 
 ## PCI passthrough prerequisites
 - WiFi PCIe passthrough requires the `q35` machine type. Set `machine: q35` when `wifi_pci_devices` is non-empty.
+- iGPU passthrough also requires q35 with OVMF UEFI and `hostpci0` with `pcie=1`.
 - IOMMU group isolation is mandatory. Always verify before binding to vfio-pci.
 - WiFi NICs must be excluded from bridge creation (they're passed through via PCIe, not bridged).
+- Single-GPU passthrough for Intel iGPUs and discrete GPUs IS supported via Proxmox hookscripts. The hookscript uses sysfs unbind (NOT `modprobe -r`) to detach the GPU from the native driver before VM start, and rebinds it after VM stop.
+- NEVER attempt GPU passthrough on AMD APU iGPUs (Raven Ridge, etc.). The GPU shares the SoC die with the CPU. ANY unbind path — sysfs unbind OR `modprobe -r` — triggers a GPU reset that hangs the entire NBIO, crashing the system. This is a hardware limitation. Discrete AMD GPUs (separate PCIe cards) are fine.
+- The hookscript stops GPU-consuming LXC containers and suspends conflicting VMs before grabbing the GPU, then restarts them after the VM stops.
+- After unbinding from vfio-pci, PCI rescan does NOT auto-bind the native driver if the module is already loaded. Cleanup and hookscript post-stop MUST explicitly rebind (`echo PCI_ADDR > /sys/bus/pci/drivers/i915/bind`).
+- Previous bug: sysfs unbind of AMD Raven Ridge APU iGPU (1002:15dd) on `ai` via hookscript pre-start hung the system. Unlike discrete GPUs, the APU GPU reset freezes the NBIO, killing USB ethernet (EHOSTUNREACH). Required physical power-on.
 
 ## PCI device cleanup after passthrough
 - After destroying VMs or running cleanup, devices remain bound to `vfio-pci`. They do NOT auto-revert.
-- ALWAYS unbind from vfio-pci, remove modprobe blacklist files, reload original kernel modules (`modprobe -r && modprobe`), and rescan PCI bus (`echo 1 > /sys/bus/pci/rescan`).
-- Without this, subsequent runs cannot detect WiFi hardware.
+- ALWAYS unbind from vfio-pci, then `modprobe -r <driver>`, rescan PCI bus (`echo 1 > /sys/bus/pci/rescan`), then `modprobe <driver>`. Wait for `/dev/dri/renderD*` to appear.
+- `modprobe <driver>` alone is a no-op if the module is already loaded. MUST `modprobe -r` first to trigger re-probe.
+- Cleanup scope must match deployment scope. If the role uses sysfs-only binding (no modprobe config files), cleanup MUST NOT remove modprobe config files.
+- Previous bug: cleanup tried to remove `blacklist-igpu.conf` that the gaming_vm role never created. The role uses runtime sysfs manipulation only.
 
 ## Bootstrap bridge IP migration
 - Initial bootstrap adds an IP to the WAN bridge (auto-detected) to reach OpenWrt at 192.168.1.1.
@@ -290,6 +298,16 @@ alwaysApply: true
 - ALWAYS set `gather_facts: false` for `pct_remote` configure plays. None of the current configure roles (wireguard, pihole, rsyslog, netdata) use gathered facts — they only use role variables.
 - If a future role needs specific facts, use `gather_subset: ['!hardware']` to skip the device-heavy hardware facts instead of gathering all facts.
 - Previous bug: `wireguard-ai` failed during fact gathering because the `ai` host (AMD Ryzen, 128GB SSD with LVM thin pool) had 15+ block devices. The full fact JSON exceeded the `pct_remote` buffer. Other hosts with fewer devices succeeded.
+
+## Host recoverability and WoL safety
+- Every host MUST declare `wol_capable` (true/false) in host_vars. This tracks whether the host can be remotely recovered after a crash or shutdown.
+- USB ethernet adapters do NOT support WoL. Hosts connected via USB ethernet only (e.g., `ai`) MUST have `wol_capable: false`.
+- NEVER use `modprobe -r` for GPU driver cleanup. ALWAYS use sysfs operations: unbind from vfio-pci, clear `driver_override`, PCI bus rescan. This is safe on ALL hosts regardless of GPU count. The PCI rescan triggers the kernel to auto-bind the native driver without module unload/reload.
+- NEVER shut down, crash, or run destructive kernel operations on hosts with `wol_capable: false`. These hosts cannot be recovered remotely.
+- `scripts/wol.sh` MUST NOT include non-WoL hosts. `tests/test_wol.py` enforces this.
+- The E2E verify playbook asserts `wol_capable` is defined for every host and that non-WoL hosts don't appear in wol.sh.
+- Previous bug: E2E cleanup ran `modprobe -r amdgpu` on `ai` (single AMD GPU, USB ethernet). Kernel panicked, host crashed. Required physical power-on. Fix: replaced all GPU `modprobe -r` with sysfs unbind + PCI rescan. Now safe on any host.
+- Previous bug: `ai` was listed in `wol.sh` with its PCIe NIC MAC, but `ai` is connected via USB ethernet only. WoL was impossible.
 
 ## Documentation accuracy
 - When changing a role's exported facts, bridge names, device paths, or connection patterns, ALWAYS update `docs/architecture/` in the same commit.

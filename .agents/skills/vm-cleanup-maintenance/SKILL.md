@@ -40,6 +40,16 @@ description: VM cleanup completeness, performance optimization, and maintenance 
 
 8. Previous bug: `proxmox_pci_passthrough` silently skipped passthrough when IOMMU groups were invalid. Root cause was VT-d disabled in BIOS — a 30-second fix masked for an entire test cycle.
 
+## GPU Driver Cleanup Safety
+
+9. NEVER run `modprobe -r amdgpu` on a single-GPU AMD host — causes kernel panic. NEVER run `modprobe -r i915` or `modprobe -r amdgpu` in broad-scope cleanup (hosts: proxmox*). PCI bus rescan is sufficient for E2E cleanup. Only in per-feature cleanup gated on VGA count >= 2.
+
+10. Every host has `wol_capable` (true/false) in host_vars. Non-WoL hosts (USB ethernet) CANNOT be recovered remotely. A kernel panic from GPU driver unload is a production-breaking incident.
+
+11. `tests/test_host_safety.py` catches this pattern. `tests/test_wol.py` enforces WoL exclusion. Run `pytest tests/` before committing.
+
+12. Previous bug: E2E cleanup ran `modprobe -r amdgpu` on `ai` (single AMD GPU, USB ethernet). Kernel panicked, host crashed. Required physical power-on.
+
 ## Configure Role Performance (pct_remote overhead)
 
 9. Each task in an LXC configure role opens a new paramiko SSH connection to the Proxmox host, then spawns `pct exec` inside the container. This overhead (15-60 seconds per task) makes LXC configure roles significantly slower than SSH-based configure roles.

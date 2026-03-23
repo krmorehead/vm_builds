@@ -99,3 +99,29 @@ Previous bug: WireGuard configure ran 4 containers in parallel. Two containers (
 ## Play Merging
 
 When two verify plays target the same `hosts:` group with the same `gather_facts:` setting, merge them into one play to eliminate startup overhead.
+
+## Large VM Image Caching
+
+Windows qcow2 images (19 GB) take 10-25 min to upload per host via SSH. Cache the image on the Proxmox host:
+
+```yaml
+- name: Check if image is already cached
+  ansible.builtin.stat:
+    path: "{{ upload_dest }}"
+    get_checksum: false
+  register: _remote_image
+
+- name: Upload image (skip if cached)
+  ansible.builtin.copy:
+    src: "{{ local_image }}"
+    dest: "{{ upload_dest }}"
+  when: not (_remote_image.stat.exists | default(false))
+```
+
+Do NOT delete the cached image after import. Only production cleanup removes it.
+
+Previous bug: 43-minute test run spent 25 minutes (60%) on image upload. Caching eliminates this on subsequent runs.
+
+## Per-Feature Scenario Scope
+
+Per-feature scenarios should test on a single host (e.g., `home` only). Multi-node coverage belongs in the full E2E test. This halves test time for services with expensive setup (large images, slow imports).

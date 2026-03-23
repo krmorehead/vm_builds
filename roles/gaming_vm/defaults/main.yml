@@ -1,0 +1,14 @@
+---
+gaming_vm_memory: 4096
+gaming_vm_cores: 4
+gaming_vm_machine: q35
+gaming_vm_bios: ovmf
+gaming_vm_onboot: true
+gaming_vm_startup_order: 1
+
+gaming_vm_image: "{{ gaming_image_path }}"
+
+gaming_vm_admin_user: "{{ lookup('env', 'GAMING_VM_ADMIN_USER') | default('admin', true) }}"
+gaming_vm_admin_password: "{{ lookup('env', 'GAMING_VM_ADMIN_PASSWORD') | default('Passw0rd!', true) }}"
+
+gaming_vm_tmp_dir: /var/tmp

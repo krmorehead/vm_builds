@@ -228,6 +228,33 @@ When verifying TCP-based services in containers, host-to-container TCP may fail 
 
 Previous bug: mesh1 host consistently failed `logger --tcp` to its rsyslog container (10.10.10.14) despite ping succeeding and br_netfilter disabled. Root cause unresolved (likely nftables or conntrack). Fallback via `pct exec` with localhost TCP verifies rsyslog works without host-level network dependency.
 
+## Windows VM verification via QEMU Guest Agent
+
+For Windows VMs without reliable SSH (no sshpass, LAN-only IPs), use `qm guest exec` instead of SSH connectivity tests:
+
+```yaml
+- name: Test in-VM command via Guest Agent
+  ansible.builtin.command:
+    cmd: qm guest exec {{ vm_id }} --timeout 15 -- cmd /c "echo vm-ok"
+  register: _exec_test
+  changed_when: false
+  failed_when: false
+
+- name: Assert in-VM command works
+  ansible.builtin.assert:
+    that: "'vm-ok' in _exec_test.stdout"
+```
+
+For per-host VMID scenarios, compute the effective VMID at the start of verify:
+
+```yaml
+- name: Set per-host VM ID
+  ansible.builtin.set_fact:
+    gaming_vm_id: "{{ (gaming_vm_id | int) + groups['gaming_nodes'].index(inventory_hostname) }}"
+```
+
+Previous bug: verify used `sshpass` for SSH testing. `sshpass` wasn't installed on mesh1. Switched to Guest Agent which bypasses network entirely.
+
 ## Common failures
 
 - 0 assertions ran → dynamic group empty (add reconstruction)

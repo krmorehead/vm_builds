@@ -35,15 +35,19 @@ fi
 # ── Known hosts ────────────────────────────────────────────────────
 # WAN hosts: directly reachable on the supernet (L2 from controller)
 # LAN hosts: behind OpenWrt, WoL via proxy through PRIMARY_HOST
+#
+# EXCLUDED from WoL:
+#   ai (192.168.86.220) — connected via USB ethernet adapter only.
+#   USB host controller is powered down in S5; no magic packet
+#   detection. Host requires manual power-on. NEVER shut down ai
+#   from automation — it cannot be recovered remotely.
 declare -A HOST_MAC=(
     [home]="8c:16:45:d1:87:a6"
-    [ai]="6c:4b:90:c2:23:bf"    # PCIe NIC (nic0/r8169). USB adapter (nic1) won't wake from S5.
     [mesh2]="00:23:24:5b:83:76"
 )
 
 declare -A HOST_IP=(
     [home]="192.168.86.201"
-    [ai]="192.168.86.220"
     [mesh2]="192.168.86.211"
 )
 

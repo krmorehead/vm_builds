@@ -23,6 +23,8 @@ Trigger: any of these happened during the session:
 - A detached/async operation failed silently
 - Documentation was found to be stale or inaccurate
 - A coding convention was violated in multiple files (systemic issue)
+- A test was found to be fake (mocking the thing it claims to test)
+- A test passed while the system it tests was broken/offline
 
 When adding diagnostic tasks during troubleshooting, ALWAYS generalize them
 and make them permanent before closing the issue. Ad-hoc diagnostics that get

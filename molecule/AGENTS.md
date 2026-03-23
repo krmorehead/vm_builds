@@ -95,6 +95,20 @@ Molecule cleanup destroys **only** known project VMs/containers by **explicit VM
 
 **Previous bug:** blanket `qm list` / `pct list` cleanup destroyed everything on the host (including non-project resources), forced a full rebuild of ~820MB of templates on every test run, and was slower than explicit VMID lookup.
 
+## Non-Recoverable Host Protection (CRITICAL — production-breaking if violated)
+
+Cleanup and molecule files MUST NOT contain operations that could crash or shut down hosts that cannot be remotely recovered.
+
+**Rules:**
+- NEVER run `modprobe -r amdgpu` or `modprobe -r i915` in broad-scope plays (hosts: proxmox*). PCI bus rescan after vfio-pci unbind is sufficient for E2E cleanup
+- ONLY run GPU driver unload in per-feature cleanup (e.g., sunshine-vm) gated on VGA controller count >= 2
+- NEVER add `shutdown`, `poweroff`, `halt`, or `init 0` to any molecule or cleanup file
+- Every host has `wol_capable` (true/false) in `inventory/host_vars/`. Hosts with `wol_capable: false` (e.g., `ai` — USB ethernet) CANNOT be recovered remotely
+- `tests/test_host_safety.py` is a **static linter** that catches these patterns at pytest time. ALWAYS run `pytest tests/` before committing cleanup changes
+- `tests/test_wol.py` enforces that non-WoL hosts are excluded from `scripts/wol.sh`
+
+**Previous bug:** E2E cleanup ran `modprobe -r amdgpu` on ALL hosts including `ai` (single AMD GPU, USB ethernet). Kernel panicked, host crashed. Required physical power-on. The static linter now catches this exact pattern.
+
 ## Hard-Fail Over Graceful Degradation
 
 **NEVER** add "graceful skip" for hardware expected on every host:
@@ -128,6 +142,36 @@ When a long-running command is backgrounded (`molecule test`, `converge`), **ALW
 - Do NOT make code changes to files that the running test depends on
 - Do NOT start a second molecule run — only one can run at a time
 - Do NOT forget to check on the test. Interleave checks every 60-120 seconds
+
+## Anti-Fake-Test Doctrine (CRITICAL — read before writing ANY test)
+
+The test suite is the early warning system for infrastructure problems.
+A test that passes while the infrastructure is broken is WORSE than no test —
+it provides false confidence.
+
+**Rules:**
+- NEVER mock `probe_host`, network connectivity, or hardware detection against
+  hosts you control. We own 4 nodes at known IPs. Probe the REAL hosts.
+- NEVER write pytest tests that only read YAML files and check string content.
+  That's a linter pretending to be a test. Write an actual linter (like
+  `test_host_safety.py`) or test real behavior via Molecule.
+- NEVER name a test "verify X works" unless it actually exercises X.
+- `pytest tests/` failing because hosts are unreachable is CORRECT behavior.
+  NEVER add workarounds to make it pass when machines are down.
+- Mocking is ONLY justified for side effects you can't control: `subprocess.run`
+  (don't run ansible-playbook), `shutil.which` (binary detection), filesystem
+  isolation (tmp_path for error-path testing).
+
+**How to detect a fake test:**
+1. Does it mock the very thing it claims to verify? → FAKE
+2. Would it pass identically if all infrastructure were offline? → FAKE
+3. Does the test name say "verify X works" but never actually runs X? → FAKE
+
+**Previous catastrophe:** `TestResolveProxmoxHost` (5 tests) monkeypatched
+`probe_host` with fake IPs. All 5 passed while `ai` was crashed and all 3
+WAN hosts were unreachable. Replaced with `TestInfrastructureHealth` that
+probes real hosts from test.env — when hosts are down, those tests FAIL with
+actionable messages telling you exactly what's wrong.
 
 ## Test Failure Diagnosis (ORDER)
 

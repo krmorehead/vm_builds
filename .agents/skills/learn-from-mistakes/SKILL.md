@@ -40,6 +40,9 @@ Code custodianship audit:
 3. Cleanup parity: diff molecule/*/cleanup.yml and playbooks/cleanup.yml
 4. Doc accuracy: verify docs/architecture/ matches actual exports
 5. Verify coverage: every role in site.yml needs verify.yml assertion
+6. Host safety: run pytest tests/test_host_safety.py — catches modprobe -r
+   amdgpu/i915 in broad-scope plays, shutdown commands in cleanup files
+7. WoL safety: run pytest tests/test_wol.py — non-WoL hosts excluded from wol.sh
 ```
 
 Mandatory testing sequence:
@@ -72,3 +75,14 @@ NEVER explain what mistakes are in learning rules
 NEVER add graceful skip for hardware that should be present
 NEVER skip testing because "it works locally"
 NEVER delete ad-hoc diagnostics without making them permanent
+NEVER run `modprobe -r amdgpu` in broad-scope cleanup — kernel-panics single-GPU AMD hosts
+NEVER shut down or crash hosts with `wol_capable: false` — they cannot be recovered remotely
+NEVER add a host to wol.sh without verifying its NIC supports Wake-on-LAN
+NEVER mock `probe_host` to test infrastructure health — probe REAL hosts from test.env
+NEVER write pytest tests that only check YAML string content instead of running code
+NEVER write a test that passes identically when infrastructure is offline (unless testing pure Python)
+NEVER name a test "verify X works" without actually exercising X
+
+Previous bug: E2E cleanup ran `modprobe -r amdgpu` on `ai` (single AMD GPU, USB ethernet). Kernel panicked, host crashed. Required physical power-on. Now caught by `tests/test_host_safety.py`.
+
+Previous bug: `TestResolveProxmoxHost` (5 tests) monkeypatched `probe_host` with fake IPs. All 5 passed while `ai` was crashed and all 3 WAN hosts were unreachable. Nobody knew because the "host probing tests" never probed any hosts. Replaced with `TestInfrastructureHealth` that probes real hosts. Now `pytest tests/` is the infrastructure early warning system.

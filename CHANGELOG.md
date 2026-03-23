@@ -8,6 +8,63 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **GPU passthrough hookscript** -- Generalized Proxmox hookscript
+  (`gpu-passthrough-hook.sh`) that manages GPU lifecycle at VM start/stop.
+  `pre-start` discovers hostpci devices from VM config, stops GPU-consuming
+  LXC containers, suspends conflicting VMs, unbinds GPU from native driver
+  via sysfs, and binds to vfio-pci. `post-stop` reverses the operation and
+  restarts stopped consumers. Works with any GPU vendor (Intel, AMD, NVIDIA).
+  Enables single-GPU passthrough on hosts that previously hard-failed (e.g.,
+  `ai` with sole AMD Raven Ridge iGPU).
+- **AMD APU GPU passthrough limitation documented** -- AMD APU iGPUs
+  (Raven Ridge, etc.) share the SoC die with the CPU. ANY GPU unbind path
+  (sysfs OR modprobe -r) triggers a GPU reset that hangs the entire NBIO,
+  crashing the system. `ai` is excluded from `gaming_nodes`. Only Intel
+  iGPUs and discrete GPUs support the hookscript approach.
+- **Host recoverability tracking** -- `wol_capable` host variable (true/false)
+  declared in every host_vars file. Tracks whether a host can be remotely
+  recovered via Wake-on-LAN after a crash or shutdown. USB-only ethernet hosts
+  (e.g., `ai`) are marked `wol_capable: false`. Unit tests (`tests/test_wol.py`)
+  enforce that non-WoL hosts are excluded from `scripts/wol.sh`. E2E verify
+  asserts every host declares `wol_capable` and non-WoL hosts don't appear
+  in the WoL script.
+
+### Changed
+
+- **GPU cleanup uses sysfs-only** -- All GPU driver cleanup across E2E,
+  per-feature, and production cleanup playbooks now uses sysfs unbind +
+  driver_override clear + PCI rescan instead of `modprobe -r`. Safe on
+  any host regardless of GPU count.
+- **gaming_vm role uses hookscript** -- Removed inline vfio-pci binding
+  from the role. The hookscript handles GPU bind/unbind at VM start/stop.
+  Removed the single-GPU AMD hard-fail that blocked passthrough on `ai`.
+
+### Fixed
+
+- **E2E cleanup kernel panic on single-GPU AMD hosts** -- Replaced all
+  `modprobe -r amdgpu/i915` with sysfs unbind + PCI rescan + explicit
+  native driver rebinding. PCI rescan alone does not auto-bind when the
+  module is already loaded. Explicit `echo PCI_ADDR > driver/bind` is
+  required.
+- **GPU not restored after cleanup** -- PCI rescan after vfio-pci unbind
+  was leaving the Intel iGPU unbound (no DRI devices). Added explicit
+  driver rebinding based on PCI vendor ID in cleanup and hookscript
+  post-stop.
+- **WoL script included non-WoL host** -- Removed `ai` from `scripts/wol.sh`
+  HOST_MAC/HOST_IP. `ai` was listed with its PCIe NIC MAC, but is connected
+  via USB ethernet only. WoL magic packets would never reach it.
+
+- **Sunshine streaming server** -- Windows 11 VM (VMID 600, 4096 MB RAM,
+  64 GB disk) with iGPU PCI passthrough running Sunshine as a Moonlight
+  streaming host. Uses vfio-pci to bind the host iGPU exclusively to the VM
+  for hardware encoding. Pre-built image via `build-images.sh --only sunshine`
+  using Tiny11 + unattended install with Sunshine, GZDoom, and Freedoom baked
+  in. `gaming_vm` role provisions the VM (q35/OVMF, QEMU Guest Agent, IP
+  discovery via `add_host`); `gaming_configure` role sets Sunshine credentials
+  via web API and verifies game installation. Per-feature molecule scenario
+  (`sunshine-vm`), rollback tag (`gaming-rollback`), opt-in deployment via
+  `--tags gaming`, and reusable group reconstruction
+  (`tasks/reconstruct_gaming_group.yml`).
 - **Kodi media player** -- LXC container (VMID 301, 1024 MB RAM, 4 GB disk)
   running Kodi as a local media player and home theater frontend. Renders
   directly to the physical display via GBM/DRM using the shared iGPU. HDMI

@@ -39,10 +39,12 @@ works, then implement the feature.
 - Use `molecule converge` + `molecule verify` for day-to-day iteration. This
   preserves the OpenWrt baseline so leaf nodes (mesh1) remain accessible and
   layered scenarios don't need a full rebuild (~4 min saved).
-- Use `molecule test` only for clean-state validation (CI, pre-commit, final
-  proof). It destroys the baseline at the end.
-- After `molecule test`, ALWAYS re-run `molecule converge` to restore the
-  baseline before working on layered scenarios.
+- Use `molecule test` for clean-state validation (CI, pre-commit, final
+  proof). The test_sequence ends with a reconverge that restores the baseline —
+  mesh1 stays accessible when tests pass. The final converge also proves the
+  build is reproducible after cleanup.
+- NEVER end the test_sequence with just `cleanup`. That tears down OpenWrt and
+  makes mesh1 permanently unreachable.
 - NEVER consider a fix complete until `molecule test` passes end-to-end.
 
 ## Service-specific cleanup
@@ -92,3 +94,29 @@ When a test fails, follow this diagnostic order:
 Previous bug: `ping 8.8.8.8` worked but `wget` got EPERM. Root cause was
 IPv6 DAD failure from duplicate MAC corrupting uclient/libubox — only visible
 in `dmesg`.
+
+## Anti-fake-test doctrine (CRITICAL)
+
+The test suite is an early warning system. A test that passes while machines
+are down is a lie. Apply these rules to EVERY test written in this project:
+
+- NEVER mock `probe_host` to test infrastructure health. We own 4 nodes at
+  known IPs. Probe the REAL hosts. If one is down, the test MUST fail.
+- NEVER write pytest tests that only check YAML string content (e.g., "does
+  this file contain `ansible.builtin`?"). That's a linter pretending to be
+  a test. Either write an actual linter (like `test_host_safety.py`) or test
+  the real behavior via Molecule.
+- NEVER write a test named "verify X works" that never actually exercises X.
+- Mocking is ONLY justified when it prevents side effects you genuinely can't
+  control in a test (e.g., `subprocess.run` for ansible-playbook, `shutil.which`
+  for binary detection). If you're mocking something you could test for real
+  against your own infrastructure, REMOVE THE MOCK.
+- `pytest tests/` failing because hosts are unreachable is CORRECT behavior.
+  It means your infrastructure has a real problem. NEVER add workarounds to
+  make it pass when machines are down.
+
+Previous catastrophe: `TestResolveProxmoxHost` (5 tests) monkeypatched
+`probe_host` with fake IPs. All 5 passed while `ai` was crashed (kernel
+panic from `modprobe -r amdgpu`) and all 3 WAN hosts were unreachable.
+The mocked tests provided false confidence for an entire test cycle.
+Replaced with `TestInfrastructureHealth` that probes real hosts from test.env.

@@ -1,0 +1,13 @@
+---
+dependencies: []
+
+galaxy_info:
+  author: Kyle
+  license: proprietary
+  role_name: gaming_configure
+  description: Configure Sunshine streaming server and verify game installation on Windows VM
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm

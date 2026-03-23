@@ -1,0 +1,150 @@
+---
+# SSH shell is PowerShell (set by post-install.ps1). Do NOT wrap raw
+# commands in powershell -Command "..." — the outer shell expands $vars.
+
+# ── Verify iGPU is visible in Windows ─────────────────────────────
+
+- name: Check GPU device in Windows
+  ansible.builtin.raw: >-
+    Get-WmiObject Win32_VideoController |
+    Select-Object -ExpandProperty Name
+  register: _win_gpu
+  changed_when: false
+
+- name: Display detected GPU
+  ansible.builtin.debug:
+    msg: "Windows GPU: {{ _win_gpu.stdout | trim }}"
+
+# ── Auto-generate Sunshine password if empty ──────────────────────
+
+- name: Generate Sunshine password if not set
+  ansible.builtin.set_fact:
+    _sunshine_password: >-
+      {{ sunshine_password if sunshine_password | length > 0
+         else lookup('password', '/dev/null length=16 chars=ascii_letters,digits') }}
+  delegate_to: localhost
+
+- name: Write Sunshine credentials to generated env file
+  ansible.builtin.blockinfile:
+    path: "{{ env_generated_path }}"
+    create: true
+    mode: "0600"
+    marker: "# {mark} Sunshine Credentials (auto-generated)"
+    block: |
+      SUNSHINE_USER={{ sunshine_user }}
+      SUNSHINE_PASSWORD={{ _sunshine_password }}
+  delegate_to: localhost
+  when: sunshine_password | length == 0
+
+# ── Configure Sunshine credentials ────────────────────────────────
+
+- name: Set Sunshine credentials via web API
+  ansible.builtin.raw: >-
+    $pair = '{{ sunshine_user }}:{{ _sunshine_password }}';
+    $cred = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes($pair));
+    try {
+      Invoke-WebRequest -Uri 'https://localhost:47990/api/password'
+        -Method POST
+        -Headers @{Authorization='Basic '+$cred}
+        -Body (@{currentPassword='';newPassword='{{ _sunshine_password }}';confirmPassword='{{ _sunshine_password }}'} | ConvertTo-Json)
+        -ContentType 'application/json'
+        -SkipCertificateCheck
+        -ErrorAction SilentlyContinue | Out-Null;
+      echo 'credentials-set'
+    } catch {
+      echo 'credentials-skipped'
+    }
+  register: _sunshine_creds
+  changed_when: "'credentials-set' in _sunshine_creds.stdout"
+  failed_when: false
+
+# ── Verify Sunshine service ───────────────────────────────────────
+
+- name: Check Sunshine service status
+  ansible.builtin.raw: >-
+    $svc = Get-Service -Name 'Sunshine*','sunshine*','SunshineService*' -ErrorAction SilentlyContinue |
+      Select-Object -First 1;
+    if ($svc) { $svc.Status } else { 'not-found' }
+  register: _sunshine_svc
+  changed_when: false
+
+- name: Start Sunshine service if stopped
+  ansible.builtin.raw: >-
+    $svc = Get-Service -Name 'Sunshine*','sunshine*','SunshineService*' -ErrorAction SilentlyContinue |
+      Select-Object -First 1;
+    if ($svc -and $svc.Status -ne 'Running') {
+      Start-Service $svc.Name;
+      echo 'started'
+    } else {
+      echo 'already-running-or-not-found'
+    }
+  register: _sunshine_start
+  changed_when: "'started' in _sunshine_start.stdout"
+
+# ── Verify Windows Firewall rules ─────────────────────────────────
+
+- name: Check Sunshine firewall rules exist
+  ansible.builtin.raw: >-
+    $rules = Get-NetFirewallRule -DisplayName 'Sunshine*' -ErrorAction SilentlyContinue;
+    if ($rules) { $rules.Count } else { 0 }
+  register: _fw_rules
+  changed_when: false
+
+- name: Add Sunshine firewall rules if missing
+  ansible.builtin.raw: >-
+    $ports = @(
+      @{Name='Sunshine-WebUI';  Port='47990'; Proto='TCP'},
+      @{Name='Sunshine-RTSP';   Port='47989'; Proto='TCP'},
+      @{Name='Sunshine-Video';  Port='47998'; Proto='UDP'},
+      @{Name='Sunshine-Control';Port='47999'; Proto='UDP'},
+      @{Name='Sunshine-Audio';  Port='48000'; Proto='UDP'},
+      @{Name='Sunshine-Mic';    Port='48002'; Proto='UDP'}
+    );
+    foreach ($p in $ports) {
+      $existing = Get-NetFirewallRule -DisplayName $p.Name -ErrorAction SilentlyContinue;
+      if (-not $existing) {
+        New-NetFirewallRule -DisplayName $p.Name -Direction Inbound -Action Allow
+          -Protocol $p.Proto -LocalPort $p.Port | Out-Null;
+        echo "added: $($p.Name)"
+      }
+    }
+  register: _fw_add
+  changed_when: "'added:' in _fw_add.stdout"
+
+# ── Verify GZDoom + Freedoom ──────────────────────────────────────
+
+- name: Check GZDoom installation
+  ansible.builtin.raw: >-
+    $gzdoom = Get-ChildItem 'C:\Games\GZDoom' -Filter 'gzdoom.exe' -Recurse -ErrorAction SilentlyContinue |
+      Select-Object -First 1;
+    if ($gzdoom) { $gzdoom.FullName } else { 'not-found' }
+  register: _gzdoom_check
+  changed_when: false
+
+- name: Check Freedoom WAD files
+  ansible.builtin.raw: >-
+    $wads = Get-ChildItem 'C:\Games\GZDoom' -Filter '*.wad' -Recurse -ErrorAction SilentlyContinue;
+    if ($wads) { $wads.Count } else { 0 }
+  register: _freedoom_check
+  changed_when: false
+
+- name: Display game installation status
+  ansible.builtin.debug:
+    msg: |
+      GZDoom: {{ _gzdoom_check.stdout | trim }}
+      Freedoom WADs: {{ _freedoom_check.stdout | trim }}
+
+# ── Enable RDP ────────────────────────────────────────────────────
+
+- name: Ensure RDP is enabled
+  ansible.builtin.raw: >-
+    $val = (Get-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections').fDenyTSConnections;
+    if ($val -ne 0) {
+      Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0 -Force;
+      Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue;
+      echo 'enabled'
+    } else {
+      echo 'already-enabled'
+    }
+  register: _rdp_status
+  changed_when: "'enabled' in _rdp_status.stdout and 'already' not in _rdp_status.stdout"

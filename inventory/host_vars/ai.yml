@@ -1,3 +1,6 @@
 ---
 ansible_host: "{{ lookup('env', 'AI_HOST') }}"
 pci_passthrough_allow_reboot: true
+# USB ethernet only — no Wake-on-LAN support. Host requires manual
+# power-on and MUST NOT be shut down or crashed by automation.
+wol_capable: false

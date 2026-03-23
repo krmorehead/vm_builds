@@ -290,6 +290,37 @@
           plays={{ stamp.plays.keys() | list | join(', ') }},
           last_run={{ stamp.last_run }}
 
+    # ── Host recoverability ──────────────────────────────────────
+    # Hosts without WoL must never be shut down or crashed by
+    # automation. Verify that wol_capable is set for every host
+    # and that non-WoL hosts are not in wol.sh.
+
+    - name: Assert wol_capable is defined for every host
+      ansible.builtin.assert:
+        that: wol_capable is defined
+        fail_msg: >-
+          {{ inventory_hostname }} has no wol_capable host var.
+          Every host MUST declare wol_capable (true/false).
+
+    - name: Read wol.sh on controller
+      ansible.builtin.shell:
+        cmd: cat {{ playbook_dir }}/../../scripts/wol.sh
+        executable: /bin/bash
+      register: _wol_script
+      changed_when: false
+      delegate_to: localhost
+      run_once: true
+
+    - name: Assert non-WoL hosts are excluded from wol.sh
+      ansible.builtin.assert:
+        that: >-
+          inventory_hostname not in _wol_script.stdout
+        fail_msg: >-
+          {{ inventory_hostname }} has wol_capable=false but appears
+          in scripts/wol.sh. Non-WoL hosts must never be in the WoL
+          script — they cannot be recovered if shut down.
+      when: not (wol_capable | bool)
+
 # ── Play 2: Router node assertions (home-specific) ────────────────
 
 - name: Verify router node state
@@ -1161,10 +1192,6 @@
       changed_when: true
       when: _rsyslog_send.rc != 0
 
-    - name: Wait for log to arrive
-      ansible.builtin.pause:
-        seconds: 3
-
     - name: Check test log arrived in container
       ansible.builtin.shell:
         cmd: |
@@ -1174,6 +1201,9 @@
       register: rsyslog_log_test
       changed_when: false
       failed_when: false
+      retries: 3
+      delay: 2
+      until: rsyslog_log_test.stdout | trim | length > 0
 
     - name: Assert test log was received
       ansible.builtin.assert:
@@ -1211,10 +1241,6 @@
       changed_when: true
       when: _rsyslog_send.rc != 0
 
-    - name: Wait for tagged logs to arrive
-      ansible.builtin.pause:
-        seconds: 3
-
     - name: Check daemon_a log is in its own file
       ansible.builtin.shell:
         cmd: |
@@ -1224,6 +1250,9 @@
       register: rsyslog_daemon_a
       changed_when: false
       failed_when: false
+      retries: 3
+      delay: 2
+      until: (rsyslog_daemon_a.stdout | trim | int) > 0
 
     - name: Check daemon_b log is in its own file
       ansible.builtin.shell:
@@ -1234,6 +1263,9 @@
       register: rsyslog_daemon_b
       changed_when: false
       failed_when: false
+      retries: 3
+      delay: 2
+      until: (rsyslog_daemon_b.stdout | trim | int) > 0
 
     - name: Assert per-program log separation works
       ansible.builtin.assert:
@@ -1256,17 +1288,13 @@
       when: _rsyslog_send.rc == 0
 
     - name: Send uniquely tagged message for leak test (container fallback)
-      ansible.builtin.shell:
+      ansible.builtin.command:
         cmd: >-
           pct exec {{ rsyslog_ct_id }} --
           logger --tcp -n 127.0.0.1 -P 514 -t e2e_leak
           "noleak-e2e-sentinel-fallback"
       changed_when: true
       when: _rsyslog_send.rc != 0
-
-    - name: Wait for message processing
-      ansible.builtin.pause:
-        seconds: 3
 
     - name: Check message landed in remote log (expected)
       ansible.builtin.shell:
@@ -1277,6 +1305,9 @@
       register: rsyslog_leak_remote
       changed_when: false
       failed_when: false
+      retries: 3
+      delay: 2
+      until: (rsyslog_leak_remote.stdout | trim | int) > 0
 
     - name: Check message did NOT leak to local syslog
       ansible.builtin.shell:
@@ -2094,6 +2125,11 @@
           Jellyfin container IP {{ _jellyfin_actual_ip }} does not match
           expected {{ _jellyfin_expected_ip }} (offset 15) on {{ inventory_hostname }}
 
+    - name: Assert stamp contains jellyfin_lxc
+      ansible.builtin.assert:
+        that: "'jellyfin_lxc' in stamp.plays"
+        fail_msg: "deploy_stamp missing jellyfin_lxc entry: {{ stamp.plays.keys() | list }}"
+
     - name: Report Jellyfin verification
       ansible.builtin.debug:
         msg: >-
@@ -2105,12 +2141,8 @@
           igpu={{ 'mounted' if _igpu_mount.rc == 0 else 'missing' }},
           media={{ 'mounted' if _media_mount.rc == 0 else 'missing' }}
 
-# ── Play: Kodi media player (media_nodes) ───────────────────────
+    # ── Kodi media player ────────────────────────────────────────
 
-- name: Verify Kodi media player
-  hosts: media_nodes
-  gather_facts: false
-  tasks:
     # ── Container state ──────────────────────────────────────────
 
     - name: Check Kodi container is running
@@ -2239,20 +2271,10 @@
 
     # ── deploy_stamp ─────────────────────────────────────────────
 
-    - name: Check deploy_stamp contains kodi_lxc
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          cat /etc/ansible/facts.d/vm_builds.fact 2>/dev/null | grep -c kodi_lxc
-        executable: /bin/bash
-      register: _kodi_stamp
-      changed_when: false
-      failed_when: false
-
-    - name: Assert deploy_stamp has kodi_lxc entry
+    - name: Assert stamp contains kodi_lxc
       ansible.builtin.assert:
-        that: (_kodi_stamp.stdout | trim | int) > 0
-        fail_msg: "deploy_stamp missing kodi_lxc entry"
+        that: "'kodi_lxc' in stamp.plays"
+        fail_msg: "deploy_stamp missing kodi_lxc entry: {{ stamp.plays.keys() | list }}"
 
     # ── Report ───────────────────────────────────────────────────
 

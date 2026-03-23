@@ -62,7 +62,7 @@ Bypassing it loses all of these capabilities.
 | `setup.sh` | Bootstrap .venv + pip + ansible-galaxy |
 | `run.sh` | Convenience wrapper — delegates to `build.py` |
 | `cleanup.sh` | Restore / full-restore / clean / rollback — delegates to `build.py` |
-| `build-images.sh` | Builds custom images (mesh LXC, router VM, Pi-hole, rsyslog, Netdata, WireGuard). Use `--only <target>` for selective rebuilds |
+| `build-images.sh` | Builds custom images (mesh LXC, router VM, Pi-hole, rsyslog, Netdata, WireGuard, Home Assistant, Jellyfin, Kodi, Sunshine). Use `--only <target>` for selective rebuilds |
 | `wol.sh` | Wake-on-LAN utility: wake hosts by alias or MAC. Proxied WoL for LAN hosts via PRIMARY_HOST |
 
 ## Script Patterns
@@ -109,6 +109,7 @@ Custom image building automation:
 ./build-images.sh --only openwrt
 ./build-images.sh --only pihole
 ./build-images.sh --only wireguard
+./build-images.sh --only sunshine
 ```
 
 **Targets:**
@@ -132,8 +133,6 @@ Wake-on-LAN utility for remote host recovery:
 ```bash
 # Wake specific host by alias
 ./wol.sh home
-./wol.sh mesh1
-./wol.sh ai
 ./wol.sh mesh2
 
 # Wake by MAC address
@@ -144,15 +143,17 @@ Wake-on-LAN utility for remote host recovery:
 ```
 
 **Requirements:**
-- NIC with WoL support
+- NIC with WoL support (NOT USB ethernet)
 - WoL enabled in BIOS
 - `ethtool Wake-on: g` on management NIC
 - Machine in standby (S5) with power connected
 
-**Limitations:**
-- USB ethernet adapters do NOT support WoL
-- Hosts with USB-only networking require manual power-on
-- Test manually or in dedicated recovery scenario (not part of regular test suite)
+**CRITICAL: Non-WoL hosts:**
+- `ai` is excluded from wol.sh — uses USB ethernet only, no WoL capability
+- Every host declares `wol_capable` (true/false) in `inventory/host_vars/`
+- `tests/test_wol.py` enforces that non-WoL hosts are excluded from wol.sh
+- NEVER add a host to wol.sh without verifying its NIC supports WoL
+- NEVER shut down or crash non-WoL hosts from automation — they require physical recovery
 
 ## Script Safety Rules
 

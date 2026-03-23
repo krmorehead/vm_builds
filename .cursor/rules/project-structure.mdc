@@ -159,7 +159,7 @@ Service-specific provision plays target flavor groups.
 - `service_nodes` — Home Assistant
 - `media_nodes` — Jellyfin, Kodi, Moonlight
 - `desktop_nodes` — Desktop VM, UX Kiosk
-- `gaming_nodes` — Gaming VM (separate physical machine)
+- `gaming_nodes` — Gaming VM with GPU passthrough (home only; AMD APU hosts like ai cannot safely unbind GPU)
 - `lan_hosts` — Satellite Proxmox nodes behind the OpenWrt router (accessed via ProxyJump; mesh1 only)
 A host can belong to multiple flavor groups.
 
@@ -175,7 +175,7 @@ Bump `project_version` in `group_vars/all.yml` when cutting a release.
 - 300-399: Media (300 Jellyfin, 301 Kodi, 302 Moonlight)
 - 400-499: Desktop (400 Desktop VM, 401 Kiosk)
 - 500-599: Observability (500 Netdata, 501 rsyslog)
-- 600-699: Gaming (600 Gaming VM)
+- 600-699: Gaming (600+ Gaming/Sunshine VM, per-host offset)
 - 999: reserved for molecule test containers
 All VMIDs defined in `group_vars/all.yml`.
 
@@ -200,7 +200,7 @@ All VMIDs defined in `group_vars/all.yml`.
 | `setup.sh` | Bootstrap .venv + pip + ansible-galaxy |
 | `run.sh` | Convenience wrapper — delegates to `build.py` |
 | `cleanup.sh` | Restore / full-restore / clean / rollback — delegates to `build.py` |
-| `build-images.sh` | Builds custom images (mesh LXC, router VM, Pi-hole, rsyslog, Jellyfin, Netdata, WireGuard, Home Assistant). Use `--only <target>` for selective rebuilds |
+| `build-images.sh` | Builds custom images (mesh LXC, router VM, Pi-hole, rsyslog, Jellyfin, Netdata, WireGuard, Home Assistant, Sunshine). Use `--only <target>` for selective rebuilds |
 | `test.env` | Test machine config (committed, IP: 192.168.86.201) |
 | `.env` | Production secrets (gitignored) |
 | `test.env.generated` | Auto-generated secrets during test runs (gitignored) |
@@ -214,6 +214,7 @@ All VMIDs defined in `group_vars/all.yml`.
 | `tasks/reconstruct_homeassistant_group.yml` | Reusable dynamic group reconstruction for Home Assistant |
 | `tasks/reconstruct_jellyfin_group.yml` | Reusable dynamic group reconstruction for Jellyfin |
 | `tasks/reconstruct_kodi_group.yml` | Reusable dynamic group reconstruction for Kodi |
+| `tasks/reconstruct_gaming_group.yml` | Reusable dynamic group reconstruction for Gaming VM |
 | `tasks/bootstrap_lan_host.yml` | Reusable bootstrap for LAN hosts (DHCP lease + API token) |
 | `tasks/cleanup_lan_host.yml` | Reusable per-LAN-host cleanup (SSH from primary host) |
 | `molecule/default/` | Full integration tests (home, mesh1, ai, mesh2 — 4-node) |
@@ -227,6 +228,7 @@ All VMIDs defined in `group_vars/all.yml`.
 | `molecule/homeassistant-lxc/` | Per-feature scenario for Home Assistant LXC container |
 | `molecule/jellyfin-lxc/` | Per-feature scenario for Jellyfin media server container |
 | `molecule/kodi-lxc/` | Per-feature scenario for Kodi media player container |
+| `molecule/sunshine-vm/` | Per-feature scenario for Sunshine Gaming VM with iGPU passthrough |
 | `molecule/openwrt-syslog/` | Per-feature scenario for OpenWrt syslog forwarding to rsyslog |
 | `molecule/mesh1-infra/` | Lightweight infra-only on mesh1 (quick iteration) |
 | `wol.sh` | Wake-on-LAN utility: wake hosts by alias or MAC. Proxied WoL for LAN hosts via PRIMARY_HOST |
@@ -267,13 +269,13 @@ All VMIDs defined in `group_vars/all.yml`.
 - Per the Design principles above: every VM and container uses a purpose-built image with all packages baked in. Images are REQUIRED — provision roles verify existence and hard-fail if missing. Configure roles NEVER install packages at runtime.
 - ALL images are stored locally in `images/` (gitignored) and uploaded to Proxmox during provisioning. NEVER depend on remote downloads from the Proxmox host.
 - `build-images.sh` is the current image build script (OpenWrt via Image Builder). Future services will have their own build steps (Dockerfiles, Packer, debootstrap, etc.).
-- VM images: uploaded to `/tmp/`, decompressed if `.gz`, imported via `qm importdisk`, then deleted.
+- VM images: uploaded to a temp directory, decompressed if `.gz`, imported via `qm importdisk`, then deleted. Use `/var/tmp/` for images >5 GB (Windows qcow2 are 8-18 GB); `/tmp/` (tmpfs) is too small.
 - LXC templates: uploaded to `/var/lib/vz/template/cache/` via `ansible.builtin.copy`. The `proxmox_lxc` role checks `pveam list` and skips upload when the template is already cached.
 - NEVER delete LXC templates in molecule cleanup. Templates are large (140-315MB each) and identical between runs. Deleting them forces re-upload of ~820MB across all hosts on every test cycle. Template deletion is ONLY valid in production cleanup behind `[full-restore, clean]` tags.
 - NEVER use `pveam download` — the host may lack internet (router VM destroyed) or have unreachable enterprise repos (no subscription).
 - Image paths are defined in `group_vars/all.yml` (e.g., `openwrt_image_path`, `openwrt_lxc_template_path`). Roles verify the image exists and fail with a clear message pointing to `./build-images.sh` if missing.
 - ALWAYS use `role_path` for source paths in tasks. Bare relative paths break when Molecule runs from non-default scenarios.
-- Use `./build-images.sh --only <target>` to rebuild a single image (~2-3 min vs ~15 min for all). Targets: mesh, router, pihole, rsyslog, netdata, wireguard, homeassistant.
+- Use `./build-images.sh --only <target>` to rebuild a single image (~2-3 min vs ~15 min for all). Targets: mesh, router, pihole, rsyslog, netdata, wireguard, homeassistant, sunshine.
 - See `vm-lifecycle` skill, Image management section, for the full pattern.
 
 ## NTP synchronization
@@ -297,8 +299,8 @@ All VMIDs defined in `group_vars/all.yml`.
 ## Baseline workflow
 - The OpenWrt baseline on the primary host is expensive to rebuild (~4 min). Layered scenarios (`mesh1-infra`, `openwrt-security`, etc.) depend on it.
 - Use `molecule converge` + `molecule verify` for day-to-day iteration. This leaves the baseline running so leaf nodes (mesh1) remain accessible.
-- Use `molecule test` only for clean-state validation (CI, pre-commit). It destroys everything.
-- After a full `molecule test`, re-run `molecule converge` to restore the baseline before working on layered scenarios.
+- Use `molecule test` for clean-state validation (CI, pre-commit). The test_sequence ends with a reconverge that restores the baseline — mesh1 stays accessible when tests pass.
+- NEVER end the test_sequence with just `cleanup`. The final converge proves the build is reproducible AND keeps mesh1 reachable.
 
 ## Testing requirements
 - ALWAYS run `molecule test` after changing roles, playbooks, or molecule config

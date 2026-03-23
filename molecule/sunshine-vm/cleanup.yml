@@ -1,0 +1,124 @@
+---
+- name: Clean up Gaming VM on all nodes
+  hosts: gaming_nodes
+  gather_facts: false
+  tasks:
+    # ── Compute per-host VMID ────────────────────────────────────
+
+    - name: Set per-host Gaming VM ID
+      ansible.builtin.set_fact:
+        gaming_vm_id: "{{ (gaming_vm_id | int) + groups['gaming_nodes'].index(inventory_hostname) }}"
+
+    # ── Destroy VM ────────────────────────────────────────────────
+    # qm stop triggers the hookscript post-stop phase, which unbinds
+    # the GPU from vfio-pci and rebinds the native driver. If the
+    # hookscript isn't attached or fails, we fall back to manual
+    # sysfs restore below.
+
+    - name: Check if Gaming VM exists
+      ansible.builtin.command:
+        cmd: qm status {{ gaming_vm_id }}
+      register: _gvm_cleanup_status
+      failed_when: false
+      changed_when: false
+
+    - name: Stop Gaming VM
+      ansible.builtin.command:
+        cmd: qm stop {{ gaming_vm_id }}
+      when: _gvm_cleanup_status.rc == 0
+      failed_when: false
+      changed_when: true
+
+    - name: Wait for VM to stop
+      ansible.builtin.pause:
+        seconds: 5
+      when: _gvm_cleanup_status.rc == 0
+
+    - name: Destroy Gaming VM
+      ansible.builtin.command:
+        cmd: qm destroy {{ gaming_vm_id }} --purge
+      when: _gvm_cleanup_status.rc == 0
+      failed_when: false
+      changed_when: true
+
+    # ── GPU restore (sysfs-only, safe for single-GPU hosts) ──────
+    # The hookscript post-stop should have already restored the GPU.
+    # This section is a safety net in case the hookscript didn't run
+    # (VM was force-killed, hookscript not attached, etc.).
+    # Uses sysfs unbind + PCI rescan only. GPU kernel module unloads
+    # are forbidden here — they kernel-panic single-GPU hosts.
+
+    - name: Find any devices still bound to vfio-pci
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ls /sys/bus/pci/drivers/vfio-pci/ 2>/dev/null | grep '^0000:' || true
+        executable: /bin/bash
+      register: _vfio_devices
+      changed_when: false
+
+    - name: Restore each vfio-pci device to native driver
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          pci_addr="{{ item }}"
+
+          # Unbind from vfio-pci
+          echo "$pci_addr" > /sys/bus/pci/drivers/vfio-pci/unbind 2>/dev/null || true
+          sleep 1
+
+          # Clear driver override so native driver can claim it
+          echo "" > "/sys/bus/pci/devices/${pci_addr}/driver_override" 2>/dev/null || true
+
+          # Rescan PCI bus
+          echo 1 > /sys/bus/pci/rescan 2>/dev/null || true
+          sleep 2
+
+          # PCI rescan does not auto-bind when the module is already loaded.
+          # Explicitly bind to the native driver based on vendor ID.
+          if [ ! -e "/sys/bus/pci/devices/${pci_addr}/driver" ]; then
+            vendor=$(cat "/sys/bus/pci/devices/${pci_addr}/vendor" 2>/dev/null)
+            case "$vendor" in
+              0x8086) native="i915" ;;
+              0x1002) native="amdgpu" ;;
+              0x10de) native="nvidia" ;;
+              *)      native="" ;;
+            esac
+            if [ -n "$native" ]; then
+              echo "$pci_addr" > "/sys/bus/pci/drivers/${native}/bind" 2>/dev/null || true
+              sleep 2
+            fi
+          fi
+
+          driver=$(basename "$(readlink "/sys/bus/pci/devices/${pci_addr}/driver" 2>/dev/null)" 2>/dev/null || echo "none")
+          echo "Device ${pci_addr} now on driver: ${driver}"
+        executable: /bin/bash
+      loop: "{{ _vfio_devices.stdout_lines | default([]) }}"
+      when: _vfio_devices.stdout | trim | length > 0
+      changed_when: true
+      failed_when: false
+
+    - name: Wait for DRI devices to appear
+      ansible.builtin.shell:
+        cmd: ls /dev/dri/renderD* 2>/dev/null | head -1
+        executable: /bin/bash
+      register: _dri_check
+      retries: 10
+      delay: 2
+      until: _dri_check.stdout | length > 0
+      changed_when: false
+      failed_when: false
+
+    # ── Clean up hookscript state files ──────────────────────────
+
+    - name: Remove hookscript state files
+      ansible.builtin.file:
+        path: "/run/gpu-passthrough/vm-{{ gaming_vm_id }}.state"
+        state: absent
+
+    # ── Clean up hookscript from snippets ────────────────────────
+
+    - name: Remove GPU passthrough hookscript
+      ansible.builtin.file:
+        path: /var/lib/vz/snippets/gpu-passthrough-hook.sh
+        state: absent

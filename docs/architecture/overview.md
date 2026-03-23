@@ -65,11 +65,14 @@ Proxmox Host (Debian)
 
 ### Gaming Rig (Separate Build)
 
-Separate physical machine dedicated to gaming and game streaming.
+Separate physical machine dedicated to gaming and game streaming. Uses iGPU
+PCI passthrough (vfio-pci) for hardware encoding in the Sunshine streaming
+server. Production deployments may use discrete GPU passthrough on dedicated
+gaming hardware.
 
 ```
 Proxmox Host (gaming hardware)
-├── Gaming VM              VM   VMID 600   cores=4-8  RAM=8-16GB  auto-start   discrete GPU
+├── Gaming VM (Sunshine)   VM   VMID 600   cores=4  RAM=4096MB    auto-start   iGPU: exclusive (vfio-pci)
 ├── Netdata Agent          LXC  VMID 500   cores=1  RAM=128MB     auto-start
 └── rsyslog Collector      LXC  VMID 501   cores=1  RAM=64MB      auto-start
 ```
@@ -255,7 +258,9 @@ PCI Device Handling (separate roles)
     ├── Exports: igpu_available, igpu_vendor, igpu_pci_address, igpu_render_device,
     │           igpu_card_device, igpu_render_gid, igpu_video_gid
     ├── LXC consumers (shared bind mount): jellyfin_lxc, kodi_lxc, moonlight_lxc, kiosk_lxc
-    └── VM consumer (exclusive hostpci): desktop_vm (takes GPU from host when running)
+    └── VM consumers (exclusive hostpci/vfio-pci):
+        ├── desktop_vm (takes GPU from host when running)
+        └── gaming_vm (vfio-pci exclusive passthrough for Sunshine streaming)
 ```
 
 ---
@@ -465,9 +470,12 @@ site.yml (current — phased for multi-node)
 │   ├── Play 27: router_nodes        [openwrt-syslog]     deploy_stamp (openwrt_syslog)
 │   ├── Play 28: router_nodes        [openwrt-pihole-dns] reconstruct openwrt group
 │   ├── Play 29: openwrt             [openwrt-pihole-dns] include_role: openwrt_configure/pihole_dns.yml
-│   └── Play 30: router_nodes        [openwrt-pihole-dns] deploy_stamp (openwrt_pihole_dns)
+│   ├── Play 30: router_nodes        [openwrt-pihole-dns] deploy_stamp (openwrt_pihole_dns)
+│   ├── Play 31: gaming_nodes        [gaming]     gaming_vm, deploy_stamp
+│   ├── Play 32: gaming_nodes        [gaming]     reconstruct_gaming_group
+│   └── Play 33: gaming              [gaming]     gaming_configure
 │
-└── Play 31: proxmox:!lan_hosts      [cleanup]    Remove bootstrap IP
+└── Play 34: proxmox:!lan_hosts      [cleanup]    Remove bootstrap IP
 ```
 
 The phased approach ensures LAN hosts (behind the OpenWrt router) are only

@@ -1,0 +1,366 @@
+---
+# Requires: proxmox_igpu role (sets igpu_pci_address, igpu_vendor).
+# VMID = gaming_vm_id + per-host index (avoids conflicts when multiple
+# hosts share the same Proxmox node in the test environment).
+
+- name: Compute per-host VMID for Gaming VM
+  ansible.builtin.set_fact:
+    gaming_vm_id: "{{ (gaming_vm_id | int) + groups['gaming_nodes'].index(inventory_hostname) }}"
+
+- name: Check if Gaming VM already exists
+  ansible.builtin.command:
+    cmd: qm status {{ gaming_vm_id }}
+  register: _gvm_status
+  failed_when: false
+  changed_when: false
+
+- name: Set VM existence flag
+  ansible.builtin.set_fact:
+    _gvm_exists: "{{ _gvm_status.rc == 0 }}"
+
+# ── Verify prerequisites ──────────────────────────────────────────
+
+- name: Assert igpu_pci_address is defined
+  ansible.builtin.assert:
+    that: igpu_pci_address is defined and igpu_pci_address | length > 0
+    fail_msg: >-
+      igpu_pci_address is not defined. The proxmox_igpu role must run
+      before gaming_vm. Check that the host is in gaming_nodes AND the
+      infrastructure play has completed.
+
+- name: Resolve Gaming VM image source path
+  ansible.builtin.set_fact:
+    _gvm_image_src: >-
+      {{ gaming_vm_image
+         if gaming_vm_image.startswith('/')
+         else (project_root + '/' + gaming_vm_image) }}
+  when: not _gvm_exists | bool
+
+- name: Check Gaming VM image exists
+  ansible.builtin.stat:
+    path: "{{ _gvm_image_src }}"
+  register: _gvm_image_stat
+  delegate_to: localhost
+  when: not _gvm_exists | bool
+
+- name: Fail if Gaming VM image is missing
+  ansible.builtin.fail:
+    msg: >-
+      Gaming VM image not found: {{ gaming_vm_image }}.
+      Run scripts/build-images.sh --host <proxmox-ip> --only sunshine
+  when:
+    - not _gvm_exists | bool
+    - not (_gvm_image_stat.stat.exists | default(false))
+
+# ── Validate host can survive GPU passthrough ────────────────────
+# AMD APU iGPUs (Raven Ridge, etc.) share the SoC die with the CPU.
+# Any GPU driver unbind path (sysfs OR modprobe -r) triggers a GPU
+# reset that hangs the entire SoC. This affects BOTH runtime hookscript
+# and boot-time binding. Only discrete AMD GPUs are safe.
+# Intel single-GPU hosts survive (i915 handles unbind gracefully).
+
+- name: Count VGA controllers on host
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      lspci | grep -c 'VGA compatible controller'
+    executable: /bin/bash
+  register: _vga_count
+  changed_when: false
+
+- name: Fail if AMD APU with single GPU
+  ansible.builtin.fail:
+    msg: >-
+      {{ inventory_hostname }} has only 1 VGA controller (AMD APU iGPU).
+      AMD APU iGPUs share the SoC die with the CPU. Unbinding the GPU
+      driver (sysfs or modprobe -r) triggers a GPU reset that hangs the
+      entire system. This is a hardware limitation — not fixable with
+      hookscripts or boot-time binding. Add a discrete GPU or remove
+      this host from gaming_nodes.
+  when:
+    - (_vga_count.stdout | trim | int) < 2
+    - igpu_vendor == "amd"
+
+- name: Warn if Intel host with single GPU
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} has only 1 VGA controller (Intel iGPU).
+      The hookscript will bind/unbind the iGPU at VM start/stop. Host
+      runs headless (SSH only) while the VM has the GPU.
+  when:
+    - (_vga_count.stdout | trim | int) < 2
+    - igpu_vendor == "intel"
+
+# ── Validate IOMMU ────────────────────────────────────────────────
+
+- name: Check IOMMU is active
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      ls /sys/class/iommu/ 2>/dev/null | head -1
+    executable: /bin/bash
+  register: _iommu_check
+  changed_when: false
+  failed_when: false
+
+- name: Fail if IOMMU is not active
+  ansible.builtin.fail:
+    msg: >-
+      IOMMU is not active on {{ inventory_hostname }}. Enable VT-d (Intel)
+      or AMD-Vi in BIOS. iGPU PCI passthrough requires IOMMU.
+  when: _iommu_check.stdout | trim | length == 0
+
+# ── Validate iGPU IOMMU group isolation ───────────────────────────
+
+- name: Check iGPU IOMMU group device count
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      iommu_group=$(readlink -f /sys/bus/pci/devices/0000:{{ igpu_pci_address }}/iommu_group 2>/dev/null)
+      if [ -z "$iommu_group" ]; then
+        echo "0"
+        exit 0
+      fi
+      ls "$iommu_group/devices/" 2>/dev/null | wc -l
+    executable: /bin/bash
+  register: _iommu_group_count
+  changed_when: false
+
+- name: Warn if iGPU shares IOMMU group with other devices
+  ansible.builtin.debug:
+    msg: >-
+      iGPU at {{ igpu_pci_address }} shares its IOMMU group with
+      {{ _iommu_group_count.stdout | trim }} devices. PCI passthrough
+      may require ACS override patch.
+  when: (_iommu_group_count.stdout | trim | int) > 2
+
+# ── Deploy GPU passthrough hookscript ────────────────────────────
+# The hookscript handles GPU driver bind/unbind at VM start/stop.
+# It stops GPU-consuming LXC containers and suspends conflicting VMs
+# before grabbing the GPU, then restores them after the VM stops.
+
+- name: Ensure snippets directory exists
+  ansible.builtin.file:
+    path: /var/lib/vz/snippets
+    state: directory
+    mode: "0755"
+
+- name: Deploy GPU passthrough hookscript
+  ansible.builtin.copy:
+    src: gpu-passthrough-hook.sh
+    dest: /var/lib/vz/snippets/gpu-passthrough-hook.sh
+    mode: "0755"
+
+# ── Image upload & VM creation ────────────────────────────────────
+
+- name: Set upload destination path
+  ansible.builtin.set_fact:
+    _gvm_tmp_upload: "{{ gaming_vm_tmp_dir }}/{{ _gvm_image_src | basename }}"
+  when: not _gvm_exists | bool
+
+- name: Check if image is already cached on host
+  ansible.builtin.stat:
+    path: "{{ _gvm_tmp_upload }}"
+    get_checksum: false
+  register: _gvm_remote_image
+  when: not _gvm_exists | bool
+
+- name: Upload Gaming VM image to Proxmox node
+  ansible.builtin.copy:
+    src: "{{ _gvm_image_src }}"
+    dest: "{{ _gvm_tmp_upload }}"
+    mode: "0644"
+  when:
+    - not _gvm_exists | bool
+    - not (_gvm_remote_image.stat.exists | default(false))
+
+- name: Detect management bridge
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      ip -o route show default | awk '{print $5}' | head -1
+    executable: /bin/bash
+  register: _gvm_mgmt_bridge
+  changed_when: false
+
+- name: Set management bridge fact
+  ansible.builtin.set_fact:
+    _gvm_bridge: "{{ proxmox_wan_bridge | default(_gvm_mgmt_bridge.stdout | trim) }}"
+
+- name: Create Gaming VM
+  ansible.builtin.command:
+    cmd: >-
+      qm create {{ gaming_vm_id }}
+      --name sunshine-gaming
+      --machine {{ gaming_vm_machine }}
+      --bios {{ gaming_vm_bios }}
+      --efidisk0 {{ proxmox_storage }}:0,format=raw,efitype=4m,pre-enrolled-keys=0
+      --cores {{ gaming_vm_cores }}
+      --memory {{ gaming_vm_memory }}
+      --cpu host,hidden=1
+      --scsihw virtio-scsi-pci
+      --net0 virtio,bridge={{ _gvm_bridge }}
+      --hostpci0 {{ igpu_pci_address }},pcie=1,rombar=0
+      --agent enabled=1
+      --ostype win11
+      --hookscript local:snippets/gpu-passthrough-hook.sh
+  when: not _gvm_exists | bool
+  changed_when: true
+
+- name: Import disk image into VM storage
+  ansible.builtin.command:
+    cmd: >-
+      qm importdisk {{ gaming_vm_id }}
+      {{ _gvm_tmp_upload }}
+      {{ proxmox_storage }}
+  register: _gvm_disk_import
+  when: not _gvm_exists | bool
+  changed_when: true
+
+- name: Get unused disk from VM config after import
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      qm config {{ gaming_vm_id }} | grep '^unused' | head -1 | sed 's/^unused[0-9]*: //'
+    executable: /bin/bash
+  register: _gvm_unused_disk
+  when: not _gvm_exists | bool
+  changed_when: false
+
+- name: Assert unused disk was found
+  ansible.builtin.assert:
+    that: _gvm_unused_disk.stdout | trim | length > 0
+    fail_msg: >-
+      No unused disk found in VM config after importdisk.
+      qm importdisk output: {{ _gvm_disk_import.stdout_lines | default([]) | join('\n') }}
+  when: not _gvm_exists | bool
+
+- name: Attach imported disk as scsi0
+  ansible.builtin.command:
+    cmd: >-
+      qm set {{ gaming_vm_id }}
+      --scsi0 {{ _gvm_unused_disk.stdout | trim }},ssd=1
+  when: not _gvm_exists | bool
+  changed_when: true
+
+- name: Set boot order to scsi0
+  ansible.builtin.command:
+    cmd: >-
+      qm set {{ gaming_vm_id }}
+      --boot order=scsi0
+  when: not _gvm_exists | bool
+  changed_when: true
+
+# Image intentionally kept on host for caching (19 GB upload = 10-25 min).
+
+# ── Ensure hookscript is attached (self-healing for existing VMs) ──
+
+- name: Ensure hookscript is attached to VM
+  ansible.builtin.command:
+    cmd: >-
+      qm set {{ gaming_vm_id }}
+      --hookscript local:snippets/gpu-passthrough-hook.sh
+  changed_when: true
+
+# ── Auto-start configuration (unconditional, self-healing) ────────
+
+- name: Configure auto-start and boot priority
+  ansible.builtin.command:
+    cmd: >-
+      qm set {{ gaming_vm_id }}
+      --onboot {{ '1' if gaming_vm_onboot else '0' }}
+      --startup order={{ gaming_vm_startup_order }}
+  changed_when: true
+
+# ── Start VM and discover IP ──────────────────────────────────────
+# The hookscript pre-start phase runs automatically when qm start is
+# called. It stops GPU consumers, unbinds the GPU from the native
+# driver, and binds it to vfio-pci before QEMU launches.
+
+- name: Check if VM is running
+  ansible.builtin.command:
+    cmd: qm status {{ gaming_vm_id }}
+  register: _gvm_run_status
+  changed_when: false
+
+- name: Start Gaming VM
+  ansible.builtin.command:
+    cmd: qm start {{ gaming_vm_id }}
+  when: "'running' not in _gvm_run_status.stdout"
+  changed_when: true
+
+- name: Wait for QEMU Guest Agent
+  ansible.builtin.command:
+    cmd: qm guest cmd {{ gaming_vm_id }} ping
+  register: _gvm_ga_ping
+  retries: 30
+  delay: 10
+  until: _gvm_ga_ping.rc == 0
+  changed_when: false
+  failed_when: false
+
+- name: Assert Guest Agent responded
+  ansible.builtin.assert:
+    that: _gvm_ga_ping.rc == 0
+    fail_msg: >-
+      QEMU Guest Agent on VM {{ gaming_vm_id }} did not respond after 5 minutes.
+      Check VM boot and qemu-ga service inside Windows.
+
+- name: Discover VM IP via QEMU Guest Agent
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      qm guest cmd {{ gaming_vm_id }} network-get-interfaces | \
+        python3 -c "
+      import sys, json
+      data = json.load(sys.stdin)
+      for iface in data:
+          if iface.get('name', '').startswith('Loopback'):
+              continue
+          for addr in iface.get('ip-addresses', []):
+              ip = addr.get('ip-address', '')
+              if (addr.get('ip-address-type') == 'ipv4'
+                  and not ip.startswith('127.')
+                  and not ip.startswith('169.254.')):
+                  print(ip)
+                  sys.exit(0)
+      sys.exit(1)
+      "
+    executable: /bin/bash
+  register: _gvm_ip
+  retries: 18
+  delay: 10
+  until: _gvm_ip.rc == 0
+  changed_when: false
+
+- name: Display discovered VM IP
+  ansible.builtin.debug:
+    msg: "Gaming VM {{ gaming_vm_id }} IP: {{ _gvm_ip.stdout | trim }}"
+
+# ── Register in dynamic group ─────────────────────────────────────
+
+- name: Set SSH args for Gaming VM connection
+  ansible.builtin.set_fact:
+    _gvm_ssh_args: >-
+      {% if 'lan_hosts' in group_names %}
+      -o ProxyJump=root@{{ lookup('env', 'PRIMARY_HOST') }}
+      {% endif %}
+      -o StrictHostKeyChecking=no
+      -o UserKnownHostsFile=/dev/null
+      -o ConnectTimeout=30
+      -o ServerAliveInterval=15
+      -o ServerAliveCountMax=4
+
+- name: Add Gaming VM to dynamic group
+  ansible.builtin.add_host:
+    name: "gaming-{{ inventory_hostname }}"
+    groups: gaming
+    ansible_host: "{{ _gvm_ip.stdout | trim }}"
+    ansible_connection: ssh
+    ansible_user: "{{ gaming_vm_admin_user }}"
+    ansible_password: "{{ gaming_vm_admin_password }}"
+    ansible_shell_type: powershell
+    ansible_become: false
+    ansible_ssh_common_args: "{{ _gvm_ssh_args }}"
+    gaming_vm_proxmox_host: "{{ inventory_hostname }}"
+    gaming_vm_id_ref: "{{ gaming_vm_id }}"

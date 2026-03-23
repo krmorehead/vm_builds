@@ -270,6 +270,31 @@
   roles:
     - openwrt_mesh_configure
 
+- name: Provision Sunshine Gaming VM
+  hosts: gaming_nodes
+  gather_facts: false
+  tags: [gaming, never]
+  roles:
+    - gaming_vm
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: gaming_vm
+
+- name: Reconstruct gaming dynamic group
+  hosts: gaming_nodes
+  gather_facts: false
+  tags: [gaming, never]
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: ../tasks/reconstruct_gaming_group.yml
+
+- name: Configure Sunshine
+  hosts: gaming
+  gather_facts: false
+  tags: [gaming, never]
+  roles:
+    - gaming_configure
+
 # ── Per-feature plays (opt-in via tags + never) ─────────────────
 
 - name: Harden OpenWrt security

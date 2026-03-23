@@ -1,0 +1,22 @@
+---
+# Baseline dependency: mesh1 is a LAN host — OpenWrt baseline must be
+# running for network connectivity. Run `molecule converge` (default)
+# first to establish the baseline.
+
+- name: Detect iGPU on gaming nodes
+  hosts: gaming_nodes
+  gather_facts: true
+  roles:
+    - proxmox_igpu
+
+- name: Provision Sunshine Gaming VM
+  hosts: gaming_nodes
+  gather_facts: false
+  roles:
+    - gaming_vm
+
+- name: Configure Sunshine
+  hosts: gaming
+  gather_facts: false
+  roles:
+    - gaming_configure

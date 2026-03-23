@@ -695,3 +695,79 @@ None — Jellyfin is pure userspace. No kernel modules, no host config files. Th
 - `kodi-standalone` systemd service unit
 - `advancedsettings.xml` buffer/cache tuning
 - `kodi` system user
+
+---
+
+## gaming_vm
+
+**Purpose:** Provision a Windows 11 VM with iGPU PCI passthrough for game streaming via Sunshine. Uses vfio-pci to bind the host iGPU exclusively to the VM, creating a q35/OVMF VM from a pre-built Windows disk image.
+
+### How It Works
+
+1. Asserts `igpu_pci_address` is defined (from `proxmox_igpu`).
+2. Verifies pre-built Windows image exists locally, hard-fails with build instructions if missing.
+3. Validates IOMMU is active and checks iGPU IOMMU group isolation.
+4. Unbinds iGPU from host driver (i915/amdgpu) and binds to vfio-pci.
+5. Uploads image to Proxmox and creates VM via `qm create` (q35, OVMF, hostpci0, virtio-net).
+6. Imports disk via `qm importdisk`, sets boot order.
+7. Configures auto-start (`onboot=1`, startup order).
+8. Starts VM and waits for QEMU Guest Agent response (up to 10 minutes).
+9. Discovers VM IP via `qm guest cmd network-get-interfaces`.
+10. Registers VM in `gaming` dynamic group via `add_host` with SSH connection vars.
+
+### Key Variables
+
+| Variable | Env Var | Default | Description |
+|----------|---------|---------|-------------|
+| `gaming_vm_memory` | -- | `4096` | RAM in MB |
+| `gaming_vm_cores` | -- | `4` | CPU cores |
+| `gaming_vm_machine` | -- | `q35` | Proxmox machine type |
+| `gaming_vm_bios` | -- | `ovmf` | UEFI firmware |
+| `gaming_vm_admin_user` | `GAMING_VM_ADMIN_USER` | `admin` | Windows admin username |
+| `gaming_vm_admin_password` | `GAMING_VM_ADMIN_PASSWORD` | `Passw0rd!` | Windows admin password |
+| `gaming_vm_tmp_dir` | -- | `/var/tmp` | Upload directory (NOT /tmp — tmpfs too small for 18GB images) |
+
+### Exported Facts
+
+| Fact | Type | Description |
+|------|------|-------------|
+| (via `add_host`) | -- | VM registered in `gaming` dynamic group with SSH connection vars |
+
+### Host State Changes
+
+- iGPU unbound from host driver and bound to vfio-pci via sysfs (no modprobe config files written)
+- VM with per-host VMID (base + group index) created and running with iGPU PCI passthrough
+
+---
+
+## gaming_configure
+
+**Purpose:** Configure Sunshine streaming server credentials and verify game installation on the Windows VM. All software (Sunshine, GZDoom, Freedoom, drivers) is pre-installed in the image — this role only applies host-specific configuration.
+
+**Connection pattern:** Runs on the `gaming` dynamic group via SSH to Windows (`ansible_shell_type: powershell`).
+
+### How It Works
+
+1. Verifies iGPU is visible in Windows via `Win32_VideoController`.
+2. Auto-generates Sunshine password if `SUNSHINE_PASSWORD` is empty, writes to `env_generated_path`.
+3. Sets Sunshine credentials via the web API.
+4. Starts Sunshine service if not already running.
+5. Verifies and adds Windows Firewall rules for Sunshine ports (47984-48002).
+6. Verifies GZDoom executable and Freedoom WAD files are present.
+7. Ensures RDP is enabled for backup remote access.
+
+### Key Variables
+
+| Variable | Env Var | Default | Description |
+|----------|---------|---------|-------------|
+| `sunshine_user` | `SUNSHINE_USER` | `admin` | Sunshine web UI username |
+| `sunshine_password` | `SUNSHINE_PASSWORD` | (auto-generated) | Sunshine web UI password |
+
+### Baked into Image (NOT configured here)
+
+- Windows 11 installation (via Tiny11 + autounattend.xml)
+- Virtio drivers and QEMU Guest Agent
+- OpenSSH Server
+- Sunshine binary and service
+- GZDoom + Freedoom WADs
+- Windows Firewall rules for Sunshine ports
