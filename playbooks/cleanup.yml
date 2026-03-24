@@ -316,12 +316,52 @@
         executable: /bin/bash
       changed_when: true
 
-# ── Per-feature rollback: Gaming VM ────────────────────────────
+# ── Per-feature rollback: Moonlight container ──────────────────
+
+- name: Rollback Moonlight container
+  hosts: streaming_nodes
+  gather_facts: false
+  tags: [moonlight-rollback, never]
+  tasks:
+    - name: Stop and destroy Moonlight container
+      ansible.builtin.shell:
+        cmd: |
+          pct stop {{ moonlight_ct_id }} 2>/dev/null || true
+          sleep 2
+          pct destroy {{ moonlight_ct_id }} --purge 2>/dev/null || true
+        executable: /bin/bash
+      changed_when: true
+
+# ── Per-feature rollback: Gaming LXC ───────────────────────────
+
+- name: Rollback Gaming LXC
+  hosts: gaming_nodes
+  gather_facts: false
+  tags: [gaming-lxc-rollback, never]
+  tasks:
+    - name: Check if Gaming LXC container exists
+      ansible.builtin.command:
+        cmd: pct status {{ gaming_ct_id }}
+      register: _gaming_rollback_status
+      failed_when: false
+      changed_when: false
+
+    - name: Stop and destroy Gaming LXC container
+      ansible.builtin.shell:
+        cmd: |
+          pct stop {{ gaming_ct_id }} 2>/dev/null || true
+          sleep 3
+          pct destroy {{ gaming_ct_id }} --purge 2>/dev/null || true
+        executable: /bin/bash
+      when: _gaming_rollback_status.rc == 0
+      changed_when: true
+
+# ── Per-feature rollback: Gaming VM (legacy Windows build) ─────
 
 - name: Rollback Gaming VM
   hosts: gaming_nodes
   gather_facts: false
-  tags: [gaming-rollback, never]
+  tags: [gaming-vm-rollback, never]
   tasks:
     - name: Compute per-host VMID for Gaming VM
       ansible.builtin.set_fact:

@@ -1,10 +1,17 @@
-# Sunshine Host Build Process
+# Sunshine Host Build Process (Windows VM -- Legacy)
+
+> **Note:** This is the legacy Windows VM gaming path. The active gaming
+> deployment uses a Fedora LXC container with GPU render device sharing.
+> See [gaming-lxc-build.md](gaming-lxc-build.md) for the current approach.
 
 ## Overview
 
 This document describes the build process for the Sunshine/Gaming Windows 11
 VM image used in the vm_builds project. The Gaming VM provides game streaming
 via Moonlight using iGPU PCI passthrough (vfio-pci) for hardware encoding.
+The Windows VM roles (`gaming_vm`, `gaming_configure`) remain in the
+repository as a general-purpose Windows build but are no longer the active
+gaming deployment path in `site.yml`.
 
 ## Image Build Requirements
 

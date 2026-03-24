@@ -29,8 +29,9 @@ LXC container
 
 ## Build Profiles
 
-- Home Entertainment Box: yes (`media_nodes`)
+- Streaming Client Node: yes (`streaming_nodes` — mesh1)
 - Minimal Router: no
+- Home Entertainment Box: no (home runs Sunshine — can't also be the client)
 - Gaming Rig: no (this is the **client**; the rig is the server)
 
 ## Display Exclusivity
@@ -49,20 +50,21 @@ LXC container
 - Physical display connected to host HDMI/DP
 - USB controller connected to host
 - `moonlight_ct_id: 302` already in `group_vars/all.yml`
-- `media_nodes` flavor group and `moonlight` dynamic group already in `inventory/hosts.yml`
-- `media_nodes` already in `molecule/default/molecule.yml` platform groups
+- `streaming_nodes` flavor group and `moonlight` dynamic group already in `inventory/hosts.yml`
+- `streaming_nodes` already in `molecule/default/molecule.yml` platform groups (mesh1)
 - `proxmox_lxc` role operational with `pct_remote` connection support
 - `proxmox_igpu` exports `igpu_render_device`, `igpu_render_gid`, `igpu_vendor` (hard-fails if absent)
 - Debian 12 standard template in `images/` (base for custom image build)
 
 ## Network topology assumption
 
-`media_nodes` hosts are always behind OpenWrt (`router_nodes` or `lan_hosts`).
-Moonlight containers always use the OpenWrt LAN subnet on the LAN bridge.
-There is no WAN-connected case — media services only run on the Home
-Entertainment Box profile, which always has OpenWrt. If `media_nodes` ever
-includes a WAN-connected host, add the WireGuard-style topology branching
-at that time.
+`streaming_nodes` hosts are LAN hosts behind OpenWrt (mesh1). Moonlight
+containers use the OpenWrt LAN subnet on the LAN bridge. The Sunshine
+server (on `gaming_nodes`/home) is on the WAN subnet. Cross-subnet
+discovery happens via WireGuard VPN — this is a core test case.
+
+NEVER co-locate Moonlight (client) and Sunshine (server) on the same host.
+The whole point is cross-subnet streaming verification.
 
 ## Skills
 
@@ -132,9 +134,9 @@ Decisions
 ### Parallelism in `molecule/default` (full integration)
 
 `molecule/default` converges all 4 nodes (home, mesh1, ai, mesh2). In
-Phase 3 of `site.yml`, Moonlight provisions on `media_nodes` (currently
-`home` only). It runs alongside Jellyfin and Kodi. All three share the
-`[media]` tag and provision in the same play on `media_nodes`.
+Phase 3 of `site.yml`, Moonlight provisions on `streaming_nodes` (mesh1).
+It uses its own `[moonlight]` tag, separate from Jellyfin/Kodi `[media]`
+since they target different hosts (mesh1 vs home).
 
 ### Per-feature scenarios (fast iteration)
 
@@ -271,8 +273,8 @@ before this play and hard-fails if absent).
 
 **Implementation pattern:**
 - Role: `roles/moonlight_lxc/defaults/main.yml`, `tasks/main.yml`, `meta/main.yml`
-- site.yml: provision play targeting `media_nodes`, tagged `[media]`,
-  in Phase 3 (combined with Jellyfin and Kodi)
+- site.yml: provision play targeting `streaming_nodes`, tagged `[moonlight]`,
+  in Phase 3 (separate from Jellyfin and Kodi — different host group)
 - deploy_stamp included as last role in the provision play
 - Dynamic group `moonlight` populated by `proxmox_lxc` via `add_host`
 
@@ -298,11 +300,10 @@ before this play and hard-fails if absent).
     disk, onboot, mount_entries, cgroup allowlist
   - Attach display-exclusive hookscript (deployed by Kiosk project 2026-03-09-12)
 - [ ] Create `roles/moonlight_lxc/meta/main.yml` with required metadata
-- [ ] Add provision play to `site.yml` Phase 3, targeting `media_nodes`,
-  tagged `[media]`, with `moonlight_lxc` role and `deploy_stamp`
-  (combined with Jellyfin and Kodi in same play)
-- [ ] Add configure play to `site.yml` Phase 3, targeting `moonlight` dynamic
-  group, tagged `[media]`, `gather_facts: true`, after provision play
+- [ ] Add provision play to `site.yml` Phase 3, targeting `streaming_nodes`,
+  tagged `[moonlight]`, with `moonlight_lxc` role and `deploy_stamp`
+- [ ] Add configure play to `site.yml` Phase 3, targeting `streaming_nodes`,
+  tagged `[moonlight]`, after provision play
 - [ ] Create `tasks/reconstruct_moonlight_group.yml`:
   - Verify container 302 is running (`pct status {{ moonlight_ct_id }}`)
   - Register via `add_host` with:
@@ -311,10 +312,9 @@ before this play and hard-fails if absent).
     `proxmox_vmid: {{ moonlight_ct_id }}`,
     `ansible_user: root`
 
-**Note on `[media]` tag:** This tag is shared with Jellyfin and Kodi (per
-the target site.yml architecture, all three provision in the same play on
-`media_nodes`). Configure plays remain separate since they target different
-dynamic groups.
+**Note on `[moonlight]` tag:** Moonlight has its own tag separate from
+Jellyfin/Kodi `[media]`. They target different host groups
+(`streaming_nodes` vs `media_nodes`) on different hosts (mesh1 vs home).
 
 **Verify:**
 
@@ -353,8 +353,8 @@ See: `proxmox-system-safety` skill (package name verification — ALWAYS
 **Implementation pattern:**
 - Role: `roles/moonlight_configure/defaults/main.yml`, `tasks/main.yml`,
   `templates/moonlight.conf.j2`, `meta/main.yml`
-- site.yml: configure play targeting `moonlight` dynamic group, tagged
-  `[media]`, after the provision play
+- site.yml: configure play targeting `streaming_nodes`, tagged
+  `[moonlight]`, after the provision play
 
 **Env variables** (optional — Sunshine server IP from group_vars or .env):
 
@@ -418,10 +418,16 @@ completeness).
     - name: home
       groups:
         - proxmox
-        - media_nodes
+        - router_nodes
+    - name: mesh1
+      groups:
+        - proxmox
+        - lan_hosts
+        - streaming_nodes
   provisioner:
     env:
       HOME_API_TOKEN: ${HOME_API_TOKEN}
+      MESH1_API_TOKEN: ${MESH1_API_TOKEN}
       PRIMARY_HOST: ${PRIMARY_HOST}
       MOONLIGHT_SERVER_IP: ${MOONLIGHT_SERVER_IP:-}
       MOONLIGHT_PAIR_PIN: ${MOONLIGHT_PAIR_PIN:-}
@@ -437,21 +443,14 @@ completeness).
 - [ ] Create `molecule/moonlight-lxc/converge.yml`:
   ```yaml
   - name: Provision Moonlight LXC container
-    hosts: media_nodes
+    hosts: streaming_nodes
     gather_facts: false
     roles:
       - moonlight_lxc
 
-  - name: Reconstruct moonlight dynamic group
-    hosts: media_nodes
-    gather_facts: false
-    tasks:
-      - name: Include group reconstruction
-        ansible.builtin.include_tasks: ../../tasks/reconstruct_moonlight_group.yml
-
   - name: Configure Moonlight
-    hosts: moonlight
-    gather_facts: true
+    hosts: streaming_nodes
+    gather_facts: false
     roles:
       - moonlight_configure
   ```
@@ -476,7 +475,7 @@ completeness).
 - [ ] Add `moonlight-rollback` play:
   ```yaml
   - name: Rollback Moonlight container
-    hosts: media_nodes
+    hosts: streaming_nodes
     gather_facts: false
     tags: [moonlight-rollback, never]
     tasks:

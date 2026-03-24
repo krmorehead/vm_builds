@@ -118,16 +118,20 @@
         fail_msg: "AMD iGPU detected but amdgpu driver is not loaded"
       when: _verify_igpu_vendor == 'amd'
 
-    - name: Verify render device exists
-      ansible.builtin.stat:
-        path: /dev/dri/renderD128
-      register: render_dev
+    - name: Detect render device
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ls /dev/dri/renderD* 2>/dev/null | head -1
+        executable: /bin/bash
+      register: _verify_render_dev
+      changed_when: false
       when: _verify_igpu_present | bool
 
     - name: Assert render device exists
       ansible.builtin.assert:
-        that: render_dev.stat.exists
-        fail_msg: "/dev/dri/renderD128 missing despite iGPU and loaded driver"
+        that: _verify_render_dev.stdout | trim | length > 0
+        fail_msg: "No render device found in /dev/dri/ despite iGPU and loaded driver"
       when: _verify_igpu_present | bool
 
     - name: Verify vainfo is installed
@@ -302,23 +306,25 @@
           {{ inventory_hostname }} has no wol_capable host var.
           Every host MUST declare wol_capable (true/false).
 
-    - name: Read wol.sh on controller
+    - name: Extract WoL host entries from wol.sh
       ansible.builtin.shell:
-        cmd: cat {{ playbook_dir }}/../../scripts/wol.sh
+        cmd: |
+          set -o pipefail
+          grep -E '^\s*\[' {{ playbook_dir }}/../../scripts/wol.sh | sed 's/.*\[\(.*\)\].*/\1/'
         executable: /bin/bash
-      register: _wol_script
+      register: _wol_entries
       changed_when: false
       delegate_to: localhost
       run_once: true
 
-    - name: Assert non-WoL hosts are excluded from wol.sh
+    - name: Assert non-WoL hosts are excluded from wol.sh arrays
       ansible.builtin.assert:
         that: >-
-          inventory_hostname not in _wol_script.stdout
+          inventory_hostname not in _wol_entries.stdout
         fail_msg: >-
           {{ inventory_hostname }} has wol_capable=false but appears
-          in scripts/wol.sh. Non-WoL hosts must never be in the WoL
-          script — they cannot be recovered if shut down.
+          in wol.sh host arrays. Non-WoL hosts must never be in the
+          WoL script — they cannot be recovered if shut down.
       when: not (wol_capable | bool)
 
 # ── Play 2: Router node assertions (home-specific) ────────────────
@@ -2030,16 +2036,21 @@
 
     # ── iGPU device mounting verification ──────────────────────────
 
-    - name: Verify iGPU device is mounted in container
-      ansible.builtin.command:
-        cmd: pct exec {{ jellyfin_ct_id }} -- ls -la /dev/dri/renderD128
+    - name: Verify render device is mounted in container
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ jellyfin_ct_id }} -- ls /dev/dri/renderD* 2>/dev/null | head -1
+        executable: /bin/bash
       register: _igpu_mount
       changed_when: false
 
-    - name: Assert iGPU device is mounted
+    - name: Assert render device is mounted
       ansible.builtin.assert:
-        that: _igpu_mount.rc == 0
-        fail_msg: "iGPU device /dev/dri/renderD128 not mounted in container {{ jellyfin_ct_id }} on {{ inventory_hostname }}"
+        that:
+          - _igpu_mount.rc == 0
+          - _igpu_mount.stdout | trim | length > 0
+        fail_msg: "No render device found in /dev/dri/ inside container {{ jellyfin_ct_id }} on {{ inventory_hostname }}"
 
     # ── Media path mounting verification ───────────────────────────
 
@@ -2287,3 +2298,372 @@
           service={{ 'enabled' if 'enabled' in _kodi_health.stdout else 'disabled' }},
           dri={{ 'mounted' if _kodi_dri.rc == 0 else 'missing' }},
           snd={{ 'mounted' if _kodi_snd.rc == 0 else 'missing' }}
+
+- name: Verify Moonlight streaming client
+  hosts: streaming_nodes
+  gather_facts: false
+  tasks:
+    # ── Container state ──────────────────────────────────────────
+
+    - name: Check Moonlight container is running
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct status {{ moonlight_ct_id }} | grep -c running
+        executable: /bin/bash
+      register: _moonlight_running
+      changed_when: false
+
+    - name: Assert Moonlight container is running
+      ansible.builtin.assert:
+        that: (_moonlight_running.stdout | trim | int) > 0
+        fail_msg: "Moonlight container {{ moonlight_ct_id }} is not running on {{ inventory_hostname }}"
+
+    # ── Container config ─────────────────────────────────────────
+
+    - name: Read Moonlight container config
+      ansible.builtin.command:
+        cmd: pct config {{ moonlight_ct_id }}
+      register: _moonlight_cfg
+      changed_when: false
+
+    - name: Assert onboot is disabled (on-demand container)
+      ansible.builtin.assert:
+        that: "'onboot: 0' in _moonlight_cfg.stdout"
+        fail_msg: "Container {{ moonlight_ct_id }} should have onboot: 0"
+
+    # ── Device mounts ────────────────────────────────────────────
+
+    - name: Check DRI devices are mounted in Moonlight
+      ansible.builtin.command:
+        cmd: pct exec {{ moonlight_ct_id }} -- ls /dev/dri/
+      register: _moonlight_dri
+      changed_when: false
+
+    - name: Assert DRI devices exist in Moonlight
+      ansible.builtin.assert:
+        that: _moonlight_dri.rc == 0
+        fail_msg: "DRI devices not mounted in Moonlight container"
+
+    # ── lxc.mount.entry device bind mounts ────────────────────────
+
+    - name: Check Moonlight lxc.mount.entry device bind mounts
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ moonlight_ct_id }} | grep -c 'lxc.mount.entry.*dev/'
+        executable: /bin/bash
+      register: _moonlight_mount_entries
+      changed_when: false
+
+    - name: Assert Moonlight device bind mounts are configured
+      ansible.builtin.assert:
+        that: (_moonlight_mount_entries.stdout | trim | int) >= 2
+        fail_msg: "Expected >= 2 lxc.mount.entry rules, got {{ _moonlight_mount_entries.stdout | trim }}"
+
+    # ── cgroup device allowlist ──────────────────────────────────
+
+    - name: Check Moonlight cgroup device allowlist
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ moonlight_ct_id }} | grep -c 'lxc.cgroup2.devices.allow'
+        executable: /bin/bash
+      register: _moonlight_cgroup
+      changed_when: false
+
+    - name: Assert Moonlight cgroup allowlist has device rules
+      ansible.builtin.assert:
+        that: (_moonlight_cgroup.stdout | trim | int) >= 3
+        fail_msg: "Expected >= 3 cgroup rules, got {{ _moonlight_cgroup.stdout | trim }}"
+
+    # ── Packages and config (batched) ────────────────────────────
+
+    - name: Run Moonlight health checks (single pct exec)
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ moonlight_ct_id }} -- /bin/sh -c '
+          echo "MOONLIGHT=$(test -x /usr/local/bin/moonlight && echo installed || echo missing)";
+          echo "VAINFO=$(test -x /usr/bin/vainfo && echo installed || echo missing)";
+          echo "CONFIG=$(test -f /etc/moonlight.conf && echo ok || echo no)"
+          '
+      register: _moonlight_health
+      changed_when: false
+
+    - name: Assert moonlight-embedded is installed
+      ansible.builtin.assert:
+        that: "'MOONLIGHT=installed' in _moonlight_health.stdout"
+        fail_msg: "moonlight-embedded not installed: {{ _moonlight_health.stdout }}"
+
+    - name: Assert vainfo is available
+      ansible.builtin.assert:
+        that: "'VAINFO=installed' in _moonlight_health.stdout"
+        fail_msg: "vainfo not installed"
+
+    - name: Assert moonlight config file deployed
+      ansible.builtin.assert:
+        that: "'CONFIG=ok' in _moonlight_health.stdout"
+        fail_msg: "Moonlight config /etc/moonlight.conf not found"
+
+    # ── VA-API decode ────────────────────────────────────────────
+
+    - name: Check Moonlight VA-API decode
+      ansible.builtin.command:
+        cmd: pct exec {{ moonlight_ct_id }} -- vainfo --display drm
+      register: _moonlight_vaapi
+      changed_when: false
+      failed_when: false
+
+    # ── Container IP ─────────────────────────────────────────────
+
+    - name: Get Moonlight container IP
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ moonlight_ct_id }} -- hostname -I | awk '{print $1}'
+        executable: /bin/bash
+      register: _moonlight_verify_ip
+      changed_when: false
+
+    - name: Validate container IP is non-empty
+      ansible.builtin.assert:
+        that: _moonlight_verify_ip.stdout | trim | length > 0
+        fail_msg: "Moonlight container has no IP address on {{ inventory_hostname }}"
+
+    # ── deploy_stamp ─────────────────────────────────────────────
+
+    - name: Read deploy_stamp on streaming node
+      ansible.builtin.slurp:
+        src: /etc/ansible/facts.d/vm_builds.fact
+      register: _streaming_stamp_raw
+      failed_when: false
+
+    - name: Parse deploy_stamp
+      ansible.builtin.set_fact:
+        _streaming_stamp: "{{ (_streaming_stamp_raw.content | b64decode | from_json) if _streaming_stamp_raw is not failed else {} }}"
+
+    - name: Assert stamp contains moonlight_lxc
+      ansible.builtin.assert:
+        that: "'moonlight_lxc' in (_streaming_stamp.plays | default({}))"
+        fail_msg: "deploy_stamp missing moonlight_lxc entry on {{ inventory_hostname }}"
+
+    # ── Report ───────────────────────────────────────────────────
+
+    - name: Report Moonlight verification
+      ansible.builtin.debug:
+        msg: >-
+          Moonlight verification passed on {{ inventory_hostname }}:
+          container={{ moonlight_ct_id }}, running=yes,
+          moonlight={{ 'installed' if 'MOONLIGHT=installed' in _moonlight_health.stdout else 'missing' }},
+          config={{ 'deployed' if 'CONFIG=ok' in _moonlight_health.stdout else 'missing' }},
+          vaapi={{ 'hardware' if 'VAProfile' in (_moonlight_vaapi.stdout | default('')) else 'software' }},
+          dri={{ 'mounted' if _moonlight_dri.rc == 0 else 'missing' }},
+          ip={{ _moonlight_verify_ip.stdout | trim }}
+
+# ── Verify Gaming LXC container ──────────────────────────────────
+
+- name: Verify Gaming LXC container
+  hosts: gaming_nodes
+  gather_facts: false
+  tasks:
+    # ── Container state ──────────────────────────────────────────
+
+    - name: Check Gaming LXC container exists
+      ansible.builtin.command:
+        cmd: pct status {{ gaming_ct_id }}
+      register: _gaming_verify_status
+      changed_when: false
+      failed_when: false
+
+    - name: Skip gaming verify if container not deployed
+      ansible.builtin.meta: end_play
+      when: _gaming_verify_status.rc != 0
+
+    - name: Assert Gaming LXC is running
+      ansible.builtin.assert:
+        that: "'running' in _gaming_verify_status.stdout"
+        fail_msg: "Gaming LXC container {{ gaming_ct_id }} is not running on {{ inventory_hostname }}"
+
+    # ── GPU device access ────────────────────────────────────────
+
+    - name: Detect GPU render device on host
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ls /dev/dri/renderD* 2>/dev/null | head -1 | xargs basename
+        executable: /bin/bash
+      register: _gaming_host_render
+      changed_when: false
+
+    - name: Check render device inside container
+      ansible.builtin.command:
+        cmd: pct exec {{ gaming_ct_id }} -- ls /dev/dri/{{ _gaming_host_render.stdout | trim }}
+      register: _gaming_render
+      changed_when: false
+
+    - name: Assert render device accessible
+      ansible.builtin.assert:
+        that: _gaming_render.rc == 0
+        fail_msg: "/dev/dri/{{ _gaming_host_render.stdout | trim }} not accessible in Gaming LXC on {{ inventory_hostname }}"
+
+    - name: Detect GPU card device on host
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ls /dev/dri/card* 2>/dev/null | head -1 | xargs basename
+        executable: /bin/bash
+      register: _gaming_host_card
+      changed_when: false
+
+    - name: Check card device inside container
+      ansible.builtin.command:
+        cmd: pct exec {{ gaming_ct_id }} -- ls /dev/dri/{{ _gaming_host_card.stdout | trim }}
+      register: _gaming_card
+      changed_when: false
+      failed_when: false
+
+    - name: Assert card device accessible
+      ansible.builtin.assert:
+        that: _gaming_card.rc == 0
+        fail_msg: "/dev/dri/{{ _gaming_host_card.stdout | trim }} not accessible in Gaming LXC on {{ inventory_hostname }}"
+
+    # ── VA-API encode ────────────────────────────────────────────
+
+    - name: Check VA-API encoding profiles
+      ansible.builtin.command:
+        cmd: pct exec {{ gaming_ct_id }} -- bash -c 'vainfo --display drm 2>&1'
+      register: _gaming_vainfo
+      changed_when: false
+      failed_when: false
+
+    - name: Assert VA-API H.264 encode available
+      ansible.builtin.assert:
+        that: "'VAProfileH264' in _gaming_vainfo.stdout"
+        fail_msg: "VA-API H.264 encoding not available in Gaming LXC on {{ inventory_hostname }}"
+
+    # ── DRI mount in LXC config ──────────────────────────────────
+
+    - name: Check DRI mount entry in LXC config
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          grep -c 'lxc.mount.entry.*dev/dri' /etc/pve/lxc/{{ gaming_ct_id }}.conf
+        executable: /bin/bash
+      register: _gaming_dri_conf
+      changed_when: false
+
+    - name: Assert DRI mount configured
+      ansible.builtin.assert:
+        that: (_gaming_dri_conf.stdout | trim | int) > 0
+        fail_msg: "DRI device bind mount not in LXC config for Gaming LXC on {{ inventory_hostname }}"
+
+    # ── Container config ─────────────────────────────────────────
+
+    - name: Read container config
+      ansible.builtin.command:
+        cmd: pct config {{ gaming_ct_id }}
+      register: _gaming_verify_config
+      changed_when: false
+
+    - name: Assert nesting feature enabled
+      ansible.builtin.assert:
+        that: "'nesting=1' in _gaming_verify_config.stdout"
+        fail_msg: "Gaming LXC missing nesting=1 feature on {{ inventory_hostname }}"
+
+    # ── Sunshine service ─────────────────────────────────────────
+
+    - name: Check Sunshine service
+      ansible.builtin.command:
+        cmd: pct exec {{ gaming_ct_id }} -- systemctl is-active sunshine.service
+      register: _gaming_sunshine
+      changed_when: false
+      failed_when: false
+
+    - name: Assert Sunshine is active
+      ansible.builtin.assert:
+        that: _gaming_sunshine.stdout | trim == 'active'
+        fail_msg: "Sunshine service not active in Gaming LXC on {{ inventory_hostname }}"
+
+    # ── dsda-doom ────────────────────────────────────────────────
+
+    - name: Check dsda-doom binary
+      ansible.builtin.command:
+        cmd: pct exec {{ gaming_ct_id }} -- which dsda-doom
+      register: _gaming_dsdadoom
+      changed_when: false
+      failed_when: false
+
+    - name: Assert dsda-doom installed
+      ansible.builtin.assert:
+        that: _gaming_dsdadoom.rc == 0
+        fail_msg: "dsda-doom not installed in Gaming LXC on {{ inventory_hostname }}"
+
+    # ── Container IP ─────────────────────────────────────────────
+
+    - name: Get Gaming container IP
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ gaming_ct_id }} -- hostname -I | awk '{print $1}'
+        executable: /bin/bash
+      register: _gaming_verify_ip
+      changed_when: false
+
+    - name: Validate container IP is non-empty
+      ansible.builtin.assert:
+        that: _gaming_verify_ip.stdout | trim | length > 0
+        fail_msg: "Gaming container has no IP address on {{ inventory_hostname }}"
+
+    # ── Sunshine API health ─────────────────────────────────────
+
+    - name: Check Sunshine web UI is responding
+      ansible.builtin.command:
+        cmd: >-
+          curl -sk --connect-timeout 5 -o /dev/null -w '%{http_code}'
+          https://{{ _gaming_verify_ip.stdout | trim }}:47990/
+      register: _gaming_api
+      changed_when: false
+      failed_when: _gaming_api.rc != 0
+      retries: 6
+      delay: 5
+      until: _gaming_api.rc == 0
+
+    - name: Assert Sunshine web UI returns valid HTTP response
+      ansible.builtin.assert:
+        that: _gaming_api.stdout | trim | int > 0
+        fail_msg: >-
+          Sunshine web UI not reachable at
+          https://{{ _gaming_verify_ip.stdout | trim }}:47990
+          on {{ inventory_hostname }}
+
+    # ── deploy_stamp ─────────────────────────────────────────────
+
+    - name: Read deploy_stamp on gaming node
+      ansible.builtin.slurp:
+        src: /etc/ansible/facts.d/vm_builds.fact
+      register: _gaming_stamp_raw
+      failed_when: false
+
+    - name: Parse deploy_stamp
+      ansible.builtin.set_fact:
+        _gaming_stamp: "{{ (_gaming_stamp_raw.content | b64decode | from_json) if _gaming_stamp_raw is not failed else {} }}"
+
+    - name: Assert stamp contains gaming_lxc
+      ansible.builtin.assert:
+        that: "'gaming_lxc' in (_gaming_stamp.plays | default({}))"
+        fail_msg: "deploy_stamp missing gaming_lxc entry on {{ inventory_hostname }}"
+
+    # ── Report ───────────────────────────────────────────────────
+
+    - name: Report Gaming LXC verification
+      ansible.builtin.debug:
+        msg: >-
+          Gaming LXC verification passed on {{ inventory_hostname }}:
+          container={{ gaming_ct_id }}, running=yes,
+          render={{ 'mounted' if _gaming_render.rc == 0 else 'missing' }},
+          card={{ 'mounted' if _gaming_card.rc == 0 else 'missing' }},
+          vaapi={{ 'H.264' if 'VAProfileH264' in (_gaming_vainfo.stdout | default('')) else 'software' }},
+          sunshine={{ _gaming_sunshine.stdout | default('unknown') | trim }},
+          api={{ 'reachable' if _gaming_api.rc == 0 else 'unreachable' }},
+          dsda-doom={{ 'installed' if _gaming_dsdadoom.rc == 0 else 'missing' }},
+          ip={{ _gaming_verify_ip.stdout | trim }}

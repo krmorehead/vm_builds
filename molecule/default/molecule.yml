@@ -28,11 +28,13 @@ platforms:
       - vpn_nodes
       - wifi_nodes
       - monitoring_nodes
+      - streaming_nodes
   - name: ai
     groups:
       - proxmox
       - vpn_nodes
       - monitoring_nodes
+      - gaming_nodes
   - name: mesh2
     groups:
       - proxmox
@@ -66,6 +68,8 @@ provisioner:
     GAMING_VM_ADMIN_PASSWORD: ${GAMING_VM_ADMIN_PASSWORD}
     SUNSHINE_USER: ${SUNSHINE_USER}
     SUNSHINE_PASSWORD: ${SUNSHINE_PASSWORD}
+    MOONLIGHT_SERVER_IP: ${MOONLIGHT_SERVER_IP}
+    MOONLIGHT_PAIR_PIN: ${MOONLIGHT_PAIR_PIN}
   inventory:
     links:
       host_vars: ../../inventory/host_vars/

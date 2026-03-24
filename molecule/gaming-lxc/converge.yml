@@ -1,0 +1,22 @@
+---
+- name: Detect infrastructure on gaming nodes
+  hosts: gaming_nodes
+  gather_facts: true
+  roles:
+    - proxmox_bridges
+    - proxmox_igpu
+
+- name: Provision Gaming LXC container
+  hosts: gaming_nodes
+  gather_facts: true
+  roles:
+    - gaming_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: gaming_lxc
+
+- name: Configure Gaming LXC
+  hosts: gaming_nodes
+  gather_facts: false
+  roles:
+    - gaming_lxc_configure

@@ -2,6 +2,15 @@
 
 This AGENTS.md provides specific instructions for agentic coding agents working in the molecule/ directory. These rules focus on testing patterns, TDD workflow, and diagnostic approaches.
 
+## SHOW STOPPER: Unreachable Host = FULL STOP
+
+When ANY host shows `unreachable=1` in a PLAY RECAP or fails a connectivity probe:
+- **STOP ALL WORK.** Do not continue development, do not run more tests.
+- **Investigate cause IMMEDIATELY.** Check terminal history for destructive operations.
+- **NEVER dismiss as "pre-existing."** Find the root cause.
+- **For `wol_capable: false` hosts (ai): physical power-on required.** No remote recovery.
+- **Do NOT validate features against a substitute host.** If ai runs Sunshine and ai is down, Moonlight verification is IMPOSSIBLE.
+
 ## External File Loading
 
 CRITICAL: When you encounter a file reference (e.g., .agents/skills/use-idle-time/SKILL.md), use your Read tool to load it on a need-to-know basis. They're relevant to the SPECIFIC task at hand.

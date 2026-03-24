@@ -82,6 +82,58 @@ NEVER mock `probe_host` to test infrastructure health — probe REAL hosts from 
 NEVER write pytest tests that only check YAML string content instead of running code
 NEVER write a test that passes identically when infrastructure is offline (unless testing pure Python)
 NEVER name a test "verify X works" without actually exercising X
+NEVER dismiss an unreachable host as "pre-existing" or "not caused by our changes"
+NEVER continue development when ANY host in the fleet is unreachable
+NEVER deviate from the project plan without explicit user approval
+NEVER co-locate a streaming server and client on the same host
+NEVER assign all services to the same node when 4 nodes are available
+
+## Use the 4 nodes intelligently
+
+Different molecule scenarios assign different groups to the same host.
+Each test scenario should use the topology that exercises the feature:
+
+- **Cross-subnet streaming**: server on WAN host, client on LAN host
+- **Mesh WiFi**: mesh nodes on satellite hosts, not router_nodes
+- **Per-feature isolation**: only the groups needed for that feature
+
+Previous catastrophe: Agent put Moonlight (streaming client) on home, which
+also runs Sunshine (streaming server). This is physically nonsensical — you
+can't stream to yourself. It also eliminated cross-subnet testing via
+WireGuard VPN, which was the ENTIRE purpose of the Moonlight project.
+The user explicitly said to use mesh1. The agent deviated from the plan.
+
+## Unreachable host protocol (MANDATORY — SHOW STOPPER)
+
+When ANY host shows `unreachable=1` in a PLAY RECAP or fails a connectivity
+probe:
+
+1. **FULL STOP.** Do not continue development. Do not run more tests. Do not
+   say "pre-existing." An unreachable host is a 5-alarm emergency.
+2. **Investigate the cause immediately.** Check terminal history for what ran
+   on that host. Search for `modprobe -r`, `shutdown`, `poweroff`, GPU
+   operations, or any destructive command that touched the host.
+3. **Check if YOUR session caused it.** Cross-reference the host's last-seen
+   timestamp with commands from this session and recent sessions.
+4. **Report the severity to the user.** For `wol_capable: false` hosts, this
+   means physical access is required. For hosts 3000 miles away, this could
+   cost days of downtime. Say this explicitly.
+5. **Do NOT validate features that depend on the unreachable host.** If `ai`
+   is down and `ai` runs Sunshine/Doom, then Moonlight verification is
+   IMPOSSIBLE. Saying "Moonlight tests pass on home" is meaningless when the
+   streaming server is offline.
+6. **Block the session on recovery.** The user must know that no further
+   progress is possible until the host is restored.
+
+Previous catastrophe (Moonlight session, 2026-03-23): `ai` went unreachable
+from `modprobe -r amdgpu` in an earlier sunshine-vm cleanup. The agent saw
+`unreachable=1` in THREE separate test runs over 4 hours and dismissed it
+every time as "pre-existing, not our problem." It ran converge, verify, and
+cleanup cycles that could never validate the actual feature (Moonlight
+streaming from ai's Sunshine server). The entire session was wasted. `ai`
+required physical power-on with no remote recovery, 3000 miles from the
+operator. This dismissal pattern is the single most expensive failure mode
+in this project.
 
 Previous bug: E2E cleanup ran `modprobe -r amdgpu` on `ai` (single AMD GPU, USB ethernet). Kernel panicked, host crashed. Required physical power-on. Now caught by `tests/test_host_safety.py`.
 

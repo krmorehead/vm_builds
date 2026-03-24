@@ -14,11 +14,31 @@ Use when starting new projects, implementing new service types, or when you want
 set -a && source test.env && set +a
 echo "HOME_API_TOKEN: $HOME_API_TOKEN"
 echo "PRIMARY_HOST: $PRIMARY_HOST"
-ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST "echo 'SSH test successful'"
-ansible home -m ping
+echo "AI_HOST: $AI_HOST"
+echo "MESH_2_HOST: $MESH_2_HOST"
+# Probe ALL hosts — not just PRIMARY_HOST
+ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@$PRIMARY_HOST "echo 'home OK'"
+ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@$AI_HOST "echo 'ai OK'"
+ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@$MESH_2_HOST "echo 'mesh2 OK'"
+ansible all -m ping
 ```
 
-**If any validation fails → STOP and fix environment before proceeding.**
+**If ANY host is unreachable → FULL STOP. Investigate immediately.**
+Do NOT continue development with a degraded fleet. An unreachable host is a
+5-alarm emergency, especially for `ai` (USB ethernet, no WoL, no remote
+recovery — requires physical power-on 3000 miles away).
+
+**NEVER dismiss an unreachable host as "pre-existing."** Every unreachable
+host was caused by something. Find the cause. If automation crashed it,
+that is a code bug that MUST be fixed before any other work continues.
+
+Previous catastrophe: `ai` went unreachable during a Moonlight implementation
+session. The agent dismissed it as "pre-existing" THREE TIMES across 4 hours
+of testing, running converge and verify cycles that could never validate the
+actual streaming feature (ai IS the Sunshine/Doom server). The root cause was
+`modprobe -r amdgpu` from an earlier sunshine-vm cleanup — the exact known
+crash vector. The dismissal wasted the entire session and left ai requiring
+physical power-on with no remote recovery path.
 
 ## Proactive Testing Triggers
 

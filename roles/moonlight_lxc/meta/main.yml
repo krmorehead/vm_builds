@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  author: vm_builds
+  role_name: moonlight_lxc
+  description: Provision Moonlight embedded streaming client LXC container
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm
+dependencies: []

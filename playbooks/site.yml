@@ -235,6 +235,23 @@
   roles:
     - kodi_configure
 
+- name: Provision Moonlight LXC
+  hosts: streaming_nodes
+  gather_facts: false
+  tags: [moonlight]
+  roles:
+    - moonlight_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: moonlight_lxc
+
+- name: Configure Moonlight
+  hosts: streaming_nodes
+  gather_facts: false
+  tags: [moonlight]
+  roles:
+    - moonlight_configure
+
 - name: Provision WireGuard LXC
   hosts: vpn_nodes
   gather_facts: false
@@ -270,30 +287,22 @@
   roles:
     - openwrt_mesh_configure
 
-- name: Provision Sunshine Gaming VM
+- name: Provision Gaming LXC
   hosts: gaming_nodes
-  gather_facts: false
+  gather_facts: true
   tags: [gaming, never]
   roles:
-    - gaming_vm
+    - gaming_lxc
     - role: deploy_stamp
       vars:
-        deploy_stamp_play: gaming_vm
+        deploy_stamp_play: gaming_lxc
 
-- name: Reconstruct gaming dynamic group
+- name: Configure Gaming LXC
   hosts: gaming_nodes
   gather_facts: false
   tags: [gaming, never]
-  tasks:
-    - name: Include group reconstruction
-      ansible.builtin.include_tasks: ../tasks/reconstruct_gaming_group.yml
-
-- name: Configure Sunshine
-  hosts: gaming
-  gather_facts: false
-  tags: [gaming, never]
   roles:
-    - gaming_configure
+    - gaming_lxc_configure
 
 # ── Per-feature plays (opt-in via tags + never) ─────────────────
 

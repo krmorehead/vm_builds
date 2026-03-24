@@ -103,12 +103,18 @@ Phase 3: Services (flavor groups span both primary + LAN hosts)
   Play 17: kodi_lxc (media_nodes)        tag: media
            deploy_stamp: kodi_lxc
   Play 18: kodi_configure (media_nodes)  tag: media
-  Play 19: wireguard_lxc (vpn_nodes)      tag: wireguard
+  Play 19: moonlight_lxc (streaming_nodes) tag: moonlight
+           deploy_stamp: moonlight_lxc
+  Play 20: moonlight_configure (streaming_nodes) tag: moonlight
+  Play 21: wireguard_lxc (vpn_nodes)      tag: wireguard
            deploy_stamp: wireguard_lxc
-  Play 20: wireguard_configure (wireguard) tag: wireguard
-  Play 21: openwrt_mesh_lxc (wifi_nodes:!router_nodes) tag: mesh-wifi
+  Play 22: wireguard_configure (wireguard) tag: wireguard
+  Play 23: openwrt_mesh_lxc (wifi_nodes:!router_nodes) tag: mesh-wifi
            deploy_stamp: openwrt_mesh_lxc
-  Play 22: openwrt_mesh_configure (openwrt_mesh) tag: mesh-wifi
+  Play 24: openwrt_mesh_configure (openwrt_mesh) tag: mesh-wifi
+  Play 25: gaming_lxc (gaming_nodes)       tag: gaming, never
+           deploy_stamp: gaming_lxc
+  Play 26: gaming_lxc_configure (gaming_nodes) tag: gaming, never
 
 Per-feature plays (opt-in via --tags, tagged with [never])
 Bootstrap cleanup (proxmox:!lan_hosts)    tag: cleanup
@@ -157,9 +163,10 @@ Service-specific provision plays target flavor groups.
 - `wifi_nodes` — Mesh WiFi Controller (router_nodes on primary); OpenWrt Mesh LXC on wifi_nodes:!router_nodes (mesh1, mesh2)
 - `monitoring_nodes` — Netdata, rsyslog
 - `service_nodes` — Home Assistant
-- `media_nodes` — Jellyfin, Kodi, Moonlight
+- `media_nodes` — Jellyfin, Kodi (home only — media server and player)
+- `streaming_nodes` — Moonlight streaming client (mesh1 — MUST be on a different host than Sunshine server)
 - `desktop_nodes` — Desktop VM, UX Kiosk
-- `gaming_nodes` — Gaming VM with GPU passthrough (home only; AMD APU hosts like ai cannot safely unbind GPU)
+- `gaming_nodes` — Gaming LXC with GPU render device sharing (ai only; uses Fedora + Sunshine + dsda-doom)
 - `lan_hosts` — Satellite Proxmox nodes behind the OpenWrt router (accessed via ProxyJump; mesh1 only)
 A host can belong to multiple flavor groups.
 
@@ -175,7 +182,7 @@ Bump `project_version` in `group_vars/all.yml` when cutting a release.
 - 300-399: Media (300 Jellyfin, 301 Kodi, 302 Moonlight)
 - 400-499: Desktop (400 Desktop VM, 401 Kiosk)
 - 500-599: Observability (500 Netdata, 501 rsyslog)
-- 600-699: Gaming (600+ Gaming/Sunshine VM, per-host offset)
+- 600-699: Gaming (600 Gaming VM legacy, 601 Gaming LXC active)
 - 999: reserved for molecule test containers
 All VMIDs defined in `group_vars/all.yml`.
 
@@ -200,7 +207,7 @@ All VMIDs defined in `group_vars/all.yml`.
 | `setup.sh` | Bootstrap .venv + pip + ansible-galaxy |
 | `run.sh` | Convenience wrapper — delegates to `build.py` |
 | `cleanup.sh` | Restore / full-restore / clean / rollback — delegates to `build.py` |
-| `build-images.sh` | Builds custom images (mesh LXC, router VM, Pi-hole, rsyslog, Jellyfin, Netdata, WireGuard, Home Assistant, Sunshine). Use `--only <target>` for selective rebuilds |
+| `build-images.sh` | Builds custom images (mesh LXC, router VM, Pi-hole, rsyslog, Jellyfin, Netdata, WireGuard, Home Assistant, Kodi, Moonlight, Gaming LXC, Sunshine). Use `--only <target>` for selective rebuilds |
 | `test.env` | Test machine config (committed, IP: 192.168.86.201) |
 | `.env` | Production secrets (gitignored) |
 | `test.env.generated` | Auto-generated secrets during test runs (gitignored) |
@@ -214,7 +221,8 @@ All VMIDs defined in `group_vars/all.yml`.
 | `tasks/reconstruct_homeassistant_group.yml` | Reusable dynamic group reconstruction for Home Assistant |
 | `tasks/reconstruct_jellyfin_group.yml` | Reusable dynamic group reconstruction for Jellyfin |
 | `tasks/reconstruct_kodi_group.yml` | Reusable dynamic group reconstruction for Kodi |
-| `tasks/reconstruct_gaming_group.yml` | Reusable dynamic group reconstruction for Gaming VM |
+| `tasks/reconstruct_moonlight_group.yml` | Reusable dynamic group reconstruction for Moonlight |
+| `tasks/reconstruct_gaming_group.yml` | Reusable dynamic group reconstruction for Gaming LXC |
 | `tasks/bootstrap_lan_host.yml` | Reusable bootstrap for LAN hosts (DHCP lease + API token) |
 | `tasks/cleanup_lan_host.yml` | Reusable per-LAN-host cleanup (SSH from primary host) |
 | `molecule/default/` | Full integration tests (home, mesh1, ai, mesh2 — 4-node) |
@@ -228,7 +236,9 @@ All VMIDs defined in `group_vars/all.yml`.
 | `molecule/homeassistant-lxc/` | Per-feature scenario for Home Assistant LXC container |
 | `molecule/jellyfin-lxc/` | Per-feature scenario for Jellyfin media server container |
 | `molecule/kodi-lxc/` | Per-feature scenario for Kodi media player container |
-| `molecule/sunshine-vm/` | Per-feature scenario for Sunshine Gaming VM with iGPU passthrough |
+| `molecule/moonlight-lxc/` | Per-feature scenario for Moonlight streaming client container |
+| `molecule/sunshine-vm/` | Per-feature scenario for Sunshine Gaming VM with iGPU passthrough (legacy) |
+| `molecule/gaming-lxc/` | Per-feature scenario for Gaming LXC with GPU render device sharing |
 | `molecule/openwrt-syslog/` | Per-feature scenario for OpenWrt syslog forwarding to rsyslog |
 | `molecule/mesh1-infra/` | Lightweight infra-only on mesh1 (quick iteration) |
 | `wol.sh` | Wake-on-LAN utility: wake hosts by alias or MAC. Proxied WoL for LAN hosts via PRIMARY_HOST |
@@ -275,7 +285,7 @@ All VMIDs defined in `group_vars/all.yml`.
 - NEVER use `pveam download` — the host may lack internet (router VM destroyed) or have unreachable enterprise repos (no subscription).
 - Image paths are defined in `group_vars/all.yml` (e.g., `openwrt_image_path`, `openwrt_lxc_template_path`). Roles verify the image exists and fail with a clear message pointing to `./build-images.sh` if missing.
 - ALWAYS use `role_path` for source paths in tasks. Bare relative paths break when Molecule runs from non-default scenarios.
-- Use `./build-images.sh --only <target>` to rebuild a single image (~2-3 min vs ~15 min for all). Targets: mesh, router, pihole, rsyslog, netdata, wireguard, homeassistant, sunshine.
+- Use `./build-images.sh --only <target>` to rebuild a single image (~2-3 min vs ~15 min for all). Targets: mesh, router, pihole, rsyslog, netdata, wireguard, homeassistant, kodi, moonlight, gaming, sunshine.
 - See `vm-lifecycle` skill, Image management section, for the full pattern.
 
 ## NTP synchronization
@@ -310,6 +320,13 @@ All VMIDs defined in `group_vars/all.yml`.
 - ALWAYS run `pytest tests/ -v` after modifying `build.py` — every public function and error path needs coverage
 - Run `ansible-lint && yamllint .` before deploying to hardware
 - See `.cursor/skills/ansible-testing/SKILL.md` for full details
+
+## SHOW STOPPER: Unreachable host protocol
+- When ANY host shows `unreachable=1` or fails a connectivity probe: FULL STOP. Do not continue.
+- NEVER dismiss as "pre-existing." NEVER say "not caused by our changes." Investigate immediately.
+- For `wol_capable: false` hosts (ai): physical power-on required 3000 miles away. No remote recovery.
+- Do NOT validate features against a substitute host. If ai runs Sunshine/Doom and ai is down, Moonlight verification is IMPOSSIBLE.
+- Previous catastrophe: agent dismissed ai unreachable THREE TIMES over 4 hours, wasting the entire session and leaving ai permanently severed.
 
 ## Cleanup philosophy: service-specific, not scorched-earth
 - Molecule cleanup MUST destroy VMs/containers using **explicit VMIDs** from `group_vars/all.yml`. NEVER iterate `qm list` / `pct list` to destroy ALL resources. Check existence first with `qm status` / `pct status`, then stop + destroy.

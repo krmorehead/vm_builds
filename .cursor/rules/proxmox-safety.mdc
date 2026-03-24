@@ -192,6 +192,20 @@ alwaysApply: true
 - The role exports `igpu_vendor` (`intel`, `amd`, or `none`) so downstream roles can branch on GPU vendor.
 - Previous bug: `proxmox_igpu` only detected Intel VGA controllers. The `ai` node had an AMD iGPU and hard-failed with "No Intel iGPU found." Mixed hardware fleets require vendor-agnostic detection.
 
+## Fedora LXC container packaging
+- Fedora 41 uses `dnf5`, which aborts the entire transaction when any single package is unavailable. ALWAYS use `--skip-unavailable` in `dnf install` commands during image builds.
+- Fedora strips patent-encumbered codecs (H.264, HEVC) from stock `mesa-va-drivers`. For hardware encode in gaming/streaming containers, ALWAYS swap to `mesa-va-drivers-freeworld` from RPM Fusion: `dnf swap -y mesa-va-drivers mesa-va-drivers-freeworld`.
+- The `passwd` package does not exist in Fedora 41 (absorbed into `shadow-utils`). NEVER include it in `dnf install` commands.
+- GZDoom is not available in RPM Fusion for Fedora 41. Use `dsda-doom` (modern Doom source port, available in RPM Fusion Free).
+- Freedoom WADs install to `/usr/share/doom/` on Fedora, NOT `/usr/share/freedoom/`.
+- Previous bug: single `dnf install` with `gzdoom` (unavailable) aborted the entire transaction. All 15+ other packages were silently uninstalled. The `| tail -5` pipe hid the error message.
+
+## Sunshine streaming server ports
+- Sunshine exposes three ports: 47984 (HTTPS API with client cert), 47989 (RTSP), 47990 (web UI).
+- For health checks from external hosts, use port 47990 (web UI HTTPS). Port 47984 requires client certificates and fails with `curl` from outside the container (rc=56).
+- Sunshine takes 10-15 seconds after `systemctl start` to fully bind its HTTPS endpoints. ALWAYS use retries on API health checks (recommended: 6 retries, 5s delay).
+- Previous bug: verify task used `curl -sk https://<ip>:47984/` which returned rc=56/28 (TLS client cert required / timeout). Fixed by checking port 47990 with retries.
+
 ## LXC container networking must match host topology
 - NEVER hardcode all containers to use the OpenWrt LAN subnet. Hosts directly on the WAN (not behind OpenWrt) need containers on the WAN subnet with the main router as gateway.
 - Hosts in `router_nodes` or `lan_hosts` → containers use OpenWrt LAN (e.g., 10.10.10.0/24, gateway 10.10.10.1) on the LAN bridge (`proxmox_all_bridges[1]`).

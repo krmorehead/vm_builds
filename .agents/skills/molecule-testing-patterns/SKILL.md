@@ -106,6 +106,30 @@ Home          AI Node          Mesh2
 - `mesh1` and `mesh2` are also in `wifi_nodes` — OpenWrt Mesh LXC deploys on both
 - `home` is the only `router_nodes` member (runs OpenWrt)
 - `mesh1` is the only `lan_hosts` member (requires OpenWrt to be running)
+- `mesh1` is also in `streaming_nodes` — Moonlight streaming client (cross-subnet from Sunshine server)
+- `home` is in `gaming_nodes` — Sunshine Gaming VM (the streaming SERVER)
+
+## Use the 4 nodes intelligently for different tests
+
+Each molecule scenario can assign different groups to the same host. A host
+is NOT locked into one role across all scenarios. Use the 4 nodes to exercise
+different topology combinations:
+
+- **moonlight-lxc scenario**: mesh1 = streaming client, home = router only.
+  mesh1 is NOT a mesh WiFi node in this scenario.
+- **mesh-wifi scenario**: mesh1 = WiFi mesh node. NOT a streaming client.
+- **E2E (default)**: mesh1 = WiFi mesh + streaming client + VPN + monitoring.
+
+NEVER co-locate a streaming server and client on the same host. If home runs
+Sunshine (gaming_nodes), home CANNOT also run Moonlight (streaming_nodes).
+The whole point of cross-subnet streaming is testing real network discovery
+via WireGuard VPN.
+
+Previous catastrophe: Agent put Moonlight on home (media_nodes) instead of
+mesh1 (streaming_nodes), making home both the Sunshine server AND the
+Moonlight client. This is physically nonsensical — you can't stream to
+yourself. It also eliminated cross-subnet testing, which was the entire
+purpose of the Moonlight project.
 
 ## Phased site.yml
 

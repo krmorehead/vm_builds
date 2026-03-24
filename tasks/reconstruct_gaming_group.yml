@@ -1,60 +1,32 @@
 ---
-# Reconstruct the 'gaming' dynamic group from a running VM.
+# Reconstruct the 'gaming' dynamic group from a running LXC container.
 # Include this from plays that target gaming_nodes when the dynamic
 # group is lost between playbook invocations (molecule verify, cleanup,
 # per-feature scenarios).
 
-- name: Check if Gaming VM is running
+- name: Check if Gaming LXC container is running
   ansible.builtin.command:
-    cmd: qm status {{ gaming_vm_id }}
-  register: _gvm_recon_status
+    cmd: pct status {{ gaming_ct_id }}
+  register: _gaming_recon_status
   failed_when: false
   changed_when: false
 
-- name: Skip reconstruction if VM is not running
+- name: Skip reconstruction if container is not running
   ansible.builtin.debug:
-    msg: "Gaming VM {{ gaming_vm_id }} is not running -- skipping group reconstruction"
-  when: _gvm_recon_status.rc != 0 or 'running' not in _gvm_recon_status.stdout
+    msg: "Gaming LXC {{ gaming_ct_id }} is not running -- skipping group reconstruction"
+  when: _gaming_recon_status.rc != 0 or 'running' not in _gaming_recon_status.stdout
 
-- name: Discover Gaming VM IP via QEMU Guest Agent
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      qm guest cmd {{ gaming_vm_id }} network-get-interfaces | \
-        python3 -c "
-      import sys, json
-      data = json.load(sys.stdin)
-      for iface in data:
-          if iface.get('name', '').startswith('Loopback'):
-              continue
-          for addr in iface.get('ip-addresses', []):
-              if addr.get('ip-address-type') == 'ipv4' and not addr['ip-address'].startswith('127.'):
-                  print(addr['ip-address'])
-                  sys.exit(0)
-      sys.exit(1)
-      "
-    executable: /bin/bash
-  register: _gvm_recon_ip
-  changed_when: false
-  when: _gvm_recon_status.rc == 0 and 'running' in _gvm_recon_status.stdout
-
-- name: Register Gaming VM in dynamic group
+- name: Register Gaming LXC container in dynamic group
   ansible.builtin.add_host:
     name: "gaming-{{ inventory_hostname }}"
     groups: gaming
-    ansible_host: "{{ _gvm_recon_ip.stdout | trim }}"
-    ansible_connection: ssh
-    ansible_user: "{{ gaming_vm_admin_user | default('admin') }}"
-    ansible_password: "{{ gaming_vm_admin_password | default('Passw0rd!') }}"
-    ansible_shell_type: powershell
-    ansible_become: false
-    ansible_ssh_common_args: >-
-      -o StrictHostKeyChecking=no
-      -o UserKnownHostsFile=/dev/null
-      -o ConnectTimeout=30
-    gaming_vm_proxmox_host: "{{ inventory_hostname }}"
-    gaming_vm_id_ref: "{{ gaming_vm_id }}"
+    ansible_host: "{{ ansible_host }}"
+    ansible_connection: community.proxmox.proxmox_pct_remote
+    ansible_user: root
+    proxmox_vmid: "{{ gaming_ct_id }}"
+    ansible_pct_remote_python: /usr/bin/python3
+    gaming_ct_proxmox_host: "{{ inventory_hostname }}"
+    gaming_ct_id_ref: "{{ gaming_ct_id }}"
   when:
-    - _gvm_recon_status.rc == 0
-    - "'running' in _gvm_recon_status.stdout"
-    - _gvm_recon_ip.rc == 0
+    - _gaming_recon_status.rc == 0
+    - "'running' in _gaming_recon_status.stdout"

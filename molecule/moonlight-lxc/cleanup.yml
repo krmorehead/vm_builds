@@ -1,0 +1,32 @@
+---
+- name: Destroy Moonlight container
+  hosts: streaming_nodes
+  gather_facts: false
+  vars:
+    moonlight_ct_id: 302
+  tasks:
+    - name: Check Moonlight container exists
+      ansible.builtin.command:
+        cmd: pct status {{ moonlight_ct_id }}
+      register: _moonlight_status
+      failed_when: false
+      changed_when: false
+
+    - name: Stop Moonlight container
+      ansible.builtin.command:
+        cmd: pct stop {{ moonlight_ct_id }}
+      when: _moonlight_status.rc == 0 and 'running' in _moonlight_status.stdout
+      failed_when: false
+      changed_when: true
+
+    - name: Wait for container to stop
+      ansible.builtin.pause:
+        seconds: 2
+      when: _moonlight_status.rc == 0 and 'running' in _moonlight_status.stdout
+
+    - name: Destroy Moonlight container
+      ansible.builtin.command:
+        cmd: pct destroy {{ moonlight_ct_id }} --purge
+      when: _moonlight_status.rc == 0
+      failed_when: false
+      changed_when: true

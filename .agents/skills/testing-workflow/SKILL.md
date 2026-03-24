@@ -157,6 +157,25 @@ entire test cycle. The mocked tests gave false confidence that host resolution
 was "tested" when no real probing ever happened. Replaced with
 `TestInfrastructureHealth` that probes real hosts from test.env.
 
+## Unreachable host = SHOW STOPPER
+
+When ANY host in the fleet is unreachable during a test run:
+
+1. **STOP ALL WORK.** Do not continue development, do not run more tests.
+2. **Investigate cause.** Check terminal history for destructive operations.
+3. **Report severity.** For `wol_capable: false` hosts (ai), physical access
+   is required. Say this explicitly to the user.
+4. **Do NOT validate features against the wrong host.** If `ai` runs Sunshine
+   and `ai` is down, then Moonlight verification is impossible regardless of
+   what passes on `home`.
+5. **NEVER say "pre-existing" or "not caused by our changes."** Every
+   unreachable host was caused by something. Find it.
+
+Previous catastrophe: Agent dismissed ai unreachable THREE TIMES in one
+session. Ran 4 hours of tests that could never validate the actual feature
+(streaming from ai). The root cause was `modprobe -r amdgpu` from an earlier
+session. Physical power-on required 3000 miles away.
+
 ## Anti-patterns
 
 NEVER explain what TDD is in testing workflow rules
@@ -168,3 +187,5 @@ NEVER mock probe_host or network connectivity to hosts you control
 NEVER write tests that check YAML file contents instead of running the code
 NEVER write tests that would pass identically if the infrastructure were offline
 NEVER call a test "verify X works" unless it actually exercises X end-to-end
+NEVER dismiss an unreachable host as "pre-existing" — investigate immediately
+NEVER continue development with ANY host unreachable — it is a show stopper

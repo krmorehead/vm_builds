@@ -14,6 +14,7 @@ When a task fails, an unexpected error occurs, or a workaround is needed:
 
 Trigger: any of these happened during the session:
 - A command made a remote host unreachable
+- A host shows `unreachable=1` in ANY play recap or fails a connectivity probe
 - A playbook failed due to an assumption that was wrong
 - A workaround was needed for a tool/module bug
 - A variable was undefined at runtime
@@ -25,6 +26,21 @@ Trigger: any of these happened during the session:
 - A coding convention was violated in multiple files (systemic issue)
 - A test was found to be fake (mocking the thing it claims to test)
 - A test passed while the system it tests was broken/offline
+
+# SHOW STOPPER: Unreachable host protocol
+
+When ANY host is unreachable: FULL STOP. Do not continue development.
+
+1. Investigate cause IMMEDIATELY. Check terminal history for destructive ops.
+2. NEVER dismiss as "pre-existing." Every unreachable host was caused by something.
+3. For `wol_capable: false` hosts (ai): physical power-on required. No remote recovery.
+4. Do NOT validate features against a substitute host when the real target is down.
+5. Report severity to the user explicitly. This is a 5-alarm emergency.
+
+Previous catastrophe: agent dismissed ai unreachable THREE TIMES over 4 hours.
+Ran converge/verify cycles that could never validate Moonlight streaming
+(ai IS the Sunshine server). Wasted entire session. ai required physical
+power-on 3000 miles away.
 
 When adding diagnostic tasks during troubleshooting, ALWAYS generalize them
 and make them permanent before closing the issue. Ad-hoc diagnostics that get

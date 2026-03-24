@@ -2,6 +2,17 @@
 
 This is an Ansible project that automates VM and LXC container provisioning on Proxmox VE. The project deploys OpenWrt router VMs with shared LXC infrastructure and follows strict architectural patterns.
 
+## SHOW STOPPER: Unreachable Host Protocol
+
+**ANY unreachable host is a 5-alarm emergency. FULL STOP.**
+
+- When `pytest tests/` reports a host unreachable, or `molecule` shows `unreachable=1`: STOP ALL WORK.
+- Investigate cause IMMEDIATELY. Check terminal history for `modprobe -r`, GPU operations, `shutdown`.
+- NEVER dismiss as "pre-existing." NEVER continue development. NEVER say "not caused by our changes."
+- For `wol_capable: false` hosts (`ai`): physical power-on required. No remote recovery. Report this to the user immediately.
+- Do NOT validate features against a substitute host when the actual target is down. If `ai` runs Sunshine and `ai` is unreachable, Moonlight verification is IMPOSSIBLE.
+- This protocol exists because an agent dismissed `ai` unreachable THREE TIMES in one session, wasting 4 hours and leaving a host 3000 miles away permanently severed from the network.
+
 ## Critical Work Management Rules
 
 **MANDATORY: Use Todo Lists and Task Tools**

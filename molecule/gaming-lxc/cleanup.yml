@@ -1,0 +1,30 @@
+---
+- name: Destroy Gaming LXC container
+  hosts: gaming_nodes
+  gather_facts: false
+  tasks:
+    - name: Check Gaming LXC container exists
+      ansible.builtin.command:
+        cmd: pct status {{ gaming_ct_id }}
+      register: _gaming_status
+      failed_when: false
+      changed_when: false
+
+    - name: Stop Gaming LXC container
+      ansible.builtin.command:
+        cmd: pct stop {{ gaming_ct_id }}
+      when: _gaming_status.rc == 0 and 'running' in _gaming_status.stdout
+      failed_when: false
+      changed_when: true
+
+    - name: Wait for container to stop
+      ansible.builtin.pause:
+        seconds: 3
+      when: _gaming_status.rc == 0 and 'running' in _gaming_status.stdout
+
+    - name: Destroy Gaming LXC container
+      ansible.builtin.command:
+        cmd: pct destroy {{ gaming_ct_id }} --purge
+      when: _gaming_status.rc == 0
+      failed_when: false
+      changed_when: true

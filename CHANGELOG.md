@@ -8,6 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Gaming LXC container (Fedora)** -- `gaming_lxc` and
+  `gaming_lxc_configure` roles deploy a Fedora-based gaming container
+  (VMID 601) with Sunshine game streaming server + dsda-doom. Uses GPU render
+  device sharing (NOT PCI passthrough) -- safe on AMD APU single-GPU hosts.
+  Fedora 41 base with Mesa VA-API freeworld drivers (H.264/HEVC encode),
+  Vulkan, headless Xorg, PipeWire audio, GameMode. Replaces the Windows
+  gaming VM as the active gaming path. Per-feature molecule scenario
+  (`molecule/gaming-lxc/`) targeting `ai`. IP offset 18 on WAN subnet.
+- **Moonlight streaming client LXC** -- `moonlight_lxc` and
+  `moonlight_configure` roles deploy a Moonlight embedded game streaming
+  client as an LXC container (VMID 302). Custom Debian 12 image with
+  `moonlight-embedded` and VA-API drivers (Intel + AMD) baked in. Device
+  passthrough for iGPU (`/dev/dri`) and USB input (`/dev/input`,
+  `/dev/uinput`). On-demand container (`onboot: false`) for display-exclusive
+  game streaming from a Sunshine server. Per-feature molecule scenario
+  (`molecule/moonlight-lxc/`) for fast iteration. IP offset 17 on the
+  OpenWrt LAN subnet.
 - **GPU passthrough hookscript** -- Generalized Proxmox hookscript
   (`gpu-passthrough-hook.sh`) that manages GPU lifecycle at VM start/stop.
   `pre-start` discovers hostpci devices from VM config, stops GPU-consuming
@@ -28,6 +45,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   enforce that non-WoL hosts are excluded from `scripts/wol.sh`. E2E verify
   asserts every host declares `wol_capable` and non-WoL hosts don't appear
   in the WoL script.
+
+- **Sunshine API health check in verify** -- Gaming LXC per-feature and E2E
+  verify playbooks now assert that Sunshine's web UI (HTTPS port 47990) is
+  reachable from the Proxmox host, with retry logic for startup delays.
+  Confirms the game streaming server is actually serving, not just that the
+  systemd unit is active.
+- **Dynamic GPU device detection** -- All verify and configure tasks now
+  detect `/dev/dri/card*` and `/dev/dri/renderD*` dynamically via sysfs
+  instead of hardcoding `card0` or `renderD128`. Fixes false failures on
+  AMD APU hosts where the card device is `card1`.
 
 ### Changed
 

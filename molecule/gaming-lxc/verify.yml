@@ -1,0 +1,182 @@
+---
+- name: Verify Gaming LXC container
+  hosts: gaming_nodes
+  gather_facts: false
+  tasks:
+    # ── Container existence and state ────────────────────────────
+    - name: Check Gaming LXC container is running
+      ansible.builtin.command:
+        cmd: pct status {{ gaming_ct_id }}
+      register: _gaming_status
+      changed_when: false
+
+    - name: Assert Gaming LXC is running
+      ansible.builtin.assert:
+        that: "'running' in _gaming_status.stdout"
+        fail_msg: "Gaming LXC container {{ gaming_ct_id }} is not running"
+
+    # ── GPU device access ────────────────────────────────────────
+    - name: Detect GPU render device on host
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ls /dev/dri/renderD* 2>/dev/null | head -1 | xargs basename
+        executable: /bin/bash
+      register: _host_render_device
+      changed_when: false
+
+    - name: Check render device inside container
+      ansible.builtin.command:
+        cmd: pct exec {{ gaming_ct_id }} -- ls /dev/dri/{{ _host_render_device.stdout | trim }}
+      register: _render_check
+      changed_when: false
+
+    - name: Assert render device is accessible
+      ansible.builtin.assert:
+        that: _render_check.rc == 0
+        fail_msg: "/dev/dri/{{ _host_render_device.stdout | trim }} not accessible inside Gaming LXC"
+
+    - name: Detect GPU card device on host
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ls /dev/dri/card* 2>/dev/null | head -1 | xargs basename
+        executable: /bin/bash
+      register: _host_card_device
+      changed_when: false
+
+    - name: Check card device inside container
+      ansible.builtin.command:
+        cmd: pct exec {{ gaming_ct_id }} -- ls /dev/dri/{{ _host_card_device.stdout | trim }}
+      register: _card_check
+      changed_when: false
+      failed_when: false
+
+    - name: Assert card device is accessible
+      ansible.builtin.assert:
+        that: _card_check.rc == 0
+        fail_msg: "/dev/dri/{{ _host_card_device.stdout | trim }} not accessible inside Gaming LXC"
+
+    # ── VA-API hardware encoding ─────────────────────────────────
+    - name: Check VA-API encoding profiles
+      ansible.builtin.command:
+        cmd: pct exec {{ gaming_ct_id }} -- bash -c 'vainfo --display drm 2>&1'
+      register: _vainfo
+      changed_when: false
+      failed_when: false
+
+    - name: Assert VA-API H.264 encode is available
+      ansible.builtin.assert:
+        that: "'VAProfileH264' in _vainfo.stdout"
+        fail_msg: "VA-API H.264 encoding not available in Gaming LXC"
+
+    # ── Container config ─────────────────────────────────────────
+    - name: Read container config
+      ansible.builtin.command:
+        cmd: pct config {{ gaming_ct_id }}
+      register: _gaming_config
+      changed_when: false
+
+    - name: Assert container is privileged
+      ansible.builtin.assert:
+        that: "'unprivileged: 0' in _gaming_config.stdout or 'unprivileged' not in _gaming_config.stdout"
+        fail_msg: "Gaming LXC must be a privileged container for GPU access"
+
+    - name: Assert nesting feature is enabled
+      ansible.builtin.assert:
+        that: "'nesting=1' in _gaming_config.stdout"
+        fail_msg: "Gaming LXC must have nesting=1 feature"
+
+    # ── DRI device mounts in LXC config ──────────────────────────
+    - name: Check LXC config for DRI mount entry
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          grep -c 'lxc.mount.entry.*dev/dri' /etc/pve/lxc/{{ gaming_ct_id }}.conf
+        executable: /bin/bash
+      register: _dri_mount_check
+      changed_when: false
+
+    - name: Assert DRI mount entry exists
+      ansible.builtin.assert:
+        that: (_dri_mount_check.stdout | trim | int) > 0
+        fail_msg: "DRI device bind mount not configured in LXC config"
+
+    # ── Sunshine service ─────────────────────────────────────────
+    - name: Check Sunshine service status
+      ansible.builtin.command:
+        cmd: pct exec {{ gaming_ct_id }} -- systemctl is-active sunshine.service
+      register: _sunshine_active
+      changed_when: false
+      failed_when: false
+
+    - name: Assert Sunshine is running
+      ansible.builtin.assert:
+        that: _sunshine_active.stdout | trim == 'active'
+        fail_msg: "Sunshine service is not active in Gaming LXC"
+
+    # ── Game installation ────────────────────────────────────────
+    - name: Check dsda-doom binary exists
+      ansible.builtin.command:
+        cmd: pct exec {{ gaming_ct_id }} -- which dsda-doom
+      register: _dsdadoom_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Assert dsda-doom is installed
+      ansible.builtin.assert:
+        that: _dsdadoom_exists.rc == 0
+        fail_msg: "dsda-doom is not installed in Gaming LXC"
+
+    - name: Check Freedoom WADs exist
+      ansible.builtin.command:
+        cmd: pct exec {{ gaming_ct_id }} -- bash -c 'ls /usr/share/doom/*.wad 2>/dev/null | head -1'
+      register: _freedoom_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Assert Freedoom WADs are installed
+      ansible.builtin.assert:
+        that: _freedoom_exists.rc == 0 and _freedoom_exists.stdout | trim | length > 0
+        fail_msg: "Freedoom WADs not found in Gaming LXC"
+
+    # ── Sunshine API health ───────────────────────────────────────
+    - name: Get Gaming container IP
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ gaming_ct_id }} -- hostname -I | awk '{print $1}'
+        executable: /bin/bash
+      register: _gaming_ip
+      changed_when: false
+
+    - name: Check Sunshine web UI is responding
+      ansible.builtin.command:
+        cmd: >-
+          curl -sk --connect-timeout 5 -o /dev/null -w '%{http_code}'
+          https://{{ _gaming_ip.stdout | trim }}:47990/
+      register: _sunshine_api
+      changed_when: false
+      failed_when: _sunshine_api.rc != 0
+      retries: 6
+      delay: 5
+      until: _sunshine_api.rc == 0
+
+    - name: Assert Sunshine web UI returns valid HTTP response
+      ansible.builtin.assert:
+        that: _sunshine_api.stdout | trim | int > 0
+        fail_msg: >-
+          Sunshine web UI returned invalid response at
+          https://{{ _gaming_ip.stdout | trim }}:47990
+          (http={{ _sunshine_api.stdout | default('none') }})
+
+    # ── Deploy stamp ─────────────────────────────────────────────
+    - name: Check deploy_stamp exists
+      ansible.builtin.stat:
+        path: /etc/ansible/facts.d/vm_builds.fact
+      register: _deploy_stamp
+
+    - name: Assert deploy_stamp file exists
+      ansible.builtin.assert:
+        that: _deploy_stamp.stat.exists
+        fail_msg: "deploy_stamp fact file not found"

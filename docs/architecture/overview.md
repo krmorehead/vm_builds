@@ -524,7 +524,8 @@ site.yml (target)
 │   ├── Play 16: media_nodes      [media]       jellyfin_configure
 │   ├── Play 17: media_nodes      [media]       kodi_lxc, deploy_stamp
 │   ├── Play 18: media_nodes      [media]       kodi_configure
-│   └── (future) moonlight_lxc, moonlight_configure
+│   ├── Play 19: media_nodes      [media]       moonlight_lxc, deploy_stamp
+│   └── Play 20: media_nodes      [media]       moonlight_configure
 │
 ├── Phase: Desktop
 │   ├── Play 19: desktop_nodes    [desktop]     desktop_vm, kiosk_lxc, deploy_stamp

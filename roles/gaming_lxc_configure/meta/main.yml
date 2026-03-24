@@ -1,0 +1,13 @@
+---
+dependencies: []
+
+galaxy_info:
+  author: vm_builds
+  license: proprietary
+  role_name: gaming_lxc_configure
+  description: Configure Sunshine game streaming and display in a Fedora gaming LXC container
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Fedora
+      versions:
+        - "41"

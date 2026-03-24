@@ -1,0 +1,115 @@
+---
+# ── Verify Moonlight template exists ────────────────────────────
+- name: Check Moonlight LXC template exists on controller
+  ansible.builtin.stat:
+    path: "{{ role_path }}/../../{{ moonlight_ct_template_path }}"
+  register: _moonlight_template_stat
+  delegate_to: localhost
+
+- name: Fail if Moonlight template is missing
+  ansible.builtin.fail:
+    msg: >-
+      Moonlight template not found: {{ moonlight_ct_template_path }}.
+      Run ./build-images.sh --only moonlight to build it.
+  when: not (_moonlight_template_stat.stat.exists | default(false))
+
+# ── Determine container network ──────────────────────────────────
+
+- name: Read LAN gateway from generated env
+  ansible.builtin.set_fact:
+    _lan_gateway: >-
+      {{ lookup('pipe', 'grep "^LAN_GATEWAY=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
+         | default('10.10.10.1', true) }}
+    _lan_cidr: >-
+      {{ lookup('pipe', 'grep "^LAN_CIDR=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
+         | default('24', true) }}
+
+- name: Compute Moonlight container IP
+  ansible.builtin.set_fact:
+    _moonlight_ct_ip: >-
+      {{ _lan_gateway.split('.')[0:3] | join('.') }}.{{ moonlight_ct_ip_offset }}
+
+- name: Report Moonlight container IP assignment
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: moonlight IP={{ _moonlight_ct_ip }}/{{ _lan_cidr }}
+      gw={{ _lan_gateway }} (OpenWrt LAN)
+
+# ── Provision via shared proxmox_lxc role ────────────────────────
+
+- name: Provision Moonlight LXC container
+  ansible.builtin.include_role:
+    name: proxmox_lxc
+  vars:
+    lxc_ct_id: "{{ moonlight_ct_id }}"
+    lxc_ct_hostname: "{{ moonlight_ct_hostname }}"
+    lxc_ct_dynamic_group: moonlight
+    lxc_ct_memory: "{{ moonlight_ct_memory }}"
+    lxc_ct_cores: "{{ moonlight_ct_cores }}"
+    lxc_ct_disk: "{{ moonlight_ct_disk }}"
+    lxc_ct_onboot: "{{ moonlight_ct_onboot }}"
+    lxc_ct_startup_order: 0
+    lxc_ct_template: "{{ moonlight_ct_template }}"
+    lxc_ct_template_path: "{{ moonlight_ct_template_path }}"
+    lxc_ct_ip: "{{ _moonlight_ct_ip }}/{{ _lan_cidr }}"
+    lxc_ct_gateway: "{{ _lan_gateway }}"
+    lxc_ct_nameserver: "{{ _lan_gateway }}"
+    lxc_ct_bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
+    lxc_ct_unprivileged: "{{ moonlight_ct_unprivileged }}"
+    lxc_ct_features: "{{ moonlight_ct_features }}"
+
+# ── Device passthrough via lxc.mount.entry + cgroup allowlists ───
+
+- name: Check for existing device mount entries
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      grep -c 'lxc.mount.entry.*dev/dri' /etc/pve/lxc/{{ moonlight_ct_id }}.conf 2>/dev/null || echo 0
+    executable: /bin/bash
+  register: _moonlight_dev_mounts
+  changed_when: false
+  failed_when: false
+
+- name: Stop container for device mount config
+  ansible.builtin.command:
+    cmd: pct stop {{ moonlight_ct_id }}
+  when: (_moonlight_dev_mounts.stdout | trim | int) == 0
+  failed_when: false
+  changed_when: true
+
+- name: Apply device bind mounts and cgroup allowlists
+  ansible.builtin.shell:
+    cmd: |
+      lxc_conf="/etc/pve/lxc/{{ moonlight_ct_id }}.conf"
+      for entry in \
+        "lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir" \
+        "lxc.mount.entry: /dev/input dev/input none bind,optional,create=dir" \
+        "lxc.cgroup2.devices.allow: c 226:* rwm" \
+        "lxc.cgroup2.devices.allow: c 13:* rwm" \
+        "lxc.cgroup2.devices.allow: c 10:223 rwm"; do
+        grep -qF "$entry" "$lxc_conf" 2>/dev/null || echo "$entry" >> "$lxc_conf"
+      done
+    executable: /bin/bash
+  when: (_moonlight_dev_mounts.stdout | trim | int) == 0
+  changed_when: true
+
+- name: Start container with device mounts
+  ansible.builtin.command:
+    cmd: pct start {{ moonlight_ct_id }}
+  when: (_moonlight_dev_mounts.stdout | trim | int) == 0
+  changed_when: true
+
+- name: Wait for container to be ready after restart
+  ansible.builtin.command:
+    cmd: pct exec {{ moonlight_ct_id }} -- ls /
+  register: _moonlight_ready
+  retries: 10
+  delay: 3
+  until: _moonlight_ready.rc == 0
+  changed_when: false
+  when: (_moonlight_dev_mounts.stdout | trim | int) == 0
+
+- name: Export Moonlight static IP for downstream roles
+  ansible.builtin.set_fact:
+    moonlight_static_ip: "{{ _moonlight_ct_ip }}"
+    cacheable: true

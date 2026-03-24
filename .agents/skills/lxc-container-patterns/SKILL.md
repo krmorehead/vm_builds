@@ -224,6 +224,26 @@ When working with LXC containers, load these skills IMMEDIATELY:
 
 33. Previous bug: Docker `--format "{{.Repository}}:{{.Tag}}"` in verify.yml was interpreted by Ansible's Jinja2 engine as undefined variables. Fix: use `docker image inspect` instead of `--format`.
 
+## Dynamic Host Fact Detection in Per-Feature Scenarios
+
+52. Configure roles that need host-level facts (e.g., render device GID for iGPU) MUST detect them dynamically from the host instead of relying on cached facts from infrastructure roles. Per-feature molecule scenarios don't run infrastructure plays, so facts like `igpu_render_gid` are undefined.
+
+53. Pattern: use `stat -c '%g' /dev/dri/renderD*` to detect the render GID at runtime:
+
+    ```yaml
+    - name: Detect render device GID from host
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          stat -c '%g' /dev/dri/renderD* 2>/dev/null | head -1
+        executable: /bin/bash
+      register: _render_gid
+      changed_when: false
+      failed_when: _render_gid.stdout | trim | length == 0
+    ```
+
+54. Previous bug: `moonlight_configure` referenced `igpu_render_gid` (exported by `proxmox_igpu`). The per-feature scenario didn't run infrastructure plays, so the variable was undefined. Fix: detect GID dynamically with `stat`.
+
 ## Configure Role Connection Decision
 
 34. When a configure role needs facts from the Proxmox host (e.g., `igpu_render_gid`, `igpu_render_device` from `proxmox_igpu`), it MUST target the Proxmox host group (`media_nodes`, `service_nodes`) and use `pct exec` commands. The `pct_remote` connection cannot access host-side facts because the dynamic group hosts are separate inventory entries.

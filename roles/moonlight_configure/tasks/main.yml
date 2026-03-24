@@ -1,0 +1,95 @@
+---
+# ── Verify moonlight-embedded is available ───────────────────────
+
+- name: Verify moonlight-embedded installed in container
+  ansible.builtin.command:
+    cmd: pct exec {{ moonlight_ct_id }} -- test -x /usr/local/bin/moonlight
+  register: _moonlight_bin
+  changed_when: false
+  failed_when: _moonlight_bin.rc != 0
+
+# ── Configure iGPU access ───────────────────────────────────────
+
+- name: Detect render device GID from host
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      stat -c '%g' /dev/dri/renderD* 2>/dev/null | head -1
+    executable: /bin/bash
+  register: _render_gid
+  changed_when: false
+  failed_when: _render_gid.stdout | trim | length == 0
+
+- name: Create render group and add root to video/render
+  ansible.builtin.shell:
+    cmd: |
+      pct exec {{ moonlight_ct_id }} -- bash -c '
+        groupadd -g {{ _render_gid.stdout | trim }} render 2>/dev/null || true
+        usermod -a -G render,video,input root 2>/dev/null || true
+      '
+    executable: /bin/bash
+  changed_when: true
+
+# ── Verify VA-API decode ─────────────────────────────────────────
+
+- name: Check VA-API decode availability
+  ansible.builtin.command:
+    cmd: pct exec {{ moonlight_ct_id }} -- vainfo --display drm
+  register: _vainfo_check
+  changed_when: false
+  failed_when: false
+
+- name: Report VA-API status
+  ansible.builtin.debug:
+    msg: >-
+      VA-API status: {{ 'hardware decode available'
+        if 'VAProfile' in (_vainfo_check.stdout | default(''))
+        else 'software fallback (no hardware decode detected)' }}
+
+# ── Deploy Moonlight configuration ──────────────────────────────
+
+- name: Write Moonlight config to host temp
+  ansible.builtin.template:
+    src: moonlight.conf.j2
+    dest: /tmp/moonlight.conf
+    mode: "0644"
+
+- name: Push config into container
+  ansible.builtin.command:
+    cmd: pct push {{ moonlight_ct_id }} /tmp/moonlight.conf /etc/moonlight.conf
+  changed_when: true
+
+- name: Clean up host temp file
+  ansible.builtin.file:
+    path: /tmp/moonlight.conf
+    state: absent
+
+# ── Server pairing (optional) ───────────────────────────────────
+
+- name: Pair with Sunshine server
+  ansible.builtin.shell:
+    cmd: >-
+      pct exec {{ moonlight_ct_id }} -- bash -c
+      'echo {{ moonlight_pair_pin }} | /usr/local/bin/moonlight pair {{ moonlight_server_ip }} --pin {{ moonlight_pair_pin }}'
+    executable: /bin/bash
+  when:
+    - moonlight_server_ip | default('', true) | length > 0
+    - moonlight_pair_pin | default('', true) | length > 0
+  register: _moonlight_pair
+  changed_when: "'Successfully' in _moonlight_pair.stdout or 'Already paired' in _moonlight_pair.stdout"
+  failed_when: false
+
+# ── Report completion ────────────────────────────────────────────
+
+- name: Report Moonlight configuration
+  ansible.builtin.debug:
+    msg: >-
+      Moonlight configured successfully!
+      Server: {{ moonlight_server_ip | default('not set', true) }}
+      Resolution: {{ moonlight_resolution }}@{{ moonlight_fps }}fps
+      Codec: {{ moonlight_codec }}, Bitrate: {{ moonlight_bitrate }}kbps
+      VA-API: {{ 'hardware' if 'VAProfile' in (_vainfo_check.stdout | default('')) else 'software fallback' }}
+      Pairing: {{ 'attempted'
+        if (moonlight_server_ip | default('', true) | length > 0
+            and moonlight_pair_pin | default('', true) | length > 0)
+        else 'skipped (set MOONLIGHT_SERVER_IP + MOONLIGHT_PAIR_PIN)' }}

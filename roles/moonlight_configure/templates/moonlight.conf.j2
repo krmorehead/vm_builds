@@ -1,0 +1,11 @@
+# Moonlight Embedded configuration
+# Managed by Ansible — do not edit manually
+{% if moonlight_server_ip | length > 0 %}
+address = {{ moonlight_server_ip }}
+{% endif %}
+width = {{ moonlight_resolution.split('x')[0] }}
+height = {{ moonlight_resolution.split('x')[1] }}
+fps = {{ moonlight_fps }}
+codec = {{ moonlight_codec }}
+bitrate = {{ moonlight_bitrate }}
+platform = auto

@@ -80,6 +80,25 @@ description: Image management and local storage patterns for VM and LXC images. 
 
 14. This avoids rebuilding images when a container is moved to different hardware. The configure role reads `igpu_vendor` to set `LIBVA_DRIVER_NAME` appropriately.
 
+## From-Source Compilation in Image Builds
+
+19. When upstream packages don't provide x86-64 Debian binaries (e.g., moonlight-embedded only has armhf packages for Raspberry Pi), compile from source inside a build container. Pattern:
+    1. Install runtime deps FIRST (`apt-get install`). Apt marks these as manually installed.
+    2. Install build-only deps (cmake, gcc, -dev packages) in a SECOND `apt-get install`.
+    3. Clone, compile, `make install`.
+    4. `apt-get purge` build-only packages, then `apt-get autoremove`. Runtime deps survive because they're marked manual.
+
+20. ALWAYS include runtime versions of FFmpeg / SDL2 / etc. in step 1. If `libavcodec59` is only pulled in as a transitive dependency of `libavcodec-dev`, autoremove deletes it after purging the -dev package.
+    - Previous bug: `libavcodec59` and `libavutil57` were autoremoved because they were only transitive deps of the `-dev` packages. Fix: add them to the first (runtime) `apt-get install` block.
+
+21. For LXC containers without X11, pass `-DENABLE_X11=OFF` (or equivalent cmake/configure flag) when compiling applications that optionally link X11/EGL/GLES. Without this, the binary links against libraries that get autoremoved.
+    - Previous bug: moonlight-embedded linked `libEGL.so.1` at compile time. After autoremove, the binary failed to load. Fix: `cmake -DENABLE_X11=OFF` eliminates the dependency entirely.
+
+22. Verification in build scripts MUST use full paths for binaries installed to `/usr/local/bin/`. `pct exec` uses a restricted PATH (`/sbin:/bin:/usr/sbin:/usr/bin`) that excludes `/usr/local/bin/`.
+    - Previous bug: `which moonlight` via `pct exec` failed because `/usr/local/bin/` isn't in PATH. Fix: `test -x /usr/local/bin/moonlight`.
+
+23. Allocate sufficient build container resources for compilation: 4GB disk (2GB too small for build deps + FFmpeg), 1024MB RAM, 2 cores.
+
 ## Windows VM Images
 
 15. Windows images are built via unattended install on the Proxmox host: create temp VM, boot Tiny11 ISO + virtio-win ISO + answer ISO, wait for Guest Agent + post-install marker, export disk via `qemu-img convert` to qcow2. Build VMID 992 is reserved for this.

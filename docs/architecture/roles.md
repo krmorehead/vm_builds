@@ -698,6 +698,63 @@ None — Jellyfin is pure userspace. No kernel modules, no host config files. Th
 
 ---
 
+## moonlight_lxc
+
+**Purpose:** Provision a Moonlight embedded game streaming client LXC container on Proxmox via the shared `proxmox_lxc` role, with iGPU display output and USB input device passthrough. On-demand container for game streaming from a Sunshine server.
+
+### How It Works
+
+1. Verifies custom Moonlight template exists, hard-fails with build instructions if missing.
+2. Reads LAN gateway/CIDR from `env_generated_path` for container IP (offset 17).
+3. Provisions via `proxmox_lxc` with service-specific vars (VMID 302, 512MB RAM, 1 core, 2GB disk).
+4. Applies device bind mounts (`/dev/dri`, `/dev/input`) and cgroup allowlists (DRI 226:\*, input 13:\*, uinput 10:223).
+5. Exports `moonlight_static_ip` fact for downstream roles.
+
+### Key Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `moonlight_ct_hostname` | `moonlight` | Container hostname |
+| `moonlight_ct_memory` | `512` | RAM in MB |
+| `moonlight_ct_cores` | `1` | CPU cores |
+| `moonlight_ct_disk` | `2` | Root disk in GB |
+| `moonlight_ct_onboot` | `false` | On-demand, display-exclusive |
+| `moonlight_ct_ip_offset` | `17` | IP offset on LAN subnet |
+
+---
+
+## moonlight_configure
+
+**Purpose:** Configure Moonlight embedded client with host-specific streaming settings (Sunshine server IP, resolution, codec, pairing). Base config (packages, VA-API drivers) is baked into the image.
+
+**Connection pattern:** Runs on the Proxmox host (targets `media_nodes`) and uses `pct exec`/`pct push` to run commands inside the container. Needs host-side `igpu_render_gid` from `proxmox_igpu`.
+
+### How It Works
+
+1. Verifies `moonlight-embedded` binary is present in the container.
+2. Creates render group and adds root to video/render/input groups using `igpu_render_gid`.
+3. Checks VA-API decode availability via `vainfo`.
+4. Templates and pushes `/etc/moonlight.conf` with resolution, codec, bitrate, and server IP.
+5. Optionally pairs with Sunshine server when `MOONLIGHT_PAIR_PIN` is set.
+
+### Key Variables
+
+| Variable | Env Var | Default | Description |
+|----------|---------|---------|-------------|
+| `moonlight_server_ip` | `MOONLIGHT_SERVER_IP` | (empty) | Sunshine server IP |
+| `moonlight_pair_pin` | `MOONLIGHT_PAIR_PIN` | (empty) | Pre-shared pairing PIN |
+| `moonlight_resolution` | -- | `1920x1080` | Stream resolution |
+| `moonlight_fps` | -- | `60` | Stream frame rate |
+| `moonlight_codec` | -- | `h265` | Video codec |
+| `moonlight_bitrate` | -- | `20000` | Bitrate in kbps |
+
+### Baked into Image (NOT configured here)
+
+- `moonlight-embedded` binary (from Cloudsmith repository)
+- VA-API drivers (`intel-media-va-driver`, `mesa-va-drivers`, `vainfo`)
+
+---
+
 ## gaming_vm
 
 **Purpose:** Provision a Windows 11 VM with iGPU PCI passthrough for game streaming via Sunshine. Uses vfio-pci to bind the host iGPU exclusively to the VM, creating a q35/OVMF VM from a pre-built Windows disk image.

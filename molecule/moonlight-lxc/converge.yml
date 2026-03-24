@@ -1,0 +1,12 @@
+---
+- name: Provision Moonlight LXC container
+  hosts: streaming_nodes
+  gather_facts: false
+  roles:
+    - moonlight_lxc
+
+- name: Configure Moonlight
+  hosts: streaming_nodes
+  gather_facts: false
+  roles:
+    - moonlight_configure

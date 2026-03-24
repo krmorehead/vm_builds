@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  author: vm_builds
+  role_name: moonlight_configure
+  description: Configure Moonlight embedded streaming client
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm
+dependencies: []

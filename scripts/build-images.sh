@@ -2,22 +2,24 @@
 set -euo pipefail
 
 # Builds custom images for the vm_builds project.
-# Produces ten outputs:
-#   1. Mesh LXC rootfs        — minimal OpenWrt, no firewall, WiFi packages      (local build)
-#   2. Router VM combined      — full OpenWrt with mesh/security/DNS packages     (local build)
-#   3. Pi-hole LXC template    — Debian 12 with Pi-hole pre-installed             (remote build on Proxmox)
+# Produces twelve outputs:
+#   1. Mesh LXC rootfs         — minimal OpenWrt, no firewall, WiFi packages      (local build)
+#   2. Router VM combined      — full OpenWrt with mesh/security/DNS packages      (local build)
+#   3. Pi-hole LXC template    — Debian 12 with Pi-hole pre-installed              (remote build on Proxmox)
 #   4. rsyslog LXC template    — Debian 12 with rsyslog TCP receiver pre-configured (remote build on Proxmox)
 #   5. Jellyfin LXC template   — Debian 12 with Jellyfin + VA-API drivers baked in (remote build on Proxmox)
 #   6. Netdata LXC template    — Debian 12 with Netdata monitoring agent pre-installed (remote build on Proxmox)
 #   7. WireGuard LXC template  — Debian 12 with wireguard-tools + iptables baked in (remote build on Proxmox)
-#   8. Home Assistant template — Debian 12 with Docker CE and HA container pre-pulled (remote build on Proxmox)
-#   9. Kodi LXC template      — Debian 12 with kodi-standalone + GBM/DRM + Mesa + libcec (remote build on Proxmox)
-#  10. Sunshine VM image       — Windows 11 with Sunshine + GZDoom + virtio drivers     (remote build on Proxmox)
+#   8. Home Assistant template  — Debian 12 with Docker CE and HA container pre-pulled (remote build on Proxmox)
+#   9. Kodi LXC template       — Debian 12 with kodi-standalone + GBM/DRM + Mesa + libcec (remote build on Proxmox)
+#  10. Moonlight LXC template  — Debian 12 with moonlight-embedded + VA-API drivers   (remote build on Proxmox)
+#  11. Gaming LXC template     — Fedora with Sunshine + GZDoom + Mesa VA-API + PipeWire (remote build on Proxmox)
+#  12. Sunshine VM image        — Windows 11 with Sunshine + GZDoom + virtio drivers    (remote build on Proxmox)
 #
 # Usage: ./build-images.sh [--clean] [--host <proxmox-ip>] [--only <target>]
 #   --clean          Remove cached Image Builder before downloading fresh copy
 #   --host <ip>      Proxmox host for remote image builds. Required for remote-built templates.
-#   --only <target>  Build only the specified target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, sunshine).
+#   --only <target>  Build only the specified target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, moonlight, gaming, sunshine).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGES_DIR="$(cd "${SCRIPT_DIR}/../images" && pwd)"
@@ -44,6 +46,13 @@ PIHOLE_BUILD_VMID=998
 RSYSLOG_BASE_TEMPLATE="debian-12-standard_12.12-1_amd64.tar.zst"
 RSYSLOG_OUTPUT_NAME="rsyslog-debian-12-amd64.tar.zst"
 RSYSLOG_BUILD_VMID=997
+
+# Gaming LXC template (built remotely on Proxmox — Fedora base with Sunshine + GZDoom)
+GAMING_FEDORA_VERSION="41"
+GAMING_BASE_ROOTFS="fedora-${GAMING_FEDORA_VERSION}-default-amd64.tar.xz"
+GAMING_LXC_IMAGE_URL="https://images.linuxcontainers.org/images/fedora/${GAMING_FEDORA_VERSION}/amd64/default"
+GAMING_OUTPUT_NAME="gaming-fedora-amd64.tar.zst"
+GAMING_BUILD_VMID=990
 
 # Remote Proxmox host (set via --host flag)
 PROXMOX_HOST=""
@@ -880,6 +889,11 @@ KODI_BASE_TEMPLATE="debian-12-standard_12.12-1_amd64.tar.zst"
 KODI_OUTPUT_NAME="kodi-debian-12-amd64.tar.zst"
 KODI_BUILD_VMID=993
 
+# Moonlight LXC template (built remotely on Proxmox via pct create/exec/vzdump)
+MOONLIGHT_BASE_TEMPLATE="debian-12-standard_12.12-1_amd64.tar.zst"
+MOONLIGHT_OUTPUT_NAME="moonlight-debian-12-amd64.tar.zst"
+MOONLIGHT_BUILD_VMID=991
+
 # Home Assistant LXC template (built remotely on Proxmox via pct create/exec/vzdump)
 HOMEASSISTANT_BASE_TEMPLATE="debian-12-standard_12.12-1_amd64.tar.zst"
 HOMEASSISTANT_OUTPUT_NAME="homeassistant-debian-12-amd64.tar.zst"
@@ -1072,6 +1086,181 @@ SETTINGS_EOF
     trap - EXIT
 
     log "Kodi LXC template: ${output}"
+    log "  Size: $(du -h "$output" | cut -f1)"
+}
+
+cleanup_moonlight_build() {
+    local vmid="${MOONLIGHT_BUILD_VMID}"
+    if [[ -n "$PROXMOX_HOST" ]]; then
+        log "Cleaning up Moonlight build container ${vmid}..."
+        remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
+    fi
+}
+
+build_moonlight_lxc() {
+    log "Building Moonlight LXC template (remote on Proxmox)..."
+    local base_template="${IMAGES_DIR}/${MOONLIGHT_BASE_TEMPLATE}"
+    local output="${IMAGES_DIR}/${MOONLIGHT_OUTPUT_NAME}"
+    local vmid="${MOONLIGHT_BUILD_VMID}"
+
+    if [[ -f "$output" ]]; then
+        log "Moonlight template already exists at ${output}"
+        log "  Delete it and re-run to rebuild."
+        return
+    fi
+
+    if [[ -z "$PROXMOX_HOST" ]]; then
+        die "Moonlight build requires --host <proxmox-ip>. Example:
+  ./build-images.sh --host 192.168.86.201"
+    fi
+
+    if [[ ! -f "$base_template" ]]; then
+        die "Base template not found: ${base_template}. Download it first:
+  wget -O ${base_template} \\
+    http://download.proxmox.com/images/system/${MOONLIGHT_BASE_TEMPLATE}"
+    fi
+
+    trap cleanup_moonlight_build EXIT
+
+    remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
+
+    local remote_template="/var/lib/vz/template/cache/${MOONLIGHT_BASE_TEMPLATE}"
+    if ! remote_cmd "test -f ${remote_template}"; then
+        log "Uploading base template to Proxmox host..."
+        # shellcheck disable=SC2086
+        scp $SSH_OPTS "$base_template" "root@${PROXMOX_HOST}:${remote_template}"
+    fi
+
+    local mgmt_bridge
+    mgmt_bridge=$(remote_cmd "ip -o route show default | awk '{print \$5}' | head -1")
+    log "Management bridge: ${mgmt_bridge}"
+
+    log "Creating temporary build container (VMID ${vmid})..."
+    remote_cmd "pct create ${vmid} local:vztmpl/${MOONLIGHT_BASE_TEMPLATE} \
+        --hostname moonlight-build \
+        --memory 1024 \
+        --cores 2 \
+        --rootfs local-lvm:4 \
+        --net0 name=eth0,bridge=${mgmt_bridge},ip=dhcp \
+        --nameserver 8.8.8.8 \
+        --unprivileged 1 \
+        --start false"
+
+    log "Starting build container..."
+    remote_cmd "pct start ${vmid}"
+
+    log "Waiting for container to start..."
+    local retries=0
+    while ! remote_cmd "pct exec ${vmid} -- ls / >/dev/null 2>&1"; do
+        retries=$((retries + 1))
+        if (( retries > 20 )); then
+            remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
+            die "Build container never became ready after 40s"
+        fi
+        sleep 2
+    done
+    log "Container is ready."
+
+    log "Waiting for network inside build container..."
+    local net_retries=0
+    while ! remote_cmd "pct exec ${vmid} -- bash -c 'getent hosts deb.debian.org >/dev/null 2>&1'"; do
+        net_retries=$((net_retries + 1))
+        if (( net_retries > 15 )); then
+            remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
+            die "Build container never got network after 30s"
+        fi
+        sleep 2
+    done
+    log "Network ready."
+
+    log "Installing runtime and build dependencies..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+
+        # Runtime deps (marked manual — survives autoremove after build)
+        # SDL2 for video output (uses KMSDRM backend in LXC without X11)
+        # FFmpeg for video decode (libavcodec59 + libavutil57 MUST be here
+        # so apt marks them manual; otherwise autoremove deletes them)
+        # VA-API drivers for Intel + AMD hardware decode
+        apt-get install -y --no-install-recommends \
+            libopus0 libexpat1 libasound2 libudev1 libavahi-client3 \
+            libcurl4 libevdev2 libpulse0 libsdl2-2.0-0 \
+            libavcodec59 libavutil57 \
+            intel-media-va-driver mesa-va-drivers vainfo \
+            ca-certificates
+
+        # Build deps (purged after compilation)
+        apt-get install -y --no-install-recommends \
+            git cmake gcc g++ make pkg-config \
+            libssl-dev libopus-dev libasound2-dev libudev-dev \
+            libavahi-client-dev libcurl4-openssl-dev libevdev-dev \
+            libexpat1-dev libpulse-dev uuid-dev \
+            libsdl2-dev libavcodec-dev libavutil-dev
+    '"
+
+    log "Compiling moonlight-embedded v2.7.1 from source..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        cd /tmp
+        git clone --branch v2.7.1 --depth 1 https://github.com/moonlight-stream/moonlight-embedded.git
+        cd moonlight-embedded
+        git submodule update --init --recursive
+        mkdir build && cd build
+        cmake -DENABLE_X11=OFF ..
+        make -j\$(nproc)
+        make install
+        ldconfig
+    '"
+
+    log "Cleaning up build dependencies and source..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get purge -y \
+            git cmake gcc g++ make pkg-config \
+            libssl-dev libopus-dev libasound2-dev libudev-dev \
+            libavahi-client-dev libcurl4-openssl-dev libevdev-dev \
+            libexpat1-dev libpulse-dev uuid-dev \
+            libsdl2-dev libavcodec-dev libavutil-dev
+        apt-get autoremove -y
+        apt-get clean 2>/dev/null || true
+        rm -rf /tmp/moonlight-embedded /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    '"
+
+    log "Verifying Moonlight installation..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        test -x /usr/local/bin/moonlight || { echo FAIL: moonlight-embedded not installed; exit 1; }
+        /usr/local/bin/moonlight --version 2>&1 || true
+        vainfo --display drm 2>&1 | head -5 || true
+        echo ALL CHECKS PASSED
+    '"
+    log "Moonlight smoke test passed."
+
+    log "Stopping build container..."
+    remote_cmd "pct stop ${vmid}"
+    sleep 2
+
+    log "Exporting container as template via vzdump..."
+    remote_cmd "vzdump ${vmid} --dumpdir /tmp --compress zstd --mode stop"
+
+    local vzdump_file
+    vzdump_file=$(remote_cmd "ls -t /tmp/vzdump-lxc-${vmid}-*.tar.zst 2>/dev/null | head -1")
+    if [[ -z "$vzdump_file" ]]; then
+        remote_cmd "pct destroy ${vmid} --purge 2>/dev/null; true"
+        die "vzdump archive not found on Proxmox host"
+    fi
+    log "vzdump archive: ${vzdump_file}"
+
+    log "Downloading template to ${output}..."
+    mkdir -p "$IMAGES_DIR"
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS "root@${PROXMOX_HOST}:${vzdump_file}" "$output"
+
+    log "Cleaning up build container and vzdump archive..."
+    remote_cmd "pct destroy ${vmid} --purge 2>/dev/null; rm -f '${vzdump_file}'; true"
+
+    trap - EXIT
+
+    log "Moonlight LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
 
@@ -1390,6 +1579,279 @@ DOCKER_EOF
     log "  Size: $(du -h "$output" | cut -f1)"
 }
 
+cleanup_gaming_build() {
+    local vmid="${GAMING_BUILD_VMID}"
+    if [[ -n "$PROXMOX_HOST" ]]; then
+        log "Cleaning up gaming build container ${vmid}..."
+        remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
+    fi
+}
+
+build_gaming_lxc() {
+    log "Building Gaming LXC template (remote on Proxmox)..."
+    local base_rootfs="${IMAGES_DIR}/${GAMING_BASE_ROOTFS}"
+    local output="${IMAGES_DIR}/${GAMING_OUTPUT_NAME}"
+    local vmid="${GAMING_BUILD_VMID}"
+
+    if [[ -f "$output" ]]; then
+        log "Gaming template already exists at ${output}"
+        log "  Delete it and re-run to rebuild."
+        return
+    fi
+
+    if [[ -z "$PROXMOX_HOST" ]]; then
+        die "Gaming build requires --host <proxmox-ip>. Example:
+  ./build-images.sh --host 192.168.86.220 --only gaming"
+    fi
+
+    # Download Fedora rootfs from linuxcontainers.org if not cached
+    if [[ ! -f "$base_rootfs" ]]; then
+        log "Downloading Fedora ${GAMING_FEDORA_VERSION} rootfs from linuxcontainers.org..."
+        mkdir -p "$IMAGES_DIR"
+        local latest_dir
+        latest_dir=$(curl -sL "${GAMING_LXC_IMAGE_URL}/" \
+            | grep -oP 'href="\K[0-9_%A-Fa-f]+(?=/")' \
+            | sort -r | head -1)
+        if [[ -z "$latest_dir" ]]; then
+            die "Could not find Fedora ${GAMING_FEDORA_VERSION} rootfs on linuxcontainers.org.
+  Check ${GAMING_LXC_IMAGE_URL}/ manually."
+        fi
+        local rootfs_url="${GAMING_LXC_IMAGE_URL}/${latest_dir}/rootfs.tar.xz"
+        log "Rootfs URL: ${rootfs_url}"
+        wget -q --show-progress -O "$base_rootfs" "$rootfs_url"
+        log "Fedora rootfs cached: $(du -h "$base_rootfs" | cut -f1)"
+    else
+        log "Using cached Fedora rootfs: ${base_rootfs}"
+    fi
+
+    trap cleanup_gaming_build EXIT
+
+    # Ensure no stale build container exists
+    remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
+
+    # Upload Fedora rootfs to Proxmox template cache
+    local remote_template="/var/lib/vz/template/cache/${GAMING_BASE_ROOTFS}"
+    if ! remote_cmd "test -f ${remote_template}"; then
+        log "Uploading Fedora rootfs to Proxmox host..."
+        # shellcheck disable=SC2086
+        scp $SSH_OPTS "$base_rootfs" "root@${PROXMOX_HOST}:${remote_template}"
+    fi
+
+    local mgmt_bridge
+    mgmt_bridge=$(remote_cmd "ip -o route show default | awk '{print \$5}' | head -1")
+    log "Management bridge: ${mgmt_bridge}"
+
+    log "Creating temporary build container (VMID ${vmid})..."
+    remote_cmd "pct create ${vmid} local:vztmpl/${GAMING_BASE_ROOTFS} \
+        --hostname gaming-build \
+        --ostype unmanaged \
+        --memory 2048 \
+        --cores 2 \
+        --rootfs local-lvm:8 \
+        --net0 name=eth0,bridge=${mgmt_bridge},ip=dhcp \
+        --nameserver 8.8.8.8 \
+        --unprivileged 0 \
+        --features nesting=1 \
+        --start false"
+
+    log "Starting build container..."
+    remote_cmd "pct start ${vmid}"
+
+    log "Waiting for container to start..."
+    local retries=0
+    while ! remote_cmd "pct exec ${vmid} -- ls / >/dev/null 2>&1"; do
+        retries=$((retries + 1))
+        if (( retries > 30 )); then
+            die "Build container never became ready after 60s"
+        fi
+        sleep 2
+    done
+    log "Container is ready."
+
+    log "Waiting for network inside build container..."
+    local net_retries=0
+    while ! remote_cmd "pct exec ${vmid} -- bash -c 'curl -sI https://fedoraproject.org >/dev/null 2>&1'"; do
+        net_retries=$((net_retries + 1))
+        if (( net_retries > 30 )); then
+            die "Build container never got network after 60s"
+        fi
+        sleep 2
+    done
+    log "Network ready."
+
+    # Force reliable DNS
+    remote_cmd "pct exec ${vmid} -- bash -c 'echo nameserver 8.8.8.8 > /etc/resolv.conf'"
+
+    log "Installing RPM Fusion for freeworld codecs and gaming packages..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        dnf install -y \
+            https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-${GAMING_FEDORA_VERSION}.noarch.rpm \
+            https://download1.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-${GAMING_FEDORA_VERSION}.noarch.rpm \
+            2>&1 | tail -3
+    '"
+
+    log "Installing base system and display packages..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        dnf install -y --skip-unavailable \
+            mesa-dri-drivers \
+            mesa-vulkan-drivers \
+            mesa-vdpau-drivers \
+            libva-utils \
+            vulkan-tools \
+            xorg-x11-server-Xorg \
+            xorg-x11-drv-modesetting \
+            xorg-x11-xinit \
+            xrandr \
+            pipewire \
+            pipewire-pulseaudio \
+            wireplumber \
+            gamemode \
+            bash \
+            systemd \
+            dbus \
+            procps-ng \
+            iproute \
+            net-tools \
+            curl \
+            wget \
+            ca-certificates \
+            2>&1 | tail -10
+    '"
+
+    log "Swapping mesa-va-drivers for freeworld variant (H.264/HEVC encode)..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        dnf swap -y mesa-va-drivers mesa-va-drivers-freeworld 2>&1 | tail -5
+    '"
+
+    log "Installing gaming packages (dsda-doom + freedoom)..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        dnf install -y dsda-doom freedoom 2>&1 | tail -5
+    '"
+
+    log "Installing Sunshine game streaming server..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        dnf copr enable -y lizardbyte/stable 2>&1 | tail -3
+        dnf install -y sunshine 2>&1 | tail -3
+    '"
+
+    log "Creating Xorg virtual display configuration..."
+    remote_cmd "pct exec ${vmid} -- bash -c 'mkdir -p /etc/X11'"
+    remote_cmd "pct exec ${vmid} -- bash -c 'cat > /etc/X11/xorg-virtual.conf << \"XEOF\"
+Section \"Device\"
+    Identifier  \"GPU\"
+    Driver      \"modesetting\"
+EndSection
+
+Section \"Screen\"
+    Identifier  \"Screen0\"
+    Device      \"GPU\"
+    DefaultDepth 24
+    SubSection \"Display\"
+        Depth 24
+        Modes \"1920x1080\" \"1280x720\"
+    EndSubSection
+EndSection
+
+Section \"ServerLayout\"
+    Identifier  \"Layout0\"
+    Screen 0    \"Screen0\"
+EndSection
+XEOF'"
+
+    log "Creating systemd service for headless Xorg..."
+    remote_cmd "pct exec ${vmid} -- bash -c 'cat > /etc/systemd/system/xorg-virtual.service << \"SEOF\"
+[Unit]
+Description=Headless Xorg display server
+After=systemd-logind.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/Xorg :0 -config /etc/X11/xorg-virtual.conf -noreset
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SEOF'"
+
+    log "Creating systemd service for Sunshine..."
+    remote_cmd "pct exec ${vmid} -- bash -c 'cat > /etc/systemd/system/sunshine.service << \"SEOF\"
+[Unit]
+Description=Sunshine game streaming server
+After=xorg-virtual.service
+Requires=xorg-virtual.service
+
+[Service]
+Type=simple
+Environment=DISPLAY=:0
+Environment=XDG_RUNTIME_DIR=/run/user/0
+ExecStart=/usr/bin/sunshine
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+SEOF'"
+
+    log "Creating PipeWire user service override for root..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        mkdir -p /root/.config/systemd/user
+        mkdir -p /etc/systemd/system/pipewire.service.d
+        cat > /etc/systemd/system/pipewire.service.d/override.conf << \"PEOF\"
+[Unit]
+Description=PipeWire Multimedia Service (system)
+
+[Service]
+Type=simple
+ExecStart=
+ExecStart=/usr/bin/pipewire
+Environment=XDG_RUNTIME_DIR=/run/user/0
+
+[Install]
+WantedBy=multi-user.target
+PEOF
+    '"
+
+    log "Enabling services..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        systemctl enable xorg-virtual.service 2>/dev/null || true
+        systemctl enable sunshine.service 2>/dev/null || true
+    '"
+
+    log "Cleaning up package caches..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        dnf clean all
+        rm -rf /var/cache/dnf /tmp/* /var/tmp/*
+    '"
+
+    log "Stopping build container..."
+    remote_cmd "pct stop ${vmid}"
+    sleep 3
+
+    log "Exporting container as template via vzdump..."
+    remote_cmd "vzdump ${vmid} --dumpdir /tmp --compress zstd --mode stop"
+
+    local vzdump_file
+    vzdump_file=$(remote_cmd "ls -t /tmp/vzdump-lxc-${vmid}-*.tar.zst 2>/dev/null | head -1")
+    if [[ -z "$vzdump_file" ]]; then
+        die "vzdump archive not found on Proxmox host"
+    fi
+    log "vzdump archive: ${vzdump_file}"
+
+    log "Downloading template to ${output}..."
+    mkdir -p "$IMAGES_DIR"
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS "root@${PROXMOX_HOST}:${vzdump_file}" "$output"
+
+    log "Cleaning up build container and vzdump archive..."
+    remote_cmd "pct destroy ${vmid} --purge 2>/dev/null; rm -f '${vzdump_file}'; true"
+
+    trap - EXIT
+
+    log "Gaming LXC template: ${output}"
+    log "  Size: $(du -h "$output" | cut -f1)"
+}
+
 # Sunshine VM image (built remotely on Proxmox: ISO boot → unattended install → export)
 SUNSHINE_ISO="Tiny11-2026-03-15.iso"
 SUNSHINE_VIRTIO_ISO="virtio-win.iso"
@@ -1648,12 +2110,12 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --only)
-            [[ -n "${2:-}" ]] || die "--only requires a target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, sunshine)"
+            [[ -n "${2:-}" ]] || die "--only requires a target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, moonlight, gaming, sunshine)"
             BUILD_TARGETS+=("$2")
             shift 2
             ;;
         *)
-            die "Unknown argument: $1\nUsage: $0 --host <ip> [--only <target>] [--clean]\n  Targets: mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, sunshine"
+            die "Unknown argument: $1\nUsage: $0 --host <ip> [--only <target>] [--clean]\n  Targets: mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, moonlight, gaming, sunshine"
             ;;
     esac
 done
@@ -1682,6 +2144,8 @@ should_build netdata    && build_netdata_lxc
 should_build wireguard  && build_wireguard_lxc
 should_build homeassistant && build_homeassistant_lxc
 should_build kodi         && build_kodi_lxc
+should_build moonlight    && build_moonlight_lxc
+should_build gaming       && build_gaming_lxc
 should_build sunshine     && build_sunshine_vm
 
 log ""
@@ -1690,5 +2154,6 @@ ls -lh "${IMAGES_DIR}/${MESH_OUTPUT_NAME}" "${IMAGES_DIR}/${ROUTER_OUTPUT_NAME}"
     "${IMAGES_DIR}/${PIHOLE_OUTPUT_NAME}" "${IMAGES_DIR}/${RSYSLOG_OUTPUT_NAME}" \
     "${IMAGES_DIR}/${JELLYFIN_OUTPUT_NAME}" "${IMAGES_DIR}/${NETDATA_OUTPUT_NAME}" \
     "${IMAGES_DIR}/${WIREGUARD_OUTPUT_NAME}" "${IMAGES_DIR}/${HOMEASSISTANT_OUTPUT_NAME}" \
-    "${IMAGES_DIR}/${KODI_OUTPUT_NAME}" "${IMAGES_DIR}/${SUNSHINE_OUTPUT_NAME}" \
+    "${IMAGES_DIR}/${KODI_OUTPUT_NAME}" "${IMAGES_DIR}/${MOONLIGHT_OUTPUT_NAME}" \
+    "${IMAGES_DIR}/${GAMING_OUTPUT_NAME}" "${IMAGES_DIR}/${SUNSHINE_OUTPUT_NAME}" \
     2>/dev/null || true

@@ -26,6 +26,8 @@
       - "{{ homeassistant_ct_id }}"
       - "{{ jellyfin_ct_id }}"
       - "{{ kodi_ct_id }}"
+      - "{{ moonlight_ct_id }}"
+      - "{{ gaming_ct_id }}"
   tasks:
     - name: Probe host connectivity
       ansible.builtin.ping:
