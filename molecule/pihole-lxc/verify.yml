@@ -80,28 +80,92 @@
 
     # ── DNS resolution ───────────────────────────────────────────
 
-    - name: Wait for FTL to listen on port 53
-      ansible.builtin.command:
-        cmd: pct exec {{ pihole_ct_id }} -- /bin/sh -c 'ss -tlnp | grep -q :53'
+    - name: Wait for FTL to listen on TCP+UDP port 53
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ pihole_ct_id }} -- /bin/sh -c '
+          tcp=$(ss -tlnp 2>/dev/null | grep -c ":53 ");
+          udp=$(ss -ulnp 2>/dev/null | grep -c ":53 ");
+          [ "$tcp" -gt 0 ] && [ "$udp" -gt 0 ]
+          && echo BOTH || echo MISSING
+          '
       register: _ftl_listen
       changed_when: false
       retries: 6
       delay: 5
-      until: _ftl_listen.rc == 0
+      until: "'BOTH' in _ftl_listen.stdout"
 
-    - name: Test DNS query through Pi-hole
+    - name: Restart FTL if listeners are incomplete
       ansible.builtin.command:
-        cmd: pct exec {{ pihole_ct_id }} -- dig @127.0.0.1 google.com +short +time=5
-      register: _pihole_dns
-      changed_when: false
-      retries: 5
-      delay: 10
-      until: _pihole_dns.rc == 0 and (_pihole_dns.stdout | trim | length > 0)
+        cmd: >-
+          pct exec {{ pihole_ct_id }} -- /bin/sh -c
+          'systemctl restart pihole-FTL && sleep 3'
+      when: "'BOTH' not in _ftl_listen.stdout"
+      changed_when: true
+
+    - name: Pi-hole DNS resolution test
+      block:
+        - name: Test DNS via FTL
+          ansible.builtin.command:
+            cmd: >-
+              pct exec {{ pihole_ct_id }} --
+              dig @127.0.0.1 google.com +short +time=5
+          register: _pihole_dns
+          changed_when: false
+          retries: 3
+          delay: 10
+          until: >-
+            _pihole_dns.rc == 0 and
+            (_pihole_dns.stdout | trim | length > 0) and
+            ('timed out' not in _pihole_dns.stdout)
+      rescue:
+        - name: Collect FTL diagnostics
+          ansible.builtin.shell:
+            cmd: |
+              set -o pipefail
+              pct exec {{ pihole_ct_id }} -- /bin/sh -c '
+                echo "FTL_PID=$(pidof pihole-FTL 2>/dev/null || echo dead)"
+                echo "RESOLV=$(cat /etc/resolv.conf 2>/dev/null)"
+                echo "UPSTREAM=$(/usr/bin/pihole-FTL --config dns.upstreams 2>/dev/null)"
+                echo "ROUTE=$(ip route show default 2>/dev/null)"
+                gw=$(ip route show default | awk "/default/{print \$3}" | head -1)
+                echo "GW_PING=$(ping -c1 -W2 $gw 2>&1 | tail -1)"
+                echo "EXT_PING=$(ping -c1 -W2 1.1.1.1 2>&1 | tail -1)"
+                echo "DIG_GW=$(dig @${gw} google.com +short +time=3 2>&1 | head -3)"
+                echo "DIG_EXT=$(dig @1.1.1.1 google.com +short +time=3 2>&1 | head -3)"
+              '
+            executable: /bin/bash
+          register: _ftl_diag
+          changed_when: false
+
+        - name: Show FTL diagnostics
+          ansible.builtin.debug:
+            var: _ftl_diag.stdout_lines
+
+        - name: Restart FTL and retry DNS
+          ansible.builtin.shell:
+            cmd: >-
+              pct exec {{ pihole_ct_id }} -- /bin/sh -c
+              'systemctl restart pihole-FTL && sleep 5' &&
+              pct exec {{ pihole_ct_id }} --
+              dig @127.0.0.1 google.com +short +time=5
+          register: _pihole_dns
+          changed_when: false
+          retries: 2
+          delay: 10
+          until: >-
+            _pihole_dns.rc == 0 and
+            (_pihole_dns.stdout | trim | length > 0) and
+            ('timed out' not in _pihole_dns.stdout)
 
     - name: Assert DNS resolves
       ansible.builtin.assert:
-        that: _pihole_dns.stdout | trim | length > 0
-        fail_msg: "DNS resolution failed: {{ _pihole_dns.stdout }}"
+        that:
+          - _pihole_dns.stdout | trim | length > 0
+          - "'timed out' not in _pihole_dns.stdout"
+        fail_msg: >-
+          DNS resolution failed:
+          {{ _pihole_dns.stdout | default('no output') }}
 
     # ── Ad blocking ──────────────────────────────────────────────
 

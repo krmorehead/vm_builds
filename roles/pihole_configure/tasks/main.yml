@@ -23,7 +23,29 @@
   when: pihole_web_password | length == 0
   changed_when: true
 
-# ── Configure upstream DNS ──────────────────────────────────────
+# ── Resolve upstream DNS servers ───────────────────────────────
+# Default: auto-detect container gateway (reliable behind OpenWrt).
+# Override: set pihole_upstream_dns_1/2 to explicit IPs (e.g. 1.1.1.1).
+
+- name: Detect container default gateway
+  ansible.builtin.command:
+    cmd: ip -4 route show default
+  register: _pihole_default_route
+  changed_when: false
+
+- name: Compute effective upstream DNS servers
+  ansible.builtin.set_fact:
+    _pihole_dns_servers: >-
+      {{
+        ([pihole_upstream_dns_1, pihole_upstream_dns_2]
+         if pihole_upstream_dns_1 | length > 0
+         else [_pihole_default_route.stdout.split()[2]])
+        | select('string') | reject('equalto', '') | list
+      }}
+
+- name: Report upstream DNS selection
+  ansible.builtin.debug:
+    msg: "Pi-hole upstreams: {{ _pihole_dns_servers }}"
 
 - name: Read current upstream DNS
   ansible.builtin.command:
@@ -35,10 +57,14 @@
   ansible.builtin.command:
     cmd: >-
       {{ pihole_ftl_bin }} --config
-      dns.upstreams '["{{ pihole_upstream_dns_1 }}", "{{ pihole_upstream_dns_2 }}"]'
+      dns.upstreams '{{ _pihole_dns_servers | to_json }}'
   when: >-
-    pihole_upstream_dns_1 not in _current_upstreams.stdout or
-    pihole_upstream_dns_2 not in _current_upstreams.stdout
+    _pihole_dns_servers | difference(
+      _current_upstreams.stdout | regex_findall('[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+')
+    ) | length > 0
+    or
+    _current_upstreams.stdout | regex_findall('[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+')
+    | difference(_pihole_dns_servers) | length > 0
   changed_when: true
   notify: _restart_ftl
 

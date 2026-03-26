@@ -1,0 +1,296 @@
+---
+# ── KDE Plasma polish (Windows-style UX) ───────────────────────────
+#
+# KDE naturally resembles Windows: taskbar at bottom, system tray,
+# alt-tab, start menu. We reinforce that and add non-conflicting
+# shortcuts from the Mac side.
+
+- name: Ensure KDE config directories exist
+  ansible.builtin.file:
+    path: "/home/{{ desktop_user }}/{{ item }}"
+    state: directory
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0755"
+  loop:
+    - .config
+    - .config/kglobalshortcutsrc.d
+    - .config/autostart
+    - .config/gtk-3.0
+    - .local/share/plasma/layout-templates
+  become: true
+
+- name: Configure KDE global settings (dark theme, single-click)
+  ansible.builtin.copy:
+    content: |
+      [General]
+      ColorScheme=BreezeDark
+
+      [KDE]
+      SingleClick=false
+      LookAndFeelPackage=org.kde.breezedark.desktop
+    dest: "/home/{{ desktop_user }}/.config/kdeglobals"
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0644"
+  become: true
+
+- name: Configure KDE keyboard shortcuts
+  ansible.builtin.copy:
+    content: |
+      [kwin]
+      Overview=Meta+Tab
+      Window Close=Alt+F4
+      Window Maximize=Meta+Up
+      Window Minimize=Meta+Down
+      Window Quick Tile Left=Meta+Left
+      Window Quick Tile Right=Meta+Right
+      Switch Window Down=Alt+Tab
+
+      [plasmashell]
+      activate task manager entry 1=Meta+1
+      activate task manager entry 2=Meta+2
+      activate task manager entry 3=Meta+3
+      show-on-mouse-pos=Meta+V
+
+      [org.kde.spectacle.desktop]
+      ActiveWindowScreenShot=Alt+Print
+      CurrentMonitorScreenShot=Ctrl+Print
+      FullScreenScreenShot=Print
+      RectangularRegionScreenShot=Ctrl+Shift+4
+      _launch=Meta+Shift+S
+
+      [flameshot.desktop]
+      Capture=Ctrl+Shift+4
+    dest: "/home/{{ desktop_user }}/.config/kglobalshortcutsrc"
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0644"
+  become: true
+
+- name: Configure KDE panel (bottom taskbar, Windows-style)
+  ansible.builtin.copy:
+    content: |
+      [PlasmaViews][Panel 2]
+      alignment=0
+      floating=1
+      panelVisibility=1
+
+      [PlasmaViews][Panel 2][Defaults]
+      thickness=44
+
+      [Containments][2]
+      activityId=
+      formfactor=2
+      immutability=1
+      lastScreen=0
+      location=4
+      plugin=org.kde.panel
+      wallpaperplugin=org.kde.image
+    dest: "/home/{{ desktop_user }}/.config/plasma-org.kde.plasma.desktop-appletsrc"
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0644"
+  become: true
+
+# ── GNOME polish (Mac-style UX) ───────────────────────────────────
+#
+# GNOME's Activities overview, top bar, and workspace model already
+# mirror macOS. We add a dock, dark mode, and Mac-like keybindings.
+
+- name: Ensure dconf local database directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /etc/dconf/db/local.d
+    - /etc/dconf/db/local.d/locks
+    - /etc/dconf/profile
+  become: true
+
+- name: Create dconf user profile
+  ansible.builtin.copy:
+    content: |
+      user-db:user
+      system-db:local
+    dest: /etc/dconf/profile/user
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+- name: Configure GNOME dark theme and dock via dconf defaults
+  ansible.builtin.copy:
+    content: |
+      [org/gnome/desktop/interface]
+      color-scheme='prefer-dark'
+      gtk-theme='Adwaita-dark'
+      clock-format='12h'
+      enable-hot-corners=true
+
+      [org/gnome/shell]
+      enabled-extensions=['dash-to-dock@micxgx.gmail.com']
+      favorite-apps=['firefox-esr.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop', 'org.gnome.TextEditor.desktop']
+
+      [org/gnome/shell/extensions/dash-to-dock]
+      dock-position='BOTTOM'
+      dash-max-icon-size=48
+      extend-height=false
+      dock-fixed=true
+      click-action='minimize'
+      intellihide=true
+      transparency-mode='DYNAMIC'
+
+      [org/gnome/desktop/wm/keybindings]
+      close=['<Alt>F4', '<Super>q']
+      minimize=['<Super>h']
+      toggle-maximized=['<Super>Up']
+      begin-move=['<Super>m']
+      switch-applications=['<Alt>Tab']
+      switch-windows=['<Super>Tab']
+
+      [org/gnome/shell/keybindings]
+      toggle-overview=['<Super>space']
+
+      [org/gnome/settings-daemon/plugins/media-keys]
+      screenshot=['Print', '<Shift><Super>3']
+      screenshot-clip=['<Shift><Control>4']
+      area-screenshot-clip=['<Shift><Control>4']
+      window-screenshot=['<Shift><Super>5']
+
+      [org/gnome/desktop/peripherals/touchpad]
+      natural-scroll=true
+      tap-to-click=true
+
+      [org/gnome/desktop/input-sources]
+      xkb-options=['caps:super']
+
+      [org/gnome/mutter]
+      edge-tiling=true
+      dynamic-workspaces=true
+    dest: /etc/dconf/db/local.d/00-desktop-defaults
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+- name: Lock GNOME dock and theme settings
+  ansible.builtin.copy:
+    content: |
+      [org/gnome/shell]
+      enabled-extensions='dash-to-dock@micxgx.gmail.com'
+
+      [org/gnome/desktop/interface]
+      color-scheme='prefer-dark'
+    dest: /etc/dconf/db/local.d/locks/desktop-defaults
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+- name: Update dconf database
+  ansible.builtin.command:
+    cmd: dconf update
+  become: true
+  changed_when: true
+
+# ── Shared shortcuts (non-conflicting, both sessions) ──────────────
+#
+# Flameshot responds to Ctrl+Shift+4 (Mac screenshot shortcut)
+# in BOTH KDE and GNOME sessions since it runs as a background app.
+
+- name: Create Flameshot autostart for both sessions
+  ansible.builtin.copy:
+    content: |
+      [Desktop Entry]
+      Type=Application
+      Name=Flameshot
+      Exec=flameshot
+      Icon=flameshot
+      Terminal=false
+      X-GNOME-Autostart-enabled=true
+      X-KDE-autostart-after=panel
+    dest: "/home/{{ desktop_user }}/.config/autostart/flameshot.desktop"
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0644"
+  become: true
+
+# ── Shared file manager bookmarks ──────────────────────────────────
+
+- name: Create GTK bookmarks for shared directories
+  ansible.builtin.copy:
+    content: |
+      file:///home/{{ desktop_user }}/Downloads Downloads
+      file:///home/{{ desktop_user }}/Documents Documents
+      file:///home/{{ desktop_user }}/Pictures Pictures
+      file:///home/{{ desktop_user }}/Videos Videos
+      file:///home/{{ desktop_user }}/Music Music
+    dest: "/home/{{ desktop_user }}/.config/gtk-3.0/bookmarks"
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0644"
+  become: true
+
+# ── SDDM configuration ────────────────────────────────────────────
+
+- name: Ensure SDDM config directory exists
+  ansible.builtin.file:
+    path: /etc/sddm.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Configure SDDM default session and theme
+  ansible.builtin.copy:
+    content: |
+      [Theme]
+      Current=breeze
+
+      [General]
+      DefaultSession={{ desktop_default_session }}.desktop
+    dest: /etc/sddm.conf.d/default.conf
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+- name: Configure SDDM autologin
+  ansible.builtin.copy:
+    content: |
+      [Autologin]
+      User={{ desktop_user }}
+      Session={{ desktop_default_session }}.desktop
+    dest: /etc/sddm.conf.d/autologin.conf
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  when: desktop_autologin | bool
+
+- name: Remove SDDM autologin when disabled
+  ansible.builtin.file:
+    path: /etc/sddm.conf.d/autologin.conf
+    state: absent
+  become: true
+  when: not (desktop_autologin | bool)
+
+# ── Enable graphical target ────────────────────────────────────────
+
+- name: Set graphical.target as default boot target
+  ansible.builtin.command:
+    cmd: systemctl set-default graphical.target
+  become: true
+  changed_when: true
+
+- name: Enable and start SDDM service
+  ansible.builtin.systemd:
+    name: sddm
+    enabled: true
+    state: started
+  become: true

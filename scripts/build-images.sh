@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Builds custom images for the vm_builds project.
-# Produces twelve outputs:
+# Produces thirteen outputs:
 #   1. Mesh LXC rootfs         — minimal OpenWrt, no firewall, WiFi packages      (local build)
 #   2. Router VM combined      — full OpenWrt with mesh/security/DNS packages      (local build)
 #   3. Pi-hole LXC template    — Debian 12 with Pi-hole pre-installed              (remote build on Proxmox)
@@ -15,11 +15,12 @@ set -euo pipefail
 #  10. Moonlight LXC template  — Debian 12 with moonlight-embedded + VA-API drivers   (remote build on Proxmox)
 #  11. Gaming LXC template     — Fedora with Sunshine + GZDoom + Mesa VA-API + PipeWire (remote build on Proxmox)
 #  12. Sunshine VM image        — Windows 11 with Sunshine + GZDoom + virtio drivers    (remote build on Proxmox)
+#  13. Desktop VM image         — Debian 12 with KDE + GNOME + SDDM + apps baked in    (remote build on Proxmox)
 #
 # Usage: ./build-images.sh [--clean] [--host <proxmox-ip>] [--only <target>]
 #   --clean          Remove cached Image Builder before downloading fresh copy
 #   --host <ip>      Proxmox host for remote image builds. Required for remote-built templates.
-#   --only <target>  Build only the specified target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, moonlight, gaming, sunshine).
+#   --only <target>  Build only the specified target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, moonlight, gaming, sunshine, desktop).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGES_DIR="$(cd "${SCRIPT_DIR}/../images" && pwd)"
@@ -53,6 +54,11 @@ GAMING_BASE_ROOTFS="fedora-${GAMING_FEDORA_VERSION}-default-amd64.tar.xz"
 GAMING_LXC_IMAGE_URL="https://images.linuxcontainers.org/images/fedora/${GAMING_FEDORA_VERSION}/amd64/default"
 GAMING_OUTPUT_NAME="gaming-fedora-amd64.tar.zst"
 GAMING_BUILD_VMID=990
+
+# Desktop VM image (built remotely on Proxmox: cloud-init boot → apt install desktops → export disk)
+DESKTOP_BASE_IMAGE="debian-12-generic-amd64.qcow2"
+DESKTOP_OUTPUT_NAME="desktop-debian-12-amd64.qcow2"
+DESKTOP_BUILD_VMID=991
 
 # Remote Proxmox host (set via --host flag)
 PROXMOX_HOST=""
@@ -1852,6 +1858,245 @@ PEOF
     log "  Size: $(du -h "$output" | cut -f1)"
 }
 
+# ── Desktop VM image ─────────────────────────────────────────────────
+# Debian 12 cloud image with KDE Plasma, GNOME, SDDM, and shared apps
+# pre-installed. GPU drivers are NOT baked (host-dependent, installed at
+# configure time). The generic cloud image must already be downloaded to
+# images/debian-12-generic-amd64.qcow2.
+
+cleanup_desktop_build() {
+    local vmid="${DESKTOP_BUILD_VMID}"
+    if [[ -n "$PROXMOX_HOST" ]]; then
+        log "Cleaning up Desktop build VM ${vmid}..."
+        remote_cmd "qm stop ${vmid} 2>/dev/null; sleep 3; qm destroy ${vmid} --purge 2>/dev/null; true"
+        remote_cmd "rm -f /var/tmp/${DESKTOP_OUTPUT_NAME}; true"
+    fi
+}
+
+build_desktop_vm() {
+    log "Building Desktop VM image (remote on Proxmox)..."
+    local base_image="${IMAGES_DIR}/${DESKTOP_BASE_IMAGE}"
+    local output="${IMAGES_DIR}/${DESKTOP_OUTPUT_NAME}"
+    local vmid="${DESKTOP_BUILD_VMID}"
+
+    if [[ -f "$output" ]]; then
+        log "Desktop VM image already exists at ${output}"
+        log "  Delete it and re-run to rebuild."
+        return
+    fi
+
+    if [[ -z "$PROXMOX_HOST" ]]; then
+        die "Desktop build requires --host <proxmox-ip>. Example:
+  ./build-images.sh --host 192.168.86.201 --only desktop"
+    fi
+
+    if [[ ! -f "$base_image" ]]; then
+        die "Debian cloud image not found: ${base_image}.
+  Download from: https://cloud.debian.org/images/cloud/bookworm/latest/
+  Save to: images/debian-12-generic-amd64.qcow2"
+    fi
+
+    trap cleanup_desktop_build EXIT
+
+    remote_cmd "qm stop ${vmid} 2>/dev/null; sleep 2; qm destroy ${vmid} --purge 2>/dev/null; true"
+
+    # Upload cloud image to Proxmox
+    log "Uploading Debian cloud image to Proxmox..."
+    if ! remote_cmd "test -f /var/tmp/${DESKTOP_BASE_IMAGE}"; then
+        # shellcheck disable=SC2086
+        scp $SSH_OPTS "$base_image" "root@${PROXMOX_HOST}:/var/tmp/${DESKTOP_BASE_IMAGE}"
+    else
+        log "  Cloud image already on host, skipping upload."
+    fi
+
+    # Detect management bridge
+    local mgmt_bridge
+    mgmt_bridge=$(remote_cmd "ip -o route show default | awk '{print \$5}' | head -1")
+    log "Management bridge: ${mgmt_bridge}"
+
+    # Create temporary build VM with cloud-init
+    log "Creating build VM (VMID ${vmid})..."
+    remote_cmd "qm create ${vmid} \
+        --name desktop-build \
+        --machine q35 \
+        --bios ovmf \
+        --efidisk0 local-lvm:1,format=raw,efitype=4m,pre-enrolled-keys=0 \
+        --cores 4 \
+        --memory 4096 \
+        --cpu host \
+        --scsihw virtio-scsi-pci \
+        --serial0 socket \
+        --vga std \
+        --agent enabled=1 \
+        --net0 virtio,bridge=${mgmt_bridge} \
+        --ide2 local-lvm:cloudinit \
+        --ostype l26"
+
+    # Import and attach cloud image disk
+    log "Importing cloud image disk..."
+    remote_cmd "qm importdisk ${vmid} /var/tmp/${DESKTOP_BASE_IMAGE} local-lvm"
+    remote_cmd "qm set ${vmid} \
+        --scsi0 local-lvm:vm-${vmid}-disk-1,discard=on,ssd=1 \
+        --boot order=scsi0"
+
+    # Configure cloud-init for SSH access
+    remote_cmd "qm set ${vmid} \
+        --ciuser root \
+        --sshkeys /root/.ssh/authorized_keys \
+        --ipconfig0 ip=dhcp"
+
+    # Resize disk for desktop packages
+    remote_cmd "qm resize ${vmid} scsi0 32G"
+
+    # Start VM
+    log "Starting build VM..."
+    remote_cmd "qm start ${vmid}"
+
+    # Get VM MAC address for IP discovery
+    local vm_mac
+    vm_mac=$(remote_cmd "qm config ${vmid} | grep '^net0' | sed -n 's/.*\\(..:..:..:..:..:..\).*/\\1/p'" | tr '[:upper:]' '[:lower:]')
+    log "VM MAC: ${vm_mac}"
+
+    # Wait for DHCP lease and discover IP via ARP neighbor table
+    log "Waiting for VM to acquire DHCP lease (up to 5 minutes)..."
+    local vm_ip=""
+    local ip_retries=0
+    while [[ -z "$vm_ip" ]]; do
+        ip_retries=$((ip_retries + 1))
+        if (( ip_retries > 30 )); then
+            die "Could not discover VM IP after 5 minutes. Check VM console."
+        fi
+        sleep 10
+        vm_ip=$(remote_cmd "ip -4 neigh show dev ${mgmt_bridge} \
+            | awk '/${vm_mac}/{print \$1}' | head -1" 2>/dev/null || true)
+        if [[ -z "$vm_ip" ]]; then
+            remote_cmd "subnet=\$(ip -4 addr show ${mgmt_bridge} | awk '/inet /{print \$2}' | head -1 | sed 's/\\.[0-9]*\\/.*//')
+                for i in \$(seq 1 254); do ping -c1 -W1 \${subnet}.\$i >/dev/null 2>&1 & done; wait" 2>/dev/null || true
+        fi
+    done
+    log "VM IP: ${vm_ip}"
+
+    # Wait for SSH (cloud-init installs SSH keys, no guest agent needed)
+    log "Waiting for SSH..."
+    local ssh_retries=0
+    while ! remote_cmd "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@${vm_ip} true 2>/dev/null"; do
+        ssh_retries=$((ssh_retries + 1))
+        if (( ssh_retries > 30 )); then
+            die "SSH not available after 5 minutes."
+        fi
+        sleep 10
+    done
+    log "SSH connected."
+
+    # Install desktop packages inside the VM (via SSH from the Proxmox host)
+    log "Installing desktop environments and applications (this takes 10-15 minutes)..."
+    remote_cmd "ssh -o StrictHostKeyChecking=no root@${vm_ip} bash -s" << 'INSTALL_EOF'
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+echo "==> Waiting for cloud-init..."
+cloud-init status --wait >/dev/null 2>&1 || true
+
+echo "==> Updating package lists..."
+apt-get update -qq
+
+echo "==> Upgrading base system..."
+apt-get dist-upgrade -y -qq
+
+echo "==> Installing KDE Plasma, GNOME, SDDM, and shared applications..."
+apt-get install -y --no-install-recommends \
+    task-kde-desktop \
+    kde-plasma-desktop \
+    plasma-nm \
+    konsole \
+    dolphin \
+    kate \
+    kde-spectacle \
+    ark \
+    kde-config-screenlocker \
+    task-gnome-desktop \
+    gnome-session \
+    gnome-terminal \
+    nautilus \
+    gnome-text-editor \
+    gnome-screenshot \
+    gnome-tweaks \
+    gnome-shell-extension-manager \
+    gnome-shell-extension-dashtodock \
+    file-roller \
+    sddm \
+    firefox-esr \
+    vlc \
+    libreoffice \
+    flameshot \
+    xdg-user-dirs \
+    fonts-noto \
+    fonts-noto-color-emoji \
+    pipewire \
+    pipewire-audio \
+    wireplumber \
+    qemu-guest-agent
+
+echo "==> Cleaning up..."
+apt-get clean
+rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+echo "==> Resetting cloud-init for next boot..."
+cloud-init clean --logs
+
+echo "==> Desktop image build complete."
+INSTALL_EOF
+
+    # Shutdown VM (use SSH shutdown since guest agent may not be started yet)
+    log "Shutting down build VM..."
+    remote_cmd "ssh -o StrictHostKeyChecking=no root@${vm_ip} 'shutdown -h now' 2>/dev/null || qm stop ${vmid}"
+    sleep 15
+
+    local stop_retries=0
+    while remote_cmd "qm status ${vmid} 2>/dev/null | grep -q running"; do
+        stop_retries=$((stop_retries + 1))
+        if (( stop_retries > 24 )); then
+            log "Force-stopping VM..."
+            remote_cmd "qm stop ${vmid}"
+            sleep 10
+            break
+        fi
+        sleep 5
+    done
+
+    # Export the disk image
+    log "Exporting VM disk image..."
+    local disk_vol disk_path
+    disk_vol=$(remote_cmd "qm config ${vmid} | grep '^scsi0:' | sed 's/^scsi0: //;s/,.*//' 2>/dev/null || echo ''")
+    if [[ -n "$disk_vol" ]]; then
+        disk_path=$(remote_cmd "pvesm path '${disk_vol}' 2>/dev/null || echo ''")
+    fi
+
+    if [[ -z "${disk_path:-}" ]]; then
+        die "Could not determine disk path for VM ${vmid}. Check 'qm config ${vmid}' on the host."
+    fi
+
+    log "Disk path: ${disk_path}"
+    log "Converting to qcow2 and downloading..."
+
+    remote_cmd "rm -f /var/tmp/${DESKTOP_OUTPUT_NAME}"
+    remote_cmd "qemu-img convert -f raw -O qcow2 '${disk_path}' /var/tmp/${DESKTOP_OUTPUT_NAME}"
+
+    mkdir -p "$IMAGES_DIR"
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS "root@${PROXMOX_HOST}:/var/tmp/${DESKTOP_OUTPUT_NAME}" "$output"
+
+    # Cleanup
+    log "Cleaning up build VM and temporary files..."
+    remote_cmd "qm destroy ${vmid} --purge 2>/dev/null; true"
+    remote_cmd "rm -f /var/tmp/${DESKTOP_OUTPUT_NAME} /var/tmp/${DESKTOP_BASE_IMAGE}; true"
+
+    trap - EXIT
+
+    log "Desktop VM image: ${output}"
+    log "  Size: $(du -h "$output" | cut -f1)"
+}
+
 # Sunshine VM image (built remotely on Proxmox: ISO boot → unattended install → export)
 SUNSHINE_ISO="Tiny11-2026-03-15.iso"
 SUNSHINE_VIRTIO_ISO="virtio-win.iso"
@@ -2110,12 +2355,12 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --only)
-            [[ -n "${2:-}" ]] || die "--only requires a target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, moonlight, gaming, sunshine)"
+            [[ -n "${2:-}" ]] || die "--only requires a target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, moonlight, gaming, sunshine, desktop)"
             BUILD_TARGETS+=("$2")
             shift 2
             ;;
         *)
-            die "Unknown argument: $1\nUsage: $0 --host <ip> [--only <target>] [--clean]\n  Targets: mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, moonlight, gaming, sunshine"
+            die "Unknown argument: $1\nUsage: $0 --host <ip> [--only <target>] [--clean]\n  Targets: mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, moonlight, gaming, sunshine, desktop"
             ;;
     esac
 done
@@ -2147,6 +2392,7 @@ should_build kodi         && build_kodi_lxc
 should_build moonlight    && build_moonlight_lxc
 should_build gaming       && build_gaming_lxc
 should_build sunshine     && build_sunshine_vm
+should_build desktop      && build_desktop_vm
 
 log ""
 log "Done. Custom images in ${IMAGES_DIR}/:"
@@ -2156,4 +2402,5 @@ ls -lh "${IMAGES_DIR}/${MESH_OUTPUT_NAME}" "${IMAGES_DIR}/${ROUTER_OUTPUT_NAME}"
     "${IMAGES_DIR}/${WIREGUARD_OUTPUT_NAME}" "${IMAGES_DIR}/${HOMEASSISTANT_OUTPUT_NAME}" \
     "${IMAGES_DIR}/${KODI_OUTPUT_NAME}" "${IMAGES_DIR}/${MOONLIGHT_OUTPUT_NAME}" \
     "${IMAGES_DIR}/${GAMING_OUTPUT_NAME}" "${IMAGES_DIR}/${SUNSHINE_OUTPUT_NAME}" \
+    "${IMAGES_DIR}/${DESKTOP_OUTPUT_NAME}" \
     2>/dev/null || true

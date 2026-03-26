@@ -1,0 +1,86 @@
+---
+# Desktop environments, SDDM, and shared applications are baked into the
+# image (built by build-images.sh --only desktop). This role only handles
+# host-specific configuration and GPU drivers (vendor-dependent at runtime).
+
+# ── Wait for cloud-init to finish ──────────────────────────────────
+
+- name: Wait for cloud-init to complete
+  ansible.builtin.command:
+    cmd: cloud-init status --wait
+  changed_when: false
+  retries: 6
+  delay: 10
+  register: _ci_status
+  until: _ci_status.rc == 0
+
+# ── GPU drivers (vendor-specific, small and host-dependent) ────────
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 86400
+  become: true
+
+- name: Install Intel GPU drivers
+  ansible.builtin.apt:
+    name:
+      - xserver-xorg-video-intel
+      - intel-media-va-driver
+      - mesa-vulkan-drivers
+      - vainfo
+    state: present
+  become: true
+  when: igpu_vendor | default('intel') == 'intel'
+
+- name: Install AMD GPU drivers
+  ansible.builtin.apt:
+    name:
+      - xserver-xorg-video-amdgpu
+      - mesa-va-drivers
+      - mesa-vulkan-drivers
+      - vainfo
+    state: present
+  become: true
+  when: igpu_vendor | default('intel') == 'amd'
+
+# ── Display manager setup ──────────────────────────────────────────
+
+- name: Set SDDM as default display manager
+  ansible.builtin.shell:
+    cmd: |
+      echo "/usr/bin/sddm" > /etc/X11/default-display-manager
+      dpkg-reconfigure -f noninteractive sddm
+    executable: /bin/bash
+  become: true
+  changed_when: true
+
+# ── Service activation ─────────────────────────────────────────────
+
+- name: Enable QEMU Guest Agent
+  ansible.builtin.systemd:
+    name: qemu-guest-agent
+    enabled: true
+    state: started
+  become: true
+
+# ── User setup ─────────────────────────────────────────────────────
+
+- name: Ensure desktop user has correct groups
+  ansible.builtin.user:
+    name: "{{ desktop_user }}"
+    groups: video,render,audio,sudo
+    append: true
+  become: true
+
+- name: Create XDG user directories
+  ansible.builtin.command:
+    cmd: xdg-user-dirs-update
+  become: true
+  become_user: "{{ desktop_user }}"
+  changed_when: false
+
+# ── Include session polish ─────────────────────────────────────────
+
+- name: Apply desktop session polish
+  ansible.builtin.include_tasks: polish.yml

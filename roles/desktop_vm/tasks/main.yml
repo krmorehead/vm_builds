@@ -1,0 +1,295 @@
+---
+- name: Check if Desktop VM already exists
+  ansible.builtin.command:
+    cmd: qm status {{ desktop_vm_id }}
+  register: _desktop_vm_status
+  failed_when: false
+  changed_when: false
+
+- name: Set VM existence flag
+  ansible.builtin.set_fact:
+    _desktop_vm_exists: "{{ _desktop_vm_status.rc == 0 }}"
+
+# ── Verify custom image exists ─────────────────────────────────────
+
+- name: Resolve Desktop image source path
+  ansible.builtin.set_fact:
+    _desktop_image_src: >-
+      {{ desktop_vm_image_path
+         if desktop_vm_image_path.startswith('/')
+         else (project_root + '/' + desktop_vm_image_path) }}
+  when: not _desktop_vm_exists | bool
+
+- name: Check Desktop image exists
+  ansible.builtin.stat:
+    path: "{{ _desktop_image_src }}"
+  register: _desktop_image_stat
+  delegate_to: localhost
+  when: not _desktop_vm_exists | bool
+
+- name: Fail if Desktop image is missing
+  ansible.builtin.fail:
+    msg: >-
+      Desktop VM image not found: {{ desktop_vm_image_path }}.
+      Build it with: ./build-images.sh --host <proxmox-ip> --only desktop
+  when:
+    - not _desktop_vm_exists | bool
+    - not (_desktop_image_stat.stat.exists | default(false))
+
+# ── Verify iGPU facts available ────────────────────────────────────
+
+- name: Fail if iGPU PCI address not available
+  ansible.builtin.fail:
+    msg: >-
+      igpu_pci_address not set. Run proxmox_igpu role first.
+      Desktop VM requires exclusive iGPU passthrough.
+  when:
+    - not _desktop_vm_exists | bool
+    - igpu_pci_address is not defined or igpu_pci_address | length == 0
+
+# ── SSH key preparation ────────────────────────────────────────────
+
+- name: Set SSH key availability flag
+  ansible.builtin.set_fact:
+    _desktop_has_ssh_key: "{{ desktop_ssh_public_key | default('') | trim | length > 0 }}"
+
+- name: Remove stale SSH key files before generation
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /tmp/desktop_tmp_key
+    - /tmp/desktop_tmp_key.pub
+  when:
+    - not _desktop_vm_exists | bool
+    - not (_desktop_has_ssh_key | bool)
+
+- name: Generate temporary SSH keypair on Proxmox host
+  ansible.builtin.command:
+    cmd: ssh-keygen -t ed25519 -f /tmp/desktop_tmp_key -N "" -C desktop-ansible-tmp
+  when:
+    - not _desktop_vm_exists | bool
+    - not (_desktop_has_ssh_key | bool)
+
+- name: Fetch temporary private key to controller
+  ansible.builtin.fetch:
+    src: /tmp/desktop_tmp_key
+    dest: /tmp/desktop_tmp_key
+    flat: true
+  when:
+    - not _desktop_vm_exists | bool
+    - not (_desktop_has_ssh_key | bool)
+
+- name: Set private key permissions on controller
+  ansible.builtin.file:
+    path: /tmp/desktop_tmp_key
+    mode: "0600"
+  delegate_to: localhost
+  when:
+    - not _desktop_vm_exists | bool
+    - not (_desktop_has_ssh_key | bool)
+
+- name: Write operator SSH public key to temp file
+  ansible.builtin.copy:
+    content: "{{ desktop_ssh_public_key }}"
+    dest: /tmp/desktop_ssh_key.pub
+    mode: "0644"
+  when:
+    - not _desktop_vm_exists | bool
+    - _desktop_has_ssh_key | bool
+
+- name: Set SSH key path fact
+  ansible.builtin.set_fact:
+    _desktop_ssh_pubkey_path: >-
+      {{ '/tmp/desktop_ssh_key.pub' if (_desktop_has_ssh_key | bool)
+         else '/tmp/desktop_tmp_key.pub' }}
+    _desktop_ssh_key_file: "{{ '' if (_desktop_has_ssh_key | bool) else '/tmp/desktop_tmp_key' }}"
+
+# ── Image upload ───────────────────────────────────────────────────
+
+- name: Set upload destination path
+  ansible.builtin.set_fact:
+    _desktop_tmp_upload: "{{ desktop_tmp_image_dir }}/{{ _desktop_image_src | basename }}"
+  when: not _desktop_vm_exists | bool
+
+- name: Upload Desktop image to Proxmox node
+  ansible.builtin.copy:
+    src: "{{ _desktop_image_src }}"
+    dest: "{{ _desktop_tmp_upload }}"
+    mode: "0644"
+  when: not _desktop_vm_exists | bool
+
+# ── Create VM with all static settings in one call ─────────────────
+
+- name: Create Desktop VM (UEFI + q35 + iGPU + NIC)
+  ansible.builtin.command:
+    cmd: >-
+      qm create {{ desktop_vm_id }}
+      --name desktop
+      --memory {{ desktop_vm_memory }}
+      --cores {{ desktop_vm_cores }}
+      --ostype l26
+      --machine q35
+      --bios ovmf
+      --efidisk0 {{ proxmox_storage }}:1,format=raw,efitype=4m,pre-enrolled-keys=0
+      --scsihw virtio-scsi-pci
+      --serial0 socket
+      --vga std
+      --agent enabled=1
+      --net0 virtio,bridge={{ proxmox_wan_bridge }}
+      --hostpci0 host={{ igpu_pci_address }},pcie=1
+      --ide2 {{ proxmox_storage }}:cloudinit
+      --onboot {{ '1' if desktop_vm_onboot else '0' }}
+  when: not _desktop_vm_exists | bool
+
+# ── Disk import and boot config ────────────────────────────────────
+
+- name: Import disk image into VM storage
+  ansible.builtin.command:
+    cmd: >-
+      qm importdisk {{ desktop_vm_id }}
+      {{ _desktop_tmp_upload }}
+      {{ proxmox_storage }}
+  register: _desktop_disk_import
+  when: not _desktop_vm_exists | bool
+
+- name: Parse imported disk path
+  ansible.builtin.set_fact:
+    _desktop_imported_disk: >-
+      {{ _desktop_disk_import.stdout
+         | regex_search("imported disk '([^']+)'", '\1')
+         | first }}
+  when: not _desktop_vm_exists | bool
+
+- name: Attach disk and configure boot order
+  ansible.builtin.command:
+    cmd: >-
+      qm set {{ desktop_vm_id }}
+      --scsi0 {{ _desktop_imported_disk }}
+      --boot order=scsi0
+  when: not _desktop_vm_exists | bool
+
+- name: Configure cloud-init user and SSH keys
+  ansible.builtin.command:
+    cmd: >-
+      qm set {{ desktop_vm_id }}
+      --ciuser {{ desktop_user }}
+      --cipassword {{ desktop_password }}
+      --sshkeys {{ _desktop_ssh_pubkey_path }}
+      --ipconfig0 ip=dhcp
+  when: not _desktop_vm_exists | bool
+
+- name: Resize boot disk
+  ansible.builtin.command:
+    cmd: >-
+      qm resize {{ desktop_vm_id }}
+      scsi0 {{ desktop_vm_disk_size }}
+  when: not _desktop_vm_exists | bool
+
+# ── Clean up temp files ────────────────────────────────────────────
+
+- name: Clean up SSH public key temp files on Proxmox host
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /tmp/desktop_ssh_key.pub
+    - /tmp/desktop_tmp_key.pub
+
+- name: Clean up uploaded image
+  ansible.builtin.file:
+    path: "{{ _desktop_tmp_upload | default('') }}"
+    state: absent
+  when: _desktop_tmp_upload is defined and _desktop_tmp_upload | length > 0
+
+# ── Hookscript attachment ──────────────────────────────────────────
+
+- name: Check if display-exclusive hookscript exists
+  ansible.builtin.stat:
+    path: /var/lib/vz/snippets/display-exclusive.sh
+  register: _hookscript_check
+
+- name: Attach display-exclusive hookscript
+  ansible.builtin.command:
+    cmd: >-
+      qm set {{ desktop_vm_id }}
+      --hookscript local:snippets/display-exclusive.sh
+  when: _hookscript_check.stat.exists | default(false)
+
+# ── Start VM and discover IP ──────────────────────────────────────
+
+- name: Start Desktop VM
+  community.proxmox.proxmox_kvm:
+    node: "{{ proxmox_node }}"
+    api_host: "{{ proxmox_api_host }}"
+    api_user: "{{ proxmox_api_user }}"
+    api_token_id: "{{ proxmox_api_token_id }}"
+    api_token_secret: "{{ proxmox_api_token_secret }}"
+    vmid: "{{ desktop_vm_id }}"
+    state: started
+  delegate_to: localhost
+
+- name: Get Desktop VM MAC address
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      qm config {{ desktop_vm_id }} | grep '^net0' | sed -n 's/.*\(..:..:..:..:..:..\).*/\1/p'
+    executable: /bin/bash
+  register: _desktop_mac
+  changed_when: false
+
+- name: Wait for Desktop VM to acquire DHCP lease
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      mac="{{ _desktop_mac.stdout | lower }}"
+      ip=$(awk "/$mac/"'{print $3}' /var/lib/misc/dnsmasq.leases 2>/dev/null)
+      [ -n "$ip" ] && echo "$ip" && exit 0
+      wan_ip=$(ip -4 addr show {{ proxmox_wan_bridge }} 2>/dev/null | awk '/inet /{print $2}' | head -1 | cut -d/ -f1)
+      if [ -n "$wan_ip" ]; then
+        subnet=$(echo "$wan_ip" | sed 's/\.[0-9]*$//')
+        for i in $(seq 1 254); do
+          ping -c1 -W1 "${subnet}.${i}" >/dev/null 2>&1 &
+        done
+        wait
+      fi
+      ip -4 neigh show dev {{ proxmox_wan_bridge }} | awk "/$mac/"'{print $1}'
+    executable: /bin/bash
+  register: _desktop_ip_poll
+  changed_when: false
+  retries: 30
+  delay: 10
+  until: _desktop_ip_poll.stdout | trim | length > 0
+
+- name: Set Desktop VM IP fact
+  ansible.builtin.set_fact:
+    _desktop_vm_ip: "{{ _desktop_ip_poll.stdout | trim }}"
+
+- name: Wait for SSH on Desktop VM
+  ansible.builtin.wait_for:
+    host: "{{ _desktop_vm_ip }}"
+    port: 22
+    delay: 5
+    timeout: 300
+
+# ── Register in dynamic inventory ──────────────────────────────────
+
+- name: Add Desktop VM to dynamic inventory
+  ansible.builtin.add_host:
+    name: "desktop-{{ inventory_hostname }}"
+    groups: desktop
+    ansible_host: "{{ _desktop_vm_ip }}"
+    ansible_user: "{{ desktop_user }}"
+    ansible_connection: ansible.builtin.ssh
+    ansible_ssh_private_key_file: "{{ _desktop_ssh_key_file | default('') }}"
+    ansible_ssh_common_args: >-
+      -o ProxyJump=root@{{ ansible_host }}
+      -o StrictHostKeyChecking=no
+      -o UserKnownHostsFile=/dev/null
+      -o ServerAliveInterval=15
+      -o ServerAliveCountMax=4
+      -o ConnectTimeout=30
+    ansible_ssh_timeout: 30
+    desktop_proxmox_host: "{{ inventory_hostname }}"
+    desktop_vm_id_ref: "{{ desktop_vm_id }}"
+    igpu_vendor: "{{ igpu_vendor | default('intel') }}"

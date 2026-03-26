@@ -1,0 +1,22 @@
+---
+- name: Detect infrastructure on desktop nodes
+  hosts: desktop_nodes
+  gather_facts: true
+  roles:
+    - proxmox_bridges
+    - proxmox_igpu
+
+- name: Provision Desktop VM
+  hosts: desktop_nodes
+  gather_facts: false
+  roles:
+    - desktop_vm
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: desktop_vm
+
+- name: Configure Desktop
+  hosts: desktop
+  gather_facts: true
+  roles:
+    - desktop_configure

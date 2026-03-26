@@ -1,6 +1,8 @@
 ---
 ansible_host: "{{ lookup('env', 'AI_HOST') }}"
 pci_passthrough_allow_reboot: true
-# USB ethernet only — no Wake-on-LAN support. Host requires manual
-# power-on and MUST NOT be shut down or crashed by automation.
+# USB ethernet (Realtek RTL8153 r8152 via USB hub) — no Wake-on-LAN.
+# Known issue: adapter silently drops network link under sustained SSH/pct-exec
+# traffic (no kernel log, host keeps running). Requires physical restart.
+# PCIe NIC (r8169 nic0) is present but has no cable connected.
 wol_capable: false

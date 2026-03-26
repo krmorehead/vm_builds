@@ -86,6 +86,13 @@ moonlight_lxc_template: moonlight-debian-12-amd64.tar.zst
 moonlight_lxc_template_path: images/moonlight-debian-12-amd64.tar.zst
 moonlight_ct_ip_offset: 17
 
+# ── Desktop VM (Debian 12 + KDE/GNOME baked image) ───────────────
+# Custom image built by build-images.sh --only desktop: KDE Plasma,
+# GNOME, SDDM, and shared applications pre-installed. GPU drivers
+# installed at configure time (host-dependent).
+# Base: images/debian-12-generic-amd64.qcow2 (still needed for builds).
+desktop_image_path: images/desktop-debian-12-amd64.qcow2
+
 # ── OpenWrt Router (VM) ──────────────────────────────────────────
 # Custom image built by build-images.sh: mesh/security/DNS packages baked in.
 # Run ./build-images.sh before first deploy.

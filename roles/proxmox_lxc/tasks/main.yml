@@ -37,17 +37,54 @@
   changed_when: false
   when: not lxc_exists | bool
 
-- name: Upload LXC template to Proxmox host
-  ansible.builtin.copy:
-    src: >-
+- name: Resolve local template source path
+  ansible.builtin.set_fact:
+    _lxc_local_template: >-
       {{ lxc_ct_template_path
       if lxc_ct_template_path.startswith('/')
       else (role_path + '/../../' + lxc_ct_template_path) }}
+  when: not lxc_exists | bool
+
+- name: Get local template size
+  ansible.builtin.stat:
+    path: "{{ _lxc_local_template }}"
+  register: _local_tmpl_stat
+  delegate_to: localhost
+  when:
+    - not lxc_exists | bool
+    - lxc_ct_template in (_template_list.stdout | default(''))
+
+- name: Get cached template size on Proxmox host
+  ansible.builtin.stat:
+    path: "/var/lib/vz/template/cache/{{ lxc_ct_template }}"
+  register: _cached_tmpl_stat
+  when:
+    - not lxc_exists | bool
+    - lxc_ct_template in (_template_list.stdout | default(''))
+
+- name: Remove stale cached template (size mismatch)
+  ansible.builtin.file:
+    path: "/var/lib/vz/template/cache/{{ lxc_ct_template }}"
+    state: absent
+  when:
+    - not lxc_exists | bool
+    - _local_tmpl_stat.stat is defined
+    - _cached_tmpl_stat.stat is defined
+    - _local_tmpl_stat.stat.size != _cached_tmpl_stat.stat.size
+  changed_when: true
+
+- name: Upload LXC template to Proxmox host
+  ansible.builtin.copy:
+    src: "{{ _lxc_local_template }}"
     dest: "/var/lib/vz/template/cache/{{ lxc_ct_template }}"
     mode: "0644"
   when:
     - not lxc_exists | bool
-    - lxc_ct_template not in (_template_list.stdout | default(''))
+    - >-
+      lxc_ct_template not in (_template_list.stdout | default(''))
+      or (_local_tmpl_stat.stat is defined
+          and _cached_tmpl_stat.stat is defined
+          and _local_tmpl_stat.stat.size != _cached_tmpl_stat.stat.size)
 
 # ── Container creation ────────────────────────────────────────────
 

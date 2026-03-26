@@ -1,0 +1,14 @@
+---
+desktop_vm_memory: 4096
+desktop_vm_cores: 2
+desktop_vm_disk_size: "32G"
+desktop_vm_onboot: false
+desktop_vm_image_path: "{{ desktop_image_path }}"
+desktop_tmp_image_dir: /var/tmp
+
+desktop_user: "{{ lookup('env', 'DESKTOP_USER') | default('desktop', true) }}"
+desktop_password: "{{ lookup('env', 'DESKTOP_PASSWORD') | default('', true) }}"
+# Molecule converts empty env vars to the string "None"; filter that out
+desktop_ssh_public_key: >-
+  {{ '' if (lookup('env', 'DESKTOP_SSH_PUBLIC_KEY') in [None, 'None', ''])
+     else lookup('env', 'DESKTOP_SSH_PUBLIC_KEY') }}

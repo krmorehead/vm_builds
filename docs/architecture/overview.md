@@ -59,7 +59,7 @@ Proxmox Host (Debian)
 │   └── Moonlight Client       LXC  VMID 302   cores=1  RAM=512MB     on-demand               iGPU: display
 │
 └── Desktop Tier
-    ├── Debian Desktop         VM   VMID 400   cores=2  RAM=1024MB    on-demand               iGPU: exclusive
+    ├── Debian Desktop         VM   VMID 400   cores=2  RAM=4096MB    on-demand               iGPU: exclusive
     └── Custom UX Kiosk        LXC  VMID 401   cores=1  RAM=512MB     auto-start priority 6   iGPU: display (default)
 ```
 
@@ -72,7 +72,7 @@ gaming hardware.
 
 ```
 Proxmox Host (gaming hardware)
-├── Gaming VM (Sunshine)   VM   VMID 600   cores=4  RAM=4096MB    auto-start   iGPU: exclusive (vfio-pci)
+├── Gaming LXC (Sunshine)  LXC  VMID 601   cores=4  RAM=4096MB    auto-start   iGPU: shared (bind mount)
 ├── Netdata Agent          LXC  VMID 500   cores=1  RAM=128MB     auto-start
 └── rsyslog Collector      LXC  VMID 501   cores=1  RAM=64MB      auto-start
 ```
@@ -258,9 +258,10 @@ PCI Device Handling (separate roles)
     ├── Exports: igpu_available, igpu_vendor, igpu_pci_address, igpu_render_device,
     │           igpu_card_device, igpu_render_gid, igpu_video_gid
     ├── LXC consumers (shared bind mount): jellyfin_lxc, kodi_lxc, moonlight_lxc, kiosk_lxc
-    └── VM consumers (exclusive hostpci/vfio-pci):
-        ├── desktop_vm (takes GPU from host when running)
-        └── gaming_vm (vfio-pci exclusive passthrough for Sunshine streaming)
+    ├── VM consumers (exclusive hostpci/vfio-pci):
+    │   └── desktop_vm (takes GPU from host when running)
+    │
+    └── LXC consumers (shared bind mount): gaming_lxc (Sunshine streaming via /dev/dri)
 ```
 
 ---
@@ -445,37 +446,46 @@ site.yml (current — phased for multi-node)
 │   └── Play 6:  lan_hosts           [lan-satellite]  pre_tasks: NTP clock sync; proxmox_bridges, proxmox_pci_passthrough, proxmox_igpu, deploy_stamp
 │
 ├── Phase 3: Services (flavor groups span primary + LAN hosts)
-│   ├── Play 7:  dns_nodes           [pihole]     pihole_lxc, deploy_stamp
-│   ├── Play 8:  pihole              [pihole]     pihole_configure
-│   ├── Play 9:  monitoring_nodes    [monitoring]  rsyslog_lxc, deploy_stamp
-│   ├── Play 10: rsyslog             [monitoring]  rsyslog_configure
-│   ├── Play 11: monitoring_nodes    [monitoring]  netdata_lxc, deploy_stamp
-│   ├── Play 12: netdata             [monitoring]  netdata_configure
-│   ├── Play 13: vpn_nodes           [wireguard]  wireguard_lxc, deploy_stamp
-│   ├── Play 14: wireguard           [wireguard]  wireguard_configure
-│   ├── Play 15: wifi_nodes:!router_nodes [mesh-wifi]  openwrt_mesh_lxc, deploy_stamp
-│   └── Play 16: openwrt_mesh        [mesh-wifi]  openwrt_mesh_configure
+│   ├── Play 7:  dns_nodes           [pihole]        pihole_lxc, deploy_stamp
+│   ├── Play 8:  pihole              [pihole]        pihole_configure
+│   ├── Play 9:  monitoring_nodes    [monitoring]    rsyslog_lxc, deploy_stamp
+│   ├── Play 10: rsyslog             [monitoring]    rsyslog_configure
+│   ├── Play 11: monitoring_nodes    [monitoring]    netdata_lxc, deploy_stamp
+│   ├── Play 12: netdata             [monitoring]    netdata_configure
+│   ├── Play 13: service_nodes       [homeassistant] homeassistant_lxc, deploy_stamp
+│   ├── Play 14: service_nodes       [homeassistant] homeassistant_configure
+│   ├── Play 15: media_nodes         [media]         jellyfin_lxc, deploy_stamp
+│   ├── Play 16: media_nodes         [media]         jellyfin_configure
+│   ├── Play 17: media_nodes         [media]         kodi_lxc, deploy_stamp
+│   ├── Play 18: media_nodes         [media]         kodi_configure
+│   ├── Play 19: streaming_nodes     [moonlight]     moonlight_lxc, deploy_stamp
+│   ├── Play 20: streaming_nodes     [moonlight]     moonlight_configure
+│   ├── Play 21: vpn_nodes           [wireguard]     wireguard_lxc, deploy_stamp
+│   ├── Play 22: wireguard           [wireguard]     wireguard_configure
+│   ├── Play 23: wifi_nodes:!router_nodes [mesh-wifi] openwrt_mesh_lxc, deploy_stamp
+│   ├── Play 24: openwrt_mesh        [mesh-wifi]     openwrt_mesh_configure
+│   ├── Play 25: desktop_nodes       [desktop]       desktop_vm, deploy_stamp
+│   └── Play 26: desktop             [desktop]       desktop_configure
 │
 ├── Per-feature plays (opt-in via --tags <name>, tagged with [never]):
-│   ├── Play 17: openwrt             [openwrt-security]   include_role: openwrt_configure/security.yml
-│   ├── Play 18: router_nodes        [openwrt-security]   deploy_stamp (openwrt_security)
-│   ├── Play 19: openwrt             [openwrt-vlans]      include_role: openwrt_configure/vlans.yml
-│   ├── Play 20: router_nodes        [openwrt-vlans]      deploy_stamp (openwrt_vlans)
-│   ├── Play 21: openwrt             [openwrt-dns]        include_role: openwrt_configure/dns.yml
-│   ├── Play 22: router_nodes        [openwrt-dns]        deploy_stamp (openwrt_dns)
-│   ├── Play 23: openwrt             [openwrt-mesh]       include_role: openwrt_configure/mesh.yml
-│   ├── Play 24: router_nodes        [openwrt-mesh]       deploy_stamp (openwrt_mesh)
-│   ├── Play 25: router_nodes        [openwrt-syslog]     reconstruct openwrt group
-│   ├── Play 26: openwrt             [openwrt-syslog]     include_role: openwrt_configure/syslog.yml
-│   ├── Play 27: router_nodes        [openwrt-syslog]     deploy_stamp (openwrt_syslog)
-│   ├── Play 28: router_nodes        [openwrt-pihole-dns] reconstruct openwrt group
-│   ├── Play 29: openwrt             [openwrt-pihole-dns] include_role: openwrt_configure/pihole_dns.yml
-│   ├── Play 30: router_nodes        [openwrt-pihole-dns] deploy_stamp (openwrt_pihole_dns)
-│   ├── Play 31: gaming_nodes        [gaming]     gaming_vm, deploy_stamp
-│   ├── Play 32: gaming_nodes        [gaming]     reconstruct_gaming_group
-│   └── Play 33: gaming              [gaming]     gaming_configure
+│   ├── Play 27: gaming_nodes        [gaming]        gaming_lxc, deploy_stamp
+│   ├── Play 28: gaming_nodes        [gaming]        gaming_lxc_configure
+│   ├── Play 29: openwrt             [openwrt-security]   include_role: openwrt_configure/security.yml
+│   ├── Play 30: router_nodes        [openwrt-security]   deploy_stamp (openwrt_security)
+│   ├── Play 31: openwrt             [openwrt-vlans]      include_role: openwrt_configure/vlans.yml
+│   ├── Play 32: router_nodes        [openwrt-vlans]      deploy_stamp (openwrt_vlans)
+│   ├── Play 33: openwrt             [openwrt-dns]        include_role: openwrt_configure/dns.yml
+│   ├── Play 34: router_nodes        [openwrt-dns]        deploy_stamp (openwrt_dns)
+│   ├── Play 35: openwrt             [openwrt-mesh]       include_role: openwrt_configure/mesh.yml
+│   ├── Play 36: router_nodes        [openwrt-mesh]       deploy_stamp (openwrt_mesh)
+│   ├── Play 37: router_nodes        [openwrt-syslog]     reconstruct openwrt group
+│   ├── Play 38: openwrt             [openwrt-syslog]     include_role: openwrt_configure/syslog.yml
+│   ├── Play 39: router_nodes        [openwrt-syslog]     deploy_stamp (openwrt_syslog)
+│   ├── Play 40: router_nodes        [openwrt-pihole-dns] reconstruct openwrt group
+│   ├── Play 41: openwrt             [openwrt-pihole-dns] include_role: openwrt_configure/pihole_dns.yml
+│   └── Play 42: router_nodes        [openwrt-pihole-dns] deploy_stamp (openwrt_pihole_dns)
 │
-└── Play 34: proxmox:!lan_hosts      [cleanup]    Remove bootstrap IP
+└── Play 43: proxmox:!lan_hosts      [cleanup]    Remove bootstrap IP
 ```
 
 The phased approach ensures LAN hosts (behind the OpenWrt router) are only
@@ -528,13 +538,13 @@ site.yml (target)
 │   └── Play 20: media_nodes      [media]       moonlight_configure
 │
 ├── Phase: Desktop
-│   ├── Play 19: desktop_nodes    [desktop]     desktop_vm, kiosk_lxc, deploy_stamp
-│   ├── Play 20: desktop          [desktop]     desktop_configure
-│   └── Play 21: kiosk            [desktop]     kiosk_configure
+│   ├── Play 21: desktop_nodes    [desktop]     desktop_vm, deploy_stamp
+│   ├── Play 22: desktop          [desktop]     desktop_configure
+│   └── (kiosk plays added by Kiosk project 2026-03-09-12)
 │
 ├── Phase: Gaming
-│   ├── Play 22: gaming_nodes     [gaming]      gaming_vm, deploy_stamp
-│   └── Play 23: gaming           [gaming]      gaming_configure
+│   ├── Play 23: gaming_nodes     [gaming]      gaming_lxc, deploy_stamp
+│   └── Play 24: gaming_nodes     [gaming]      gaming_lxc_configure
 │
 └── Phase: Cleanup
     └── Play 24: proxmox          [cleanup]     Remove bootstrap IPs, set startup order
@@ -628,7 +638,7 @@ Service Roles
 │   └── kiosk_lxc / kiosk_configure               LXC  VMID 401   desktop_nodes  → kiosk
 │
 └── Gaming
-    └── gaming_vm / gaming_configure              VM   VMID 600   gaming_nodes   → gaming
+    └── gaming_lxc / gaming_lxc_configure         LXC  VMID 601   gaming_nodes   → gaming
 ```
 
 ---
@@ -660,7 +670,8 @@ VMID Ranges
 │   └── 501  rsyslog
 │
 └── 600-699  Gaming
-    └── 600  Gaming VM
+    ├── 600  Gaming VM (legacy)
+    └── 601  Gaming LXC (active)
 ```
 
 All VMIDs are defined in `inventory/group_vars/all.yml`.
@@ -773,31 +784,48 @@ vm_builds/
 │   │   └── kiosk_configure/
 │   │
 │   └── Gaming
-│       ├── gaming_vm/
-│       └── gaming_configure/
+│       ├── gaming_lxc/
+│       ├── gaming_lxc_configure/
+│       ├── gaming_vm/           (legacy — Windows VM with vfio-pci)
+│       └── gaming_configure/    (legacy)
 │
 ├── tasks/
+│   ├── reconstruct_desktop_group.yml     Reusable dynamic group reconstruction (Desktop)
+│   ├── reconstruct_gaming_group.yml      Reusable dynamic group reconstruction (Gaming)
+│   ├── reconstruct_homeassistant_group.yml  Reusable dynamic group reconstruction (Home Assistant)
+│   ├── reconstruct_jellyfin_group.yml    Reusable dynamic group reconstruction (Jellyfin)
+│   ├── reconstruct_kodi_group.yml        Reusable dynamic group reconstruction (Kodi)
+│   ├── reconstruct_moonlight_group.yml   Reusable dynamic group reconstruction (Moonlight)
+│   ├── reconstruct_netdata_group.yml     Reusable dynamic group reconstruction (Netdata)
 │   ├── reconstruct_openwrt_group.yml     Reusable dynamic group reconstruction (OpenWrt)
-│   ├── reconstruct_wireguard_group.yml   Reusable dynamic group reconstruction (WireGuard)
 │   ├── reconstruct_pihole_group.yml      Reusable dynamic group reconstruction (Pi-hole)
 │   ├── reconstruct_rsyslog_group.yml     Reusable dynamic group reconstruction (rsyslog)
-│   ├── reconstruct_netdata_group.yml    Reusable dynamic group reconstruction (Netdata)
-│   ├── bootstrap_lan_host.yml           SSH key check, DHCP lease, API token for LAN nodes
-│   └── cleanup_lan_host.yml             Reusable per-LAN-host cleanup (SSH from primary)
+│   ├── reconstruct_wireguard_group.yml   Reusable dynamic group reconstruction (WireGuard)
+│   ├── bootstrap_lan_host.yml            SSH key check, DHCP lease, API token for LAN nodes
+│   └── cleanup_lan_host.yml              Reusable per-LAN-host cleanup (SSH from primary)
 │
 ├── molecule/
 │   ├── default/                   Full integration tests (home, mesh1, ai, mesh2 — 4-node)
-│   ├── openwrt-security/          Per-feature: security hardening
-│   ├── openwrt-vlans/             Per-feature: VLAN segmentation
+│   ├── desktop-vm/                Per-feature: Debian Desktop VM with iGPU passthrough
+│   ├── gaming-lxc/                Per-feature: Gaming LXC with GPU render device sharing
+│   ├── homeassistant-lxc/         Per-feature: Home Assistant LXC container
+│   ├── jellyfin-lxc/              Per-feature: Jellyfin media server container
+│   ├── kodi-lxc/                  Per-feature: Kodi media player container
+│   ├── mesh1-infra/               Lightweight infra-only on mesh1 (quick iteration)
+│   ├── moonlight-lxc/             Per-feature: Moonlight streaming client container
+│   ├── netdata-lxc/               Per-feature: Netdata monitoring agent container
 │   ├── openwrt-dns/               Per-feature: encrypted DNS
 │   ├── openwrt-mesh/              Per-feature: mesh enhancements
-│   ├── wireguard-lxc/             Per-feature: WireGuard VPN container
-│   ├── pihole-lxc/                Per-feature: Pi-hole DNS container
 │   ├── openwrt-pihole-dns/        Per-feature: OpenWrt DNS forwarding to Pi-hole
-│   ├── rsyslog-lxc/               Per-feature: rsyslog log collector container
-│   ├── netdata-lxc/               Per-feature: Netdata monitoring agent container
+│   ├── openwrt-security/          Per-feature: security hardening
 │   ├── openwrt-syslog/            Per-feature: OpenWrt syslog forwarding to rsyslog
-│   └── mesh1-infra/               Lightweight infra-only on mesh1 (quick iteration)
+│   ├── openwrt-vlans/             Per-feature: VLAN segmentation
+│   ├── pihole-lxc/                Per-feature: Pi-hole DNS container
+│   ├── proxmox-igpu/              Per-feature: iGPU detection and VA-API validation
+│   ├── proxmox-lxc/               Per-feature: shared LXC provisioning helper
+│   ├── rsyslog-lxc/               Per-feature: rsyslog log collector container
+│   ├── sunshine-vm/               Per-feature: Sunshine Gaming VM (legacy)
+│   └── wireguard-lxc/             Per-feature: WireGuard VPN container
 │
 ├── images/                        VM/LXC images (gitignored, built by build-images.sh)
 │

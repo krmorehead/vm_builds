@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Debian Desktop VM** -- `desktop_vm` and `desktop_configure` roles deploy
+  a Debian 12 VM (VMID 400) with both KDE Plasma (Windows-style UX) and GNOME
+  (Mac-style UX) desktop sessions. Users select their preferred UX at the SDDM
+  login screen; both sessions share the same home directory. Exclusive iGPU
+  passthrough via hostpci0 (UEFI/OVMF, q35). Custom baked image via
+  `build-images.sh --only desktop` (KDE + GNOME + apps pre-installed).
+  Vendor-specific GPU drivers (Intel or AMD) at configure time. Shared
+  cross-session shortcuts (Ctrl+Shift+4 for screenshot via Flameshot).
+  On-demand service (no auto-start). Per-feature molecule scenario
+  (`molecule/desktop-vm/`). Display-exclusive hookscript attachment.
 - **Gaming LXC container (Fedora)** -- `gaming_lxc` and
   `gaming_lxc_configure` roles deploy a Fedora-based gaming container
   (VMID 601) with Sunshine game streaming server + dsda-doom. Uses GPU render
@@ -68,6 +78,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Pi-hole DNS timeout behind OpenWrt** -- Changed Pi-hole upstream DNS from
+  hardcoded external servers (1.1.1.1, 1.0.0.1) to auto-detected container
+  gateway. Direct DNS queries from the LAN container to external servers were
+  intermittently rejected ("connection refused"), while gateway DNS always
+  worked. The gateway is auto-detected via `ip -4 route show default` inside
+  the container. Explicit overrides via `pihole_upstream_dns_1/2` are still
+  supported for the `openwrt-pihole-dns` feature (where gateway-based DNS
+  would create a loop).
 - **E2E cleanup kernel panic on single-GPU AMD hosts** -- Replaced all
   `modprobe -r amdgpu/i915` with sysfs unbind + PCI rescan + explicit
   native driver rebinding. PCI rescan alone does not auto-bind when the

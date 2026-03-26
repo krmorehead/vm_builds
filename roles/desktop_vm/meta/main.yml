@@ -1,0 +1,13 @@
+---
+dependencies: []
+
+galaxy_info:
+  author: vm_builds
+  license: proprietary
+  role_name: desktop_vm
+  description: Provision a Debian Desktop VM with UEFI, cloud-init, and iGPU passthrough
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm

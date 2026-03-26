@@ -1,5 +1,24 @@
 ---
-# ── Play 1: Primary hosts (directly reachable) ───────────────────
+# ── Play 1: LAN hosts (cleaned via SSH from primary BEFORE bridges go down)
+#
+# MUST run before primary cleanup because Play 2 destroys OpenWrt and tears
+# down bridges on the primary host, making LAN hosts unreachable. If this
+# runs after, stale containers survive and reconverge reuses them.
+
+- name: Clean up LAN satellite hosts
+  hosts: router_nodes
+  gather_facts: false
+  ignore_unreachable: true
+  tasks:
+    - name: Process each LAN host
+      ansible.builtin.include_tasks: cleanup_lan_host.yml
+      vars:
+        _lan_host_ip: "{{ hostvars[item].ansible_host }}"
+        _lan_host_name: "{{ item }}"
+      loop: "{{ groups['lan_hosts'] | default([]) }}"
+      when: groups['lan_hosts'] | default([]) | length > 0
+
+# ── Play 2: Primary hosts (directly reachable) ───────────────────
 #
 # Service-specific cleanup: destroy only known project VMs/containers
 # by explicit VMID. NEVER iterate qm list / pct list — that destroys
@@ -13,6 +32,7 @@
     backup_dir: /var/lib/ansible-backup
     project_vm_ids:
       - "{{ openwrt_vm_id }}"
+      - "{{ desktop_vm_id }}"
       - "{{ gaming_vm_id }}"
       - "{{ gaming_vm_id | int + 1 }}"
       - "{{ gaming_vm_id | int + 2 }}"
@@ -170,6 +190,8 @@
         - /etc/modules-load.d/wireguard.conf
         - /tmp/openwrt-router-24.10.0-x86-64-combined.img.gz
         - /tmp/openwrt-router-24.10.0-x86-64-combined.img
+        - /tmp/desktop_tmp_key
+        - /tmp/desktop_tmp_key.pub
 
     - name: Remove hookscripts from snippets
       ansible.builtin.shell:
@@ -256,17 +278,11 @@
         - "{{ playbook_dir }}/../../test.env.generated"
       delegate_to: localhost
 
-# ── Play 2: LAN hosts (cleaned via SSH from primary host) ─────────
-
-- name: Clean up LAN satellite hosts
-  hosts: router_nodes
-  gather_facts: false
-  ignore_unreachable: true
-  tasks:
-    - name: Process each LAN host
-      ansible.builtin.include_tasks: cleanup_lan_host.yml
-      vars:
-        _lan_host_ip: "{{ hostvars[item].ansible_host }}"
-        _lan_host_name: "{{ item }}"
-      loop: "{{ groups['lan_hosts'] | default([]) }}"
-      when: groups['lan_hosts'] | default([]) | length > 0
+    - name: Remove temporary Desktop VM SSH keys from controller
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/desktop_tmp_key
+        - /tmp/desktop_tmp_key.pub
+      delegate_to: localhost

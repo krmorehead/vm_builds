@@ -255,6 +255,61 @@ For per-host VMID scenarios, compute the effective VMID at the start of verify:
 
 Previous bug: verify used `sshpass` for SSH testing. `sshpass` wasn't installed on mesh1. Switched to Guest Agent which bypasses network entirely.
 
+## DNS service verification (Pi-hole FTL)
+
+ALWAYS check BOTH TCP and UDP listeners for DNS services. `dig` defaults to UDP. `ss -tlnp` only checks TCP — a service can bind TCP:53 but miss UDP:53 due to startup race or partial initialization.
+
+```yaml
+- name: Wait for DNS on TCP+UDP port 53
+  ansible.builtin.shell:
+    cmd: >-
+      pct exec {{ ct_id }} -- /bin/sh -c '
+      tcp=$(ss -tlnp 2>/dev/null | grep -c ":53 ");
+      udp=$(ss -ulnp 2>/dev/null | grep -c ":53 ");
+      [ "$tcp" -gt 0 ] && [ "$udp" -gt 0 ] && echo BOTH || echo MISSING
+      '
+  retries: 6
+  delay: 5
+  until: "'BOTH' in _ftl_listen.stdout"
+
+- name: Restart FTL if listeners are incomplete
+  ansible.builtin.command:
+    cmd: >-
+      pct exec {{ ct_id }} -- /bin/sh -c
+      'systemctl restart pihole-FTL && sleep 3'
+  when: "'BOTH' not in _ftl_listen.stdout"
+```
+
+ALWAYS wrap DNS resolution tests in `block/rescue`. The `retries/until` pattern makes a task `fatal` when all retries expire — any diagnostic tasks after it never execute. Use `block:` for the test and `rescue:` for diagnostics + recovery (FTL restart + retry).
+
+ALWAYS add a network connectivity pre-check before DNS tests: verify the container can ping its gateway and an external IP. This distinguishes "FTL is broken" from "container has no network."
+
+Previous bug: Pi-hole DNS verify timed out in E2E tests. `ss -tlnp | grep :53` passed (TCP listener present) but `dig @127.0.0.1` timed out (UDP listener missing). FTL had TCP bound but UDP wasn't ready. Adding UDP check + automatic FTL restart fixed the intermittent failure.
+
+Previous bug: DNS test used `retries: 5` with `until:`. After all retries expired, the task failed fatally. Diagnostic tasks defined below it never executed. Switching to `block/rescue` ensures diagnostics always fire, and the rescue block restarts FTL + retries, recovering from transient upstream timeout.
+
+## Avoid regex_search on pct exec output
+
+NEVER use `regex_search` with capture groups to parse `pct exec` output in `set_fact` or `assert` blocks. `pct exec` output passes through multiple shell layers (SSH → Proxmox host bash → lxc-attach → container shell) and may contain unexpected formatting, ANSI escapes, or extra whitespace that breaks regex matching.
+
+**Safe pattern:** Use string-contains checks with `in` operator:
+
+```yaml
+# BAD — crashes with 'NoneType' if regex returns None
+- set_fact:
+    val: "{{ output | regex_search('KEY=(\\S+)', '\\1') | first }}"
+
+# GOOD — simple, robust, no crash risk
+- assert:
+    that: "'KEY=expected' in output"
+
+# GOOD — for negation checks
+- assert:
+    that: "'KEY=0' not in output"
+```
+
+Previous bug: Batched rsyslog/gaming verify tasks used `regex_search('MATCH=(\\S+)', '\\1') | first` to extract values from `pct exec` output. The regex returned `None` on all 4 nodes, crashing `set_fact` with `'NoneType' object has no attribute 'group'`. Replaced with string-contains checks.
+
 ## Common failures
 
 - 0 assertions ran → dynamic group empty (add reconstruction)

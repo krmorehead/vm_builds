@@ -1,0 +1,397 @@
+---
+- name: Reconstruct desktop group for verification
+  hosts: desktop_nodes
+  gather_facts: true
+  tasks:
+    - name: Include desktop group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_desktop_group.yml
+
+- name: Verify Desktop VM
+  hosts: desktop_nodes
+  gather_facts: false
+  vars:
+    _desktop_user: "{{ lookup('env', 'DESKTOP_USER') | default('desktop', true) }}"
+    _desktop_default_session: "{{ lookup('env', 'DESKTOP_DEFAULT_SESSION') | default('plasma', true) }}"
+    _desktop_autologin: "{{ lookup('env', 'DESKTOP_AUTOLOGIN') | default('false', true) }}"
+  tasks:
+    # ── VM existence and Proxmox-level config ────────────────────────
+    - name: Check Desktop VM is running
+      ansible.builtin.command:
+        cmd: qm status {{ desktop_vm_id }}
+      register: _desktop_status
+      changed_when: false
+
+    - name: Assert Desktop VM is running
+      ansible.builtin.assert:
+        that: "'running' in _desktop_status.stdout"
+        fail_msg: "Desktop VM {{ desktop_vm_id }} is not running"
+
+    - name: Read Desktop VM config
+      ansible.builtin.command:
+        cmd: qm config {{ desktop_vm_id }}
+      register: _desktop_config
+      changed_when: false
+
+    - name: Assert Proxmox VM configuration
+      ansible.builtin.assert:
+        that:
+          - "'ovmf' in _desktop_config.stdout"
+          - "'q35' in _desktop_config.stdout"
+          - "'hostpci0' in _desktop_config.stdout"
+          - "'cloudinit' in _desktop_config.stdout"
+          - "'onboot: 0' in _desktop_config.stdout"
+        fail_msg: "Desktop VM config mismatch: expected UEFI/q35/hostpci0/cloudinit/onboot:0"
+
+    # ── Network: IP discovery and SSH ────────────────────────────────
+    - name: Get Desktop VM MAC address
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          qm config {{ desktop_vm_id }} | grep '^net0' | sed -n 's/.*\(..:..:..:..:..:..\).*/\1/p'
+        executable: /bin/bash
+      register: _desktop_mac
+      changed_when: false
+
+    - name: Look up Desktop VM IP from DHCP lease
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          awk '/{{ _desktop_mac.stdout | lower }}/{print $3}' /var/lib/misc/dnsmasq.leases 2>/dev/null ||
+          ip -4 neigh | awk '/{{ _desktop_mac.stdout | lower }}/{print $1}'
+        executable: /bin/bash
+      register: _desktop_ip
+      changed_when: false
+
+    - name: Assert Desktop VM has an IP
+      ansible.builtin.assert:
+        that: _desktop_ip.stdout | trim | length > 0
+        fail_msg: "Desktop VM has no IP (cloud-init or DHCP failed)"
+
+    # ── SSH setup with ControlMaster for connection reuse ────────────
+    - name: Check for temporary SSH key on Proxmox host
+      ansible.builtin.stat:
+        path: /tmp/desktop_tmp_key
+      register: _desktop_verify_tmpkey
+
+    - name: Set SSH command prefix fact
+      ansible.builtin.set_fact:
+        _vm_ssh: >-
+          ssh
+          {{ '-i /tmp/desktop_tmp_key' if _desktop_verify_tmpkey.stat.exists else '' }}
+          -o StrictHostKeyChecking=no
+          -o UserKnownHostsFile=/dev/null
+          -o ConnectTimeout=15
+          -o ControlMaster=auto
+          -o ControlPath=/tmp/desktop-verify-%r@%h
+          -o ControlPersist=120
+          {{ _desktop_user }}@{{ _desktop_ip.stdout | trim }}
+
+    - name: Verify SSH connectivity (also establishes ControlMaster)
+      ansible.builtin.command:
+        cmd: "{{ _vm_ssh }} echo ok"
+      register: _ssh_check
+      changed_when: false
+
+    - name: Assert SSH works
+      ansible.builtin.assert:
+        that: "'ok' in _ssh_check.stdout"
+        fail_msg: "SSH to Desktop VM failed"
+
+    # ── QEMU Guest Agent ─────────────────────────────────────────────
+    - name: Check QEMU Guest Agent via Proxmox API
+      ansible.builtin.command:
+        cmd: qm agent {{ desktop_vm_id }} ping
+      register: _desktop_qga
+      changed_when: false
+      failed_when: false
+      retries: 6
+      delay: 10
+      until: _desktop_qga.rc == 0
+
+    - name: Assert QEMU Guest Agent is responding
+      ansible.builtin.assert:
+        that: _desktop_qga.rc == 0
+        fail_msg: "QEMU Guest Agent not responding in Desktop VM"
+
+    # ── Batch system state check (single SSH call) ───────────────────
+    - name: Collect system state from VM
+      ansible.builtin.shell:
+        cmd: |
+          {{ _vm_ssh }} bash -c '
+          echo "SDDM_STATUS=$(systemctl is-active sddm)"
+          echo "DEFAULT_TARGET=$(systemctl get-default)"
+          echo "DBUS_STATUS=$(systemctl is-active dbus)"
+          echo "DEFAULT_DM=$(cat /etc/X11/default-display-manager 2>/dev/null)"
+          echo "KDE_SESSION=$(test -f /usr/share/xsessions/plasma.desktop && echo found || echo missing)"
+          echo "GNOME_SESSION=$(test -f /usr/share/xsessions/gnome.desktop && echo found || echo missing)"
+          id
+          '
+      register: _vm_system_state
+      changed_when: false
+
+    - name: Assert SDDM is active
+      ansible.builtin.assert:
+        that: "'SDDM_STATUS=active' in _vm_system_state.stdout"
+        fail_msg: "SDDM service is not active"
+
+    - name: Assert graphical.target is default
+      ansible.builtin.assert:
+        that: "'DEFAULT_TARGET=graphical.target' in _vm_system_state.stdout"
+        fail_msg: "Default target is not graphical.target"
+
+    - name: Assert D-Bus is active
+      ansible.builtin.assert:
+        that: "'DBUS_STATUS=active' in _vm_system_state.stdout"
+        fail_msg: "D-Bus not running — keyboard shortcuts will not work"
+
+    - name: Assert SDDM is the default display manager
+      ansible.builtin.assert:
+        that: "'sddm' in _vm_system_state.stdout"
+        fail_msg: "Default display manager is not sddm"
+
+    - name: Assert KDE Plasma session is available
+      ansible.builtin.assert:
+        that: "'KDE_SESSION=found' in _vm_system_state.stdout"
+        fail_msg: "plasma.desktop missing — KDE not available in SDDM"
+
+    - name: Assert GNOME session is available
+      ansible.builtin.assert:
+        that: "'GNOME_SESSION=found' in _vm_system_state.stdout"
+        fail_msg: "gnome.desktop missing — GNOME not available in SDDM"
+
+    - name: Assert user has video, render, audio, sudo groups
+      ansible.builtin.assert:
+        that:
+          - "'video' in _vm_system_state.stdout"
+          - "'render' in _vm_system_state.stdout"
+          - "'audio' in _vm_system_state.stdout"
+          - "'sudo' in _vm_system_state.stdout"
+        fail_msg: "Desktop user missing required groups"
+
+    # ── GPU and VA-API check (single SSH call) ───────────────────────
+    - name: Collect GPU state from VM
+      ansible.builtin.shell:
+        cmd: |
+          {{ _vm_ssh }} bash -c '
+          echo "=== LSPCI ==="
+          lspci -k 2>/dev/null | grep -A2 -i "vga\|display"
+          echo "=== DRM ==="
+          ls /dev/dri/card0 2>/dev/null && echo "DRM_OK" || echo "DRM_MISSING"
+          echo "=== VAAPI ==="
+          vainfo 2>&1 || true
+          '
+      register: _vm_gpu_state
+      changed_when: false
+
+    - name: Assert GPU device visible in VM
+      ansible.builtin.assert:
+        that: _vm_gpu_state.stdout | regex_search('VGA|Display', ignorecase=True) is not none
+        fail_msg: "No GPU device visible inside Desktop VM (passthrough failed)"
+
+    - name: Assert DRM device exists
+      ansible.builtin.assert:
+        that: "'DRM_OK' in _vm_gpu_state.stdout"
+        fail_msg: "/dev/dri/card0 not found — GPU passthrough or driver not working"
+
+    - name: Assert VA-API reports profiles
+      ansible.builtin.assert:
+        that: "'VAProfile' in _vm_gpu_state.stdout"
+        fail_msg: "VA-API not functional (vainfo shows no profiles)"
+
+    # ── Batch binary check (single SSH call) ─────────────────────────
+    - name: Check all required binaries in VM
+      ansible.builtin.shell:
+        cmd: |
+          {{ _vm_ssh }} bash -c '
+          for bin in spectacle flameshot firefox-esr vlc libreoffice konsole gnome-terminal dolphin nautilus pipewire; do
+            if which "$bin" >/dev/null 2>&1; then
+              echo "BIN_OK=$bin"
+            else
+              echo "BIN_MISSING=$bin"
+            fi
+          done
+          test -d ~/Downloads && test -d ~/Pictures && test -d ~/Documents \
+            && test -d ~/Videos && test -d ~/Music \
+            && echo "XDG_DIRS=ok" || echo "XDG_DIRS=missing"
+          '
+      register: _vm_binaries
+      changed_when: false
+
+    - name: Assert all required binaries are installed
+      ansible.builtin.assert:
+        that:
+          - "'BIN_OK=spectacle' in _vm_binaries.stdout"
+          - "'BIN_OK=flameshot' in _vm_binaries.stdout"
+          - "'BIN_OK=firefox-esr' in _vm_binaries.stdout"
+          - "'BIN_OK=vlc' in _vm_binaries.stdout"
+          - "'BIN_OK=libreoffice' in _vm_binaries.stdout"
+          - "'BIN_OK=konsole' in _vm_binaries.stdout"
+          - "'BIN_OK=gnome-terminal' in _vm_binaries.stdout"
+          - "'BIN_OK=dolphin' in _vm_binaries.stdout"
+          - "'BIN_OK=nautilus' in _vm_binaries.stdout"
+          - "'BIN_OK=pipewire' in _vm_binaries.stdout"
+        fail_msg: "Missing binaries: {{ _vm_binaries.stdout_lines | select('match', 'BIN_MISSING=') | list }}"
+
+    - name: Assert XDG directories exist
+      ansible.builtin.assert:
+        that: "'XDG_DIRS=ok' in _vm_binaries.stdout"
+        fail_msg: "XDG user directories missing (Downloads/Pictures/Documents/Videos/Music)"
+
+    # ── KDE config check (single SSH call) ───────────────────────────
+    - name: Collect KDE configuration from VM
+      ansible.builtin.shell:
+        cmd: |
+          {{ _vm_ssh }} bash -c '
+          echo "=== SHORTCUTS ==="
+          cat ~/.config/kglobalshortcutsrc 2>/dev/null || echo "NOFILE"
+          echo "=== GLOBALS ==="
+          cat ~/.config/kdeglobals 2>/dev/null || echo "NOFILE"
+          '
+      register: _vm_kde_config
+      changed_when: false
+
+    - name: Assert KDE shortcuts configured
+      ansible.builtin.assert:
+        that:
+          - "'Ctrl+Shift+4' in _vm_kde_config.stdout"
+          - "'Alt+F4' in _vm_kde_config.stdout"
+          - "'Meta+Left' in _vm_kde_config.stdout"
+          - "'Meta+Right' in _vm_kde_config.stdout"
+          - "'Meta+Up' in _vm_kde_config.stdout"
+        fail_msg: "KDE shortcuts misconfigured"
+
+    - name: Assert KDE dark theme configured
+      ansible.builtin.assert:
+        that: "'BreezeDark' in _vm_kde_config.stdout"
+        fail_msg: "KDE not configured with Breeze Dark theme"
+
+    # ── GNOME dconf check (single SSH call) ──────────────────────────
+    - name: Collect GNOME dconf settings from VM
+      ansible.builtin.shell:
+        cmd: |
+          {{ _vm_ssh }} bash -c '
+          echo "CLOSE=$(sudo dconf read /org/gnome/desktop/wm/keybindings/close 2>/dev/null)"
+          echo "SCREENSHOT=$(sudo dconf read /org/gnome/settings-daemon/plugins/media-keys/screenshot-clip 2>/dev/null)"
+          echo "COLORSCHEME=$(sudo dconf read /org/gnome/desktop/interface/color-scheme 2>/dev/null)"
+          echo "DOCKPOS=$(sudo dconf read /org/gnome/shell/extensions/dash-to-dock/dock-position 2>/dev/null)"
+          echo "EXTENSIONS=$(sudo dconf read /org/gnome/shell/enabled-extensions 2>/dev/null)"
+          echo "OVERVIEW=$(sudo dconf read /org/gnome/shell/keybindings/toggle-overview 2>/dev/null)"
+          echo "CAPSLOCK=$(sudo dconf read /org/gnome/desktop/input-sources/xkb-options 2>/dev/null)"
+          '
+      register: _vm_gnome_dconf
+      changed_when: false
+
+    - name: Assert GNOME close shortcut includes Super+Q
+      ansible.builtin.assert:
+        that: "'<Super>q' in _vm_gnome_dconf.stdout"
+        fail_msg: "GNOME close keybinding missing Super+Q"
+
+    - name: Assert GNOME Ctrl+Shift+4 screenshot shortcut
+      ansible.builtin.assert:
+        that: "'<Shift><Control>4' in _vm_gnome_dconf.stdout"
+        fail_msg: "GNOME missing Ctrl+Shift+4 screenshot shortcut"
+
+    - name: Assert GNOME dark theme
+      ansible.builtin.assert:
+        that: "'prefer-dark' in _vm_gnome_dconf.stdout"
+        fail_msg: "GNOME not using dark theme"
+
+    - name: Assert GNOME dock at bottom
+      ansible.builtin.assert:
+        that: "'BOTTOM' in _vm_gnome_dconf.stdout"
+        fail_msg: "GNOME Dash to Dock not at bottom"
+
+    - name: Assert Dash to Dock extension enabled
+      ansible.builtin.assert:
+        that: "'dash-to-dock' in _vm_gnome_dconf.stdout"
+        fail_msg: "Dash to Dock extension not enabled"
+
+    - name: Assert GNOME overview bound to Super+Space
+      ansible.builtin.assert:
+        that: "'<Super>space' in _vm_gnome_dconf.stdout"
+        fail_msg: "GNOME overview not bound to Super+Space"
+
+    - name: Assert Caps Lock remapped to Super
+      ansible.builtin.assert:
+        that: "'caps:super' in _vm_gnome_dconf.stdout"
+        fail_msg: "Caps Lock not remapped to Super"
+
+    # ── SDDM config + Flameshot autostart (single SSH call) ──────────
+    - name: Collect SDDM and Flameshot config from VM
+      ansible.builtin.shell:
+        cmd: |
+          {{ _vm_ssh }} bash -c '
+          echo "=== SDDM_DEFAULT ==="
+          cat /etc/sddm.conf.d/default.conf 2>/dev/null || echo "NOFILE"
+          echo "=== SDDM_AUTOLOGIN ==="
+          cat /etc/sddm.conf.d/autologin.conf 2>/dev/null || echo "NOFILE"
+          echo "=== FLAMESHOT ==="
+          cat ~/.config/autostart/flameshot.desktop 2>/dev/null || echo "NOFILE"
+          '
+      register: _vm_sddm_flameshot
+      changed_when: false
+
+    - name: Assert SDDM default session matches env
+      ansible.builtin.assert:
+        that: "'{{ _desktop_default_session }}.desktop' in _vm_sddm_flameshot.stdout"
+        fail_msg: "SDDM default session not set to {{ _desktop_default_session }}"
+
+    - name: Assert autologin matches DESKTOP_AUTOLOGIN=true
+      ansible.builtin.assert:
+        that:
+          - "'User={{ _desktop_user }}' in _vm_sddm_flameshot.stdout"
+          - "'Session={{ _desktop_default_session }}.desktop' in _vm_sddm_flameshot.stdout"
+        fail_msg: "SDDM autologin not configured for {{ _desktop_user }}"
+      when: _desktop_autologin | bool
+
+    - name: Assert autologin absent when DESKTOP_AUTOLOGIN=false
+      ansible.builtin.assert:
+        that: _vm_sddm_flameshot.stdout | regex_search('=== SDDM_AUTOLOGIN ===\nNOFILE') is not none
+        fail_msg: "SDDM autologin.conf exists but DESKTOP_AUTOLOGIN is false"
+      when: not (_desktop_autologin | bool)
+
+    - name: Assert Flameshot autostart configured for both sessions
+      ansible.builtin.assert:
+        that:
+          - "'Exec=flameshot' in _vm_sddm_flameshot.stdout"
+          - "'X-GNOME-Autostart-enabled=true' in _vm_sddm_flameshot.stdout"
+          - "'X-KDE-autostart-after=panel' in _vm_sddm_flameshot.stdout"
+        fail_msg: "Flameshot autostart misconfigured — Ctrl+Shift+4 will not work in both sessions"
+
+    # ── Deploy stamp ─────────────────────────────────────────────────
+    - name: Read deploy_stamp
+      ansible.builtin.slurp:
+        src: /etc/ansible/facts.d/vm_builds.fact
+      register: _desktop_stamp_raw
+      failed_when: false
+
+    - name: Parse deploy_stamp
+      ansible.builtin.set_fact:
+        _desktop_stamp: "{{ (_desktop_stamp_raw.content | b64decode | from_json) if _desktop_stamp_raw is not failed else {} }}"
+
+    - name: Assert stamp contains desktop_vm
+      ansible.builtin.assert:
+        that: "'desktop_vm' in (_desktop_stamp.plays | default({}))"
+        fail_msg: "deploy_stamp missing desktop_vm entry on {{ inventory_hostname }}"
+
+    # ── Cleanup SSH ControlMaster socket ─────────────────────────────
+    - name: Close SSH ControlMaster connection
+      ansible.builtin.command:
+        cmd: >-
+          ssh -o ControlPath=/tmp/desktop-verify-%r@%h -O exit
+          {{ _desktop_user }}@{{ _desktop_ip.stdout | trim }}
+      failed_when: false
+      changed_when: false
+
+    # ── Summary ──────────────────────────────────────────────────────
+    - name: Report Desktop VM verification
+      ansible.builtin.debug:
+        msg: >-
+          Desktop VM verification passed on {{ inventory_hostname }}:
+          vm={{ desktop_vm_id }}, running=yes,
+          bios=ovmf, machine=q35, hostpci0=yes,
+          gpu={{ 'detected' if _vm_gpu_state.stdout | regex_search('VGA|Display', ignorecase=True) is not none else 'missing' }},
+          drm={{ 'ok' if 'DRM_OK' in _vm_gpu_state.stdout else 'missing' }},
+          vaapi={{ 'hardware' if 'VAProfile' in _vm_gpu_state.stdout else 'none' }},
+          qga={{ 'ok' if _desktop_qga.rc == 0 else 'no' }},
+          ip={{ _desktop_ip.stdout | trim }}

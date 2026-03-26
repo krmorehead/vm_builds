@@ -5,6 +5,12 @@
 # Pi-hole is the primary upstream; https-dns-proxy (127.0.0.1#5053)
 # is the fallback when Pi-hole is unavailable.
 #
+# WARNING: pihole_configure defaults to using the container's gateway
+# (OpenWrt) as upstream DNS. When THIS feature is active, that creates
+# a loop: OpenWrt → Pi-hole → OpenWrt. Callers MUST override Pi-hole's
+# upstream to external DNS (e.g. pihole_upstream_dns_1: "1.1.1.1",
+# pihole_upstream_dns_2: "1.0.0.1") when enabling this feature.
+#
 # All tasks guarded by pihole_static_ip being defined.
 
 # ── Derive Pi-hole IP from LAN topology ──────────────────────────

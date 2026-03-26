@@ -50,7 +50,7 @@ NEVER restore host config from backup — redundant with explicit file removal, 
 
 Without steps 3-6, next run cannot detect WiFi hardware.
 
-For iGPU passthrough cleanup (gaming_vm per-feature scenario), the role uses sysfs-only binding (no modprobe configs). Cleanup:
+For iGPU passthrough cleanup (gaming_lxc per-feature scenario), the role uses sysfs-only binding (no modprobe configs). Cleanup:
 1. Count VGA controllers BEFORE unloading — gate step 2 on count >= 2
 2. `modprobe -r i915/amdgpu` to release stale bindings (ONLY if multi-GPU)
 3. Rescan PCI bus
@@ -108,6 +108,27 @@ Saves ~20s per host when PCI passthrough not configured.
 
 If cleanup removes SSH access temporarily, verify SSH before re-running. May need physical power cycle.
 
+## Cleanup ordering: LAN hosts BEFORE primary hosts
+
+ALWAYS clean LAN satellite hosts BEFORE cleaning primary hosts. The primary host cleanup destroys OpenWrt and tears down bridges, making LAN hosts unreachable. If LAN cleanup runs after, the reachability check fails, LAN host cleanup is skipped, and stale containers survive into the next converge.
+
+Stale containers from a previous converge are NEVER recreated by `proxmox_lxc` — the role checks `pct status` and skips creation if the container already exists. A stale container with an outdated template persists indefinitely until manually destroyed.
+
+```yaml
+# Play 1: LAN hosts (while OpenWrt + bridges still exist)
+- name: Clean up LAN satellite hosts
+  hosts: router_nodes
+  tasks:
+    - ansible.builtin.include_tasks: cleanup_lan_host.yml
+      loop: "{{ groups['lan_hosts'] | default([]) }}"
+
+# Play 2: Primary hosts (destroys OpenWrt, bridges)
+- name: Clean reset primary Proxmox hosts
+  hosts: proxmox:!lan_hosts
+```
+
+Previous bug: LAN host cleanup ran AFTER primary cleanup. OpenWrt (gateway to mesh1) was already destroyed. SSH to mesh1 at 10.10.10.210 failed (no route). The stale rsyslog container on mesh1 survived with an outdated logrotate config. Reconverge reused the stale container. The logrotate verify assertion failed on every test cycle until the cleanup ordering was fixed.
+
 ## Common failures
 
 | Issue | Cause | Fix |
@@ -115,4 +136,5 @@ If cleanup removes SSH access temporarily, verify SSH before re-running. May nee
 | Stale LAN IP on subsequent runs | Missing config file in cleanup list | Add to all cleanup playbooks |
 | Bridge numbers keep incrementing | Didn't remove bridges or reload modules | Add bridge teardown to cleanup |
 | WiFi not detected | Didn't unbind vfio-pci or reload modules | Ensure steps 3-6 present |
-| Re-authentication fails after rollback | Cleanup removed authorized_keys | NEVER remove credentials
+| Re-authentication fails after rollback | Cleanup removed authorized_keys | NEVER remove credentials |
+| Stale container on LAN host | LAN cleanup runs after OpenWrt destroyed | Move LAN cleanup before primary |

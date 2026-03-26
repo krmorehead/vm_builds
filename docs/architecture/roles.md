@@ -421,8 +421,8 @@ Cleanup restores enterprise repos and removes the no-subscription file.
 | Variable | Env Var | Default | Description |
 |----------|---------|---------|-------------|
 | `pihole_web_password` | `PIHOLE_WEB_PASSWORD` | `""` | Web admin password |
-| `pihole_upstream_dns_1` | -- | `1.1.1.1` | Primary upstream DNS |
-| `pihole_upstream_dns_2` | -- | `1.0.0.1` | Secondary upstream DNS |
+| `pihole_upstream_dns_1` | -- | `""` (auto-detect gateway) | Primary upstream DNS |
+| `pihole_upstream_dns_2` | -- | `""` (omitted) | Secondary upstream DNS |
 | `pihole_query_logging_days` | -- | `7` | Query log retention days |
 
 ---
@@ -828,3 +828,71 @@ None — Jellyfin is pure userspace. No kernel modules, no host config files. Th
 - Sunshine binary and service
 - GZDoom + Freedoom WADs
 - Windows Firewall rules for Sunshine ports
+
+---
+
+## desktop_vm
+
+**Purpose:** Provision a Debian 12 Desktop VM on Proxmox with UEFI (OVMF), q35 machine type, cloud-init bootstrap, and exclusive iGPU passthrough via hostpci0. On-demand service (no auto-start).
+
+**Connection pattern:** Runs on `desktop_nodes` Proxmox hosts, then adds VM to `desktop` dynamic group via SSH (ProxyJump through Proxmox host).
+
+### How It Works
+
+1. Checks if VM already exists (`qm status`).
+2. Validates cloud image exists locally (`desktop_image_path`).
+3. Validates `igpu_pci_address` is available from `proxmox_igpu`.
+4. Uploads cloud image and creates UEFI/q35 VM via `qm create`.
+5. Imports disk, attaches cloud-init drive with user/SSH key/DHCP.
+6. Attaches NIC to WAN bridge (DHCP from ISP router), configures iGPU passthrough via hostpci0.
+7. Attaches display-exclusive hookscript if available.
+8. Starts VM, waits for DHCP lease and SSH.
+9. Registers VM in `desktop` dynamic group via `add_host`.
+
+### Key Variables
+
+| Variable | Env Var | Default | Description |
+|----------|---------|---------|-------------|
+| `desktop_vm_memory` | -- | `4096` | RAM in MB |
+| `desktop_vm_cores` | -- | `2` | CPU cores |
+| `desktop_vm_disk_size` | -- | `32G` | Boot disk size |
+| `desktop_vm_onboot` | -- | `false` | Auto-start on host boot |
+| `desktop_user` | `DESKTOP_USER` | `desktop` | Cloud-init user |
+| `desktop_password` | `DESKTOP_PASSWORD` | `` | Cloud-init password |
+| `desktop_ssh_public_key` | `DESKTOP_SSH_PUBLIC_KEY` | `` | SSH public key |
+
+### Exported Facts
+
+| Fact | Type | Description |
+|------|------|-------------|
+| (via `add_host`) | -- | VM registered in `desktop` dynamic group with SSH + ProxyJump vars |
+
+---
+
+## desktop_configure
+
+**Purpose:** Configure the Debian Desktop VM with two desktop sessions: KDE Plasma (Windows-style UX) and GNOME (Mac-style UX). Desktop environments and shared applications are baked into the image (build-images.sh --only desktop). This role installs host-specific GPU drivers and applies per-session polish (shortcuts, dconf, SDDM config, Flameshot autostart).
+
+**Connection pattern:** Runs on `desktop` dynamic group via SSH (ProxyJump through Proxmox host).
+
+### How It Works
+
+1. Waits for cloud-init to complete.
+2. Updates apt cache and upgrades base system.
+3. Installs vendor-specific GPU drivers (Intel or AMD via `igpu_vendor`).
+4. Installs KDE Plasma and GNOME desktop environments.
+5. Installs SDDM display manager for session switching.
+6. Installs shared applications (Firefox, VLC, LibreOffice, Flameshot).
+7. Configures user groups (video, render, audio, sudo).
+8. Applies KDE polish: dark Breeze theme, bottom taskbar, window shortcuts.
+9. Applies GNOME polish: dark Adwaita, Dash to Dock, Mac-like keybindings.
+10. Configures shared Ctrl+Shift+4 screenshot shortcut via Flameshot autostart.
+11. Configures SDDM default session and optional autologin.
+12. Sets graphical.target as default boot target.
+
+### Key Variables
+
+| Variable | Env Var | Default | Description |
+|----------|---------|---------|-------------|
+| `desktop_autologin` | `DESKTOP_AUTOLOGIN` | `false` | Auto-login at boot |
+| `desktop_default_session` | `DESKTOP_DEFAULT_SESSION` | `plasma` | Default SDDM session |

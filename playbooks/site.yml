@@ -287,6 +287,23 @@
   roles:
     - openwrt_mesh_configure
 
+- name: Provision Desktop VM
+  hosts: desktop_nodes
+  gather_facts: false
+  tags: [desktop]
+  roles:
+    - desktop_vm
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: desktop_vm
+
+- name: Configure Desktop
+  hosts: desktop
+  gather_facts: true
+  tags: [desktop]
+  roles:
+    - desktop_configure
+
 - name: Provision Gaming LXC
   hosts: gaming_nodes
   gather_facts: true

@@ -1,0 +1,13 @@
+---
+dependencies: []
+
+galaxy_info:
+  author: vm_builds
+  license: proprietary
+  role_name: desktop_configure
+  description: Configure Debian Desktop VM with KDE (Windows-style) and GNOME (Mac-style) sessions
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm

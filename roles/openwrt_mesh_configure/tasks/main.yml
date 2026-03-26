@@ -112,5 +112,9 @@
   ansible.builtin.raw: /bin/sh -c 'uci commit wireless'
 
 - name: Restart wireless
-  ansible.builtin.raw: /bin/sh -c 'wifi reload'
+  ansible.builtin.raw: /bin/sh -c 'sleep 2 && wifi reload'
+  register: _wifi_reload
+  retries: 3
+  delay: 5
+  until: _wifi_reload.rc == 0
   changed_when: true

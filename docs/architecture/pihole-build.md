@@ -29,16 +29,24 @@ The template is built remotely on a Proxmox host by `build-images.sh --host <ip>
 - Source: `images/pihole-debian-12-amd64.tar.zst`
 - Variables: `pihole_lxc_template` and `pihole_lxc_template_path` in `group_vars/all.yml`
 
-## DNS Chain
+## DNS Chain (default)
 
 ```
-Clients → OpenWrt dnsmasq → Pi-hole (VMID 102) → Cloudflare DoH (1.1.1.1 / 1.0.0.1)
+Clients → Pi-hole (VMID 102) → OpenWrt gateway (dnsmasq) → ISP / DoH upstream
 ```
 
-- OpenWrt handles DHCP and presents a single DNS IP to clients
 - Pi-hole filters queries against blocklists
-- Pi-hole forwards unblocked queries to upstream DNS (Cloudflare by default)
-- https-dns-proxy on OpenWrt serves as fallback when Pi-hole is unavailable
+- Pi-hole forwards unblocked queries to the container's gateway (auto-detected)
+- Override with explicit IPs via `pihole_upstream_dns_1` / `pihole_upstream_dns_2`
+
+### With openwrt-pihole-dns feature (opt-in)
+
+```
+Clients → OpenWrt dnsmasq → Pi-hole → explicit external DNS (must override defaults)
+```
+
+- When OpenWrt forwards to Pi-hole, Pi-hole MUST NOT use the gateway as upstream
+  (creates a loop). Override `pihole_upstream_dns_1/2` to external resolvers.
 
 ## Container Resources
 

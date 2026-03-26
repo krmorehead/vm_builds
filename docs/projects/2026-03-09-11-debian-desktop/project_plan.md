@@ -15,9 +15,9 @@ VM (KVM/QEMU)
 ## Resources
 
 - Cores: 2
-- RAM: 1024 MB
+- RAM: 4096 MB
 - Disk: 32 GB (OS + applications)
-- Network: LAN bridge
+- Network: WAN bridge (DHCP from ISP router)
 - iGPU: exclusive passthrough via `hostpci` (entire GPU bound to vfio-pci)
 - VMID: 400
 
@@ -57,27 +57,23 @@ Desktop VMs always use the OpenWrt LAN subnet on the LAN bridge. There is
 no WAN-connected case — desktop services only run on the Home Entertainment
 Box profile, which always has OpenWrt.
 
-## Documented exception: cloud image + apt install
+## Image strategy: baked desktop image
 
-**Desktop VMs are the exception to the "bake, don't configure at runtime"
-principle.** Full desktop environments (KDE, GNOME, Firefox, etc.) are too
-large and hardware-dependent for generic pre-built images. The practical
-approach for desktop VMs is:
+Desktop VMs now follow the standard "bake, don't configure" principle.
+`build-images.sh --only desktop` creates a custom qcow2 image with KDE
+Plasma, GNOME, SDDM, and all shared applications pre-installed. The
+configure role only handles host-specific GPU drivers and per-session
+polish (shortcuts, dconf, SDDM settings). This eliminated ~15 minutes
+of runtime package installation during converge.
 
-1. Start from a Debian 12 cloud image (lightweight, cloud-init enabled)
-2. Install desktop packages at configure time via `apt`
+Build process:
 
-This is documented as an exception because:
-- Desktop environments total 2-4 GB of packages — impractical for a
-  pre-built image that must be portable across hardware
-- GPU driver selection depends on the actual GPU vendor (Intel vs AMD),
-  known only at runtime via `igpu_vendor`
-- The cloud image approach is the community standard for VM provisioning
-  (Packer, Terraform, cloud-init all use this pattern)
-
-If pre-building becomes practical (e.g., one dedicated hardware platform),
-add a `build_desktop_vm` function to `build-images.sh` and switch to the
-standard bake pattern.
+1. `build-images.sh --host <ip> --only desktop` creates a temporary VM on
+   Proxmox from the generic Debian 12 cloud image
+2. SSH in, install KDE + GNOME + SDDM + all shared applications
+3. Clean up, reset cloud-init, export disk as `desktop-debian-12-amd64.qcow2`
+4. The `desktop_vm` role uses this pre-built image instead of the generic one
+5. GPU drivers remain at configure time (vendor-specific, <30 seconds)
 
 ## Skills
 
@@ -101,9 +97,9 @@ Decisions
 ├── Guest OS: Debian 12
 │   └── Same distro as Proxmox host; consistent, well-supported, stable
 │
-├── Base image: Debian cloud image + cloud-init for bootstrap
-│   └── No interactive installer; cloud-init sets user, SSH keys, network at first boot
-│   └── DOCUMENTED EXCEPTION to bake principle (see above)
+├── Base image: Custom baked qcow2 (KDE + GNOME + apps) with cloud-init
+│   └── Built by build-images.sh --only desktop from Debian 12 cloud image
+│   └── Follows standard bake principle
 │
 ├── VM provisioning: qm create (not proxmox_lxc)
 │   └── This is a VM, not an LXC container — full KVM/QEMU stack
@@ -219,15 +215,14 @@ See: `image-management-patterns` skill.
 - Image stored in `images/` (gitignored), uploaded during provisioning
 - NEVER use `pveam download` — host may lack internet
 
-- [ ] Download Debian 12 cloud image (qcow2) into `images/`
-- [ ] Add `desktop_image_path: images/debian-12-genericcloud-amd64.qcow2` to
+- [ ] Build custom desktop image: `./build-images.sh --host <ip> --only desktop`
+- [ ] `desktop_image_path: images/desktop-debian-12-amd64.qcow2` in
   `group_vars/all.yml`
-- [ ] Verify cloud-init support in the image (user-data, network-config)
+- [ ] Base cloud image (`debian-12-generic-amd64.qcow2`) available in `images/`
 
 **Verify:**
 
-- [ ] Image file exists at `images/debian-12-genericcloud-amd64.qcow2` (or
-  configured path)
+- [ ] Baked image exists at `images/desktop-debian-12-amd64.qcow2`
 - [ ] `desktop_image_path` resolves correctly in role defaults
 - [ ] Image is valid qcow2: `qemu-img info` succeeds
 
@@ -324,8 +319,8 @@ config, reload original drivers, rescan PCI bus. Detach hookscript before destro
 
 ### Milestone 3: Configuration
 
-_Blocked on: M2 (VM must be running, SSH accessible). Uses cloud image + apt
-install (documented exception to bake principle)._
+_Blocked on: M2 (VM must be running, SSH accessible). Desktop environments
+are baked into the image; this milestone covers GPU drivers and polish._
 
 Configure the running VM via SSH + ProxyJump: install KDE, GNOME, SDDM,
 GPU drivers (vendor-specific via `igpu_vendor`), base applications, and
@@ -519,7 +514,7 @@ _Depends on M2–M5._
 
 - [ ] Create `docs/architecture/desktop-build.md`:
   - Requirements, design decisions, env variables
-  - Cloud image + apt install as documented exception to bake principle
+  - Custom baked image via build-images.sh --only desktop
   - iGPU exclusive passthrough, cloud-init bootstrap
   - Session switching (KDE/GNOME), SDDM config
   - Display-exclusive hookscript (deployed by Kiosk project 2026-03-09-12)
@@ -556,7 +551,6 @@ _Depends on M2–M5._
   and the iGPU returns to the host driver.
 - **rsyslog**: Desktop VM logs can be forwarded to the rsyslog collector via
   standard rsyslog client configuration inside the VM.
-- **Future: pre-built image**: If a single hardware platform is standardized,
-  a pre-built desktop image via Packer/debootstrap could replace the cloud
-  image + apt approach, bringing the Desktop VM in line with the bake
-  principle.
+- **Image management**: The baked desktop image is built once via
+  `build-images.sh --only desktop` and reused across deployments. GPU
+  drivers remain at configure time since they depend on `igpu_vendor`.

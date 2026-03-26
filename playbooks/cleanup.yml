@@ -332,6 +332,49 @@
         executable: /bin/bash
       changed_when: true
 
+# ── Per-feature rollback: Desktop VM ─────────────────────────────
+
+- name: Rollback Desktop VM
+  hosts: desktop_nodes
+  gather_facts: false
+  tags: [desktop-rollback, never]
+  tasks:
+    - name: Stop and destroy Desktop VM
+      ansible.builtin.shell:
+        cmd: |
+          qm stop {{ desktop_vm_id }} 2>/dev/null || true
+          sleep 3
+          qm destroy {{ desktop_vm_id }} --purge 2>/dev/null || true
+        executable: /bin/bash
+      changed_when: true
+
+    - name: PCI cleanup - restore iGPU to host
+      ansible.builtin.shell:
+        cmd: |
+          for dev in /sys/bus/pci/drivers/vfio-pci/0000:*/; do
+            [ -d "$dev" ] || continue
+            addr=$(basename "$dev")
+            echo "$addr" > /sys/bus/pci/drivers/vfio-pci/unbind 2>/dev/null || true
+            echo "" > "/sys/bus/pci/devices/${addr}/driver_override" 2>/dev/null || true
+          done
+          echo 1 > /sys/bus/pci/rescan 2>/dev/null || true
+          sleep 2
+          for dev in /sys/bus/pci/devices/0000:*/; do
+            [ -d "$dev" ] || continue
+            addr=$(basename "$dev")
+            class=$(cat "${dev}/class" 2>/dev/null)
+            [ "${class:0:4}" = "0x03" ] || continue
+            [ -e "${dev}/driver" ] && continue
+            vendor=$(cat "${dev}/vendor" 2>/dev/null)
+            case "$vendor" in
+              0x8086) echo "$addr" > /sys/bus/pci/drivers/i915/bind 2>/dev/null || true ;;
+              0x1002) echo "$addr" > /sys/bus/pci/drivers/amdgpu/bind 2>/dev/null || true ;;
+            esac
+          done
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
 # ── Per-feature rollback: Gaming LXC ───────────────────────────
 
 - name: Rollback Gaming LXC

@@ -207,7 +207,7 @@ All VMIDs defined in `group_vars/all.yml`.
 | `setup.sh` | Bootstrap .venv + pip + ansible-galaxy |
 | `run.sh` | Convenience wrapper — delegates to `build.py` |
 | `cleanup.sh` | Restore / full-restore / clean / rollback — delegates to `build.py` |
-| `build-images.sh` | Builds custom images (mesh LXC, router VM, Pi-hole, rsyslog, Jellyfin, Netdata, WireGuard, Home Assistant, Kodi, Moonlight, Gaming LXC, Sunshine). Use `--only <target>` for selective rebuilds |
+| `build-images.sh` | Builds custom images (mesh LXC, router VM, Pi-hole, rsyslog, Jellyfin, Netdata, WireGuard, Home Assistant, Kodi, Moonlight, Gaming LXC, Sunshine, Desktop VM). Use `--only <target>` for selective rebuilds |
 | `test.env` | Test machine config (committed, IP: 192.168.86.201) |
 | `.env` | Production secrets (gitignored) |
 | `test.env.generated` | Auto-generated secrets during test runs (gitignored) |
@@ -222,6 +222,7 @@ All VMIDs defined in `group_vars/all.yml`.
 | `tasks/reconstruct_jellyfin_group.yml` | Reusable dynamic group reconstruction for Jellyfin |
 | `tasks/reconstruct_kodi_group.yml` | Reusable dynamic group reconstruction for Kodi |
 | `tasks/reconstruct_moonlight_group.yml` | Reusable dynamic group reconstruction for Moonlight |
+| `tasks/reconstruct_desktop_group.yml` | Reusable dynamic group reconstruction for Desktop VM |
 | `tasks/reconstruct_gaming_group.yml` | Reusable dynamic group reconstruction for Gaming LXC |
 | `tasks/bootstrap_lan_host.yml` | Reusable bootstrap for LAN hosts (DHCP lease + API token) |
 | `tasks/cleanup_lan_host.yml` | Reusable per-LAN-host cleanup (SSH from primary host) |
@@ -237,6 +238,7 @@ All VMIDs defined in `group_vars/all.yml`.
 | `molecule/jellyfin-lxc/` | Per-feature scenario for Jellyfin media server container |
 | `molecule/kodi-lxc/` | Per-feature scenario for Kodi media player container |
 | `molecule/moonlight-lxc/` | Per-feature scenario for Moonlight streaming client container |
+| `molecule/desktop-vm/` | Per-feature scenario for Debian Desktop VM with iGPU passthrough |
 | `molecule/sunshine-vm/` | Per-feature scenario for Sunshine Gaming VM with iGPU passthrough (legacy) |
 | `molecule/gaming-lxc/` | Per-feature scenario for Gaming LXC with GPU render device sharing |
 | `molecule/openwrt-syslog/` | Per-feature scenario for OpenWrt syslog forwarding to rsyslog |
@@ -285,7 +287,7 @@ All VMIDs defined in `group_vars/all.yml`.
 - NEVER use `pveam download` — the host may lack internet (router VM destroyed) or have unreachable enterprise repos (no subscription).
 - Image paths are defined in `group_vars/all.yml` (e.g., `openwrt_image_path`, `openwrt_lxc_template_path`). Roles verify the image exists and fail with a clear message pointing to `./build-images.sh` if missing.
 - ALWAYS use `role_path` for source paths in tasks. Bare relative paths break when Molecule runs from non-default scenarios.
-- Use `./build-images.sh --only <target>` to rebuild a single image (~2-3 min vs ~15 min for all). Targets: mesh, router, pihole, rsyslog, netdata, wireguard, homeassistant, kodi, moonlight, gaming, sunshine.
+- Use `./build-images.sh --only <target>` to rebuild a single image (~2-3 min vs ~15 min for all). Targets: mesh, router, pihole, rsyslog, netdata, wireguard, homeassistant, kodi, moonlight, gaming, sunshine, desktop.
 - See `vm-lifecycle` skill, Image management section, for the full pattern.
 
 ## NTP synchronization

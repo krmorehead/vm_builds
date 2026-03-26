@@ -33,7 +33,7 @@
   ansible.builtin.shell:
     cmd: >-
       {{ _cleanup_ssh }} "
-      for vm in {{ gaming_vm_id }}; do
+      for vm in {{ desktop_vm_id }} {{ gaming_vm_id }}; do
         qm status \$vm >/dev/null 2>&1 || continue;
         qm stop \$vm 2>/dev/null || true;
         sleep 3;

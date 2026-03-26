@@ -246,7 +246,7 @@ pytest tests/ -v
 - Every host MUST declare `wol_capable` (true/false) in `inventory/host_vars/`
 - `ai` has `wol_capable: false` — USB ethernet only, no Wake-on-LAN
 - NEVER run `modprobe -r amdgpu` or `modprobe -r i915` in broad-scope plays (hosts: proxmox) — use PCI bus rescan instead
-- ONLY run GPU driver unload in per-feature cleanup (gaming_vm) gated on VGA controller count >= 2
+- ONLY run GPU driver unload in per-feature cleanup (gaming_lxc) gated on VGA controller count >= 2
 - NEVER shut down or crash hosts that cannot be remotely recovered
 - `scripts/wol.sh` MUST NOT include non-WoL hosts — enforced by `tests/test_wol.py`
 - `tests/test_host_safety.py` is a static linter that catches `modprobe -r amdgpu/i915` in broad-scope plays, `shutdown/poweroff` in cleanup/molecule files, and unrecognized `modprobe -r` modules
