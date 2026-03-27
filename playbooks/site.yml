@@ -86,6 +86,14 @@
   hosts: lan_hosts
   gather_facts: true
   tags: [lan-satellite, backup]
+  pre_tasks:
+    - name: Clear stale SSH state to LAN hosts
+      ansible.builtin.meta: reset_connection
+
+    - name: Wait for SSH via ProxyCommand to stabilize
+      ansible.builtin.wait_for_connection:
+        timeout: 120
+        delay: 5
   roles:
     - proxmox_backup
     - role: deploy_stamp

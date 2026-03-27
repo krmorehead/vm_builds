@@ -25,6 +25,7 @@
     uci set network.vlan_iot_dev.ifname='br-lan'
     uci set network.vlan_iot_dev.vid='{{ openwrt_vlan_iot_id }}'
     uci set network.vlan_iot_dev.name='br-lan.{{ openwrt_vlan_iot_id }}'
+  changed_when: false
 
 - name: Create IoT VLAN interface
   ansible.builtin.raw: |
@@ -33,6 +34,7 @@
     uci set network.vlan_iot.device='br-lan.{{ openwrt_vlan_iot_id }}'
     uci set network.vlan_iot.ipaddr='{{ openwrt_vlan_iot_ip }}'
     uci set network.vlan_iot.netmask='{{ openwrt_vlan_iot_netmask }}'
+  changed_when: false
 
 # ── Guest VLAN (VLAN 20) ────────────────────────────────────────
 
@@ -43,6 +45,7 @@
     uci set network.vlan_guest_dev.ifname='br-lan'
     uci set network.vlan_guest_dev.vid='{{ openwrt_vlan_guest_id }}'
     uci set network.vlan_guest_dev.name='br-lan.{{ openwrt_vlan_guest_id }}'
+  changed_when: false
 
 - name: Create Guest VLAN interface
   ansible.builtin.raw: |
@@ -51,11 +54,13 @@
     uci set network.vlan_guest.device='br-lan.{{ openwrt_vlan_guest_id }}'
     uci set network.vlan_guest.ipaddr='{{ openwrt_vlan_guest_ip }}'
     uci set network.vlan_guest.netmask='{{ openwrt_vlan_guest_netmask }}'
+  changed_when: false
 
 # ── Commit network changes ──────────────────────────────────────
 
 - name: Commit network changes
   ansible.builtin.raw: uci commit network
+  changed_when: true
 
 # ── Firewall zones ──────────────────────────────────────────────
 
@@ -67,6 +72,7 @@
     uci set firewall.zone_vlan_iot.input='REJECT'
     uci set firewall.zone_vlan_iot.output='ACCEPT'
     uci set firewall.zone_vlan_iot.forward='REJECT'
+  changed_when: false
 
 - name: Allow IoT DHCP/DNS
   ansible.builtin.raw: |
@@ -76,12 +82,14 @@
     uci set firewall.iot_dhcp_dns.dest_port='53 67 68'
     uci set firewall.iot_dhcp_dns.proto='tcpudp'
     uci set firewall.iot_dhcp_dns.target='ACCEPT'
+  changed_when: false
 
 - name: Allow IoT to WAN forwarding
   ansible.builtin.raw: |
     uci set firewall.fwd_iot_wan=forwarding
     uci set firewall.fwd_iot_wan.src='vlan_iot'
     uci set firewall.fwd_iot_wan.dest='wan'
+  changed_when: false
 
 - name: Create Guest firewall zone
   ansible.builtin.raw: |
@@ -91,6 +99,7 @@
     uci set firewall.zone_vlan_guest.input='REJECT'
     uci set firewall.zone_vlan_guest.output='ACCEPT'
     uci set firewall.zone_vlan_guest.forward='REJECT'
+  changed_when: false
 
 - name: Allow Guest DHCP/DNS
   ansible.builtin.raw: |
@@ -100,17 +109,20 @@
     uci set firewall.guest_dhcp_dns.dest_port='53 67 68'
     uci set firewall.guest_dhcp_dns.proto='tcpudp'
     uci set firewall.guest_dhcp_dns.target='ACCEPT'
+  changed_when: false
 
 - name: Allow Guest to WAN forwarding
   ansible.builtin.raw: |
     uci set firewall.fwd_guest_wan=forwarding
     uci set firewall.fwd_guest_wan.src='vlan_guest'
     uci set firewall.fwd_guest_wan.dest='wan'
+  changed_when: false
 
 - name: Commit firewall changes
   ansible.builtin.raw: |
     uci commit firewall
     /etc/init.d/firewall restart
+  changed_when: true
 
 # ── DHCP pools per VLAN ─────────────────────────────────────────
 
@@ -121,6 +133,7 @@
     uci set dhcp.vlan_iot.start='{{ openwrt_vlan_iot_dhcp_start }}'
     uci set dhcp.vlan_iot.limit='{{ openwrt_vlan_iot_dhcp_limit }}'
     uci set dhcp.vlan_iot.leasetime='{{ openwrt_dhcp_leasetime }}'
+  changed_when: false
 
 - name: Create Guest DHCP pool
   ansible.builtin.raw: |
@@ -129,11 +142,13 @@
     uci set dhcp.vlan_guest.start='{{ openwrt_vlan_guest_dhcp_start }}'
     uci set dhcp.vlan_guest.limit='{{ openwrt_vlan_guest_dhcp_limit }}'
     uci set dhcp.vlan_guest.leasetime='{{ openwrt_dhcp_leasetime }}'
+  changed_when: false
 
 - name: Commit DHCP changes
   ansible.builtin.raw: |
     uci commit dhcp
     /etc/init.d/dnsmasq restart
+  changed_when: true
 
 # ── Bring up VLAN interfaces ────────────────────────────────────
 

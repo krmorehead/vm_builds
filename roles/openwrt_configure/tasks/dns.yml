@@ -8,6 +8,7 @@
 
 - name: Set dnsmasq noresolv (ignore ISP DNS)
   ansible.builtin.raw: uci set dhcp.@dnsmasq[0].noresolv='1'
+  changed_when: false
 
 - name: Clear existing dnsmasq server entries
   ansible.builtin.raw: |
@@ -16,14 +17,17 @@
 
 - name: Add https-dns-proxy as dnsmasq upstream
   ansible.builtin.raw: uci add_list dhcp.@dnsmasq[0].server='127.0.0.1#5053'
+  changed_when: false
 
 # ── DNS rebinding protection ────────────────────────────────────
 
 - name: Enable DNS rebinding protection
   ansible.builtin.raw: uci set dhcp.@dnsmasq[0].rebind_protection='1'
+  changed_when: false
 
 - name: Enable rebinding localhost
   ansible.builtin.raw: uci set dhcp.@dnsmasq[0].rebind_localhost='1'
+  changed_when: false
 
 # ── Commit and restart ──────────────────────────────────────────
 
@@ -31,11 +35,13 @@
   ansible.builtin.raw: |
     uci commit dhcp
     /etc/init.d/dnsmasq restart
+  changed_when: true
 
 - name: Enable and start https-dns-proxy
   ansible.builtin.raw: |
     /etc/init.d/https-dns-proxy enable
     /etc/init.d/https-dns-proxy start
+  changed_when: true
 
 - name: Wait for DNS to stabilize
   ansible.builtin.pause:

@@ -47,6 +47,7 @@
       {{ ('--storage ' + backup_storage) if backup_storage | length > 0
          else ('--dumpdir ' + backup_dir) }}
   loop: "{{ _vm_ids }}"
+  changed_when: true
   when:
     - backup_vms | bool
     - _vm_ids | length > 0

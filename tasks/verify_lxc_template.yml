@@ -1,0 +1,19 @@
+---
+# Shared pre-flight check: verify an LXC template exists on the controller.
+#
+# Required variables (set via include_tasks vars:):
+#   lxc_template_path  — relative path to the template file (e.g. images/pihole.tar.gz)
+#   lxc_service_name   — human-readable name for error messages (e.g. "Pi-hole")
+
+- name: "Check LXC template exists — {{ lxc_service_name }}"
+  ansible.builtin.stat:
+    path: "{{ role_path }}/../../{{ lxc_template_path }}"
+  register: _lxc_template_stat
+  delegate_to: localhost
+
+- name: "Fail if template is missing — {{ lxc_service_name }}"
+  ansible.builtin.fail:
+    msg: >-
+      {{ lxc_service_name }} template not found: {{ lxc_template_path }}.
+      Run ./build-images.sh to build it.
+  when: not (_lxc_template_stat.stat.exists | default(false))

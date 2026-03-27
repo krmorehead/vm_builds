@@ -12,27 +12,20 @@
   tasks:
     # ── Container state ──────────────────────────────────────────
 
-    - name: Check container is running
+    - name: Read container state and config
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          pct status {{ rsyslog_ct_id }} | grep -c running
+          pct status {{ rsyslog_ct_id }}
+          pct config {{ rsyslog_ct_id }}
         executable: /bin/bash
-      register: _rsyslog_running
+      register: _rsyslog_cfg
       changed_when: false
 
     - name: Assert container is running
       ansible.builtin.assert:
-        that: (_rsyslog_running.stdout | trim | int) > 0
+        that: "'running' in _rsyslog_cfg.stdout"
         fail_msg: "Container {{ rsyslog_ct_id }} is not running"
-
-    # ── Container config (single read) ───────────────────────────
-
-    - name: Read container config (single call)
-      ansible.builtin.command:
-        cmd: pct config {{ rsyslog_ct_id }}
-      register: _rsyslog_cfg
-      changed_when: false
 
     - name: Assert onboot is enabled
       ansible.builtin.assert:

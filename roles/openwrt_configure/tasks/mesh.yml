@@ -30,15 +30,18 @@
   ansible.builtin.raw: >-
     uci set dawn.@metric[0].rssi_val='{{ openwrt_dawn_rssi_threshold }}'
   when: _wifi_present | bool
+  changed_when: false
 
 - name: Configure Dawn steering mode
   ansible.builtin.raw: >-
     uci set dawn.@metric[0].steering='{{ openwrt_dawn_steering_mode }}'
   when: _wifi_present | bool
+  changed_when: false
 
 - name: Commit Dawn configuration
   ansible.builtin.raw: uci commit dawn
   when: _wifi_present | bool
+  changed_when: true
 
 # ── Enable and start Dawn service ───────────────────────────────
 
@@ -47,6 +50,7 @@
     /etc/init.d/dawn enable
     /etc/init.d/dawn start
   when: _wifi_present | bool
+  changed_when: true
 
 # ── Mesh peer monitoring ────────────────────────────────────────
 

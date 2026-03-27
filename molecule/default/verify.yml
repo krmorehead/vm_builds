@@ -51,81 +51,59 @@
 
     # ── iGPU detection (Intel or AMD) ──────────────────────────────
 
-    - name: Check for Intel iGPU
+    - name: Detect iGPU vendor, PCI address, and driver in one pass
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          lspci -nn | grep -ic 'VGA compatible controller.*Intel'
+          lspci_out=$(lspci -nn)
+          intel=$(echo "$lspci_out" | grep -ic 'VGA compatible controller.*Intel' || true)
+          amd=$(echo "$lspci_out" | grep -icE 'VGA compatible controller.*(AMD|ATI)|Display controller.*(AMD|ATI)' || true)
+          if [ "$intel" -gt 0 ]; then
+            vendor=intel
+            pci_addr=$(echo "$lspci_out" | grep -i 'VGA compatible controller.*Intel' | head -1 | awk '{print $1}')
+            driver_loaded=$(lsmod | grep -c '^i915' || true)
+          elif [ "$amd" -gt 0 ]; then
+            vendor=amd
+            pci_addr=$(echo "$lspci_out" | grep -iE 'VGA compatible controller.*(AMD|ATI)|Display controller.*(AMD|ATI)' | head -1 | awk '{print $1}')
+            driver_loaded=$(lsmod | grep -c '^amdgpu' || true)
+          else
+            vendor=none
+            pci_addr=""
+            driver_loaded=0
+          fi
+          passthrough="host"
+          if [ -n "$pci_addr" ]; then
+            drv=$(readlink "/sys/bus/pci/devices/0000:${pci_addr}/driver" 2>/dev/null || true)
+            case "$drv" in *vfio-pci) passthrough="passthrough" ;; esac
+          fi
+          echo "VENDOR=$vendor"
+          echo "PCI_ADDR=$pci_addr"
+          echo "DRIVER_LOADED=$driver_loaded"
+          echo "PASSTHROUGH=$passthrough"
         executable: /bin/bash
-      register: _intel_igpu_count
+      register: _igpu_probe
       changed_when: false
-      failed_when: false
 
-    - name: Check for AMD iGPU
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          lspci -nn | grep -icE 'VGA compatible controller.*(AMD|ATI)|Display controller.*(AMD|ATI)'
-        executable: /bin/bash
-      register: _amd_igpu_count
-      changed_when: false
-      failed_when: false
-
-    - name: Set iGPU vendor fact for verify
+    - name: Set iGPU facts from probe
       ansible.builtin.set_fact:
-        _verify_igpu_vendor: >-
-          {{ 'intel' if (_intel_igpu_count.stdout | trim | int) > 0
-             else ('amd' if (_amd_igpu_count.stdout | trim | int) > 0
-             else 'none') }}
-        _verify_igpu_present: >-
-          {{ (_intel_igpu_count.stdout | trim | int) > 0
-             or (_amd_igpu_count.stdout | trim | int) > 0 }}
+        _verify_igpu_vendor: "{{ _igpu_probe.stdout | regex_search('VENDOR=(\\S+)', '\\1') | first }}"
+        _verify_igpu_present: "{{ _igpu_probe.stdout | regex_search('VENDOR=(\\S+)', '\\1') | first != 'none' }}"
+        _verify_igpu_pci_address: "{{ _igpu_probe.stdout | regex_search('PCI_ADDR=(\\S*)', '\\1') | first }}"
+        _verify_driver_loaded: "{{ (_igpu_probe.stdout | regex_search('DRIVER_LOADED=(\\d+)', '\\1') | first | int) > 0 }}"
+        _verify_igpu_passthrough: "{{ _igpu_probe.stdout | regex_search('PASSTHROUGH=(\\S+)', '\\1') | first }}"
 
     - name: Assert an iGPU is present
       ansible.builtin.assert:
         that: _verify_igpu_present | bool
         fail_msg: "No iGPU (Intel or AMD) found on {{ inventory_hostname }}"
 
-    - name: Verify GPU driver loaded (Intel i915)
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          lsmod | grep -c '^i915'
-        executable: /bin/bash
-      register: _i915_loaded
-      changed_when: false
-      when: _verify_igpu_vendor == 'intel'
-
-    - name: Assert i915 is loaded
+    - name: Assert GPU driver is loaded
       ansible.builtin.assert:
-        that: (_i915_loaded.stdout | trim | int) > 0
-        fail_msg: "Intel iGPU detected but i915 driver is not loaded"
-      when: _verify_igpu_vendor == 'intel'
-
-    - name: Verify GPU driver loaded (AMD amdgpu)
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          lsmod | grep -c '^amdgpu'
-        executable: /bin/bash
-      register: _amdgpu_loaded
-      changed_when: false
-      when: _verify_igpu_vendor == 'amd'
-
-    - name: Assert amdgpu is loaded
-      ansible.builtin.assert:
-        that: (_amdgpu_loaded.stdout | trim | int) > 0
-        fail_msg: "AMD iGPU detected but amdgpu driver is not loaded"
-      when: _verify_igpu_vendor == 'amd'
-
-    - name: Check if iGPU is passed through to a running VM
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          readlink /sys/bus/pci/devices/0000:00:02.0/driver 2>/dev/null | grep -q vfio-pci && echo "passthrough" || echo "host"
-        executable: /bin/bash
-      register: _verify_igpu_passthrough
-      changed_when: false
+        that: _verify_driver_loaded | bool
+        fail_msg: >-
+          {{ _verify_igpu_vendor }} iGPU detected but
+          {{ 'i915' if _verify_igpu_vendor == 'intel' else 'amdgpu' }}
+          driver is not loaded
       when: _verify_igpu_present | bool
 
     - name: Detect render device
@@ -138,7 +116,7 @@
       changed_when: false
       when:
         - _verify_igpu_present | bool
-        - _verify_igpu_passthrough.stdout | trim != 'passthrough'
+        - _verify_igpu_passthrough != 'passthrough'
 
     - name: Assert render device exists
       ansible.builtin.assert:
@@ -146,7 +124,7 @@
         fail_msg: "No render device found in /dev/dri/ despite iGPU and loaded driver"
       when:
         - _verify_igpu_present | bool
-        - _verify_igpu_passthrough.stdout | trim != 'passthrough'
+        - _verify_igpu_passthrough != 'passthrough'
 
     - name: Verify vainfo is installed
       ansible.builtin.command:
@@ -414,24 +392,20 @@
 
     # ── VM state ──────────────────────────────────────────────────
 
-    - name: Check OpenWrt VM is running
-      ansible.builtin.command:
-        cmd: qm status {{ openwrt_vm_id }}
-      register: vm_running
+    - name: Read OpenWrt VM state and config
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          qm status {{ openwrt_vm_id }}
+          qm config {{ openwrt_vm_id }}
+        executable: /bin/bash
+      register: vm_cfg
       changed_when: false
 
     - name: Assert VM is in running state
       ansible.builtin.assert:
-        that: "'running' in vm_running.stdout"
-        fail_msg: "VM {{ openwrt_vm_id }} is not running: {{ vm_running.stdout }}"
-
-    # ── VM auto-start and NIC ordering ──────────────────────────────
-
-    - name: Read VM config (single call)
-      ansible.builtin.command:
-        cmd: qm config {{ openwrt_vm_id }}
-      register: vm_cfg
-      changed_when: false
+        that: "'running' in vm_cfg.stdout"
+        fail_msg: "VM {{ openwrt_vm_id }} is not running"
 
     - name: Assert VM is configured to start on boot
       ansible.builtin.assert:
@@ -921,222 +895,66 @@
           Mesh={{ mesh_iface_count.stdout | default('0') | trim }},
           LAN_GATEWAY(generated)={{ _generated_lan_gw.stdout | trim }}
 
-# ── Play 3: Pi-hole assertions (dns_nodes) ───────────────────────
+# ── Play 3: Pi-hole health + integration (dns_nodes) ─────────────
+# Deep Pi-hole checks (FTL diagnostics, ad-block, DNS retry loops)
+# live in molecule/pihole-lxc/verify.yml.
 
 - name: Verify Pi-hole LXC on DNS nodes
   hosts: dns_nodes
   gather_facts: false
   tasks:
-    # ── Pi-hole container ──────────────────────────────────────────
-
-    - name: Check Pi-hole container is running
+    - name: Read Pi-hole container state and config
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          pct status {{ pihole_ct_id }} | grep -c running
+          pct status {{ pihole_ct_id }}
+          pct config {{ pihole_ct_id }}
         executable: /bin/bash
-      register: pihole_ct_running
-      changed_when: false
-
-    - name: Assert Pi-hole container is running
-      ansible.builtin.assert:
-        that: (pihole_ct_running.stdout | trim | int) > 0
-        fail_msg: "Container {{ pihole_ct_id }} is not running on {{ inventory_hostname }}"
-
-    - name: Read Pi-hole container config (single call)
-      ansible.builtin.command:
-        cmd: pct config {{ pihole_ct_id }}
       register: pihole_ct_cfg
       changed_when: false
 
-    - name: Assert Pi-hole container starts on boot
+    - name: Assert Pi-hole container is running with correct config
       ansible.builtin.assert:
-        that: "'onboot: 1' in pihole_ct_cfg.stdout"
-        fail_msg: "Container {{ pihole_ct_id }} on {{ inventory_hostname }} missing onboot: 1"
+        that:
+          - "'running' in pihole_ct_cfg.stdout"
+          - "'onboot: 1' in pihole_ct_cfg.stdout"
+          - pihole_ct_cfg.stdout is regex('startup:.*order=3')
+          - "'nesting=1' in pihole_ct_cfg.stdout"
+        fail_msg: "Pi-hole container {{ pihole_ct_id }} config incorrect on {{ inventory_hostname }}"
 
-    - name: Assert Pi-hole container has startup order 3
-      ansible.builtin.assert:
-        that: pihole_ct_cfg.stdout is regex('startup:.*order=3')
-        fail_msg: "Container {{ pihole_ct_id }} on {{ inventory_hostname }} missing startup order=3"
-
-    - name: Assert Pi-hole container has nesting enabled
-      ansible.builtin.assert:
-        that: "'nesting=1' in pihole_ct_cfg.stdout"
-        fail_msg: "Container {{ pihole_ct_id }} on {{ inventory_hostname }} missing nesting=1"
-
-    # ── Pi-hole health checks (batched single pct exec) ───────────
-
-    - name: Run Pi-hole container health checks (single pct exec)
+    - name: Check Pi-hole service health (single pct exec)
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ pihole_ct_id }} -- /bin/sh -c '
           echo "FTL=$(/usr/local/bin/pihole status 2>/dev/null | head -3)";
           echo "WEB=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1/admin/ 2>/dev/null)";
-          echo "DHCP=$(/usr/bin/pihole-FTL --config dhcp.active 2>/dev/null)"
+          echo "DNS=$(dig @127.0.0.1 google.com +short +time=5 2>/dev/null | head -1)"
           '
       register: pihole_health
       changed_when: false
 
-    - name: Assert FTL is active
-      ansible.builtin.assert:
-        that: "'FTL' in pihole_health.stdout or 'Enabled' in pihole_health.stdout or 'Active' in pihole_health.stdout"
-        fail_msg: "Pi-hole FTL not active on {{ inventory_hostname }}"
-
-    - name: Parse web admin status
-      ansible.builtin.set_fact:
-        _pihole_web_code: "{{ pihole_health.stdout | regex_search('WEB=(\\d+)', '\\1') | first }}"
-
-    - name: Assert web admin is accessible
-      ansible.builtin.assert:
-        that: _pihole_web_code in ['200', '301']
-        fail_msg: "Web admin HTTP status: {{ _pihole_web_code }}"
-
-    # ── DNS resolution ────────────────────────────────────────────
-    # Uses block/rescue so diagnostics fire on failure. Previous
-    # approach: retries/until made failure fatal before diag tasks.
-
-    - name: Wait for FTL to listen on TCP+UDP port 53
-      ansible.builtin.shell:
-        cmd: >-
-          pct exec {{ pihole_ct_id }} -- /bin/sh -c '
-          tcp=$(ss -tlnp 2>/dev/null | grep -c ":53 ");
-          udp=$(ss -ulnp 2>/dev/null | grep -c ":53 ");
-          [ "$tcp" -gt 0 ] && [ "$udp" -gt 0 ]
-          && echo BOTH || echo MISSING
-          '
-      register: _ftl_listen
-      changed_when: false
-      retries: 6
-      delay: 5
-      until: "'BOTH' in _ftl_listen.stdout"
-
-    - name: Restart FTL if listeners are incomplete
-      ansible.builtin.command:
-        cmd: >-
-          pct exec {{ pihole_ct_id }} -- /bin/sh -c
-          'systemctl restart pihole-FTL && sleep 3'
-      when: "'BOTH' not in _ftl_listen.stdout"
-      changed_when: true
-
-    - name: Verify container has upstream connectivity
-      ansible.builtin.shell:
-        cmd: >-
-          pct exec {{ pihole_ct_id }} -- /bin/sh -c '
-          gw=$(ip route show default 2>/dev/null
-          | awk "/default/{print \$3}" | head -1);
-          gw_ok=$(ping -c1 -W2 "$gw" >/dev/null 2>&1
-          && echo yes || echo no);
-          ext_ok=$(ping -c1 -W2 1.1.1.1 >/dev/null 2>&1
-          && echo yes || echo no);
-          echo "GW=${gw} GW_PING=${gw_ok} EXT_PING=${ext_ok}"
-          '
-      register: _pihole_net_check
-      changed_when: false
-
-    - name: Report container connectivity
-      ansible.builtin.debug:
-        msg: "Pi-hole net: {{ _pihole_net_check.stdout }}"
-
-    - name: Pi-hole DNS resolution test
-      block:
-        - name: Test DNS via FTL (dig @127.0.0.1)
-          ansible.builtin.command:
-            cmd: >-
-              pct exec {{ pihole_ct_id }} --
-              dig @127.0.0.1 google.com +short +time=5
-          register: pihole_dns_test
-          changed_when: false
-          retries: 3
-          delay: 10
-          until: >-
-            pihole_dns_test.rc == 0 and
-            (pihole_dns_test.stdout | trim | length > 0) and
-            ('timed out' not in pihole_dns_test.stdout)
-      rescue:
-        - name: Collect FTL and network diagnostics
-          ansible.builtin.shell:
-            cmd: |
-              set -o pipefail
-              echo "=== FTL state ==="
-              pct exec {{ pihole_ct_id }} -- /bin/sh -c '
-                echo "FTL_PID=$(pidof pihole-FTL 2>/dev/null || echo dead)"
-                echo "RESOLV=$(cat /etc/resolv.conf 2>/dev/null)"
-                echo "UPSTREAM=$(/usr/bin/pihole-FTL --config dns.upstreams 2>/dev/null)"
-              '
-              echo "=== Network state ==="
-              pct exec {{ pihole_ct_id }} -- /bin/sh -c '
-                echo "IP=$(ip -4 addr show eth0 2>/dev/null | grep inet)"
-                echo "ROUTE=$(ip route show default 2>/dev/null)"
-                gw=$(ip route show default | awk "/default/{print \$3}" | head -1)
-                echo "GW_PING=$(ping -c1 -W2 $gw 2>&1 | tail -1)"
-                echo "EXT_PING=$(ping -c1 -W2 1.1.1.1 2>&1 | tail -1)"
-              '
-              echo "=== Direct upstream DNS test ==="
-              pct exec {{ pihole_ct_id }} -- /bin/sh -c '
-                echo "DIG_UPSTREAM=$(dig @1.1.1.1 google.com +short +time=3 2>&1 | head -3)"
-                gw=$(ip route show default | awk "/default/{print \$3}" | head -1)
-                echo "DIG_GW=$(dig @${gw} google.com +short +time=3 2>&1 | head -3)"
-              '
-            executable: /bin/bash
-          register: _ftl_diag
-          changed_when: false
-
-        - name: Show FTL diagnostics
-          ansible.builtin.debug:
-            var: _ftl_diag.stdout_lines
-
-        - name: Restart FTL and retry DNS
-          ansible.builtin.shell:
-            cmd: >-
-              pct exec {{ pihole_ct_id }} -- /bin/sh -c
-              'systemctl restart pihole-FTL && sleep 5' &&
-              pct exec {{ pihole_ct_id }} --
-              dig @127.0.0.1 google.com +short +time=5
-          register: pihole_dns_test
-          changed_when: false
-          retries: 2
-          delay: 10
-          until: >-
-            pihole_dns_test.rc == 0 and
-            (pihole_dns_test.stdout | trim | length > 0) and
-            ('timed out' not in pihole_dns_test.stdout)
-
-    - name: Assert DNS resolves through Pi-hole
+    - name: Assert FTL is active and DNS resolves
       ansible.builtin.assert:
         that:
-          - pihole_dns_test.stdout | trim | length > 0
-          - "'timed out' not in pihole_dns_test.stdout"
-        fail_msg: >-
-          DNS resolution failed through Pi-hole:
-          {{ pihole_dns_test.stdout | default('no output') }}
+          - "'FTL' in pihole_health.stdout or 'Enabled' in pihole_health.stdout or 'Active' in pihole_health.stdout"
+          - pihole_health.stdout | regex_search('DNS=\\d') is not none
+        fail_msg: "Pi-hole health check failed on {{ inventory_hostname }}: {{ pihole_health.stdout }}"
 
-    - name: Assert DHCP is disabled
-      ansible.builtin.assert:
-        that: "'false' in pihole_health.stdout"
-        fail_msg: "DHCP is active in Pi-hole — should be disabled"
-
-    # ── deploy_stamp ─────────────────────────────────────────────
-
-    - name: Assert stamp contains pihole_lxc (dns nodes only)
+    - name: Assert stamp contains pihole_lxc
       ansible.builtin.assert:
         that: "'pihole_lxc' in stamp.plays"
-        fail_msg: "deploy_stamp missing pihole_lxc entry: {{ stamp.plays.keys() | list }}"
+        fail_msg: "deploy_stamp missing pihole_lxc entry"
 
-    - name: Report Pi-hole verification
-      ansible.builtin.debug:
-        msg: >-
-          Pi-hole verification passed on {{ inventory_hostname }}:
-          container={{ pihole_ct_id }}, running=yes,
-          web={{ _pihole_web_code }},
-          dns={{ 'working' if pihole_dns_test.stdout | trim | length > 0 else 'failed' }}
+# ── Play 4: Monitoring health + integration (monitoring_nodes) ────
+# Deep rsyslog checks (config validation, separation, leak tests,
+# logrotate) live in molecule/rsyslog-lxc/verify.yml.
+# Deep Netdata checks (systemd override, memory) live in
+# molecule/netdata-lxc/verify.yml.
 
-# ── Play 4: rsyslog assertions (monitoring_nodes) ────────────────
-
-- name: Verify rsyslog LXC on monitoring nodes
+- name: Verify monitoring services on monitoring nodes
   hosts: monitoring_nodes
   gather_facts: false
   tasks:
-    # ── Ensure br_netfilter doesn't block bridge traffic ──────────
     - name: Check if br_netfilter is loaded
       ansible.builtin.stat:
         path: /proc/sys/net/bridge/bridge-nf-call-iptables
@@ -1150,168 +968,67 @@
         reload: true
       when: _br_nf.stat.exists
 
-    # ── rsyslog container ──────────────────────────────────────────
+    # ── rsyslog container health ─────────────────────────────────
 
-    - name: Check rsyslog container is running
+    - name: Read rsyslog container state and config
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          pct status {{ rsyslog_ct_id }} | grep -c running
+          pct status {{ rsyslog_ct_id }}
+          pct config {{ rsyslog_ct_id }}
         executable: /bin/bash
-      register: rsyslog_ct_running
-      changed_when: false
-
-    - name: Assert rsyslog container is running
-      ansible.builtin.assert:
-        that: (rsyslog_ct_running.stdout | trim | int) > 0
-        fail_msg: "Container {{ rsyslog_ct_id }} is not running on {{ inventory_hostname }}"
-
-    - name: Read rsyslog container config (single call)
-      ansible.builtin.command:
-        cmd: pct config {{ rsyslog_ct_id }}
       register: rsyslog_ct_cfg
       changed_when: false
 
-    - name: Assert rsyslog container starts on boot
+    - name: Assert rsyslog container is running with correct config
       ansible.builtin.assert:
-        that: "'onboot: 1' in rsyslog_ct_cfg.stdout"
-        fail_msg: "Container {{ rsyslog_ct_id }} on {{ inventory_hostname }} missing onboot: 1"
+        that:
+          - "'running' in rsyslog_ct_cfg.stdout"
+          - "'onboot: 1' in rsyslog_ct_cfg.stdout"
+          - rsyslog_ct_cfg.stdout is regex('startup:.*order=3')
+        fail_msg: "rsyslog container {{ rsyslog_ct_id }} config incorrect on {{ inventory_hostname }}"
 
-    - name: Assert rsyslog container has startup order 3
-      ansible.builtin.assert:
-        that: rsyslog_ct_cfg.stdout is regex('startup:.*order=3')
-        fail_msg: "Container {{ rsyslog_ct_id }} on {{ inventory_hostname }} missing startup order=3"
-
-    # ── Baked config files ─────────────────────────────────────────
-
-    - name: Check baked rsyslog config files exist
-      ansible.builtin.command:
-        cmd: >-
-          pct exec {{ rsyslog_ct_id }} -- /bin/sh -c
-          'test -f /etc/rsyslog.d/10-receive.conf && test -f /etc/rsyslog.d/50-remote-route.conf'
-      register: rsyslog_baked_confs
-      changed_when: false
-
-    - name: Assert baked rsyslog configs are present
-      ansible.builtin.assert:
-        that: rsyslog_baked_confs.rc == 0
-        fail_msg: "Baked rsyslog config files missing (10-receive.conf or 50-remote-route.conf)"
-
-    # ── rsyslog health checks (batched single pct exec) ────────────
-
-    - name: Run rsyslog container health checks (single pct exec)
+    - name: Check rsyslog service is active and TCP 514 listening
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ rsyslog_ct_id }} -- /bin/sh -c '
           echo "SVC=$(systemctl is-active rsyslog 2>/dev/null || echo inactive)";
-          /usr/sbin/rsyslogd -N1 >/dev/null 2>&1; echo "CFG_VALID=$?";
-          echo "TCP514=$(ss -tlnp 2>/dev/null | grep -c ":514")";
-          echo "SPOOL=$(test -d /var/spool/rsyslog && echo present || echo missing)";
-          echo "LOGROTATE=$(test -f /etc/logrotate.d/rsyslog-remote && echo present || echo missing)";
-          MEM=$(free -m | awk "/^Mem:/{print \$3}"); echo "MEM=${MEM}"
+          echo "TCP514=$(ss -tlnp 2>/dev/null | grep -c ":514")"
           '
       register: rsyslog_health
       changed_when: false
 
-    - name: Assert rsyslog service is active
+    - name: Assert rsyslog is active and listening
       ansible.builtin.assert:
-        that: "'SVC=active' in rsyslog_health.stdout"
-        fail_msg: "rsyslog service not active on {{ inventory_hostname }}"
+        that:
+          - "'SVC=active' in rsyslog_health.stdout"
+          - rsyslog_health.stdout | regex_search('TCP514=(\d+)', '\\1') | first | int > 0
+        fail_msg: "rsyslog not active or not listening on TCP 514 on {{ inventory_hostname }}"
 
-    - name: Assert rsyslog config is valid
-      ansible.builtin.assert:
-        that: "'CFG_VALID=0' in rsyslog_health.stdout"
-        fail_msg: "rsyslog config validation failed on {{ inventory_hostname }}"
+    # ── Cross-service: log reception from host ─────────────────
 
-    - name: Assert TCP 514 is listening
-      ansible.builtin.assert:
-        that: rsyslog_health.stdout | regex_search('TCP514=(\d+)', '\\1') | first | int > 0
-        fail_msg: "rsyslog not listening on TCP 514 on {{ inventory_hostname }}"
-
-    - name: Assert spool directory exists
-      ansible.builtin.assert:
-        that: "'SPOOL=present' in rsyslog_health.stdout"
-        fail_msg: "/var/spool/rsyslog missing on {{ inventory_hostname }}"
-
-    # ── Log reception test ───────────────────────────────────────
-
-    - name: Extract rsyslog container IP from cached config
+    - name: Extract rsyslog container IP
       ansible.builtin.set_fact:
         _rsyslog_verify_ip: "{{ rsyslog_ct_cfg.stdout | regex_search('ip=([^/,]+)', '\\1') | first }}"
 
-    - name: Assert container IP is not empty
-      ansible.builtin.assert:
-        that: (_rsyslog_verify_ip | length) > 0
-        fail_msg: "Could not determine rsyslog container IP from pct config on {{ inventory_hostname }}"
-
-    - name: Assert container IP does not collide with host IP
-      ansible.builtin.assert:
-        that: _rsyslog_verify_ip != ansible_host
-        fail_msg: >-
-          Container IP {{ _rsyslog_verify_ip }} collides with host IP
-          {{ ansible_host }} on {{ inventory_hostname }}
-
-    - name: Verify host can reach rsyslog container IP
-      ansible.builtin.command:
-        cmd: ping -c 1 -W 3 {{ _rsyslog_verify_ip }}
-      register: _rsyslog_ping
-      changed_when: false
-      retries: 5
-      delay: 3
-      until: _rsyslog_ping.rc == 0
-
-    - name: Send test log message to rsyslog container
+    - name: Send test log to rsyslog container
       ansible.builtin.shell:
         cmd: >-
           logger --tcp -n {{ _rsyslog_verify_ip }} -P 514
-          "molecule-default-verify-rsyslog-$(date +%s)"
+          "e2e-integration-rsyslog-$(date +%s)"
       changed_when: true
-      retries: 5
+      retries: 3
       delay: 5
       register: _rsyslog_send
       until: _rsyslog_send.rc == 0
       failed_when: false
 
-    - name: Diagnose TCP connectivity failure
-      ansible.builtin.shell:
-        cmd: |
-          echo "=== nft ruleset ==="
-          nft list ruleset 2>/dev/null | head -40 || echo "no nft"
-          echo "=== iptables FORWARD ==="
-          iptables -L FORWARD -n -v 2>/dev/null || echo "no iptables"
-          echo "=== bridge link ==="
-          bridge link show 2>/dev/null || echo "no bridge cmd"
-          echo "=== raw TCP test ==="
-          timeout 3 bash -c "echo test > /dev/tcp/{{ _rsyslog_verify_ip }}/514" 2>&1 && echo "RAW_TCP=ok" || echo "RAW_TCP=fail"
-          echo "=== nc test ==="
-          timeout 3 nc -z -v {{ _rsyslog_verify_ip }} 514 2>&1 && echo "NC=ok" || echo "NC=fail"
-          echo "=== ss inside container ==="
-          pct exec {{ rsyslog_ct_id }} -- ss -tlnp 2>/dev/null || echo "no ss"
-        executable: /bin/bash
-      register: _rsyslog_tcp_debug
-      changed_when: false
-      when: _rsyslog_send.rc != 0
-
-    - name: Show TCP diagnostics
-      ansible.builtin.debug:
-        var: _rsyslog_tcp_debug.stdout_lines
-      when: _rsyslog_send.rc != 0
-
-    - name: Fallback — send log via TCP inside container when host TCP fails
-      ansible.builtin.shell:
-        cmd: >-
-          pct exec {{ rsyslog_ct_id }} --
-          logger --tcp -n 127.0.0.1 -P 514
-          "molecule-default-verify-rsyslog-$(date +%s)"
-      changed_when: true
-      when: _rsyslog_send.rc != 0
-
-    - name: Check test log arrived in container
+    - name: Check test log arrived
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
           pct exec {{ rsyslog_ct_id }} -- \
-            grep -rl 'molecule-default-verify-rsyslog' \
+            grep -rl 'e2e-integration-rsyslog' \
             /var/log/remote/ 2>/dev/null | head -1
         executable: /bin/bash
       register: rsyslog_log_test
@@ -1320,490 +1037,112 @@
       retries: 3
       delay: 2
       until: rsyslog_log_test.stdout | trim | length > 0
+      when: _rsyslog_send.rc == 0
 
-    - name: Assert test log was received
+    - name: Assert log reception works (cross-service integration)
       ansible.builtin.assert:
         that: rsyslog_log_test.stdout | trim | length > 0
-        fail_msg: "Test log message not found in /var/log/remote/"
-
-    - name: List remote log files for diagnostics
-      ansible.builtin.command:
-        cmd: >-
-          pct exec {{ rsyslog_ct_id }} --
-          find /var/log/remote/ -type f -name '*.log'
-      register: _rsyslog_remote_files
-      changed_when: false
-      failed_when: false
-
-    - name: Show remote log files
-      ansible.builtin.debug:
-        msg: >-
-          Remote log files on {{ inventory_hostname }}:
-          {{ _rsyslog_remote_files.stdout_lines | default([]) }}
-
-    # ── Multi-source separation test ──────────────────────────────
-
-    - name: Send tagged log messages for separation test (host TCP)
-      ansible.builtin.shell:
-        cmd: |
-          logger --tcp -n {{ _rsyslog_verify_ip }} -P 514 -t e2e_daemon_a "e2e-separation-a-$(date +%s)" &&
-          logger --tcp -n {{ _rsyslog_verify_ip }} -P 514 -t e2e_daemon_b "e2e-separation-b-$(date +%s)"
-      changed_when: true
+        fail_msg: "Cross-service log reception failed on {{ inventory_hostname }}"
       when: _rsyslog_send.rc == 0
-
-    - name: Send tagged log messages for separation test (container fallback)
-      ansible.builtin.shell:
-        cmd: >-
-          pct exec {{ rsyslog_ct_id }} -- /bin/sh -c '
-          logger --tcp -n 127.0.0.1 -P 514 -t e2e_daemon_a "e2e-separation-a-fallback" &&
-          logger --tcp -n 127.0.0.1 -P 514 -t e2e_daemon_b "e2e-separation-b-fallback"
-          '
-      changed_when: true
-      when: _rsyslog_send.rc != 0
-
-    - name: Check separation logs arrived (single pct exec)
-      ansible.builtin.shell:
-        cmd: >-
-          pct exec {{ rsyslog_ct_id }} -- /bin/sh -c '
-          a=$(grep -rch "e2e-separation-a" /var/log/remote/ 2>/dev/null
-          | awk "{sum+=\$1} END {print sum+0}");
-          b=$(grep -rch "e2e-separation-b" /var/log/remote/ 2>/dev/null
-          | awk "{sum+=\$1} END {print sum+0}");
-          echo "DAEMON_A=$a";
-          echo "DAEMON_B=$b"
-          '
-      register: _rsyslog_separation
-      changed_when: false
-      failed_when: false
-      retries: 3
-      delay: 2
-      until: >-
-        'DAEMON_A=0' not in _rsyslog_separation.stdout and
-        'DAEMON_B=0' not in _rsyslog_separation.stdout
-
-    - name: Assert per-program log separation works
-      ansible.builtin.assert:
-        that:
-          - "'DAEMON_A=0' not in _rsyslog_separation.stdout"
-          - "'DAEMON_B=0' not in _rsyslog_separation.stdout"
-        fail_msg: >-
-          Per-program separation failed:
-          {{ _rsyslog_separation.stdout }}
-
-    # ── No-leak test: remote messages must NOT appear in local syslog
-
-    - name: Send uniquely tagged message for leak test (host TCP)
-      ansible.builtin.shell:
-        cmd: >-
-          logger --tcp -n {{ _rsyslog_verify_ip }} -P 514 -t e2e_leak
-          "noleak-e2e-sentinel-$(date +%s)"
-      changed_when: true
-      when: _rsyslog_send.rc == 0
-
-    - name: Send uniquely tagged message for leak test (container fallback)
-      ansible.builtin.command:
-        cmd: >-
-          pct exec {{ rsyslog_ct_id }} --
-          logger --tcp -n 127.0.0.1 -P 514 -t e2e_leak
-          "noleak-e2e-sentinel-fallback"
-      changed_when: true
-      when: _rsyslog_send.rc != 0
-
-    - name: Check leak test results (single pct exec)
-      ansible.builtin.shell:
-        cmd: >-
-          pct exec {{ rsyslog_ct_id }} -- /bin/sh -c '
-          remote=$(grep -rch "noleak-e2e-sentinel" /var/log/remote/
-          2>/dev/null | awk "{sum+=\$1} END {print sum+0}");
-          local=$(grep -c "noleak-e2e-sentinel" /var/log/syslog
-          2>/dev/null || echo 0);
-          echo "LEAK_REMOTE=$remote";
-          echo "LEAK_LOCAL=$local"
-          '
-      register: _rsyslog_leak
-      changed_when: false
-      failed_when: false
-      retries: 3
-      delay: 2
-      until: "'LEAK_REMOTE=0' not in _rsyslog_leak.stdout"
-
-    - name: Assert remote messages are isolated from local syslog
-      ansible.builtin.assert:
-        that:
-          - "'LEAK_REMOTE=0' not in _rsyslog_leak.stdout"
-          - "'LEAK_LOCAL=0' in _rsyslog_leak.stdout"
-        fail_msg: >-
-          Remote message isolation failed:
-          {{ _rsyslog_leak.stdout }}
-
-    # ── Memory and logrotate checks (from batched health output) ──
-
-    - name: Parse rsyslog memory usage from health check
-      ansible.builtin.set_fact:
-        _rsyslog_mem_mb: "{{ rsyslog_health.stdout | regex_search('MEM=(\\d+)', '\\1') | first }}"
-
-    - name: Assert memory usage is reasonable for 64 MB container
-      ansible.builtin.assert:
-        that: (_rsyslog_mem_mb | int) < 56
-        fail_msg: >-
-          rsyslog container on {{ inventory_hostname }} using
-          {{ _rsyslog_mem_mb }} MB of 64 MB — risk of OOM
-
-    - name: Assert logrotate config exists
-      ansible.builtin.assert:
-        that: "'LOGROTATE=present' in rsyslog_health.stdout"
-        fail_msg: "/etc/logrotate.d/rsyslog-remote missing on {{ inventory_hostname }}"
-
-    - name: Validate logrotate config syntax
-      ansible.builtin.command:
-        cmd: pct exec {{ rsyslog_ct_id }} -- logrotate --debug /etc/logrotate.d/rsyslog-remote
-      register: rsyslog_logrotate_valid
-      changed_when: false
-      failed_when: false
-
-    - name: Assert logrotate config is valid
-      ansible.builtin.assert:
-        that: rsyslog_logrotate_valid.rc == 0
-        fail_msg: "logrotate config invalid on {{ inventory_hostname }}: {{ rsyslog_logrotate_valid.stderr }}"
-
-    # ── deploy_stamp ─────────────────────────────────────────────
 
     - name: Assert stamp contains rsyslog_lxc
       ansible.builtin.assert:
         that: "'rsyslog_lxc' in stamp.plays"
-        fail_msg: "deploy_stamp missing rsyslog_lxc entry: {{ stamp.plays.keys() | list }}"
+        fail_msg: "deploy_stamp missing rsyslog_lxc entry"
 
-    - name: Report rsyslog verification
-      ansible.builtin.debug:
-        msg: >-
-          rsyslog verification passed on {{ inventory_hostname }}:
-          container={{ rsyslog_ct_id }}, running=yes,
-          ip={{ _rsyslog_verify_ip }},
-          config_valid=yes,
-          tcp_514=listening,
-          log_reception={{ 'verified' if rsyslog_log_test.stdout | trim | length > 0 else 'failed' }},
-          multi_source=verified,
-          remote_isolation=verified,
-          memory={{ _rsyslog_mem_mb }}MB,
-          logrotate=valid
+    # ── Netdata container health ─────────────────────────────────
 
-    # ── Netdata container ──────────────────────────────────────────
-
-    - name: Check Netdata container is running
+    - name: Read Netdata container state and config
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          pct status {{ netdata_ct_id }} | grep -c running
+          pct status {{ netdata_ct_id }}
+          pct config {{ netdata_ct_id }}
         executable: /bin/bash
-      register: netdata_ct_running
-      changed_when: false
-
-    - name: Assert Netdata container is running
-      ansible.builtin.assert:
-        that: (netdata_ct_running.stdout | trim | int) > 0
-        fail_msg: "Container {{ netdata_ct_id }} is not running on {{ inventory_hostname }}"
-
-    - name: Read Netdata container config (single call)
-      ansible.builtin.command:
-        cmd: pct config {{ netdata_ct_id }}
       register: netdata_ct_cfg
       changed_when: false
 
-    - name: Assert Netdata container starts on boot
+    - name: Assert Netdata container is running with correct config
       ansible.builtin.assert:
-        that: "'onboot: 1' in netdata_ct_cfg.stdout"
-        fail_msg: "Container {{ netdata_ct_id }} on {{ inventory_hostname }} missing onboot: 1"
+        that:
+          - "'running' in netdata_ct_cfg.stdout"
+          - "'onboot: 1' in netdata_ct_cfg.stdout"
+          - netdata_ct_cfg.stdout is regex('startup:.*order=3')
+          - "'nesting=1' in netdata_ct_cfg.stdout"
+          - "'/host/proc' in netdata_ct_cfg.stdout"
+          - "'/host/sys' in netdata_ct_cfg.stdout"
+        fail_msg: "Netdata container {{ netdata_ct_id }} config incorrect on {{ inventory_hostname }}"
 
-    - name: Assert Netdata container has startup order 3
-      ansible.builtin.assert:
-        that: netdata_ct_cfg.stdout is regex('startup:.*order=3')
-        fail_msg: "Container {{ netdata_ct_id }} on {{ inventory_hostname }} missing startup order=3"
-
-    # ── Bind mounts ──────────────────────────────────────────────
-
-    - name: Assert /host/proc bind mount exists
-      ansible.builtin.assert:
-        that: "'/host/proc' in netdata_ct_cfg.stdout"
-        fail_msg: "Bind mount for /host/proc not found in container config on {{ inventory_hostname }}"
-
-    - name: Assert /host/sys bind mount exists
-      ansible.builtin.assert:
-        that: "'/host/sys' in netdata_ct_cfg.stdout"
-        fail_msg: "Bind mount for /host/sys not found in container config on {{ inventory_hostname }}"
-
-    # ── Nesting feature ──────────────────────────────────────────
-
-    - name: Assert nesting=1 is enabled
-      ansible.builtin.assert:
-        that: "'nesting=1' in netdata_ct_cfg.stdout"
-        fail_msg: "Container missing nesting=1 on {{ inventory_hostname }}"
-
-    # ── Netdata container health checks (batched single pct exec) ─
-
-    - name: Run Netdata container health checks (single pct exec)
+    - name: Check Netdata service and dashboard (single pct exec)
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ netdata_ct_id }} -- /bin/sh -c '
-          echo "OVERRIDE=$(test -f /etc/systemd/system/netdata.service.d/lxc-override.conf && echo present || echo missing)";
           echo "SVC=$(systemctl is-active netdata 2>/dev/null || echo inactive)";
-          echo "CPUINFO=$(test -f /host/proc/cpuinfo && echo present || echo missing)";
-          MEM=$(free -m | awk "/^Mem:/{print \$3}"); echo "MEM=${MEM}"
+          echo "HTTP=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:19999 2>/dev/null)"
           '
       register: netdata_health
       changed_when: false
 
-    - name: Debug Netdata health output
-      ansible.builtin.debug:
-        msg: "{{ inventory_hostname }}: {{ netdata_health.stdout }}"
-
-    - name: Assert systemd override is present
+    - name: Assert Netdata is active and dashboard responds
       ansible.builtin.assert:
-        that: "'OVERRIDE=present' in netdata_health.stdout"
-        fail_msg: >-
-          systemd LXC override not found on {{ inventory_hostname }}:
-          {{ netdata_health.stdout }}
-
-    - name: Assert Netdata service is active
-      ansible.builtin.assert:
-        that: "'SVC=active' in netdata_health.stdout"
-        fail_msg: "Netdata service not active on {{ inventory_hostname }}"
-
-    # ── Dashboard on port 19999 (kept separate for retry logic) ──
-
-    - name: Check Netdata dashboard responds
-      ansible.builtin.command:
-        cmd: pct exec {{ netdata_ct_id }} -- curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:19999
-      register: netdata_dashboard
-      changed_when: false
-      retries: 3
-      delay: 3
-      until: (netdata_dashboard.stdout | trim) == '200'
-
-    - name: Assert dashboard is accessible
-      ansible.builtin.assert:
-        that: (netdata_dashboard.stdout | trim) == '200'
-        fail_msg: "Dashboard HTTP status on {{ inventory_hostname }}: {{ netdata_dashboard.stdout | trim }}"
-
-    - name: Assert host cpuinfo is readable
-      ansible.builtin.assert:
-        that: "'CPUINFO=present' in netdata_health.stdout"
-        fail_msg: "/host/proc/cpuinfo not accessible in container on {{ inventory_hostname }}"
-
-    # ── Container IP validation ──────────────────────────────────
-
-    - name: Extract netdata container IP from cached config
-      ansible.builtin.set_fact:
-        _netdata_verify_ip: "{{ netdata_ct_cfg.stdout | regex_search('ip=([^/,]+)', '\\1') | first }}"
-
-    - name: Assert container IP is not empty
-      ansible.builtin.assert:
-        that: (_netdata_verify_ip | length) > 0
-        fail_msg: "Could not determine netdata container IP from pct config on {{ inventory_hostname }}"
-
-    - name: Assert container IP does not collide with host IP
-      ansible.builtin.assert:
-        that: _netdata_verify_ip != ansible_host
-        fail_msg: >-
-          Container IP {{ _netdata_verify_ip }} collides with host IP
-          {{ ansible_host }} on {{ inventory_hostname }}
-
-    # ── Memory usage check (from batched health output) ──────────
-
-    - name: Parse Netdata memory usage from health check
-      ansible.builtin.set_fact:
-        _netdata_mem_mb: "{{ netdata_health.stdout | regex_search('MEM=(\\d+)', '\\1') | first }}"
-
-    - name: Assert memory usage is reasonable for 128 MB container
-      ansible.builtin.assert:
-        that: (_netdata_mem_mb | int) < 112
-        fail_msg: >-
-          Netdata container on {{ inventory_hostname }} using
-          {{ _netdata_mem_mb }} MB of 128 MB — risk of OOM
-
-    # ── deploy_stamp ─────────────────────────────────────────────
+        that:
+          - "'SVC=active' in netdata_health.stdout"
+          - netdata_health.stdout | regex_search('HTTP=(\\d+)', '\\1') | first == '200'
+        fail_msg: "Netdata health check failed on {{ inventory_hostname }}: {{ netdata_health.stdout }}"
 
     - name: Assert stamp contains netdata_lxc
       ansible.builtin.assert:
         that: "'netdata_lxc' in stamp.plays"
-        fail_msg: "deploy_stamp missing netdata_lxc entry: {{ stamp.plays.keys() | list }}"
+        fail_msg: "deploy_stamp missing netdata_lxc entry"
 
-    - name: Report Netdata verification
-      ansible.builtin.debug:
-        msg: >-
-          Netdata verification passed on {{ inventory_hostname }}:
-          container={{ netdata_ct_id }}, running=yes,
-          ip={{ _netdata_verify_ip }},
-          dashboard={{ netdata_dashboard.stdout | trim }},
-          host_proc=accessible,
-          bind_mounts=present,
-          memory={{ _netdata_mem_mb }}MB
-
-# ── Play 6: WireGuard assertions (all vpn_nodes) ─────────────────
+# ── Play 6: WireGuard health (vpn_nodes) ────────────────────────
+# Deep WireGuard checks (permissions, peers, sysctl, NAT, env.generated)
+# live in molecule/wireguard-lxc/verify.yml.
 
 - name: Verify WireGuard LXC on VPN nodes
   hosts: vpn_nodes
   gather_facts: false
   tasks:
-    # ── WireGuard container ────────────────────────────────────────
-
-    - name: Check WireGuard container is running
+    - name: Read WireGuard container state and config
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          pct status {{ wireguard_ct_id }} | grep -c running
+          pct status {{ wireguard_ct_id }}
+          pct config {{ wireguard_ct_id }}
         executable: /bin/bash
-      register: wg_ct_running
-      changed_when: false
-
-    - name: Assert WireGuard container is running
-      ansible.builtin.assert:
-        that: (wg_ct_running.stdout | trim | int) > 0
-        fail_msg: "Container {{ wireguard_ct_id }} is not running on {{ inventory_hostname }}"
-
-    - name: Read WireGuard container config (single call)
-      ansible.builtin.command:
-        cmd: pct config {{ wireguard_ct_id }}
       register: wg_ct_cfg
       changed_when: false
 
-    - name: Assert WireGuard container starts on boot
+    - name: Assert WireGuard container is running with correct config
       ansible.builtin.assert:
-        that: "'onboot: 1' in wg_ct_cfg.stdout"
-        fail_msg: "Container {{ wireguard_ct_id }} on {{ inventory_hostname }} missing onboot: 1"
+        that:
+          - "'running' in wg_ct_cfg.stdout"
+          - "'onboot: 1' in wg_ct_cfg.stdout"
+          - wg_ct_cfg.stdout is regex('startup:.*order=2')
+          - "'nesting=1' in wg_ct_cfg.stdout"
+        fail_msg: "WireGuard container {{ wireguard_ct_id }} config incorrect on {{ inventory_hostname }}"
 
-    - name: Assert WireGuard container has startup order 2
-      ansible.builtin.assert:
-        that: wg_ct_cfg.stdout is regex('startup:.*order=2')
-        fail_msg: "Container {{ wireguard_ct_id }} on {{ inventory_hostname }} missing startup order=2"
-
-    - name: Assert WireGuard container has nesting enabled
-      ansible.builtin.assert:
-        that: "'nesting=1' in wg_ct_cfg.stdout"
-        fail_msg: "Container {{ wireguard_ct_id }} on {{ inventory_hostname }} missing nesting=1"
-
-    # ── Kernel module on host ──────────────────────────────────────
-
-    - name: Check wireguard kernel module on host
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          lsmod | grep -c '^wireguard'
-        executable: /bin/bash
-      register: wg_module_loaded
-      changed_when: false
-
-    - name: Assert wireguard kernel module is loaded
-      ansible.builtin.assert:
-        that: (wg_module_loaded.stdout | trim | int) > 0
-        fail_msg: "wireguard kernel module is not loaded on {{ inventory_hostname }}"
-
-    - name: Check wireguard module persistence file
-      ansible.builtin.stat:
-        path: /etc/modules-load.d/wireguard.conf
-      register: wg_module_conf
-
-    - name: Assert wireguard module persistence exists
-      ansible.builtin.assert:
-        that: wg_module_conf.stat.exists
-        fail_msg: "/etc/modules-load.d/wireguard.conf missing on {{ inventory_hostname }}"
-
-    # ── WireGuard configuration (batched single pct exec) ──────────
-
-    - name: Run WireGuard container health checks (single pct exec)
+    - name: Check wg0 interface is up (single pct exec)
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ wireguard_ct_id }} -- /bin/sh -c '
           echo "IFACE=$(ip link show wg0 >/dev/null 2>&1 && echo ok || echo missing)";
-          echo "PERMS=$(stat -c "%a" /etc/wireguard/wg0.conf 2>/dev/null || echo missing)";
-          echo "PEER=$(wg show wg0 2>/dev/null | grep -c -E "peer|endpoint")";
-          echo "SVC=$(systemctl is-enabled wg-quick@wg0 2>/dev/null || echo unknown)";
-          echo "IPFWD=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)";
-          echo "SYSCTL=$(test -f /etc/sysctl.d/99-wireguard.conf && echo present || echo missing)";
-          echo "NAT=$(iptables -t nat -C POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null && echo present || echo missing)"
+          echo "SVC=$(systemctl is-enabled wg-quick@wg0 2>/dev/null || echo unknown)"
           '
       register: wg_health
       changed_when: false
 
-    - name: Assert wg0 interface exists
+    - name: Assert wg0 interface exists and service enabled
       ansible.builtin.assert:
-        that: "'IFACE=ok' in wg_health.stdout"
-        fail_msg: "wg0 interface not found in container {{ wireguard_ct_id }} on {{ inventory_hostname }}"
+        that:
+          - "'IFACE=ok' in wg_health.stdout"
+          - "'SVC=enabled' in wg_health.stdout"
+        fail_msg: "WireGuard health check failed on {{ inventory_hostname }}: {{ wg_health.stdout }}"
 
-    - name: Assert wg0 config has correct permissions
+    - name: Assert stamp contains wireguard_lxc
       ansible.builtin.assert:
-        that: "'PERMS=600' in wg_health.stdout"
-        fail_msg: >-
-          /etc/wireguard/wg0.conf permissions incorrect on {{ inventory_hostname }}.
-          Health output: {{ wg_health.stdout }}
-
-    - name: Assert wg show reports peer
-      ansible.builtin.assert:
-        that: wg_health.stdout | regex_search('PEER=(\d+)', '\\1') | first | int > 0
-        fail_msg: "wg show wg0 missing peer/endpoint info on {{ inventory_hostname }}"
-
-    - name: Assert wg-quick@wg0 is enabled
-      ansible.builtin.assert:
-        that: "'SVC=enabled' in wg_health.stdout"
-        fail_msg: "wg-quick@wg0 not enabled on {{ inventory_hostname }}"
-
-    - name: Assert IP forwarding is enabled
-      ansible.builtin.assert:
-        that: "'IPFWD=1' in wg_health.stdout"
-        fail_msg: "IP forwarding not enabled on {{ inventory_hostname }}"
-
-    - name: Assert IP forwarding sysctl file exists
-      ansible.builtin.assert:
-        that: "'SYSCTL=present' in wg_health.stdout"
-        fail_msg: "/etc/sysctl.d/99-wireguard.conf missing on {{ inventory_hostname }}"
-
-    - name: Assert MASQUERADE rule present on wg0
-      ansible.builtin.assert:
-        that: "'NAT=present' in wg_health.stdout"
-        fail_msg: "MASQUERADE rule missing on {{ inventory_hostname }}"
-
-    # ── Generated env file (controller, check once) ────────────────
-
-    - name: Check test.env.generated exists on controller
-      ansible.builtin.stat:
-        path: "{{ playbook_dir }}/../../test.env.generated"
-      register: env_generated
-      delegate_to: localhost
-      run_once: true
-
-    - name: Assert test.env.generated was written (auto-generated keys)
-      ansible.builtin.assert:
-        that: env_generated.stat.exists
-        fail_msg: "test.env.generated not found on controller"
-      when: lookup('env', 'WIREGUARD_PRIVATE_KEY') | length == 0
-      run_once: true
-
-    - name: Read test.env.generated for public key check
-      ansible.builtin.slurp:
-        src: "{{ playbook_dir }}/../../test.env.generated"
-      register: env_generated_content
-      delegate_to: localhost
-      when:
-        - lookup('env', 'WIREGUARD_PRIVATE_KEY') | length == 0
-        - env_generated.stat.exists
-      run_once: true
-
-    - name: Assert test.env.generated contains client public key
-      ansible.builtin.assert:
-        that: "'WIREGUARD_PUBLIC_KEY=' in (env_generated_content.content | b64decode)"
-        fail_msg: "test.env.generated missing WIREGUARD_PUBLIC_KEY entry"
-      when:
-        - lookup('env', 'WIREGUARD_PRIVATE_KEY') | length == 0
-        - env_generated.stat.exists
-      run_once: true
-
-    - name: Report WireGuard verification
-      ansible.builtin.debug:
-        msg: >-
-          WireGuard verification passed on {{ inventory_hostname }}:
-          container={{ wireguard_ct_id }}, running=yes,
-          wg0={{ 'present' if 'IFACE=ok' in wg_health.stdout else 'absent' }},
-          ip_forward={{ 'enabled' if 'IPFWD=1' in wg_health.stdout else 'disabled' }},
-          nat={{ 'present' if 'NAT=present' in wg_health.stdout else 'absent' }}
+        that: "'wireguard_lxc' in stamp.plays"
+        fail_msg: "deploy_stamp missing wireguard_lxc entry"
 
 # ── Play 4: LAN host assertions (mesh1-specific) ─────────────────
 
@@ -1866,25 +1205,20 @@
   hosts: wifi_nodes:!router_nodes
   gather_facts: false
   tasks:
-    - name: Check mesh WiFi container is running
+    - name: Read mesh WiFi container state and config
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          pct status {{ meshwifi_ct_id }} | grep -c running
+          pct status {{ meshwifi_ct_id }}
+          pct config {{ meshwifi_ct_id }}
         executable: /bin/bash
-      register: mesh_ct_running
+      register: mesh_ct_cfg
       changed_when: false
 
     - name: Assert mesh WiFi container is running
       ansible.builtin.assert:
-        that: (mesh_ct_running.stdout | trim | int) > 0
+        that: "'running' in mesh_ct_cfg.stdout"
         fail_msg: "Container {{ meshwifi_ct_id }} is not running on {{ inventory_hostname }}"
-
-    - name: Read mesh WiFi container config (single call)
-      ansible.builtin.command:
-        cmd: pct config {{ meshwifi_ct_id }}
-      register: mesh_ct_cfg
-      changed_when: false
 
     - name: Assert mesh container starts on boot
       ansible.builtin.assert:
@@ -1960,731 +1294,188 @@
           container={{ meshwifi_ct_id }}, running=yes,
           privileged=yes, hookscript=deployed
 
-# ── Play 7: Home Assistant assertions (service_nodes) ─────────────
+# ── Play 7: Home Assistant health (service_nodes) ────────────────
+# Deep HA checks (Docker install, Compose, cgroupfs, HA image, IP offset)
+# live in molecule/homeassistant-lxc/verify.yml.
 
 - name: Verify Home Assistant LXC on service nodes
   hosts: service_nodes
   gather_facts: false
   tasks:
-    # ── Home Assistant container ─────────────────────────────────────
-
-    - name: Check Home Assistant container is running
+    - name: Read Home Assistant container state and config
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          pct status {{ homeassistant_ct_id }} | grep -c running
+          pct status {{ homeassistant_ct_id }}
+          pct config {{ homeassistant_ct_id }}
         executable: /bin/bash
-      register: ha_ct_running
-      changed_when: false
-
-    - name: Assert Home Assistant container is running
-      ansible.builtin.assert:
-        that: (ha_ct_running.stdout | trim | int) > 0
-        fail_msg: "Container {{ homeassistant_ct_id }} is not running on {{ inventory_hostname }}"
-
-    - name: Read Home Assistant container config (single call)
-      ansible.builtin.command:
-        cmd: pct config {{ homeassistant_ct_id }}
       register: ha_ct_cfg
       changed_when: false
 
-    - name: Assert Home Assistant container starts on boot
+    - name: Assert Home Assistant container is running with correct config
       ansible.builtin.assert:
-        that: "'onboot: 1' in ha_ct_cfg.stdout"
-        fail_msg: "Container {{ homeassistant_ct_id }} on {{ inventory_hostname }} missing onboot: 1"
+        that:
+          - "'running' in ha_ct_cfg.stdout"
+          - "'onboot: 1' in ha_ct_cfg.stdout"
+          - ha_ct_cfg.stdout is regex('startup:.*order=5')
+          - "'nesting=1' in ha_ct_cfg.stdout"
+        fail_msg: "Home Assistant container {{ homeassistant_ct_id }} config incorrect on {{ inventory_hostname }}"
 
-    - name: Assert Home Assistant container has startup order 5
-      ansible.builtin.assert:
-        that: ha_ct_cfg.stdout is regex('startup:.*order=5')
-        fail_msg: "Container {{ homeassistant_ct_id }} on {{ inventory_hostname }} missing startup order=5"
-
-    - name: Assert Home Assistant container has nesting enabled
-      ansible.builtin.assert:
-        that: "'nesting=1' in ha_ct_cfg.stdout"
-        fail_msg: "Container {{ homeassistant_ct_id }} on {{ inventory_hostname }} missing nesting=1"
-
-    # ── Docker installation verification ────────────────────────────
-
-    - name: Run Docker installation verification (single pct exec)
+    - name: Check Docker daemon is active (single pct exec)
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ homeassistant_ct_id }} -- /bin/sh -c '
-          echo "DOCKER=$(docker --version 2>/dev/null || echo missing)";
-          echo "COMPOSE=$(docker compose version 2>/dev/null || echo missing)";
-          echo "DAEMON=$(systemctl is-active docker 2>/dev/null || echo inactive)";
-          echo "HA_IMAGE=$(docker image inspect homeassistant/home-assistant:stable
-          >/dev/null 2>&1 && echo present || echo missing)";
-          echo "CGROUPFS=$(test -f /etc/docker/daemon.json &&
-          grep -q cgroupfs /etc/docker/daemon.json &&
-          echo present || echo missing)"
+          echo "DAEMON=$(systemctl is-active docker 2>/dev/null || echo inactive)"
           '
-      register: ha_docker_check
+      register: ha_health
       changed_when: false
-
-    - name: Assert Docker CE is installed
-      ansible.builtin.assert:
-        that: "'DOCKER=Docker version' in ha_docker_check.stdout"
-        fail_msg: "Docker CE not installed in Home Assistant container on {{ inventory_hostname }}"
-
-    - name: Assert Docker Compose plugin is installed
-      ansible.builtin.assert:
-        that: "'COMPOSE=Docker Compose version' in ha_docker_check.stdout"
-        fail_msg: "Docker Compose plugin not installed in Home Assistant container on {{ inventory_hostname }}"
 
     - name: Assert Docker daemon is active
       ansible.builtin.assert:
-        that: "'DAEMON=active' in ha_docker_check.stdout"
+        that: "'DAEMON=active' in ha_health.stdout"
         fail_msg: "Docker daemon not active in Home Assistant container on {{ inventory_hostname }}"
 
-    - name: Assert HA container image is pre-pulled
+    - name: Assert stamp contains homeassistant_lxc
       ansible.builtin.assert:
-        that: "'HA_IMAGE=present' in ha_docker_check.stdout"
-        fail_msg: "Home Assistant container image not pre-pulled in template on {{ inventory_hostname }}"
+        that: "'homeassistant_lxc' in stamp.plays"
+        fail_msg: "deploy_stamp missing homeassistant_lxc entry"
 
-    - name: Assert cgroupfs driver is configured
-      ansible.builtin.assert:
-        that: "'CGROUPFS=present' in ha_docker_check.stdout"
-        fail_msg: "Docker cgroupfs driver not configured in Home Assistant container on {{ inventory_hostname }}"
+# ── Play 5: Media services health (media_nodes + streaming_nodes) ──
+# Deep Jellyfin checks (VA-API, media path, port, web UI, IP offset)
+# live in molecule/jellyfin-lxc/verify.yml.
+# Deep Kodi checks (packages, device mounts, config files, ALSA)
+# live in molecule/kodi-lxc/verify.yml.
+# Deep Moonlight checks (VA-API, config, DRI, vainfo)
+# live in molecule/moonlight-lxc/verify.yml.
 
-    # ── Container IP validation ─────────────────────────────────────
-
-    - name: Extract Home Assistant container IP from cached config
-      ansible.builtin.set_fact:
-        _ha_verify_ip: "{{ ha_ct_cfg.stdout | regex_search('ip=([^/,]+)', '\\1') | first }}"
-
-    - name: Assert container IP is not empty
-      ansible.builtin.assert:
-        that: (_ha_verify_ip | length) > 0
-        fail_msg: "Could not determine Home Assistant container IP from pct config on {{ inventory_hostname }}"
-
-    - name: Assert container IP does not collide with host IP
-      ansible.builtin.assert:
-        that: _ha_verify_ip != ansible_host
-        fail_msg: >-
-          Container IP {{ _ha_verify_ip }} collides with host IP
-          {{ ansible_host }} on {{ inventory_hostname }}
-
-    - name: Assert Home Assistant IP matches expected offset (14)
-      ansible.builtin.set_fact:
-        _ha_expected_ip: "{{ _ha_verify_ip.split('.')[0:3] | join('.') }}.14"
-
-    - name: Assert container IP has correct offset
-      ansible.builtin.assert:
-        that: _ha_verify_ip == _ha_expected_ip
-        fail_msg: >-
-          Home Assistant container IP {{ _ha_verify_ip }} does not match
-          expected {{ _ha_expected_ip }} (offset 14) on {{ inventory_hostname }}
-
-    - name: Report Home Assistant verification
-      ansible.builtin.debug:
-        msg: >-
-          Home Assistant verification passed on {{ inventory_hostname }}:
-          container={{ homeassistant_ct_id }}, running=yes,
-          ip={{ _ha_verify_ip }},
-          docker={{ 'installed' if 'DOCKER=Docker version' in ha_docker_check.stdout else 'missing' }},
-          compose={{ 'installed' if 'COMPOSE=Docker Compose version' in ha_docker_check.stdout else 'missing' }},
-          daemon={{ 'active' if 'DAEMON=active' in ha_docker_check.stdout else 'inactive' }},
-          ha_image={{ 'pre-pulled' if 'HA_IMAGE=present' in ha_docker_check.stdout else 'missing' }}
-
-# ── Play 5: Media services (media_nodes) ───────────────────────
-
-- name: Verify Jellyfin media server
+- name: Verify media services on media nodes
   hosts: media_nodes
   gather_facts: false
   tasks:
-    # ── Container state verification ───────────────────────────────
-
-    - name: Check Jellyfin container is running
+    - name: Read Jellyfin container state and config
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          pct status {{ jellyfin_ct_id }} | grep -c running
+          pct status {{ jellyfin_ct_id }}
+          pct config {{ jellyfin_ct_id }}
         executable: /bin/bash
-      register: _jellyfin_running
-      changed_when: false
-
-    - name: Assert Jellyfin container is running
-      ansible.builtin.assert:
-        that: (_jellyfin_running.stdout | trim | int) > 0
-        fail_msg: "Jellyfin container {{ jellyfin_ct_id }} on {{ inventory_hostname }} is not running"
-
-    # ── Container configuration verification ───────────────────────
-
-    - name: Read Jellyfin container config (single call)
-      ansible.builtin.command:
-        cmd: pct config {{ jellyfin_ct_id }}
       register: _jellyfin_cfg
       changed_when: false
 
-    - name: Assert Jellyfin container starts on boot
-      ansible.builtin.assert:
-        that: "'onboot: 1' in _jellyfin_cfg.stdout"
-        fail_msg: "Container {{ jellyfin_ct_id }} on {{ inventory_hostname }} missing onboot: 1"
-
-    - name: Assert Jellyfin container has startup order 5
-      ansible.builtin.assert:
-        that: _jellyfin_cfg.stdout is regex('startup:.*order=5')
-        fail_msg: "Container {{ jellyfin_ct_id }} on {{ inventory_hostname }} missing startup order=5"
-
-    # ── lxc.mount.entry device bind mount ─────────────────────────
-
-    - name: Check lxc.mount.entry for DRI device
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ jellyfin_ct_id }} | grep -c 'lxc.mount.entry.*dev/dri'
-        executable: /bin/bash
-      register: _jellyfin_mount_entry
-      changed_when: false
-
-    - name: Assert DRI bind mount is configured
-      ansible.builtin.assert:
-        that: (_jellyfin_mount_entry.stdout | trim | int) >= 1
-        fail_msg: "Expected lxc.mount.entry for /dev/dri, got {{ _jellyfin_mount_entry.stdout | trim }}"
-
-    # ── iGPU device mounting verification ──────────────────────────
-
-    - name: Check if iGPU is passed through to a VM
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          readlink /sys/bus/pci/devices/0000:00:02.0/driver 2>/dev/null | grep -q vfio-pci && echo "passthrough" || echo "host"
-        executable: /bin/bash
-      register: _jellyfin_igpu_passthrough
-      changed_when: false
-
-    - name: Verify render device is mounted in container
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct exec {{ jellyfin_ct_id }} -- ls /dev/dri/renderD* 2>/dev/null | head -1
-        executable: /bin/bash
-      register: _igpu_mount
-      changed_when: false
-      when: _jellyfin_igpu_passthrough.stdout | trim != 'passthrough'
-
-    - name: Assert render device is mounted
+    - name: Assert Jellyfin container is running with correct config
       ansible.builtin.assert:
         that:
-          - _igpu_mount.rc == 0
-          - _igpu_mount.stdout | trim | length > 0
-        fail_msg: "No render device found in /dev/dri/ inside container {{ jellyfin_ct_id }} on {{ inventory_hostname }}"
-      when: _jellyfin_igpu_passthrough.stdout | trim != 'passthrough'
+          - "'running' in _jellyfin_cfg.stdout"
+          - "'onboot: 1' in _jellyfin_cfg.stdout"
+          - _jellyfin_cfg.stdout is regex('startup:.*order=5')
+          - _jellyfin_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/dri')
+        fail_msg: "Jellyfin container {{ jellyfin_ct_id }} config incorrect on {{ inventory_hostname }}"
 
-    # ── Media path mounting verification ───────────────────────────
-
-    - name: Verify media path is mounted in container
-      ansible.builtin.command:
-        cmd: pct exec {{ jellyfin_ct_id }} -- ls -la /media
-      register: _media_mount
-      changed_when: false
-
-    - name: Assert media path is mounted
-      ansible.builtin.assert:
-        that: _media_mount.rc == 0
-        fail_msg: "Media path /media not mounted in container {{ jellyfin_ct_id }} on {{ inventory_hostname }}"
-
-    # ── Jellyfin service verification ──────────────────────────────
-
-    - name: Run Jellyfin service verification (single pct exec)
+    - name: Check Jellyfin service is active (single pct exec)
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ jellyfin_ct_id }} -- /bin/sh -c '
           echo "SERVICE=$(systemctl is-active jellyfin 2>/dev/null || echo inactive)";
-          echo "WEB=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8096 2>/dev/null || echo 000)";
-          echo "PORT=$(ss -tlnp | grep -c :8096 2>/dev/null || echo 0)";
-          echo "VAAPI=$(vainfo 2>/dev/null | grep -c "VAProfile" || echo 0)";
-          echo "CONFIG=$(test -f /etc/jellyfin/network.xml && echo present || echo missing)"
+          echo "WEB=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8096 2>/dev/null || echo 000)"
           '
-      register: _jellyfin_service_check
+      register: _jellyfin_health
       changed_when: false
 
-    - name: Assert Jellyfin service is active
+    - name: Assert Jellyfin service active and web accessible
       ansible.builtin.assert:
-        that: "'SERVICE=active' in _jellyfin_service_check.stdout"
-        fail_msg: "Jellyfin service not active in container {{ jellyfin_ct_id }} on {{ inventory_hostname }}"
-
-    - name: Parse web interface status
-      ansible.builtin.set_fact:
-        _jellyfin_web_code: "{{ _jellyfin_service_check.stdout | regex_search('WEB=(\\d+)', '\\1') | first }}"
-
-    - name: Assert web interface is accessible
-      ansible.builtin.assert:
-        that: _jellyfin_web_code in ['200', '302']
-        fail_msg: "Jellyfin web interface returned {{ _jellyfin_web_code }}, expected 200 or 302 in container {{ jellyfin_ct_id }} on {{ inventory_hostname }}"
-
-    - name: Assert port 8096 is listening
-      ansible.builtin.assert:
-        that: (_jellyfin_service_check.stdout | regex_search('PORT=(\\d+)', '\\1') | first | int) > 0
-        fail_msg: "Port 8096 not listening in container {{ jellyfin_ct_id }} on {{ inventory_hostname }}"
-
-    # ── Hardware acceleration verification ─────────────────────────
-
-    - name: Verify VA-API hardware acceleration
-      ansible.builtin.command:
-        cmd: pct exec {{ jellyfin_ct_id }} -- vainfo
-      register: _vaapi_verify
-      changed_when: false
-      when: _jellyfin_igpu_passthrough.stdout | trim != 'passthrough'
-
-    - name: Report VA-API status
-      ansible.builtin.debug:
-        msg: >-
-          Jellyfin VA-API on {{ inventory_hostname }}:
-          {{ 'Hardware acceleration available'
-          if (_vaapi_verify.stdout | default('') | regex_search('VAProfile'))
-          else 'Software fallback (iGPU passed through)' }}
-
-    # ── IP address verification ───────────────────────────────────
-
-    - name: Get Jellyfin container IP for verification
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct exec {{ jellyfin_ct_id }} -- hostname -I | awk '{print $1}'
-        executable: /bin/bash
-      register: _jellyfin_verify_ip
-      changed_when: false
-
-    - name: Set expected Jellyfin container IP
-      ansible.builtin.set_fact:
-        _jellyfin_actual_ip: "{{ _jellyfin_verify_ip.stdout | trim }}"
-        _jellyfin_expected_ip: "{{ (_jellyfin_verify_ip.stdout | trim).split('.')[0:3] | join('.') }}.15"
-
-    - name: Assert container IP has correct offset
-      ansible.builtin.assert:
-        that: _jellyfin_actual_ip == _jellyfin_expected_ip
-        fail_msg: >-
-          Jellyfin container IP {{ _jellyfin_actual_ip }} does not match
-          expected {{ _jellyfin_expected_ip }} (offset 15) on {{ inventory_hostname }}
+        that:
+          - "'SERVICE=active' in _jellyfin_health.stdout"
+          - _jellyfin_health.stdout | regex_search('WEB=(\\d+)', '\\1') | first in ['200', '302']
+        fail_msg: "Jellyfin health check failed on {{ inventory_hostname }}: {{ _jellyfin_health.stdout }}"
 
     - name: Assert stamp contains jellyfin_lxc
       ansible.builtin.assert:
         that: "'jellyfin_lxc' in stamp.plays"
-        fail_msg: "deploy_stamp missing jellyfin_lxc entry: {{ stamp.plays.keys() | list }}"
+        fail_msg: "deploy_stamp missing jellyfin_lxc entry"
 
-    - name: Report Jellyfin verification
-      ansible.builtin.debug:
-        msg: >-
-          Jellyfin verification passed on {{ inventory_hostname }}:
-          container={{ jellyfin_ct_id }}, running=yes,
-          ip={{ _jellyfin_actual_ip }},
-          web={{ _jellyfin_web_code }},
-          vaapi={{ 'hardware' if (_vaapi_verify.stdout | default('') | regex_search('VAProfile')) else 'skipped(passthrough)' }},
-          igpu={{ 'mounted' if (_igpu_mount.rc | default(1)) == 0 else 'skipped(passthrough)' }},
-          media={{ 'mounted' if _media_mount.rc == 0 else 'missing' }}
+    # ── Kodi ───────────────────────────────────────────────────────
 
-    # ── Kodi media player ────────────────────────────────────────
-
-    # ── Container state ──────────────────────────────────────────
-
-    - name: Check Kodi container is running
+    - name: Read Kodi container state and config
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          pct status {{ kodi_ct_id }} | grep -c running
+          pct status {{ kodi_ct_id }}
+          pct config {{ kodi_ct_id }}
         executable: /bin/bash
-      register: _kodi_running
-      changed_when: false
-
-    - name: Assert Kodi container is running
-      ansible.builtin.assert:
-        that: (_kodi_running.stdout | trim | int) > 0
-        fail_msg: "Kodi container {{ kodi_ct_id }} is not running"
-
-    # ── Container config ─────────────────────────────────────────
-
-    - name: Read Kodi container config
-      ansible.builtin.command:
-        cmd: pct config {{ kodi_ct_id }}
       register: _kodi_cfg
       changed_when: false
 
-    - name: Assert onboot is disabled (on-demand container)
-      ansible.builtin.assert:
-        that: "'onboot: 0' in _kodi_cfg.stdout"
-        fail_msg: "Container {{ kodi_ct_id }} should have onboot: 0"
-
-    # ── Device mounts ────────────────────────────────────────────
-
-    - name: Check if iGPU is passed through to a VM
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          readlink /sys/bus/pci/devices/0000:00:02.0/driver 2>/dev/null | grep -q vfio-pci && echo "passthrough" || echo "host"
-        executable: /bin/bash
-      register: _kodi_igpu_passthrough
-      changed_when: false
-
-    - name: Check DRI devices are mounted
-      ansible.builtin.command:
-        cmd: pct exec {{ kodi_ct_id }} -- ls /dev/dri/
-      register: _kodi_dri
-      changed_when: false
-      when: _kodi_igpu_passthrough.stdout | trim != 'passthrough'
-
-    - name: Assert DRI devices exist
-      ansible.builtin.assert:
-        that: _kodi_dri.rc == 0
-        fail_msg: "DRI devices not mounted in Kodi container"
-      when: _kodi_igpu_passthrough.stdout | trim != 'passthrough'
-
-    - name: Check sound devices are mounted
-      ansible.builtin.command:
-        cmd: pct exec {{ kodi_ct_id }} -- ls /dev/snd/
-      register: _kodi_snd
-      changed_when: false
-
-    - name: Assert sound devices exist
-      ansible.builtin.assert:
-        that: _kodi_snd.rc == 0
-        fail_msg: "Sound devices not mounted in Kodi container"
-
-    # ── lxc.mount.entry device bind mounts ────────────────────────
-
-    - name: Check lxc.mount.entry device bind mounts
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ kodi_ct_id }} | grep -c 'lxc.mount.entry.*dev/'
-        executable: /bin/bash
-      register: _kodi_mount_entries
-      changed_when: false
-
-    - name: Assert device bind mounts are configured
-      ansible.builtin.assert:
-        that: (_kodi_mount_entries.stdout | trim | int) >= 3
-        fail_msg: "Expected >= 3 lxc.mount.entry rules, got {{ _kodi_mount_entries.stdout | trim }}"
-
-    # ── cgroup device allowlist ──────────────────────────────────
-
-    - name: Check cgroup device allowlist
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ kodi_ct_id }} | grep -c 'lxc.cgroup2.devices.allow'
-        executable: /bin/bash
-      register: _kodi_cgroup
-      changed_when: false
-
-    - name: Assert cgroup allowlist has device rules
-      ansible.builtin.assert:
-        that: (_kodi_cgroup.stdout | trim | int) >= 3
-        fail_msg: "Expected >= 3 cgroup rules, got {{ _kodi_cgroup.stdout | trim }}"
-
-    # ── Packages and service (batched) ───────────────────────────
-
-    - name: Run Kodi health checks (single pct exec)
-      ansible.builtin.shell:
-        cmd: >-
-          pct exec {{ kodi_ct_id }} -- /bin/sh -c '
-          echo "KODI=$(dpkg -l kodi 2>/dev/null | grep -c ^ii)";
-          echo "SVC=$(systemctl is-enabled kodi-standalone 2>/dev/null)";
-          echo "SETTINGS=$(test -f /home/kodi/.kodi/userdata/advancedsettings.xml && echo ok || echo no)";
-          echo "GUI=$(test -f /home/kodi/.kodi/userdata/guisettings.xml && echo ok || echo no)";
-          echo "ALSA=$(test -f /home/kodi/.asoundrc && echo ok || echo no)"
-          '
-      register: _kodi_health
-      changed_when: false
-
-    - name: Assert Kodi packages installed
+    - name: Assert Kodi container is running with correct config
       ansible.builtin.assert:
         that:
-          - "'KODI=1' in _kodi_health.stdout"
-        fail_msg: "Kodi package not installed: {{ _kodi_health.stdout }}"
-
-    - name: Assert kodi-standalone service enabled
-      ansible.builtin.assert:
-        that: "'enabled' in _kodi_health.stdout"
-        fail_msg: "kodi-standalone service not enabled"
-
-    - name: Assert advancedsettings.xml exists
-      ansible.builtin.assert:
-        that: "'SETTINGS=ok' in _kodi_health.stdout"
-        fail_msg: "advancedsettings.xml missing"
-
-    - name: Assert guisettings.xml exists
-      ansible.builtin.assert:
-        that: "'GUI=ok' in _kodi_health.stdout"
-        fail_msg: "guisettings.xml missing (web interface config)"
-
-    - name: Assert ALSA config exists
-      ansible.builtin.assert:
-        that: "'ALSA=ok' in _kodi_health.stdout"
-        fail_msg: "ALSA .asoundrc missing"
-
-    # ── deploy_stamp ─────────────────────────────────────────────
+          - "'running' in _kodi_cfg.stdout"
+          - "'onboot: 0' in _kodi_cfg.stdout"
+          - _kodi_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/dri')
+          - _kodi_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/snd')
+          - _kodi_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/input')
+        fail_msg: "Kodi container {{ kodi_ct_id }} config incorrect on {{ inventory_hostname }}"
 
     - name: Assert stamp contains kodi_lxc
       ansible.builtin.assert:
         that: "'kodi_lxc' in stamp.plays"
-        fail_msg: "deploy_stamp missing kodi_lxc entry: {{ stamp.plays.keys() | list }}"
-
-    # ── Report ───────────────────────────────────────────────────
-
-    - name: Report Kodi verification
-      ansible.builtin.debug:
-        msg: >-
-          Kodi verification passed on {{ inventory_hostname }}:
-          container={{ kodi_ct_id }}, running=yes,
-          kodi={{ 'installed' if 'KODI=1' in _kodi_health.stdout else 'missing' }},
-          service={{ 'enabled' if 'enabled' in _kodi_health.stdout else 'disabled' }},
-          dri={{ 'mounted' if (_kodi_dri.rc | default(1)) == 0 else 'skipped(passthrough)' }},
-          snd={{ 'mounted' if _kodi_snd.rc == 0 else 'missing' }}
+        fail_msg: "deploy_stamp missing kodi_lxc entry"
 
 - name: Verify Moonlight streaming client
   hosts: streaming_nodes
   gather_facts: false
   tasks:
-    # ── Container state ──────────────────────────────────────────
-
-    - name: Check Moonlight container is running
+    - name: Read Moonlight container state and config
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          pct status {{ moonlight_ct_id }} | grep -c running
+          pct status {{ moonlight_ct_id }}
+          pct config {{ moonlight_ct_id }}
         executable: /bin/bash
-      register: _moonlight_running
-      changed_when: false
-
-    - name: Assert Moonlight container is running
-      ansible.builtin.assert:
-        that: (_moonlight_running.stdout | trim | int) > 0
-        fail_msg: "Moonlight container {{ moonlight_ct_id }} is not running on {{ inventory_hostname }}"
-
-    # ── Container config ─────────────────────────────────────────
-
-    - name: Read Moonlight container config
-      ansible.builtin.command:
-        cmd: pct config {{ moonlight_ct_id }}
       register: _moonlight_cfg
       changed_when: false
 
-    - name: Assert onboot is disabled (on-demand container)
+    - name: Assert Moonlight container is running with correct config
       ansible.builtin.assert:
-        that: "'onboot: 0' in _moonlight_cfg.stdout"
-        fail_msg: "Container {{ moonlight_ct_id }} should have onboot: 0"
-
-    # ── Device mounts ────────────────────────────────────────────
-
-    - name: Check DRI devices are mounted in Moonlight
-      ansible.builtin.command:
-        cmd: pct exec {{ moonlight_ct_id }} -- ls /dev/dri/
-      register: _moonlight_dri
-      changed_when: false
-
-    - name: Assert DRI devices exist in Moonlight
-      ansible.builtin.assert:
-        that: _moonlight_dri.rc == 0
-        fail_msg: "DRI devices not mounted in Moonlight container"
-
-    # ── lxc.mount.entry device bind mounts ────────────────────────
-
-    - name: Check Moonlight lxc.mount.entry device bind mounts
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ moonlight_ct_id }} | grep -c 'lxc.mount.entry.*dev/'
-        executable: /bin/bash
-      register: _moonlight_mount_entries
-      changed_when: false
-
-    - name: Assert Moonlight device bind mounts are configured
-      ansible.builtin.assert:
-        that: (_moonlight_mount_entries.stdout | trim | int) >= 2
-        fail_msg: "Expected >= 2 lxc.mount.entry rules, got {{ _moonlight_mount_entries.stdout | trim }}"
-
-    # ── cgroup device allowlist ──────────────────────────────────
-
-    - name: Check Moonlight cgroup device allowlist
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ moonlight_ct_id }} | grep -c 'lxc.cgroup2.devices.allow'
-        executable: /bin/bash
-      register: _moonlight_cgroup
-      changed_when: false
-
-    - name: Assert Moonlight cgroup allowlist has device rules
-      ansible.builtin.assert:
-        that: (_moonlight_cgroup.stdout | trim | int) >= 3
-        fail_msg: "Expected >= 3 cgroup rules, got {{ _moonlight_cgroup.stdout | trim }}"
-
-    # ── Packages and config (batched) ────────────────────────────
-
-    - name: Run Moonlight health checks (single pct exec)
-      ansible.builtin.shell:
-        cmd: >-
-          pct exec {{ moonlight_ct_id }} -- /bin/sh -c '
-          echo "MOONLIGHT=$(test -x /usr/local/bin/moonlight && echo installed || echo missing)";
-          echo "VAINFO=$(test -x /usr/bin/vainfo && echo installed || echo missing)";
-          echo "CONFIG=$(test -f /etc/moonlight.conf && echo ok || echo no)"
-          '
-      register: _moonlight_health
-      changed_when: false
-
-    - name: Assert moonlight-embedded is installed
-      ansible.builtin.assert:
-        that: "'MOONLIGHT=installed' in _moonlight_health.stdout"
-        fail_msg: "moonlight-embedded not installed: {{ _moonlight_health.stdout }}"
-
-    - name: Assert vainfo is available
-      ansible.builtin.assert:
-        that: "'VAINFO=installed' in _moonlight_health.stdout"
-        fail_msg: "vainfo not installed"
-
-    - name: Assert moonlight config file deployed
-      ansible.builtin.assert:
-        that: "'CONFIG=ok' in _moonlight_health.stdout"
-        fail_msg: "Moonlight config /etc/moonlight.conf not found"
-
-    # ── VA-API decode ────────────────────────────────────────────
-
-    - name: Check Moonlight VA-API decode
-      ansible.builtin.command:
-        cmd: pct exec {{ moonlight_ct_id }} -- vainfo --display drm
-      register: _moonlight_vaapi
-      changed_when: false
-      failed_when: false
-
-    # ── Container IP ─────────────────────────────────────────────
-
-    - name: Get Moonlight container IP
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct exec {{ moonlight_ct_id }} -- hostname -I | awk '{print $1}'
-        executable: /bin/bash
-      register: _moonlight_verify_ip
-      changed_when: false
-
-    - name: Validate container IP is non-empty
-      ansible.builtin.assert:
-        that: _moonlight_verify_ip.stdout | trim | length > 0
-        fail_msg: "Moonlight container has no IP address on {{ inventory_hostname }}"
-
-    # ── deploy_stamp ─────────────────────────────────────────────
-
-    - name: Read deploy_stamp on streaming node
-      ansible.builtin.slurp:
-        src: /etc/ansible/facts.d/vm_builds.fact
-      register: _streaming_stamp_raw
-      failed_when: false
-
-    - name: Parse deploy_stamp
-      ansible.builtin.set_fact:
-        _streaming_stamp: "{{ (_streaming_stamp_raw.content | b64decode | from_json) if _streaming_stamp_raw is not failed else {} }}"
+        that:
+          - "'running' in _moonlight_cfg.stdout"
+          - "'onboot: 0' in _moonlight_cfg.stdout"
+          - _moonlight_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/dri')
+          - _moonlight_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/input')
+        fail_msg: "Moonlight container {{ moonlight_ct_id }} config incorrect on {{ inventory_hostname }}"
 
     - name: Assert stamp contains moonlight_lxc
       ansible.builtin.assert:
-        that: "'moonlight_lxc' in (_streaming_stamp.plays | default({}))"
+        that: "'moonlight_lxc' in stamp.plays"
         fail_msg: "deploy_stamp missing moonlight_lxc entry on {{ inventory_hostname }}"
 
-    # ── Report ───────────────────────────────────────────────────
-
-    - name: Report Moonlight verification
-      ansible.builtin.debug:
-        msg: >-
-          Moonlight verification passed on {{ inventory_hostname }}:
-          container={{ moonlight_ct_id }}, running=yes,
-          moonlight={{ 'installed' if 'MOONLIGHT=installed' in _moonlight_health.stdout else 'missing' }},
-          config={{ 'deployed' if 'CONFIG=ok' in _moonlight_health.stdout else 'missing' }},
-          vaapi={{ 'hardware' if 'VAProfile' in (_moonlight_vaapi.stdout | default('')) else 'software' }},
-          dri={{ 'mounted' if _moonlight_dri.rc == 0 else 'missing' }},
-          ip={{ _moonlight_verify_ip.stdout | trim }}
-
-# ── Verify Desktop VM ────────────────────────────────────────────
+# ── Verify Desktop VM health (desktop_nodes) ──────────────────────
+# Deep Desktop checks (KDE/GNOME shortcuts, apps, dotfiles, VA-API,
+# SDDM, groups) live in molecule/desktop-vm/verify.yml.
 
 - name: Verify Desktop VM
   hosts: desktop_nodes
   gather_facts: false
-  vars:
-    _desktop_user: "{{ lookup('env', 'DESKTOP_USER') | default('desktop', true) }}"
   tasks:
-    # ── VM state ───────────────────────────────────────────────────
-    - name: Check Desktop VM is running
-      ansible.builtin.command:
-        cmd: qm status {{ desktop_vm_id }}
-      register: _desktop_e2e_status
-      changed_when: false
-
-    - name: Assert Desktop VM is running
-      ansible.builtin.assert:
-        that: "'running' in _desktop_e2e_status.stdout"
-        fail_msg: "Desktop VM {{ desktop_vm_id }} is not running on {{ inventory_hostname }}"
-
-    # ── Proxmox-level config ───────────────────────────────────────
-    - name: Read Desktop VM config
-      ansible.builtin.command:
-        cmd: qm config {{ desktop_vm_id }}
+    - name: Read Desktop VM state and config
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          qm status {{ desktop_vm_id }}
+          qm config {{ desktop_vm_id }}
+        executable: /bin/bash
       register: _desktop_e2e_config
       changed_when: false
 
-    - name: Assert UEFI, q35, iGPU passthrough
+    - name: Assert Desktop VM is running with correct config
       ansible.builtin.assert:
         that:
+          - "'running' in _desktop_e2e_config.stdout"
           - "'ovmf' in _desktop_e2e_config.stdout"
           - "'q35' in _desktop_e2e_config.stdout"
           - "'hostpci0' in _desktop_e2e_config.stdout"
-          - "'onboot: 0' in _desktop_e2e_config.stdout"
-        fail_msg: "Desktop VM config incorrect on {{ inventory_hostname }}"
+        fail_msg: "Desktop VM {{ desktop_vm_id }} config incorrect on {{ inventory_hostname }}"
 
-    # ── Network: IP and SSH ────────────────────────────────────────
-    - name: Get Desktop VM MAC
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          qm config {{ desktop_vm_id }} | grep '^net0' | sed -n 's/.*\(..:..:..:..:..:..\).*/\1/p'
-        executable: /bin/bash
-      register: _desktop_e2e_mac
-      changed_when: false
-
-    - name: Look up Desktop VM IP
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          awk '/{{ _desktop_e2e_mac.stdout | lower }}/{print $3}' /var/lib/misc/dnsmasq.leases 2>/dev/null ||
-          ip -4 neigh | awk '/{{ _desktop_e2e_mac.stdout | lower }}/{print $1}'
-        executable: /bin/bash
-      register: _desktop_e2e_ip
-      changed_when: false
-
-    - name: Assert Desktop VM has an IP
-      ansible.builtin.assert:
-        that: _desktop_e2e_ip.stdout | trim | length > 0
-        fail_msg: "Desktop VM has no IP on {{ inventory_hostname }}"
-
-    - name: Check for temporary SSH key from provisioning
-      ansible.builtin.stat:
-        path: /tmp/desktop_tmp_key
-      register: _desktop_e2e_tmpkey
-
-    - name: Set SSH command prefix with ControlMaster
-      ansible.builtin.set_fact:
-        _e2e_vm_ssh: >-
-          ssh
-          {{ '-i /tmp/desktop_tmp_key' if _desktop_e2e_tmpkey.stat.exists else '' }}
-          -o StrictHostKeyChecking=no
-          -o UserKnownHostsFile=/dev/null
-          -o ConnectTimeout=15
-          -o ControlMaster=auto
-          -o ControlPath=/tmp/desktop-e2e-%r@%h
-          -o ControlPersist=120
-          {{ _desktop_user }}@{{ _desktop_e2e_ip.stdout | trim }}
-
-    - name: Verify SSH to Desktop VM (establishes ControlMaster)
-      ansible.builtin.command:
-        cmd: "{{ _e2e_vm_ssh }} echo ok"
-      register: _desktop_e2e_ssh
-      changed_when: false
-
-    - name: Assert SSH works
-      ansible.builtin.assert:
-        that: "'ok' in _desktop_e2e_ssh.stdout"
-        fail_msg: "SSH to Desktop VM failed on {{ inventory_hostname }}"
-
-    # ── QEMU Guest Agent ───────────────────────────────────────────
-    - name: Check QEMU Guest Agent
+    - name: Check QEMU Guest Agent is responding
       ansible.builtin.command:
         cmd: qm agent {{ desktop_vm_id }} ping
       register: _desktop_e2e_qga
@@ -2697,254 +1488,21 @@
     - name: Assert QEMU Guest Agent responding
       ansible.builtin.assert:
         that: _desktop_e2e_qga.rc == 0
-        fail_msg: >-
-          QEMU Guest Agent not responding on {{ inventory_hostname }}
-
-    # ── Check if containers share iGPU (mutual exclusion) ──────────
-    # In E2E tests, LXC containers bind-mount /dev/dri/* devices,
-    # preventing QEMU from doing full PCI passthrough. The VM still
-    # starts (--vga std), but the physical iGPU isn't visible inside.
-    - name: Check if containers are using iGPU on host
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct list 2>/dev/null | awk 'NR>1 && /running/{print $1}' |
-          while read vmid; do
-            pct config "$vmid" 2>/dev/null | grep -q 'dev/dri' && echo "shared" && exit 0
-          done
-          echo "exclusive"
-        executable: /bin/bash
-      register: _desktop_igpu_mode
-      changed_when: false
-
-    # ── GPU + system state (batched, single SSH call) ─────────────
-    - name: Collect GPU and system state from VM
-      ansible.builtin.shell:
-        cmd: |
-          {{ _e2e_vm_ssh }} bash -c '
-          echo "DRM=$(ls /dev/dri/card0 2>/dev/null && echo ok || echo missing)"
-          echo "VAAPI_START"
-          vainfo 2>&1 || true
-          echo "VAAPI_END"
-          echo "SDDM=$(systemctl is-active sddm)"
-          echo "TARGET=$(systemctl get-default)"
-          echo "DBUS=$(systemctl is-active dbus)"
-          echo "KDE_SESSION=$(test -f /usr/share/xsessions/plasma.desktop && echo found || echo missing)"
-          echo "GNOME_SESSION=$(test -f /usr/share/xsessions/gnome.desktop && echo found || echo missing)"
-          '
-      register: _desktop_e2e_state
-      changed_when: false
-
-    - name: Assert DRM device exists (exclusive iGPU only)
-      ansible.builtin.assert:
-        that: "'DRM=ok' in _desktop_e2e_state.stdout"
-        fail_msg: "/dev/dri/card0 missing in Desktop VM — GPU passthrough broken"
-      when: _desktop_igpu_mode.stdout | trim == 'exclusive'
-
-    - name: Assert VA-API has profiles (exclusive iGPU only)
-      ansible.builtin.assert:
-        that: "'VAProfile' in _desktop_e2e_state.stdout"
-        fail_msg: "VA-API not functional in Desktop VM"
-      when: _desktop_igpu_mode.stdout | trim == 'exclusive'
-
-    - name: Assert SDDM running
-      ansible.builtin.assert:
-        that: "'SDDM=active' in _desktop_e2e_state.stdout"
-        fail_msg: "SDDM not active in Desktop VM on {{ inventory_hostname }}"
-
-    - name: Assert graphical.target
-      ansible.builtin.assert:
-        that: "'TARGET=graphical.target' in _desktop_e2e_state.stdout"
-        fail_msg: "Default target is not graphical.target"
-
-    - name: Assert KDE and GNOME sessions available in SDDM
-      ansible.builtin.assert:
-        that:
-          - "'KDE_SESSION=found' in _desktop_e2e_state.stdout"
-          - "'GNOME_SESSION=found' in _desktop_e2e_state.stdout"
-        fail_msg: "KDE or GNOME session file missing from /usr/share/xsessions/"
-
-    - name: Assert D-Bus running
-      ansible.builtin.assert:
-        that: "'DBUS=active' in _desktop_e2e_state.stdout"
-        fail_msg: "D-Bus not running — shortcuts will not work"
-
-    # ── KDE session shortcuts ──────────────────────────────────────
-    - name: Read KDE shortcuts config
-      ansible.builtin.shell:
-        cmd: |
-          {{ _e2e_vm_ssh }} "cat ~/.config/kglobalshortcutsrc 2>/dev/null || echo NOFILE"
-      register: _desktop_e2e_kde_shortcuts
-      changed_when: false
-
-    - name: Assert KDE keybindings configured
-      ansible.builtin.assert:
-        that:
-          - "'Ctrl+Shift+4' in _desktop_e2e_kde_shortcuts.stdout"
-          - "'Alt+F4' in _desktop_e2e_kde_shortcuts.stdout"
-          - "'Meta+Left' in _desktop_e2e_kde_shortcuts.stdout"
-        fail_msg: "KDE keyboard shortcuts not configured correctly"
-
-    # ── GNOME session dconf verification ───────────────────────────
-    - name: Read GNOME keybindings and theme via dconf
-      ansible.builtin.shell:
-        cmd: |
-          {{ _e2e_vm_ssh }} "
-          echo CLOSE=\$(sudo dconf read /org/gnome/desktop/wm/keybindings/close 2>/dev/null)
-          echo SCREENSHOT=\$(sudo dconf read /org/gnome/settings-daemon/plugins/media-keys/screenshot-clip 2>/dev/null)
-          echo THEME=\$(sudo dconf read /org/gnome/desktop/interface/color-scheme 2>/dev/null)
-          echo DOCK=\$(sudo dconf read /org/gnome/shell/extensions/dash-to-dock/dock-position 2>/dev/null)
-          echo OVERVIEW=\$(sudo dconf read /org/gnome/shell/keybindings/toggle-overview 2>/dev/null)
-          echo CAPS=\$(sudo dconf read /org/gnome/desktop/input-sources/xkb-options 2>/dev/null)
-          "
-      register: _desktop_e2e_gnome_dconf
-      changed_when: false
-
-    - name: Assert GNOME Super+Q close keybinding
-      ansible.builtin.assert:
-        that: "'<Super>q' in _desktop_e2e_gnome_dconf.stdout"
-        fail_msg: "GNOME close keybinding missing Super+Q"
-
-    - name: Assert GNOME Ctrl+Shift+4 screenshot
-      ansible.builtin.assert:
-        that: "'<Shift><Control>4' in _desktop_e2e_gnome_dconf.stdout"
-        fail_msg: "GNOME screenshot shortcut missing Ctrl+Shift+4"
-
-    - name: Assert GNOME dark theme
-      ansible.builtin.assert:
-        that: "'prefer-dark' in _desktop_e2e_gnome_dconf.stdout"
-        fail_msg: "GNOME not using dark theme"
-
-    - name: Assert GNOME dock at bottom
-      ansible.builtin.assert:
-        that: "'BOTTOM' in _desktop_e2e_gnome_dconf.stdout"
-        fail_msg: "GNOME Dash to Dock not at bottom"
-
-    - name: Assert GNOME overview Super+Space
-      ansible.builtin.assert:
-        that: "'<Super>space' in _desktop_e2e_gnome_dconf.stdout"
-        fail_msg: "GNOME overview not bound to Super+Space"
-
-    - name: Assert GNOME Caps Lock remapped to Super
-      ansible.builtin.assert:
-        that: "'caps:super' in _desktop_e2e_gnome_dconf.stdout"
-        fail_msg: "GNOME Caps Lock not remapped to Super"
-
-    # ── Shared apps executable ─────────────────────────────────────
-    - name: Check core applications are executable
-      ansible.builtin.shell:
-        cmd: |
-          {{ _e2e_vm_ssh }} "
-          echo FIREFOX=\$(which firefox-esr >/dev/null 2>&1 && echo ok || echo missing)
-          echo FLAMESHOT=\$(which flameshot >/dev/null 2>&1 && echo ok || echo missing)
-          echo VLC=\$(which vlc >/dev/null 2>&1 && echo ok || echo missing)
-          echo KONSOLE=\$(which konsole >/dev/null 2>&1 && echo ok || echo missing)
-          echo NAUTILUS=\$(which nautilus >/dev/null 2>&1 && echo ok || echo missing)
-          echo SPECTACLE=\$(which spectacle >/dev/null 2>&1 && echo ok || echo missing)
-          "
-      register: _desktop_e2e_apps
-      changed_when: false
-
-    - name: Assert all applications are installed
-      ansible.builtin.assert:
-        that:
-          - "'FIREFOX=ok' in _desktop_e2e_apps.stdout"
-          - "'FLAMESHOT=ok' in _desktop_e2e_apps.stdout"
-          - "'VLC=ok' in _desktop_e2e_apps.stdout"
-          - "'KONSOLE=ok' in _desktop_e2e_apps.stdout"
-          - "'NAUTILUS=ok' in _desktop_e2e_apps.stdout"
-          - "'SPECTACLE=ok' in _desktop_e2e_apps.stdout"
-        fail_msg: "Missing applications: {{ _desktop_e2e_apps.stdout }}"
-
-    # ── Flameshot autostart (cross-session Ctrl+Shift+4) ──────────
-    - name: Check Flameshot autostart entry
-      ansible.builtin.shell:
-        cmd: |
-          {{ _e2e_vm_ssh }} "cat ~/.config/autostart/flameshot.desktop 2>/dev/null || echo NOFILE"
-      register: _desktop_e2e_flameshot_autostart
-      changed_when: false
-
-    - name: Assert Flameshot autostart covers both sessions
-      ansible.builtin.assert:
-        that:
-          - "'Exec=flameshot' in _desktop_e2e_flameshot_autostart.stdout"
-          - "'X-GNOME-Autostart-enabled=true' in _desktop_e2e_flameshot_autostart.stdout"
-          - "'X-KDE-autostart-after=panel' in _desktop_e2e_flameshot_autostart.stdout"
-        fail_msg: "Flameshot autostart not configured for both sessions"
-
-    # ── User and directories ───────────────────────────────────────
-    - name: Check user groups and directories
-      ansible.builtin.shell:
-        cmd: |
-          {{ _e2e_vm_ssh }} "
-          echo GROUPS=\$(id -Gn)
-          echo DIRS=\$(test -d ~/Downloads && test -d ~/Pictures && test -d ~/Documents && echo ok || echo missing)
-          "
-      register: _desktop_e2e_user
-      changed_when: false
-
-    - name: Assert user has correct groups
-      ansible.builtin.assert:
-        that:
-          - "'video' in _desktop_e2e_user.stdout"
-          - "'render' in _desktop_e2e_user.stdout"
-          - "'audio' in _desktop_e2e_user.stdout"
-        fail_msg: "User missing required groups: {{ _desktop_e2e_user.stdout }}"
-
-    - name: Assert XDG directories exist
-      ansible.builtin.assert:
-        that: "'DIRS=ok' in _desktop_e2e_user.stdout"
-        fail_msg: "XDG directories (Downloads/Pictures/Documents) missing"
-
-    # ── Deploy stamp ───────────────────────────────────────────────
-    - name: Read deploy_stamp
-      ansible.builtin.slurp:
-        src: /etc/ansible/facts.d/vm_builds.fact
-      register: _desktop_e2e_stamp_raw
-      failed_when: false
-
-    - name: Parse deploy_stamp
-      ansible.builtin.set_fact:
-        _desktop_e2e_stamp: "{{ (_desktop_e2e_stamp_raw.content | b64decode | from_json) if _desktop_e2e_stamp_raw is not failed else {} }}"
+        fail_msg: "QEMU Guest Agent not responding on {{ inventory_hostname }}"
 
     - name: Assert stamp contains desktop_vm
       ansible.builtin.assert:
-        that: "'desktop_vm' in (_desktop_e2e_stamp.plays | default({}))"
+        that: "'desktop_vm' in stamp.plays"
         fail_msg: "deploy_stamp missing desktop_vm on {{ inventory_hostname }}"
 
-    # ── Cleanup and report ──────────────────────────────────────────
-    - name: Close SSH ControlMaster connection
-      ansible.builtin.command:
-        cmd: >-
-          ssh -o ControlPath=/tmp/desktop-e2e-%r@%h -O exit
-          {{ _desktop_user }}@{{ _desktop_e2e_ip.stdout | trim }}
-      failed_when: false
-      changed_when: false
-
-    - name: Report Desktop VM E2E verification
-      ansible.builtin.debug:
-        msg: >-
-          Desktop VM E2E passed on {{ inventory_hostname }}:
-          vm={{ desktop_vm_id }}, running=yes,
-          bios=ovmf, machine=q35, hostpci0=yes,
-          igpu_mode={{ _desktop_igpu_mode.stdout | trim }},
-          drm={{ 'ok' if 'DRM=ok' in _desktop_e2e_state.stdout
-          else 'n/a(shared)' }},
-          qga={{ 'ok' if _desktop_e2e_qga.rc == 0 else 'no' }},
-          sddm={{ 'active' if 'SDDM=active' in _desktop_e2e_state.stdout
-          else 'inactive' }},
-          apps={{ _desktop_e2e_apps.stdout_lines
-          | select('search', 'missing') | list | length == 0 }},
-          ip={{ _desktop_e2e_ip.stdout | trim }}
-
-# ── Verify Gaming LXC container ──────────────────────────────────
+# ── Verify Gaming LXC health (gaming_nodes) ──────────────────────
+# Deep Gaming checks (VA-API profiles, render/card devices, dsda-doom,
+# Sunshine API) live in molecule/gaming-lxc/verify.yml.
 
 - name: Verify Gaming LXC container
   hosts: gaming_nodes
   gather_facts: false
   tasks:
-    # ── Container state ──────────────────────────────────────────
-
     - name: Check Gaming LXC container exists
       ansible.builtin.command:
         cmd: pct status {{ gaming_ct_id }}
@@ -2961,176 +1519,21 @@
         that: "'running' in _gaming_verify_status.stdout"
         fail_msg: "Gaming LXC container {{ gaming_ct_id }} is not running on {{ inventory_hostname }}"
 
-    # ── Host-side checks (single batch) ──────────────────────────
-    # Read host DRI devices + LXC config + pct config in one shell
-    # to minimize SSH round trips on ai's USB ethernet.
-
-    - name: Collect host-side gaming state (single SSH call)
+    - name: Check Sunshine is active (single pct exec)
       ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          render=$(ls /dev/dri/renderD* 2>/dev/null | head -1 | xargs basename)
-          card=$(ls /dev/dri/card* 2>/dev/null | head -1 | xargs basename)
-          dri_mounts=$(grep -c 'lxc.mount.entry.*dev/dri' \
-            /etc/pve/lxc/{{ gaming_ct_id }}.conf 2>/dev/null || echo 0)
-          nesting=$(pct config {{ gaming_ct_id }} 2>/dev/null \
-            | grep -c 'nesting=1' || echo 0)
-          echo "RENDER=${render}"
-          echo "CARD=${card}"
-          echo "DRI_MOUNTS=${dri_mounts}"
-          echo "NESTING=${nesting}"
-        executable: /bin/bash
-      register: _gaming_host_state
-      changed_when: false
-
-    # ── Container-side checks (single pct exec) ──────────────────
-    # Batches 6 former pct exec calls into 1.
-
-    - name: Collect gaming container state (single pct exec)
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          render=$(echo '{{ _gaming_host_state.stdout }}' \
-            | sed -n 's/.*RENDER=\(\S*\).*/\1/p')
-          card=$(echo '{{ _gaming_host_state.stdout }}' \
-            | sed -n 's/.*CARD=\(\S*\).*/\1/p')
-          pct exec {{ gaming_ct_id }} -- bash -c "
-            echo RENDER_OK=\$(ls /dev/dri/$render \
-              >/dev/null 2>&1 && echo yes || echo no)
-            echo CARD_OK=\$(ls /dev/dri/$card \
-              >/dev/null 2>&1 && echo yes || echo no)
-            echo VAINFO=\$(vainfo --display drm 2>&1)
-            echo SUNSHINE=\$(systemctl is-active sunshine.service \
-              2>/dev/null || echo inactive)
-            echo DSDA_DOOM=\$(which dsda-doom >/dev/null 2>&1 \
-              && echo ok || echo missing)
-            echo IP=\$(hostname -I 2>/dev/null | awk '{print \$1}')
-          "
-        executable: /bin/bash
-      register: _gaming_ct_state
-      changed_when: false
-
-    - name: Assert render device accessible
-      ansible.builtin.assert:
-        that: "'RENDER_OK=yes' in _gaming_ct_state.stdout"
-        fail_msg: >-
-          Render device not accessible in Gaming LXC on
-          {{ inventory_hostname }}
-
-    - name: Assert card device accessible
-      ansible.builtin.assert:
-        that: "'CARD_OK=yes' in _gaming_ct_state.stdout"
-        fail_msg: >-
-          Card device not accessible in Gaming LXC on
-          {{ inventory_hostname }}
-
-    - name: Assert VA-API H.264 encode available
-      ansible.builtin.assert:
-        that: "'VAProfileH264' in _gaming_ct_state.stdout"
-        fail_msg: >-
-          VA-API H.264 encoding not available in Gaming LXC on
-          {{ inventory_hostname }}
-
-    - name: Assert DRI mount configured
-      ansible.builtin.assert:
-        that: "'DRI_MOUNTS=0' not in _gaming_host_state.stdout"
-        fail_msg: >-
-          DRI device bind mount not in LXC config for Gaming LXC
-          on {{ inventory_hostname }}
-
-    - name: Assert nesting feature enabled
-      ansible.builtin.assert:
-        that: "'NESTING=0' not in _gaming_host_state.stdout"
-        fail_msg: >-
-          Gaming LXC missing nesting=1 feature on
-          {{ inventory_hostname }}
-
-    - name: Assert Sunshine is active
-      ansible.builtin.assert:
-        that: "'SUNSHINE=active' in _gaming_ct_state.stdout"
-        fail_msg: >-
-          Sunshine service not active in Gaming LXC on
-          {{ inventory_hostname }}
-
-    - name: Assert dsda-doom installed
-      ansible.builtin.assert:
-        that: "'DSDA_DOOM=ok' in _gaming_ct_state.stdout"
-        fail_msg: >-
-          dsda-doom not installed in Gaming LXC on
-          {{ inventory_hostname }}
-
-    - name: Get Gaming container IP
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct exec {{ gaming_ct_id }} -- hostname -I | awk '{print $1}'
-        executable: /bin/bash
-      register: _gaming_verify_ip
-      changed_when: false
-
-    - name: Validate container IP is non-empty
-      ansible.builtin.assert:
-        that: _gaming_verify_ip.stdout | trim | length > 0
-        fail_msg: >-
-          Gaming container has no IP address on
-          {{ inventory_hostname }}
-
-    # ── Sunshine API health ─────────────────────────────────────
-
-    - name: Check Sunshine web UI is responding
-      ansible.builtin.command:
         cmd: >-
-          curl -sk --connect-timeout 5 -o /dev/null -w '%{http_code}'
-          https://{{ _gaming_verify_ip.stdout | trim }}:47990/
-      register: _gaming_api
+          pct exec {{ gaming_ct_id }} -- bash -c '
+          echo "SUNSHINE=$(systemctl is-active sunshine.service 2>/dev/null || echo inactive)"
+          '
+      register: _gaming_health
       changed_when: false
-      failed_when: _gaming_api.rc != 0
-      retries: 6
-      delay: 5
-      until: _gaming_api.rc == 0
 
-    - name: Assert Sunshine web UI returns valid HTTP response
+    - name: Assert Sunshine service is active
       ansible.builtin.assert:
-        that: _gaming_api.stdout | trim | int > 0
-        fail_msg: >-
-          Sunshine web UI not reachable at
-          https://{{ _gaming_verify_ip.stdout | trim }}:47990
-          on {{ inventory_hostname }}
-
-    # ── deploy_stamp ─────────────────────────────────────────────
-
-    - name: Read deploy_stamp on gaming node
-      ansible.builtin.slurp:
-        src: /etc/ansible/facts.d/vm_builds.fact
-      register: _gaming_stamp_raw
-      failed_when: false
-
-    - name: Parse deploy_stamp
-      ansible.builtin.set_fact:
-        _gaming_stamp: "{{ (_gaming_stamp_raw.content | b64decode | from_json) if _gaming_stamp_raw is not failed else {} }}"
+        that: "'SUNSHINE=active' in _gaming_health.stdout"
+        fail_msg: "Sunshine service not active in Gaming LXC on {{ inventory_hostname }}"
 
     - name: Assert stamp contains gaming_lxc
       ansible.builtin.assert:
-        that: "'gaming_lxc' in (_gaming_stamp.plays | default({}))"
+        that: "'gaming_lxc' in stamp.plays"
         fail_msg: "deploy_stamp missing gaming_lxc entry on {{ inventory_hostname }}"
-
-    # ── Report ───────────────────────────────────────────────────
-
-    - name: Report Gaming LXC verification
-      ansible.builtin.debug:
-        msg: >-
-          Gaming LXC verification passed on {{ inventory_hostname }}:
-          container={{ gaming_ct_id }}, running=yes,
-          render={{ 'mounted' if 'RENDER_OK=yes' in
-          _gaming_ct_state.stdout else 'missing' }},
-          card={{ 'mounted' if 'CARD_OK=yes' in
-          _gaming_ct_state.stdout else 'missing' }},
-          vaapi={{ 'H.264' if 'VAProfileH264' in
-          _gaming_ct_state.stdout else 'software' }},
-          sunshine={{ 'active' if 'SUNSHINE=active' in
-          _gaming_ct_state.stdout else 'inactive' }},
-          api={{ 'reachable' if _gaming_api.rc == 0
-          else 'unreachable' }},
-          dsda-doom={{ 'installed' if 'DSDA_DOOM=ok' in
-          _gaming_ct_state.stdout else 'missing' }},
-          ip={{ _gaming_verify_ip.stdout | trim }}

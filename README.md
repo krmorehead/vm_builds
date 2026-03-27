@@ -192,15 +192,38 @@ yamllint .
 ansible-playbook playbooks/site.yml --syntax-check
 ```
 
+### Build images
+
+Build all service images (sequential, single host):
+
+```bash
+./build-images.sh --host $PRIMARY_HOST
+```
+
+Build in parallel across multiple hosts (3x faster):
+
+```bash
+./build-images.sh --parallel
+```
+
 ### Full test pipeline (Molecule)
 
-Runs cleanup (reset host), syntax check, converge (full playbook),
-verify (assertions), and cleanup (destroy the test VM) against the
-test machine:
+The project uses a two-tier testing architecture:
+
+- **Unit tests** (`molecule/<service>-lxc/`) — self-contained per-service
+  scenarios that build their own image, deploy, verify all functionality, and
+  tear down.
+- **E2E integration tests** (`molecule/default/`) — deploy all services from
+  pre-built images, verify cross-service integration and basic health only.
 
 ```bash
 source .venv/bin/activate
 set -a; source test.env; set +a
+
+# Unit test a single service (builds image if needed)
+molecule test -s pihole-lxc
+
+# E2E integration test (requires images pre-built)
 molecule test
 ```
 
@@ -210,7 +233,7 @@ Useful Molecule commands during development:
 molecule converge    # run the playbook only (no verify/cleanup)
 molecule verify      # re-run verification without re-converging
 molecule destroy     # tear down the test VM
-molecule test        # full pipeline: cleanup -> syntax -> converge -> verify -> cleanup
+molecule test        # full pipeline: cleanup -> prepare -> converge -> verify
 ```
 
 ### What the verify step checks
@@ -393,7 +416,7 @@ platforms:
 
 6. **Extend tests:**
    - Add assertions to `molecule/default/verify.yml`.
-   - Cleanup already iterates `qm list` to destroy all VMs, so no changes needed unless the VM needs custom teardown.
+   - Add the new VMID to the explicit-VMID cleanup lists (`molecule/default/cleanup.yml`, `molecule/default/cleanup_lan_host.yml`, `tasks/cleanup_lan_host.yml`, and any per-feature scenario cleanup). Cleanup destroys only known project VMs/containers by VMID from `inventory/group_vars/all.yml` — it does **not** iterate `qm list` / `pct list`.
 
 7. **Place the image** in `images/`, add a doc at `docs/architecture/<type>-build.md`, and add a CHANGELOG entry.
 

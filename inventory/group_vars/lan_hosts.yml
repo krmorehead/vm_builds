@@ -1,11 +1,21 @@
 ---
 # Hosts behind the OpenWrt router on the LAN subnet (10.10.10.0/24).
 # Controller cannot route to this subnet directly -- SSH goes through
-# the primary Proxmox host via ProxyJump.
+# the primary Proxmox host via ProxyCommand.
+#
+# ProxyCommand (not ProxyJump) so we can pass keepalives to the jump
+# connection itself. Without these, the controller→PRIMARY_HOST SSH
+# that carries the tunnel can silently die during long plays, causing
+# "Data could not be sent to remote host" mid-task.
 ansible_ssh_common_args: >-
-  -o ProxyJump=root@{{ lookup('env', 'PRIMARY_HOST') }}
+  -o ProxyCommand="ssh
+  -o ServerAliveInterval=15
+  -o ServerAliveCountMax=4
   -o StrictHostKeyChecking=no
   -o UserKnownHostsFile=/dev/null
-  -o ConnectTimeout=10
+  -W %h:%p root@{{ lookup('env', 'PRIMARY_HOST') }}"
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o ConnectTimeout=30
   -o ServerAliveInterval=15
   -o ServerAliveCountMax=4

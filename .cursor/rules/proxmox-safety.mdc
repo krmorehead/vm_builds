@@ -86,9 +86,13 @@ alwaysApply: true
 - MUST remove the bootstrap IP from the WAN bridge and add it to the actual LAN bridge or SSH will route to the wrong device.
 - The upstream router may also have 192.168.1.1, causing routing ambiguity if the IP exists on multiple bridges.
 
-## SSH keepalives through ProxyJump
-- SSH via ProxyJump drops during sequences of local Ansible tasks (set_fact, debug) that don't send traffic.
-- ALWAYS add `-o ServerAliveInterval=15 -o ServerAliveCountMax=4` to `ansible_ssh_common_args`.
+## SSH keepalives through ProxyCommand
+- ALWAYS use ProxyCommand (not ProxyJump) for lan_hosts so keepalives can be passed to the jump connection.
+- ALWAYS add `ServerAliveInterval=15` and `ServerAliveCountMax=4` to BOTH the ProxyCommand inner SSH and the outer SSH args.
+- ALWAYS set `ControlPersist=300s` (not 60s) in `ansible.cfg` ssh_args. Short persistence causes ControlMasters carrying ProxyCommand tunnels to die during long plays.
+- ALWAYS add `ServerAliveInterval=15` and `ServerAliveCountMax=4` to `ansible.cfg` ssh_args so ALL connections (including ControlMasters) send keepalives.
+- ALWAYS add `meta: reset_connection` + `wait_for_connection` pre_tasks to the first Phase 2 play targeting `lan_hosts`. This clears stale state and validates the ProxyCommand path before heavy infrastructure work.
+- Previous bug: mesh1 became UNREACHABLE mid-play during `proxmox_igpu` after 54 successful tasks. Root cause: ControlMaster carrying the ProxyJump tunnel died silently — no keepalives on the jump connection, ControlPersist too short (60s).
 
 ## Cleanup completeness
 - When ANY role deploys a file to the host, ALWAYS add it to the removal list in BOTH `molecule/default/cleanup.yml` AND `playbooks/cleanup.yml`.

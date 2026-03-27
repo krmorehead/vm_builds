@@ -1,17 +1,10 @@
 ---
 # ── Verify netdata template exists ──────────────────────────────
-- name: Check netdata LXC template exists on controller
-  ansible.builtin.stat:
-    path: "{{ role_path }}/../../{{ netdata_ct_template_path }}"
-  register: _netdata_template_stat
-  delegate_to: localhost
-
-- name: Fail if netdata template is missing
-  ansible.builtin.fail:
-    msg: >-
-      Netdata template not found: {{ netdata_ct_template_path }}.
-      Run ./build-images.sh to build it.
-  when: not (_netdata_template_stat.stat.exists | default(false))
+- name: Verify netdata template exists
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/verify_lxc_template.yml"
+  vars:
+    lxc_template_path: "{{ netdata_ct_template_path }}"
+    lxc_service_name: Netdata
 
 # ── Determine container network based on host topology ───────────
 

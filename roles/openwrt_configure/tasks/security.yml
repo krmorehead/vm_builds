@@ -11,6 +11,7 @@
     echo -e '{{ openwrt_root_password }}\n{{ openwrt_root_password }}' | passwd root
   when: openwrt_root_password | length > 0
   no_log: true
+  changed_when: true
 
 # ── SSH key deployment ───────────────────────────────────────────
 
@@ -29,6 +30,7 @@
     echo '{{ _ssh_pubkey_content | trim }}' > /etc/dropbear/authorized_keys
     chmod 600 /etc/dropbear/authorized_keys
   when: openwrt_ssh_pubkey | length > 0
+  changed_when: true
 
 - name: Verify key-based SSH works before lockdown
   ansible.builtin.raw: echo 'key_auth_ok'
@@ -60,6 +62,7 @@
   when:
     - openwrt_ssh_pubkey | length > 0
     - openwrt_ssh_private_key | length > 0
+  changed_when: true
 
 # ── Restrict SSH to LAN zone ────────────────────────────────────
 
@@ -79,6 +82,7 @@
     done
     uci commit firewall
   when: "'Allow-SSH' in (_wan_ssh_rule.stdout | default(''))"
+  changed_when: true
 
 # ── Intrusion prevention (banIP) ────────────────────────────────
 # banip is pre-installed in the custom router image (build-images.sh).
@@ -99,14 +103,17 @@
 
 - name: Enable SYN flood protection
   ansible.builtin.raw: uci set firewall.@defaults[0].syn_flood='1'
+  changed_when: false
 
 - name: Enable invalid packet dropping
   ansible.builtin.raw: uci set firewall.@defaults[0].drop_invalid='1'
+  changed_when: false
 
 - name: Commit firewall changes and restart
   ansible.builtin.raw: |
     uci commit firewall
     /etc/init.d/firewall restart
+  changed_when: true
 
 # ── Re-register host with updated SSH args ──────────────────────
 

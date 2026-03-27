@@ -1,0 +1,14 @@
+---
+- name: Build Gaming image
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Build Gaming image if not cached
+      ansible.builtin.command:
+        cmd: >-
+          {{ playbook_dir }}/../../scripts/build-images.sh
+          --host {{ lookup('env', 'AI_HOST') }}
+          --only gaming
+      register: _build
+      changed_when: "'already exists' not in _build.stdout"

@@ -35,11 +35,20 @@ in testable functions; see tests/test_build.py.
     #   issues when swapping routers. Omit to use auto-generated MAC.
 
 Available tags (site.yml plays):
-    backup      Back up Proxmox host config and VMs before changes
-    infra       Shared infrastructure (bridges, PCI passthrough)
-    openwrt     OpenWrt VM provisioning and configuration
-    wireguard   WireGuard VPN LXC container provisioning and configuration
-    cleanup     Remove temporary bootstrap networking
+    backup          Back up Proxmox host config and VMs
+    infra           Shared infrastructure (bridges, PCI passthrough, iGPU)
+    openwrt         OpenWrt router VM provisioning and configuration
+    pihole          Pi-hole DNS container
+    monitoring      rsyslog + Netdata monitoring containers
+    homeassistant   Home Assistant service container
+    media           Jellyfin + Kodi media containers
+    moonlight       Moonlight streaming client container
+    wireguard       WireGuard VPN container
+    mesh-wifi       OpenWrt mesh WiFi LXC containers
+    desktop         Debian desktop VM
+    gaming          Gaming LXC container (opt-in, tagged with never)
+    lan-satellite   LAN host bootstrap
+    cleanup         Remove temporary bootstrap networking
 
     Tags are independent. If a play depends on another (e.g., openwrt
     depends on infra), include both: --tags infra,openwrt
@@ -229,7 +238,8 @@ def main(argv: list[str] | None = None) -> int:
         description="Execute an Ansible build against a Proxmox host.",
         epilog=(
             "Any arguments after -- are passed directly to ansible-playbook.\n\n"
-            "Available tags: backup, infra, openwrt, wireguard, cleanup"
+            "Available tags: backup, infra, openwrt, pihole, monitoring, homeassistant, "
+            "media, moonlight, wireguard, mesh-wifi, desktop, gaming, lan-satellite, cleanup"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

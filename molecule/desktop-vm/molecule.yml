@@ -46,6 +46,8 @@ scenario:
   test_sequence:
     - dependency
     - syntax
+    - cleanup
+    - prepare
     - converge
     - verify
     - cleanup

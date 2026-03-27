@@ -59,42 +59,90 @@
 # ── Generate wireless config from detected hardware ────────────
 # The WiFi PHY was namespace-moved into the container AFTER boot,
 # so OpenWrt didn't auto-generate /etc/config/wireless. We must
-# run `wifi config` to create radio sections from the detected PHYs.
+# create radio sections for each detected PHY.
+#
+# `wifi config` uses sysfs enumeration, which doesn't reflect
+# namespace-moved PHYs in LXC containers. It produces empty output
+# for cards like Intel Centrino Wireless-N 105 on mesh1. When that
+# happens, we fall back to creating minimal radio sections manually
+# using the PHY names from `iw phy` (netlink-based, namespace-aware).
 
-- name: Generate wireless config from detected hardware
+- name: Try wifi config to generate wireless configuration
+  ansible.builtin.raw: >-
+    /bin/sh -c 'wifi config > /etc/config/wireless 2>/dev/null; true'
+  changed_when: true
+
+- name: Get radio section names from UCI
   ansible.builtin.raw: >-
     /bin/sh -c
-    'wifi config > /tmp/wifi_detected.conf &&
-    if [ ! -s /etc/config/wireless ] || ! grep -q "wifi-device" /etc/config/wireless; then
-      cp /tmp/wifi_detected.conf /etc/config/wireless;
-    fi;
-    rm -f /tmp/wifi_detected.conf'
+    'uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)=wifi-device$/\1/p"'
+  register: _uci_radios_raw
+  changed_when: false
+
+- name: Set UCI radio list
+  ansible.builtin.set_fact:
+    _uci_radios: "{{ _uci_radios_raw.stdout_lines | default([]) | select('match', '^radio') | list }}"
+
+# Fallback: wifi config couldn't see the namespace-moved PHYs via
+# sysfs. Create minimal radio sections manually from iw phy names.
+- name: Create radio sections manually when wifi config fails
+  ansible.builtin.raw: >-
+    /bin/sh -c
+    'uci set wireless.radio{{ idx }}=wifi-device &&
+    uci set wireless.radio{{ idx }}.type=mac80211 &&
+    uci set wireless.radio{{ idx }}.phy={{ item }} &&
+    uci set wireless.radio{{ idx }}.channel=auto &&
+    uci set wireless.radio{{ idx }}.disabled=1 &&
+    uci commit wireless'
+  loop: "{{ _mesh_radios }}"
+  loop_control:
+    index_var: idx
+  when: _uci_radios | length == 0
   changed_when: true
+
+- name: Re-read radio sections after manual creation
+  ansible.builtin.raw: >-
+    /bin/sh -c
+    'uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)=wifi-device$/\1/p"'
+  register: _uci_radios_raw
+  changed_when: false
+  when: _uci_radios | length == 0
+
+- name: Update UCI radio list after fallback
+  ansible.builtin.set_fact:
+    _uci_radios: "{{ _uci_radios_raw.stdout_lines | default([]) | select('match', '^radio') | list }}"
+  when: _uci_radios | length == 0
+
+- name: Fail if still no radio sections after fallback
+  ansible.builtin.fail:
+    msg: >-
+      No radio sections in UCI even after manual creation.
+      PHYs detected: {{ _mesh_radios | join(', ') }}.
+      Check that wpad-mesh-openssl and mac80211 are in the mesh image.
+  when: _uci_radios | length == 0
 
 # ── Mesh WiFi configuration ─────────────────────────────────────
 
 - name: Enable each WiFi radio
   ansible.builtin.raw: >-
     /bin/sh -c
-    'uci set wireless.radio{{ idx }}.disabled=0'
-  loop: "{{ _mesh_radios }}"
-  loop_control:
-    index_var: idx
+    'uci set wireless.{{ item }}.disabled=0'
+  loop: "{{ _uci_radios }}"
+  changed_when: false
 
 - name: Set WiFi radio channel
   ansible.builtin.raw: >-
     /bin/sh -c
-    'uci set wireless.radio{{ idx }}.channel={{ openwrt_mesh_channel }}'
-  loop: "{{ _mesh_radios }}"
-  loop_control:
-    index_var: idx
+    'uci set wireless.{{ item }}.channel={{ openwrt_mesh_channel }}'
+  loop: "{{ _uci_radios }}"
   when: openwrt_mesh_channel != 'auto'
+  changed_when: false
 
 - name: Create mesh interface for each radio
   ansible.builtin.raw: >-
     /bin/sh -c
     'uci set wireless.mesh{{ idx }}=wifi-iface &&
-    uci set wireless.mesh{{ idx }}.device="radio{{ idx }}" &&
+    uci set wireless.mesh{{ idx }}.device="{{ item }}" &&
     uci set wireless.mesh{{ idx }}.network="lan" &&
     uci set wireless.mesh{{ idx }}.mode="mesh" &&
     uci set wireless.mesh{{ idx }}.mesh_id="{{ openwrt_mesh_id }}" &&
@@ -102,14 +150,16 @@
     uci set wireless.mesh{{ idx }}.key="{{ openwrt_mesh_key }}" &&
     uci set wireless.mesh{{ idx }}.mesh_fwding="1" &&
     uci set wireless.mesh{{ idx }}.mesh_rssi_threshold="0"'
-  loop: "{{ _mesh_radios }}"
+  loop: "{{ _uci_radios }}"
   loop_control:
     index_var: idx
+  changed_when: false
 
 # ── Commit and apply ─────────────────────────────────────────────
 
 - name: Commit wireless configuration
   ansible.builtin.raw: /bin/sh -c 'uci commit wireless'
+  changed_when: true
 
 - name: Restart wireless
   ansible.builtin.raw: /bin/sh -c 'sleep 2 && wifi reload'

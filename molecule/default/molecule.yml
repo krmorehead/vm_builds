@@ -88,5 +88,6 @@ scenario:
     - dependency
     - cleanup
     - syntax
+    - prepare
     - converge
     - verify

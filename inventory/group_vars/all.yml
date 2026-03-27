@@ -132,7 +132,7 @@ netdata_ct_id: 500
 rsyslog_ct_id: 501
 
 # ── Gaming LXC (Sunshine host) ───────────────────────────────────
-# Custom image built by build-images.sh: Fedora + Sunshine + GZDoom +
+# Custom image built by build-images.sh: Fedora + Sunshine + dsda-doom +
 # Mesa VA-API/Vulkan + Xorg headless + PipeWire. GPU render device
 # sharing (NOT PCI passthrough) — safe on AMD APU single-GPU hosts.
 # Run ./build-images.sh --only gaming before first deploy.
@@ -142,10 +142,8 @@ gaming_ct_ip_offset: 18
 
 # ── Windows VM (general-purpose, not active for gaming) ──────────
 # Pre-built Windows 11 image with Sunshine, virtio drivers, QEMU GA,
-# and GZDoom baked in. Retained as a general Windows build option.
+# and dsda-doom baked in. Retained as a general Windows build option.
 gaming_image_path: images/sunshine-win11-amd64.qcow2
-gaming_iso_path: images/Tiny11-2026-03-15.iso
-gaming_virtio_iso_path: images/isos/virtio-win.iso
 
 # ── Gaming (600-699) ─────────────────────────────────────────────
 gaming_vm_id: 600

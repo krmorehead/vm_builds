@@ -15,6 +15,9 @@
   until: _ci_status.rc == 0
 
 # ── GPU drivers (vendor-specific, small and host-dependent) ────────
+# Accepted exception to bake-don't-configure: these small driver packages
+# depend on igpu_vendor which is detected at runtime. Baking both vendors
+# into the image would pull in conflicting Mesa driver stacks.
 
 - name: Update apt cache
   ansible.builtin.apt:

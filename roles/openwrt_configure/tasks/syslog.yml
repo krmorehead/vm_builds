@@ -37,17 +37,21 @@
 
 - name: Set syslog remote IP
   ansible.builtin.raw: uci set system.@system[0].log_ip='{{ rsyslog_static_ip }}'
+  changed_when: false
 
 - name: Set syslog remote port
   ansible.builtin.raw: uci set system.@system[0].log_port='514'
+  changed_when: false
 
 - name: Set syslog protocol to TCP
   ansible.builtin.raw: uci set system.@system[0].log_proto='tcp'
+  changed_when: false
 
 - name: Commit system changes and restart log daemon
   ansible.builtin.raw: |
     uci commit system
     /etc/init.d/log restart
+  changed_when: true
 
 - name: Wait for log daemon to stabilize
   ansible.builtin.pause:

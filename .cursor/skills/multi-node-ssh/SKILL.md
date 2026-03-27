@@ -129,12 +129,33 @@ proxmox:
 
 ```yaml
 # inventory/group_vars/lan_hosts.yml
+# ProxyCommand (not ProxyJump) — so we can pass keepalives to the jump connection.
 ansible_ssh_common_args: >-
-  -o ProxyJump=root@{{ lookup('env', 'PRIMARY_HOST') }}
-  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-  -o ConnectTimeout=10
-  -o ServerAliveInterval=15 -o ServerAliveCountMax=4
+  -o ProxyCommand="ssh
+  -o ServerAliveInterval=15
+  -o ServerAliveCountMax=4
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -W %h:%p root@{{ lookup('env', 'PRIMARY_HOST') }}"
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o ConnectTimeout=30
+  -o ServerAliveInterval=15
+  -o ServerAliveCountMax=4
 ```
+
+## Connection hardening
+
+Three layers prevent mid-play SSH drops through the ProxyCommand tunnel:
+
+1. **ansible.cfg**: `ControlPersist=300s` + `ServerAliveInterval=15` on ALL connections.
+2. **lan_hosts.yml**: ProxyCommand (not ProxyJump) with keepalives on the jump connection.
+3. **site.yml**: `meta: reset_connection` + `wait_for_connection` pre_tasks on the first
+   Phase 2 play targeting lan_hosts.
+
+Previous bug: mesh1 became UNREACHABLE mid-play during `proxmox_igpu` (54 tasks ok,
+then "Data could not be sent"). Root cause: the ControlMaster carrying the ProxyJump
+tunnel had no keepalives and could silently die.
 
 ## Bootstrap flow (`tasks/bootstrap_lan_host.yml`)
 

@@ -8,6 +8,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Parallel image building** -- `build-images.sh --parallel` distributes image
+  builds across multiple Proxmox hosts concurrently. Uses round-robin assignment
+  with automatic host discovery from env vars (`PRIMARY_HOST`, `AI_HOST`,
+  `MESH_2_HOST`). Local-only targets (mesh, router) build on the controller.
+  Override hosts with `--hosts <ip1,ip2,...>`. Reduces total build time from
+  serial (~15 min) to parallel (~5 min with 3 hosts).
+- **Per-feature unit test `prepare.yml`** -- Each per-feature molecule scenario
+  (`molecule/<service>-lxc/`) now includes a `prepare.yml` that builds the
+  service image if not cached. Unit tests are fully self-contained: prepare →
+  converge → verify → cleanup. See `molecule/UNIT_TEST_PATTERN.md`.
+- **E2E image pre-flight check** -- `molecule/default/prepare.yml` asserts all
+  required images exist before E2E integration tests run, failing with clear
+  build instructions if any are missing.
+
+### Changed
+
+- **E2E verify.yml slimmed by 35%** -- `molecule/default/verify.yml` now focuses
+  on infrastructure health, basic service liveness, cross-service integration,
+  and deploy stamps. Deep service-specific diagnostics (config validation,
+  separation tests, leak tests, logrotate, VA-API profiles, KDE/GNOME shortcuts,
+  etc.) moved to per-feature unit test verify files. Two-tier testing: unit tests
+  for depth, E2E for integration breadth.
+- **Molecule test sequences updated** -- All per-feature scenarios include
+  `prepare` step after `cleanup`. Default scenario includes `prepare` before
+  `converge`. Consistent pattern across all 13+ scenarios.
+
 - **Debian Desktop VM** -- `desktop_vm` and `desktop_configure` roles deploy
   a Debian 12 VM (VMID 400) with both KDE Plasma (Windows-style UX) and GNOME
   (Mac-style UX) desktop sessions. Users select their preferred UX at the SDDM
@@ -65,40 +91,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   detect `/dev/dri/card*` and `/dev/dri/renderD*` dynamically via sysfs
   instead of hardcoding `card0` or `renderD128`. Fixes false failures on
   AMD APU hosts where the card device is `card1`.
-
-### Changed
-
-- **GPU cleanup uses sysfs-only** -- All GPU driver cleanup across E2E,
-  per-feature, and production cleanup playbooks now uses sysfs unbind +
-  driver_override clear + PCI rescan instead of `modprobe -r`. Safe on
-  any host regardless of GPU count.
-- **gaming_vm role uses hookscript** -- Removed inline vfio-pci binding
-  from the role. The hookscript handles GPU bind/unbind at VM start/stop.
-  Removed the single-GPU AMD hard-fail that blocked passthrough on `ai`.
-
-### Fixed
-
-- **Pi-hole DNS timeout behind OpenWrt** -- Changed Pi-hole upstream DNS from
-  hardcoded external servers (1.1.1.1, 1.0.0.1) to auto-detected container
-  gateway. Direct DNS queries from the LAN container to external servers were
-  intermittently rejected ("connection refused"), while gateway DNS always
-  worked. The gateway is auto-detected via `ip -4 route show default` inside
-  the container. Explicit overrides via `pihole_upstream_dns_1/2` are still
-  supported for the `openwrt-pihole-dns` feature (where gateway-based DNS
-  would create a loop).
-- **E2E cleanup kernel panic on single-GPU AMD hosts** -- Replaced all
-  `modprobe -r amdgpu/i915` with sysfs unbind + PCI rescan + explicit
-  native driver rebinding. PCI rescan alone does not auto-bind when the
-  module is already loaded. Explicit `echo PCI_ADDR > driver/bind` is
-  required.
-- **GPU not restored after cleanup** -- PCI rescan after vfio-pci unbind
-  was leaving the Intel iGPU unbound (no DRI devices). Added explicit
-  driver rebinding based on PCI vendor ID in cleanup and hookscript
-  post-stop.
-- **WoL script included non-WoL host** -- Removed `ai` from `scripts/wol.sh`
-  HOST_MAC/HOST_IP. `ai` was listed with its PCIe NIC MAC, but is connected
-  via USB ethernet only. WoL magic packets would never reach it.
-
 - **Sunshine streaming server** -- Windows 11 VM (VMID 600, 4096 MB RAM,
   64 GB disk) with iGPU PCI passthrough running Sunshine as a Moonlight
   streaming host. Uses vfio-pci to bind the host iGPU exclusively to the VM
@@ -259,13 +251,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   uploaded to Proxmox during provisioning (no external download needed).
 - **VMID allocation scheme** -- 100-series network, 200-series services,
   300-series media, 400-series desktop, 500-series observability, 600-series
-  gaming. Defined in `group_vars/all.yml`.
+  gaming. Defined in `inventory/group_vars/all.yml`.
 - **Flavor groups** -- `router_nodes`, `vpn_nodes`, `dns_nodes`,
   `wifi_nodes`, `monitoring_nodes`, `service_nodes`, `media_nodes`,
   `desktop_nodes`, `gaming_nodes` in inventory for build profile composition.
 - **Build profiles documentation** (`docs/architecture/build-profiles.md`).
 - **Auto-start configuration** -- `proxmox_startup_order` lookup table and
-  `proxmox_ondemand_services` list in `group_vars/all.yml`.
+  `proxmox_ondemand_services` list in `inventory/group_vars/all.yml`.
 - **Per-feature Molecule scenarios** -- `proxmox-lxc` and `proxmox-igpu`
   for fast, isolated testing of individual roles.
 - **Proxmox repo management** -- enterprise repo disabling, no-subscription
@@ -279,7 +271,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Device flavor groups** -- inventory uses child groups under `proxmox`
   (e.g., `router_nodes`) to control which VM types each host receives.
   Shared infrastructure runs on all `proxmox` hosts regardless of flavor.
-- **`project_version`** variable in `group_vars/all.yml` as single source
+- **`project_version`** variable in `inventory/group_vars/all.yml` as single source
   of truth for version tracking across deployments.
 - **Unit tests** for `build.py` (`tests/test_build.py`, 32 tests covering
   env parsing, validation, playbook resolution, and command construction).
@@ -287,8 +279,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **GPU cleanup uses sysfs-only** -- All GPU driver cleanup across E2E,
+  per-feature, and production cleanup playbooks now uses sysfs unbind +
+  driver_override clear + PCI rescan instead of `modprobe -r`. Safe on
+  any host regardless of GPU count.
+- **gaming_vm role uses hookscript** -- Removed inline vfio-pci binding
+  from the role. The hookscript handles GPU bind/unbind at VM start/stop.
+  Removed the single-GPU AMD hard-fail that blocked passthrough on `ai`.
 - **Service-specific molecule cleanup** -- Replaced blanket `qm list` / `pct list`
-  iteration with explicit VMIDs from `group_vars/all.yml`. Cleanup now only
+  iteration with explicit VMIDs from `inventory/group_vars/all.yml`. Cleanup now only
   destroys known project VMs (100) and containers (101-103, 500-501) by checking
   existence first. Removed backup restore and made `update-initramfs` conditional
   on PCI passthrough config presence. Fixes template deletion on LAN hosts that
@@ -312,6 +311,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   VM-specific provisioning. Shared roles (`proxmox_bridges`,
   `proxmox_pci_passthrough`) target all `proxmox` hosts; OpenWrt provision
   targets `router_nodes` only.
+
+### Fixed
+
+- **Pi-hole DNS timeout behind OpenWrt** -- Changed Pi-hole upstream DNS from
+  hardcoded external servers (1.1.1.1, 1.0.0.1) to auto-detected container
+  gateway. Direct DNS queries from the LAN container to external servers were
+  intermittently rejected ("connection refused"), while gateway DNS always
+  worked. The gateway is auto-detected via `ip -4 route show default` inside
+  the container. Explicit overrides via `pihole_upstream_dns_1/2` are still
+  supported for the `openwrt-pihole-dns` feature (where gateway-based DNS
+  would create a loop).
+- **E2E cleanup kernel panic on single-GPU AMD hosts** -- Replaced all
+  `modprobe -r amdgpu/i915` with sysfs unbind + PCI rescan + explicit
+  native driver rebinding. PCI rescan alone does not auto-bind when the
+  module is already loaded. Explicit `echo PCI_ADDR > driver/bind` is
+  required.
+- **GPU not restored after cleanup** -- PCI rescan after vfio-pci unbind
+  was leaving the Intel iGPU unbound (no DRI devices). Added explicit
+  driver rebinding based on PCI vendor ID in cleanup and hookscript
+  post-stop.
+- **WoL script included non-WoL host** -- Removed `ai` from `scripts/wol.sh`
+  HOST_MAC/HOST_IP. `ai` was listed with its PCIe NIC MAC, but is connected
+  via USB ethernet only. WoL magic packets would never reach it.
 
 ## [1.0.0] - 2026-03-09
 

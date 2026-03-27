@@ -13,14 +13,19 @@ set -euo pipefail
 #   8. Home Assistant template  — Debian 12 with Docker CE and HA container pre-pulled (remote build on Proxmox)
 #   9. Kodi LXC template       — Debian 12 with kodi-standalone + GBM/DRM + Mesa + libcec (remote build on Proxmox)
 #  10. Moonlight LXC template  — Debian 12 with moonlight-embedded + VA-API drivers   (remote build on Proxmox)
-#  11. Gaming LXC template     — Fedora with Sunshine + GZDoom + Mesa VA-API + PipeWire (remote build on Proxmox)
-#  12. Sunshine VM image        — Windows 11 with Sunshine + GZDoom + virtio drivers    (remote build on Proxmox)
+#  11. Gaming LXC template     — Fedora with Sunshine + dsda-doom + Mesa VA-API + PipeWire (remote build on Proxmox)
+#  12. Sunshine VM image        — Windows 11 with Sunshine + dsda-doom + virtio drivers    (remote build on Proxmox)
 #  13. Desktop VM image         — Debian 12 with KDE + GNOME + SDDM + apps baked in    (remote build on Proxmox)
 #
 # Usage: ./build-images.sh [--clean] [--host <proxmox-ip>] [--only <target>]
+#                          [--parallel] [--hosts <ip1>,<ip2>,...]
 #   --clean          Remove cached Image Builder before downloading fresh copy
 #   --host <ip>      Proxmox host for remote image builds. Required for remote-built templates.
 #   --only <target>  Build only the specified target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, moonlight, gaming, sunshine, desktop).
+#   --parallel       Build images across multiple hosts in parallel.
+#                    Reads host IPs from PRIMARY_HOST, AI_HOST, MESH_2_HOST env vars.
+#   --hosts <ips>    Comma-separated list of Proxmox host IPs for parallel builds.
+#                    Implies --parallel.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGES_DIR="$(cd "${SCRIPT_DIR}/../images" && pwd)"
@@ -38,17 +43,18 @@ MESH_FILES_DIR="${SCRIPT_DIR}/image-builder/files-mesh-lxc"
 MESH_OUTPUT_NAME="openwrt-mesh-lxc-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}-rootfs.tar.gz"
 ROUTER_OUTPUT_NAME="openwrt-router-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}-combined.img.gz"
 
+# Shared Debian base template for all Debian-based LXC builds
+DEBIAN_BASE_TEMPLATE="debian-12-standard_12.12-1_amd64.tar.zst"
+
 # Pi-hole LXC template (built remotely on Proxmox via pct create/exec/vzdump)
-PIHOLE_BASE_TEMPLATE="debian-12-standard_12.12-1_amd64.tar.zst"
 PIHOLE_OUTPUT_NAME="pihole-debian-12-amd64.tar.zst"
 PIHOLE_BUILD_VMID=998
 
 # rsyslog LXC template (built remotely on Proxmox via pct create/exec/vzdump)
-RSYSLOG_BASE_TEMPLATE="debian-12-standard_12.12-1_amd64.tar.zst"
 RSYSLOG_OUTPUT_NAME="rsyslog-debian-12-amd64.tar.zst"
 RSYSLOG_BUILD_VMID=997
 
-# Gaming LXC template (built remotely on Proxmox — Fedora base with Sunshine + GZDoom)
+# Gaming LXC template (built remotely on Proxmox — Fedora base with Sunshine + dsda-doom)
 GAMING_FEDORA_VERSION="41"
 GAMING_BASE_ROOTFS="fedora-${GAMING_FEDORA_VERSION}-default-amd64.tar.xz"
 GAMING_LXC_IMAGE_URL="https://images.linuxcontainers.org/images/fedora/${GAMING_FEDORA_VERSION}/amd64/default"
@@ -63,6 +69,11 @@ DESKTOP_BUILD_VMID=991
 # Remote Proxmox host (set via --host flag)
 PROXMOX_HOST=""
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10"
+
+# Parallel build mode (set via --parallel or --hosts)
+PARALLEL_MODE=false
+PARALLEL_HOSTS=()
+CLEAN_MODE=false
 
 # ── Package lists ────────────────────────────────────────────────────
 
@@ -128,6 +139,106 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 remote_cmd() {
     # shellcheck disable=SC2086
     ssh $SSH_OPTS "root@${PROXMOX_HOST}" "$@"
+}
+
+# Shared cleanup for any LXC build container
+cleanup_lxc_build() {
+    local vmid="$1"
+    if [[ -n "$PROXMOX_HOST" ]]; then
+        log "Cleaning up build container ${vmid}..."
+        remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
+    fi
+}
+
+# TODO: Wire these helpers into per-service build functions to eliminate
+# duplicated preflight/prepare/wait/export logic. Each per-service function
+# currently inlines this same sequence. Integration deferred until we can
+# run `./build-images.sh` end-to-end to validate.
+
+# Shared pre-flight checks for Debian-based LXC builds.
+# Returns 1 (skip) if output already exists, dies on missing prerequisites.
+debian_lxc_preflight() {
+    local output="$1" service_name="$2"
+    if [[ -f "$output" ]]; then
+        log "${service_name} template already exists at ${output}"
+        log "  Delete it and re-run to rebuild."
+        return 1
+    fi
+    if [[ -z "$PROXMOX_HOST" ]]; then
+        die "${service_name} build requires --host <proxmox-ip>. Example:
+  ./build-images.sh --host 192.168.86.201"
+    fi
+    local base_template="${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}"
+    if [[ ! -f "$base_template" ]]; then
+        die "Base template not found: ${base_template}. Download it first:
+  wget -O ${base_template} \\
+    http://download.proxmox.com/images/system/${DEBIAN_BASE_TEMPLATE}"
+    fi
+    return 0
+}
+
+# Shared: upload base template and detect management bridge.
+# Prints the bridge name to stdout.
+debian_lxc_prepare() {
+    local vmid="$1"
+    remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
+    local remote_template="/var/lib/vz/template/cache/${DEBIAN_BASE_TEMPLATE}"
+    if ! remote_cmd "test -f ${remote_template}"; then
+        log "Uploading base template to Proxmox host..."
+        # shellcheck disable=SC2086
+        scp $SSH_OPTS "${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}" "root@${PROXMOX_HOST}:${remote_template}"
+    fi
+    remote_cmd "ip -o route show default | awk '{print \$5}' | head -1"
+}
+
+# Shared: wait for container shell readiness + DNS resolution
+debian_lxc_wait_ready() {
+    local vmid="$1"
+    log "Waiting for container readiness..."
+    local retries=0
+    while ! remote_cmd "pct exec ${vmid} -- ls / >/dev/null 2>&1"; do
+        retries=$((retries + 1))
+        if (( retries > 30 )); then
+            die "Build container never became ready after 60s"
+        fi
+        sleep 2
+    done
+    log "Waiting for DNS resolution..."
+    retries=0
+    while ! remote_cmd "pct exec ${vmid} -- getent hosts deb.debian.org >/dev/null 2>&1"; do
+        retries=$((retries + 1))
+        if (( retries > 30 )); then
+            die "Build container never got DNS resolution after 60s"
+        fi
+        sleep 2
+    done
+    log "Container has network access."
+}
+
+# Shared: stop container, vzdump, download, cleanup
+debian_lxc_export() {
+    local vmid="$1" output="$2" service_name="$3"
+    log "Stopping build container..."
+    remote_cmd "pct stop ${vmid}"
+    sleep 2
+    log "Exporting container as template via vzdump..."
+    remote_cmd "vzdump ${vmid} --dumpdir /tmp --compress zstd --mode stop"
+    local vzdump_file
+    vzdump_file=$(remote_cmd "ls -t /tmp/vzdump-lxc-${vmid}-*.tar.zst 2>/dev/null | head -1")
+    if [[ -z "$vzdump_file" ]]; then
+        remote_cmd "pct destroy ${vmid} --purge 2>/dev/null; true"
+        die "vzdump archive not found on Proxmox host"
+    fi
+    log "vzdump archive: ${vzdump_file}"
+    log "Downloading template to ${output}..."
+    mkdir -p "$IMAGES_DIR"
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS "root@${PROXMOX_HOST}:${vzdump_file}" "$output"
+    log "Cleaning up build container and vzdump archive..."
+    remote_cmd "pct destroy ${vmid} --purge 2>/dev/null; rm -f '${vzdump_file}'; true"
+    trap - EXIT
+    log "${service_name} LXC template: ${output}"
+    log "  Size: $(du -h "$output" | cut -f1)"
 }
 
 check_deps() {
@@ -211,17 +322,11 @@ build_router_vm() {
     log "  Size: $(du -h "${IMAGES_DIR}/${ROUTER_OUTPUT_NAME}" | cut -f1)"
 }
 
-cleanup_pihole_build() {
-    local vmid="${PIHOLE_BUILD_VMID}"
-    if [[ -n "$PROXMOX_HOST" ]]; then
-        log "Cleaning up build container ${vmid}..."
-        remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
-    fi
-}
+cleanup_pihole_build() { cleanup_lxc_build "${PIHOLE_BUILD_VMID}"; }
 
 build_pihole_lxc() {
     log "Building Pi-hole LXC template (remote on Proxmox)..."
-    local base_template="${IMAGES_DIR}/${PIHOLE_BASE_TEMPLATE}"
+    local base_template="${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}"
     local output="${IMAGES_DIR}/${PIHOLE_OUTPUT_NAME}"
     local vmid="${PIHOLE_BUILD_VMID}"
 
@@ -239,7 +344,7 @@ build_pihole_lxc() {
     if [[ ! -f "$base_template" ]]; then
         die "Base template not found: ${base_template}. Download it first:
   wget -O ${base_template} \\
-    http://download.proxmox.com/images/system/${PIHOLE_BASE_TEMPLATE}"
+    http://download.proxmox.com/images/system/${DEBIAN_BASE_TEMPLATE}"
     fi
 
     trap cleanup_pihole_build EXIT
@@ -248,7 +353,7 @@ build_pihole_lxc() {
     remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
 
     # Upload base template if not already cached on host
-    local remote_template="/var/lib/vz/template/cache/${PIHOLE_BASE_TEMPLATE}"
+    local remote_template="/var/lib/vz/template/cache/${DEBIAN_BASE_TEMPLATE}"
     if ! remote_cmd "test -f ${remote_template}"; then
         log "Uploading base template to Proxmox host..."
         # shellcheck disable=SC2086
@@ -261,7 +366,7 @@ build_pihole_lxc() {
     log "Management bridge: ${mgmt_bridge}"
 
     log "Creating temporary build container (VMID ${vmid})..."
-    remote_cmd "pct create ${vmid} local:vztmpl/${PIHOLE_BASE_TEMPLATE} \
+    remote_cmd "pct create ${vmid} local:vztmpl/${DEBIAN_BASE_TEMPLATE} \
         --hostname pihole-build \
         --memory 512 \
         --cores 1 \
@@ -347,17 +452,11 @@ TOML_EOF
     log "  Size: $(du -h "$output" | cut -f1)"
 }
 
-cleanup_rsyslog_build() {
-    local vmid="${RSYSLOG_BUILD_VMID}"
-    if [[ -n "$PROXMOX_HOST" ]]; then
-        log "Cleaning up rsyslog build container ${vmid}..."
-        remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
-    fi
-}
+cleanup_rsyslog_build() { cleanup_lxc_build "${RSYSLOG_BUILD_VMID}"; }
 
 build_rsyslog_lxc() {
     log "Building rsyslog LXC template (remote on Proxmox)..."
-    local base_template="${IMAGES_DIR}/${RSYSLOG_BASE_TEMPLATE}"
+    local base_template="${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}"
     local output="${IMAGES_DIR}/${RSYSLOG_OUTPUT_NAME}"
     local vmid="${RSYSLOG_BUILD_VMID}"
 
@@ -375,14 +474,14 @@ build_rsyslog_lxc() {
     if [[ ! -f "$base_template" ]]; then
         die "Base template not found: ${base_template}. Download it first:
   wget -O ${base_template} \\
-    http://download.proxmox.com/images/system/${RSYSLOG_BASE_TEMPLATE}"
+    http://download.proxmox.com/images/system/${DEBIAN_BASE_TEMPLATE}"
     fi
 
     trap cleanup_rsyslog_build EXIT
 
     remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
 
-    local remote_template="/var/lib/vz/template/cache/${RSYSLOG_BASE_TEMPLATE}"
+    local remote_template="/var/lib/vz/template/cache/${DEBIAN_BASE_TEMPLATE}"
     if ! remote_cmd "test -f ${remote_template}"; then
         log "Uploading base template to Proxmox host..."
         # shellcheck disable=SC2086
@@ -394,7 +493,7 @@ build_rsyslog_lxc() {
     log "Management bridge: ${mgmt_bridge}"
 
     log "Creating temporary build container (VMID ${vmid})..."
-    remote_cmd "pct create ${vmid} local:vztmpl/${RSYSLOG_BASE_TEMPLATE} \
+    remote_cmd "pct create ${vmid} local:vztmpl/${DEBIAN_BASE_TEMPLATE} \
         --hostname rsyslog-build \
         --memory 256 \
         --cores 1 \
@@ -520,21 +619,14 @@ ROTATE_EOF
 }
 
 # Jellyfin LXC template (built remotely on Proxmox via pct create/exec/vzdump)
-JELLYFIN_BASE_TEMPLATE="debian-12-standard_12.12-1_amd64.tar.zst"
 JELLYFIN_OUTPUT_NAME="jellyfin-debian-12-amd64.tar.zst"
 JELLYFIN_BUILD_VMID=995
 
-cleanup_jellyfin_build() {
-    local vmid="${JELLYFIN_BUILD_VMID}"
-    if [[ -n "$PROXMOX_HOST" ]]; then
-        log "Cleaning up Jellyfin build container ${vmid}..."
-        remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
-    fi
-}
+cleanup_jellyfin_build() { cleanup_lxc_build "${JELLYFIN_BUILD_VMID}"; }
 
 build_jellyfin_lxc() {
     log "Building Jellyfin LXC template (remote on Proxmox)..."
-    local base_template="${IMAGES_DIR}/${JELLYFIN_BASE_TEMPLATE}"
+    local base_template="${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}"
     local output="${IMAGES_DIR}/${JELLYFIN_OUTPUT_NAME}"
     local vmid="${JELLYFIN_BUILD_VMID}"
 
@@ -552,14 +644,14 @@ build_jellyfin_lxc() {
     if [[ ! -f "$base_template" ]]; then
         die "Base template not found: ${base_template}. Download it first:
   wget -O ${base_template} \\
-    http://download.proxmox.com/images/system/${JELLYFIN_BASE_TEMPLATE}"
+    http://download.proxmox.com/images/system/${DEBIAN_BASE_TEMPLATE}"
     fi
 
     trap cleanup_jellyfin_build EXIT
 
     remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
 
-    local remote_template="/var/lib/vz/template/cache/${JELLYFIN_BASE_TEMPLATE}"
+    local remote_template="/var/lib/vz/template/cache/${DEBIAN_BASE_TEMPLATE}"
     if ! remote_cmd "test -f ${remote_template}"; then
         log "Uploading base template to Proxmox host..."
         # shellcheck disable=SC2086
@@ -571,7 +663,7 @@ build_jellyfin_lxc() {
     log "Management bridge: ${mgmt_bridge}"
 
     log "Creating temporary build container (VMID ${vmid})..."
-    remote_cmd "pct create ${vmid} local:vztmpl/${JELLYFIN_BASE_TEMPLATE} \
+    remote_cmd "pct create ${vmid} local:vztmpl/${DEBIAN_BASE_TEMPLATE} \
         --hostname jellyfin-build \
         --memory 512 \
         --cores 1 \
@@ -695,21 +787,14 @@ JELLYFIN_EOF
 }
 
 # Netdata LXC template (built remotely on Proxmox via pct create/exec/vzdump)
-NETDATA_BASE_TEMPLATE="debian-12-standard_12.12-1_amd64.tar.zst"
 NETDATA_OUTPUT_NAME="netdata-debian-12-amd64.tar.zst"
 NETDATA_BUILD_VMID=996
 
-cleanup_netdata_build() {
-    local vmid="${NETDATA_BUILD_VMID}"
-    if [[ -n "$PROXMOX_HOST" ]]; then
-        log "Cleaning up Netdata build container ${vmid}..."
-        remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
-    fi
-}
+cleanup_netdata_build() { cleanup_lxc_build "${NETDATA_BUILD_VMID}"; }
 
 build_netdata_lxc() {
     log "Building Netdata LXC template (remote on Proxmox)..."
-    local base_template="${IMAGES_DIR}/${NETDATA_BASE_TEMPLATE}"
+    local base_template="${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}"
     local output="${IMAGES_DIR}/${NETDATA_OUTPUT_NAME}"
     local vmid="${NETDATA_BUILD_VMID}"
 
@@ -727,14 +812,14 @@ build_netdata_lxc() {
     if [[ ! -f "$base_template" ]]; then
         die "Base template not found: ${base_template}. Download it first:
   wget -O ${base_template} \\
-    http://download.proxmox.com/images/system/${NETDATA_BASE_TEMPLATE}"
+    http://download.proxmox.com/images/system/${DEBIAN_BASE_TEMPLATE}"
     fi
 
     trap cleanup_netdata_build EXIT
 
     remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
 
-    local remote_template="/var/lib/vz/template/cache/${NETDATA_BASE_TEMPLATE}"
+    local remote_template="/var/lib/vz/template/cache/${DEBIAN_BASE_TEMPLATE}"
     if ! remote_cmd "test -f ${remote_template}"; then
         log "Uploading base template to Proxmox host..."
         # shellcheck disable=SC2086
@@ -746,7 +831,7 @@ build_netdata_lxc() {
     log "Management bridge: ${mgmt_bridge}"
 
     log "Creating temporary build container (VMID ${vmid})..."
-    remote_cmd "pct create ${vmid} local:vztmpl/${NETDATA_BASE_TEMPLATE} \
+    remote_cmd "pct create ${vmid} local:vztmpl/${DEBIAN_BASE_TEMPLATE} \
         --hostname netdata-build \
         --memory 512 \
         --cores 1 \
@@ -886,36 +971,26 @@ OVERRIDE_EOF
 }
 
 # WireGuard LXC template (built remotely on Proxmox via pct create/exec/vzdump)
-WIREGUARD_BASE_TEMPLATE="debian-12-standard_12.12-1_amd64.tar.zst"
 WIREGUARD_OUTPUT_NAME="wireguard-debian-12-amd64.tar.zst"
-WIREGUARD_BUILD_VMID=995
+WIREGUARD_BUILD_VMID=989
 
 # Kodi LXC template (built remotely on Proxmox via pct create/exec/vzdump)
-KODI_BASE_TEMPLATE="debian-12-standard_12.12-1_amd64.tar.zst"
 KODI_OUTPUT_NAME="kodi-debian-12-amd64.tar.zst"
 KODI_BUILD_VMID=993
 
 # Moonlight LXC template (built remotely on Proxmox via pct create/exec/vzdump)
-MOONLIGHT_BASE_TEMPLATE="debian-12-standard_12.12-1_amd64.tar.zst"
 MOONLIGHT_OUTPUT_NAME="moonlight-debian-12-amd64.tar.zst"
-MOONLIGHT_BUILD_VMID=991
+MOONLIGHT_BUILD_VMID=988
 
 # Home Assistant LXC template (built remotely on Proxmox via pct create/exec/vzdump)
-HOMEASSISTANT_BASE_TEMPLATE="debian-12-standard_12.12-1_amd64.tar.zst"
 HOMEASSISTANT_OUTPUT_NAME="homeassistant-debian-12-amd64.tar.zst"
 HOMEASSISTANT_BUILD_VMID=994
 
-cleanup_kodi_build() {
-    local vmid="${KODI_BUILD_VMID}"
-    if [[ -n "$PROXMOX_HOST" ]]; then
-        log "Cleaning up Kodi build container ${vmid}..."
-        remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
-    fi
-}
+cleanup_kodi_build() { cleanup_lxc_build "${KODI_BUILD_VMID}"; }
 
 build_kodi_lxc() {
     log "Building Kodi LXC template (remote on Proxmox)..."
-    local base_template="${IMAGES_DIR}/${KODI_BASE_TEMPLATE}"
+    local base_template="${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}"
     local output="${IMAGES_DIR}/${KODI_OUTPUT_NAME}"
     local vmid="${KODI_BUILD_VMID}"
 
@@ -933,14 +1008,14 @@ build_kodi_lxc() {
     if [[ ! -f "$base_template" ]]; then
         die "Base template not found: ${base_template}. Download it first:
   wget -O ${base_template} \\
-    http://download.proxmox.com/images/system/${KODI_BASE_TEMPLATE}"
+    http://download.proxmox.com/images/system/${DEBIAN_BASE_TEMPLATE}"
     fi
 
     trap cleanup_kodi_build EXIT
 
     remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
 
-    local remote_template="/var/lib/vz/template/cache/${KODI_BASE_TEMPLATE}"
+    local remote_template="/var/lib/vz/template/cache/${DEBIAN_BASE_TEMPLATE}"
     if ! remote_cmd "test -f ${remote_template}"; then
         log "Uploading base template to Proxmox host..."
         # shellcheck disable=SC2086
@@ -952,7 +1027,7 @@ build_kodi_lxc() {
     log "Management bridge: ${mgmt_bridge}"
 
     log "Creating temporary build container (VMID ${vmid})..."
-    remote_cmd "pct create ${vmid} local:vztmpl/${KODI_BASE_TEMPLATE} \
+    remote_cmd "pct create ${vmid} local:vztmpl/${DEBIAN_BASE_TEMPLATE} \
         --hostname kodi-build \
         --memory 1024 \
         --cores 2 \
@@ -1095,17 +1170,11 @@ SETTINGS_EOF
     log "  Size: $(du -h "$output" | cut -f1)"
 }
 
-cleanup_moonlight_build() {
-    local vmid="${MOONLIGHT_BUILD_VMID}"
-    if [[ -n "$PROXMOX_HOST" ]]; then
-        log "Cleaning up Moonlight build container ${vmid}..."
-        remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
-    fi
-}
+cleanup_moonlight_build() { cleanup_lxc_build "${MOONLIGHT_BUILD_VMID}"; }
 
 build_moonlight_lxc() {
     log "Building Moonlight LXC template (remote on Proxmox)..."
-    local base_template="${IMAGES_DIR}/${MOONLIGHT_BASE_TEMPLATE}"
+    local base_template="${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}"
     local output="${IMAGES_DIR}/${MOONLIGHT_OUTPUT_NAME}"
     local vmid="${MOONLIGHT_BUILD_VMID}"
 
@@ -1123,14 +1192,14 @@ build_moonlight_lxc() {
     if [[ ! -f "$base_template" ]]; then
         die "Base template not found: ${base_template}. Download it first:
   wget -O ${base_template} \\
-    http://download.proxmox.com/images/system/${MOONLIGHT_BASE_TEMPLATE}"
+    http://download.proxmox.com/images/system/${DEBIAN_BASE_TEMPLATE}"
     fi
 
     trap cleanup_moonlight_build EXIT
 
     remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
 
-    local remote_template="/var/lib/vz/template/cache/${MOONLIGHT_BASE_TEMPLATE}"
+    local remote_template="/var/lib/vz/template/cache/${DEBIAN_BASE_TEMPLATE}"
     if ! remote_cmd "test -f ${remote_template}"; then
         log "Uploading base template to Proxmox host..."
         # shellcheck disable=SC2086
@@ -1142,7 +1211,7 @@ build_moonlight_lxc() {
     log "Management bridge: ${mgmt_bridge}"
 
     log "Creating temporary build container (VMID ${vmid})..."
-    remote_cmd "pct create ${vmid} local:vztmpl/${MOONLIGHT_BASE_TEMPLATE} \
+    remote_cmd "pct create ${vmid} local:vztmpl/${DEBIAN_BASE_TEMPLATE} \
         --hostname moonlight-build \
         --memory 1024 \
         --cores 2 \
@@ -1270,25 +1339,13 @@ build_moonlight_lxc() {
     log "  Size: $(du -h "$output" | cut -f1)"
 }
 
-cleanup_wireguard_build() {
-    local vmid="${WIREGUARD_BUILD_VMID}"
-    if [[ -n "$PROXMOX_HOST" ]]; then
-        log "Cleaning up WireGuard build container ${vmid}..."
-        remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
-    fi
-}
+cleanup_wireguard_build() { cleanup_lxc_build "${WIREGUARD_BUILD_VMID}"; }
 
-cleanup_homeassistant_build() {
-    local vmid="${HOMEASSISTANT_BUILD_VMID}"
-    if [[ -n "$PROXMOX_HOST" ]]; then
-        log "Cleaning up Home Assistant build container ${vmid}..."
-        remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
-    fi
-}
+cleanup_homeassistant_build() { cleanup_lxc_build "${HOMEASSISTANT_BUILD_VMID}"; }
 
 build_wireguard_lxc() {
     log "Building WireGuard LXC template (remote on Proxmox)..."
-    local base_template="${IMAGES_DIR}/${WIREGUARD_BASE_TEMPLATE}"
+    local base_template="${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}"
     local output="${IMAGES_DIR}/${WIREGUARD_OUTPUT_NAME}"
     local vmid="${WIREGUARD_BUILD_VMID}"
 
@@ -1306,14 +1363,14 @@ build_wireguard_lxc() {
     if [[ ! -f "$base_template" ]]; then
         die "Base template not found: ${base_template}. Download it first:
   wget -O ${base_template} \\
-    http://download.proxmox.com/images/system/${WIREGUARD_BASE_TEMPLATE}"
+    http://download.proxmox.com/images/system/${DEBIAN_BASE_TEMPLATE}"
     fi
 
     trap cleanup_wireguard_build EXIT
 
     remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
 
-    local remote_template="/var/lib/vz/template/cache/${WIREGUARD_BASE_TEMPLATE}"
+    local remote_template="/var/lib/vz/template/cache/${DEBIAN_BASE_TEMPLATE}"
     if ! remote_cmd "test -f ${remote_template}"; then
         log "Uploading base template to Proxmox host..."
         # shellcheck disable=SC2086
@@ -1325,7 +1382,7 @@ build_wireguard_lxc() {
     log "Management bridge: ${mgmt_bridge}"
 
     log "Creating temporary build container (VMID ${vmid})..."
-    remote_cmd "pct create ${vmid} local:vztmpl/${WIREGUARD_BASE_TEMPLATE} \
+    remote_cmd "pct create ${vmid} local:vztmpl/${DEBIAN_BASE_TEMPLATE} \
         --hostname wireguard-build \
         --memory 256 \
         --cores 1 \
@@ -1420,7 +1477,7 @@ SYSCTL_EOF
 
 build_homeassistant_lxc() {
     log "Building Home Assistant LXC template (remote on Proxmox)..."
-    local base_template="${IMAGES_DIR}/${HOMEASSISTANT_BASE_TEMPLATE}"
+    local base_template="${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}"
     local output="${IMAGES_DIR}/${HOMEASSISTANT_OUTPUT_NAME}"
     local vmid="${HOMEASSISTANT_BUILD_VMID}"
 
@@ -1438,14 +1495,14 @@ build_homeassistant_lxc() {
     if [[ ! -f "$base_template" ]]; then
         die "Base template not found: ${base_template}. Download it first:
   wget -O ${base_template} \\
-    http://download.proxmox.com/images/system/${HOMEASSISTANT_BASE_TEMPLATE}"
+    http://download.proxmox.com/images/system/${DEBIAN_BASE_TEMPLATE}"
     fi
 
     trap cleanup_homeassistant_build EXIT
 
     remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
 
-    local remote_template="/var/lib/vz/template/cache/${HOMEASSISTANT_BASE_TEMPLATE}"
+    local remote_template="/var/lib/vz/template/cache/${DEBIAN_BASE_TEMPLATE}"
     if ! remote_cmd "test -f ${remote_template}"; then
         log "Uploading base template to Proxmox host..."
         # shellcheck disable=SC2086
@@ -1457,7 +1514,7 @@ build_homeassistant_lxc() {
     log "Management bridge: ${mgmt_bridge}"
 
     log "Creating temporary build container (VMID ${vmid})..."
-    remote_cmd "pct create ${vmid} local:vztmpl/${HOMEASSISTANT_BASE_TEMPLATE} \
+    remote_cmd "pct create ${vmid} local:vztmpl/${DEBIAN_BASE_TEMPLATE} \
         --hostname homeassistant-build \
         --memory 1024 \
         --cores 2 \
@@ -1585,13 +1642,7 @@ DOCKER_EOF
     log "  Size: $(du -h "$output" | cut -f1)"
 }
 
-cleanup_gaming_build() {
-    local vmid="${GAMING_BUILD_VMID}"
-    if [[ -n "$PROXMOX_HOST" ]]; then
-        log "Cleaning up gaming build container ${vmid}..."
-        remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
-    fi
-}
+cleanup_gaming_build() { cleanup_lxc_build "${GAMING_BUILD_VMID}"; }
 
 build_gaming_lxc() {
     log "Building Gaming LXC template (remote on Proxmox)..."
@@ -2338,6 +2389,123 @@ build_sunshine_vm() {
     log "  Size: $(du -h "$output" | cut -f1)"
 }
 
+# ── Parallel build ────────────────────────────────────────────────────
+
+parallel_build() {
+    if [[ ${#PARALLEL_HOSTS[@]} -eq 0 ]]; then
+        [[ -n "${PRIMARY_HOST:-}" ]] && PARALLEL_HOSTS+=("$PRIMARY_HOST")
+        [[ -n "${AI_HOST:-}" ]] && PARALLEL_HOSTS+=("$AI_HOST")
+        [[ -n "${MESH_2_HOST:-}" ]] && PARALLEL_HOSTS+=("$MESH_2_HOST")
+    fi
+
+    if [[ ${#PARALLEL_HOSTS[@]} -eq 0 ]]; then
+        die "--parallel requires at least one host.
+  Set PRIMARY_HOST, AI_HOST, MESH_2_HOST in your environment, or use --hosts <ip1>,<ip2>,..."
+    fi
+
+    local -a all_local=(mesh router)
+    local -a all_remote=(pihole rsyslog jellyfin netdata wireguard homeassistant kodi moonlight gaming sunshine desktop)
+    local -a local_targets=() remote_targets=()
+
+    if [[ ${#BUILD_TARGETS[@]} -gt 0 ]]; then
+        for t in "${BUILD_TARGETS[@]}"; do
+            if printf '%s\n' "${all_local[@]}" | grep -qx "$t"; then
+                local_targets+=("$t")
+            elif printf '%s\n' "${all_remote[@]}" | grep -qx "$t"; then
+                remote_targets+=("$t")
+            fi
+        done
+    else
+        local_targets=("${all_local[@]}")
+        remote_targets=("${all_remote[@]}")
+    fi
+
+    # Distribute remote targets round-robin across hosts
+    local num_hosts=${#PARALLEL_HOSTS[@]}
+    local -a host_target_lists=()
+    for ((i = 0; i < num_hosts; i++)); do
+        host_target_lists[$i]=""
+    done
+    for ((i = 0; i < ${#remote_targets[@]}; i++)); do
+        local idx=$((i % num_hosts))
+        host_target_lists[$idx]+="${remote_targets[$i]} "
+    done
+
+    log "Parallel build plan:"
+    if [[ ${#local_targets[@]} -gt 0 ]]; then
+        log "  controller: ${local_targets[*]}"
+    fi
+    for ((i = 0; i < num_hosts; i++)); do
+        local targets="${host_target_lists[$i]}"
+        [[ -n "${targets// /}" ]] && log "  ${PARALLEL_HOSTS[$i]}: ${targets% }"
+    done
+    log ""
+
+    local log_dir
+    log_dir=$(mktemp -d "${TMPDIR:-/tmp}/build-images-parallel.XXXXXX")
+    local -a pids=() labels=() log_files=()
+    local -a propagate=()
+    [[ "$CLEAN_MODE" == true ]] && propagate+=(--clean)
+
+    # Launch local builds (mesh, router) in background
+    if [[ ${#local_targets[@]} -gt 0 ]]; then
+        local -a args=("${propagate[@]}")
+        for t in "${local_targets[@]}"; do args+=(--only "$t"); done
+        log "Starting local builds: ${local_targets[*]}"
+        "$0" "${args[@]}" > "${log_dir}/controller.log" 2>&1 &
+        pids+=($!)
+        labels+=("controller(${local_targets[*]})")
+        log_files+=("${log_dir}/controller.log")
+    fi
+
+    # Launch per-host remote builds in background
+    for ((i = 0; i < num_hosts; i++)); do
+        local targets="${host_target_lists[$i]}"
+        [[ -z "${targets// /}" ]] && continue
+        local host="${PARALLEL_HOSTS[$i]}"
+        local -a args=("${propagate[@]}" --host "$host")
+        for t in $targets; do args+=(--only "$t"); done
+        log "Starting builds on ${host}: ${targets% }"
+        "$0" "${args[@]}" > "${log_dir}/${host}.log" 2>&1 &
+        pids+=($!)
+        labels+=("${host}(${targets% })")
+        log_files+=("${log_dir}/${host}.log")
+    done
+
+    log "Waiting for ${#pids[@]} parallel build jobs..."
+    log ""
+
+    local failed=0
+    for ((i = 0; i < ${#pids[@]}; i++)); do
+        if wait "${pids[$i]}"; then
+            log "  DONE: ${labels[$i]}"
+        else
+            local rc=$?
+            log "  FAILED: ${labels[$i]} (exit code ${rc})"
+            failed=1
+        fi
+    done
+
+    log ""
+    if [[ $failed -ne 0 ]]; then
+        log "Some builds failed. Error details:"
+        for ((i = 0; i < ${#log_files[@]}; i++)); do
+            local lf="${log_files[$i]}"
+            [[ -f "$lf" ]] || continue
+            if grep -q "^ERROR:" "$lf" 2>/dev/null; then
+                log "--- ${labels[$i]} ---"
+                grep "^ERROR:" "$lf" | sed 's/^/  /'
+            fi
+        done
+        log ""
+        log "Full logs in: ${log_dir}/"
+        return 1
+    fi
+
+    rm -rf "$log_dir"
+    log "All parallel builds completed successfully."
+}
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 BUILD_TARGETS=()
@@ -2345,6 +2513,7 @@ BUILD_TARGETS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --clean)
+            CLEAN_MODE=true
             log "Cleaning cached Image Builder..."
             rm -rf "$BUILD_DIR"
             shift
@@ -2359,8 +2528,20 @@ while [[ $# -gt 0 ]]; do
             BUILD_TARGETS+=("$2")
             shift 2
             ;;
+        --parallel)
+            PARALLEL_MODE=true
+            shift
+            ;;
+        --hosts)
+            [[ -n "${2:-}" ]] || die "--hosts requires comma-separated IPs"
+            IFS=',' read -ra PARALLEL_HOSTS <<< "$2"
+            PARALLEL_MODE=true
+            shift 2
+            ;;
         *)
-            die "Unknown argument: $1\nUsage: $0 --host <ip> [--only <target>] [--clean]\n  Targets: mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, moonlight, gaming, sunshine, desktop"
+            die "Unknown argument: $1
+Usage: $0 [--host <ip>] [--only <target>] [--clean] [--parallel] [--hosts <ip1>,<ip2>,...]
+  Targets: mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, moonlight, gaming, sunshine, desktop"
             ;;
     esac
 done
@@ -2376,6 +2557,13 @@ should_build() {
 
 check_deps
 
+# ── Parallel dispatch ────────────────────────────────────────────────
+if [[ "$PARALLEL_MODE" == true ]]; then
+    parallel_build
+    exit $?
+fi
+
+# ── Sequential builds (single host) ─────────────────────────────────
 if should_build mesh || should_build router; then
     download_imagebuilder
 fi

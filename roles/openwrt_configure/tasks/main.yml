@@ -70,15 +70,19 @@
 
 - name: Set WAN interface device
   ansible.builtin.raw: uci set network.wan.device='{{ wan_device }}'
+  changed_when: false
 
 - name: Set WAN protocol
   ansible.builtin.raw: uci set network.wan.proto='dhcp'
+  changed_when: false
 
 - name: Set WAN6 device
   ansible.builtin.raw: uci set network.wan6.device='{{ wan_device }}'
+  changed_when: false
 
 - name: Set WAN6 protocol
   ansible.builtin.raw: uci set network.wan6.proto='dhcpv6'
+  changed_when: false
 
 - name: Clear existing LAN bridge port list
   ansible.builtin.raw: uci delete network.@device[0].ports 2>/dev/null; true
@@ -87,9 +91,11 @@
 - name: Add each LAN port to the bridge
   ansible.builtin.raw: uci add_list network.@device[0].ports='{{ item }}'
   loop: "{{ lan_devices }}"
+  changed_when: false
 
 - name: Commit network changes (keeping LAN IP at default)
   ansible.builtin.raw: uci commit
+  changed_when: true
 
 - name: Schedule Phase 1 service restart via detached script
   ansible.builtin.raw: >-
@@ -200,6 +206,7 @@
   loop: "{{ wifi_radios | default([]) }}"
   loop_control:
     index_var: idx
+  changed_when: false
   when:
     - openwrt_mesh_enabled | bool
     - wifi_radios | default([]) | length > 0
@@ -210,6 +217,7 @@
   loop: "{{ wifi_radios | default([]) }}"
   loop_control:
     index_var: idx
+  changed_when: false
   when:
     - openwrt_mesh_enabled | bool
     - wifi_radios | default([]) | length > 0
@@ -229,6 +237,7 @@
   loop: "{{ wifi_radios | default([]) }}"
   loop_control:
     index_var: idx
+  changed_when: false
   when:
     - openwrt_mesh_enabled | bool
     - wifi_radios | default([]) | length > 0
@@ -237,18 +246,23 @@
 
 - name: Set LAN IP address
   ansible.builtin.raw: uci set network.lan.ipaddr='{{ openwrt_lan_ip }}'
+  changed_when: false
 
 - name: Set LAN netmask
   ansible.builtin.raw: uci set network.lan.netmask='{{ openwrt_lan_netmask }}'
+  changed_when: false
 
 - name: Set DHCP start address offset
   ansible.builtin.raw: uci set dhcp.lan.start='{{ openwrt_dhcp_start }}'
+  changed_when: false
 
 - name: Set DHCP address pool size
   ansible.builtin.raw: uci set dhcp.lan.limit='{{ openwrt_dhcp_limit }}'
+  changed_when: false
 
 - name: Set DHCP lease time
   ansible.builtin.raw: uci set dhcp.lan.leasetime='{{ openwrt_dhcp_leasetime }}'
+  changed_when: false
 
 # ── DHCP reservation for Proxmox host LAN management IP ──────────
 # The Proxmox host gets its LAN IP via DHCP from this VM on every boot.
@@ -349,6 +363,7 @@
   ansible.builtin.raw: >-
     echo '{{ openwrt_wan_mac }}' > /etc/openwrt_wan_mac_deferred &&
     chmod 644 /etc/openwrt_wan_mac_deferred
+  changed_when: true
   when:
     - openwrt_wan_mac | default('') | length > 0
     - _wan_mac_conflict | default(false) | bool
@@ -414,6 +429,7 @@
     INITEOF
     chmod +x /etc/init.d/wan_mac_apply
     /etc/init.d/wan_mac_apply enable
+  changed_when: true
   when:
     - openwrt_wan_mac | default('') | length > 0
     - _wan_mac_conflict | default(false) | bool
@@ -431,12 +447,14 @@
 
 - name: Clone WAN MAC address
   ansible.builtin.raw: uci set network.wan.macaddr='{{ openwrt_wan_mac }}'
+  changed_when: false
   when:
     - openwrt_wan_mac | default('') | length > 0
     - not (_wan_mac_conflict | default(false) | bool)
 
 - name: Commit all final changes
   ansible.builtin.raw: uci commit
+  changed_when: true
 
 - name: Schedule final service restart via detached script
   ansible.builtin.raw: >-

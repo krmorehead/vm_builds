@@ -1,0 +1,45 @@
+---
+# Shared task file: reconstruct an LXC container's dynamic group.
+#
+# Used by per-service wrappers (reconstruct_pihole_group.yml, etc.)
+# to avoid duplicating the same 3-task skeleton across every service.
+#
+# Required vars:
+#   reconstruct_service_name   — human-readable name (e.g. "Pi-hole")
+#   reconstruct_service_prefix — hostname prefix and group name (e.g. "pihole")
+#   reconstruct_ct_id          — container VMID (e.g. {{ pihole_ct_id }})
+
+- name: "Verify container is running — {{ reconstruct_service_name }}"
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct status {{ reconstruct_ct_id }} | grep -c running
+    executable: /bin/bash
+  register: _reconstruct_ct_status
+  changed_when: false
+  failed_when: (_reconstruct_ct_status.stdout | trim | int) == 0
+
+- name: "Add containers to dynamic group — {{ reconstruct_service_name }}"
+  ansible.builtin.add_host:
+    name: "{{ reconstruct_service_prefix }}-{{ item }}"
+    groups: "{{ reconstruct_service_prefix }}"
+    ansible_connection: community.proxmox.proxmox_pct_remote
+    ansible_host: "{{ hostvars[item].ansible_host }}"
+    ansible_user: root
+    proxmox_vmid: "{{ reconstruct_ct_id }}"
+    ansible_paramiko_host_key_checking: false
+    ansible_paramiko_proxy_command: >-
+      {{ 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@'
+         + lookup('env', 'PRIMARY_HOST')
+         if 'lan_hosts' in (hostvars[item].group_names | default([]))
+         else omit }}
+  loop: "{{ ansible_play_hosts }}"
+
+- name: "Report reconstructed group — {{ reconstruct_service_prefix }}"
+  ansible.builtin.debug:
+    msg: >-
+      Reconstructed {{ reconstruct_service_prefix }} group:
+      host={{ reconstruct_service_prefix }}-{{ inventory_hostname }},
+      proxmox_host={{ ansible_host }},
+      vmid={{ reconstruct_ct_id }},
+      connection=pct_remote

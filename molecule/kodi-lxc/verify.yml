@@ -14,27 +14,20 @@
   tasks:
     # ── Container state ──────────────────────────────────────────
 
-    - name: Check container is running
+    - name: Read container state and config
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          pct status {{ kodi_ct_id }} | grep -c running
+          pct status {{ kodi_ct_id }}
+          pct config {{ kodi_ct_id }}
         executable: /bin/bash
-      register: _kodi_running
+      register: _kodi_cfg
       changed_when: false
 
     - name: Assert container is running
       ansible.builtin.assert:
-        that: (_kodi_running.stdout | trim | int) > 0
+        that: "'running' in _kodi_cfg.stdout"
         fail_msg: "Container {{ kodi_ct_id }} is not running"
-
-    # ── Container config (single read) ───────────────────────────
-
-    - name: Read container config (single call)
-      ansible.builtin.command:
-        cmd: pct config {{ kodi_ct_id }}
-      register: _kodi_cfg
-      changed_when: false
 
     - name: Assert onboot is disabled (on-demand container)
       ansible.builtin.assert:
@@ -72,37 +65,17 @@
       changed_when: false
       failed_when: false
 
-    # ── lxc.mount.entry device bind mounts ────────────────────────
-
-    - name: Check lxc.mount.entry device bind mounts
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ kodi_ct_id }} | grep -c 'lxc.mount.entry.*dev/'
-        executable: /bin/bash
-      register: _mount_entries
-      changed_when: false
+    # ── lxc.mount.entry + cgroup allowlist (from cached config) ────
 
     - name: Assert device bind mounts are configured
       ansible.builtin.assert:
-        that: (_mount_entries.stdout | trim | int) >= 3
-        fail_msg: "Expected at least 3 lxc.mount.entry device rules, got {{ _mount_entries.stdout | trim }}"
-
-    # ── cgroup device allowlist ──────────────────────────────────
-
-    - name: Check cgroup device allowlist
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct config {{ kodi_ct_id }} | grep -c 'lxc.cgroup2.devices.allow'
-        executable: /bin/bash
-      register: _cgroup_rules
-      changed_when: false
+        that: (_kodi_cfg.stdout | regex_findall('lxc\\.mount\\.entry.*dev/') | length) >= 3
+        fail_msg: "Expected at least 3 lxc.mount.entry device rules in container config"
 
     - name: Assert cgroup allowlist has device rules
       ansible.builtin.assert:
-        that: (_cgroup_rules.stdout | trim | int) >= 3
-        fail_msg: "Expected at least 3 cgroup device rules, got {{ _cgroup_rules.stdout | trim }}"
+        that: (_kodi_cfg.stdout | regex_findall('lxc\\.cgroup2\\.devices\\.allow') | length) >= 3
+        fail_msg: "Expected at least 3 cgroup device rules in container config"
 
     # ── Kodi packages and service ────────────────────────────────
 

@@ -87,6 +87,8 @@ When adding a new feature: write the verify assertion that checks the feature wo
 - It destroys the baseline at the end
 - After `molecule test`, **ALWAYS** re-run `molecule converge` to restore the baseline before working on layered scenarios
 
+**Default `test_sequence` (`molecule/default/molecule.yml`):** `dependency` → `cleanup` → `syntax` → `prepare` → `converge` → `verify`. The `prepare` step asserts all required images exist (hard-fails with build instructions if any are missing). There is **no** extra `converge` step at the end of the sequence — restoring a full baseline after a clean-state run is manual (`molecule converge`), not part of `molecule test`.
+
 **NEVER** consider a fix complete until `molecule test` passes end-to-end.
 
 ## Service-Specific Cleanup (CRITICAL)
@@ -101,6 +103,28 @@ Molecule cleanup destroys **only** known project VMs/containers by **explicit VM
 - The full integration test (`molecule test`) creates all services from cached images, verifies they work together, then cleans up each service by VMID
 
 **Adding a new feature:** run only the per-feature scenario. The full integration test is reserved for CI and final proof.
+
+## Two-Tier Testing Architecture
+
+### Unit Tests (per-feature scenarios)
+Each `molecule/<service>-lxc/` scenario is self-contained:
+- `prepare.yml` builds the service image if not cached (idempotent)
+- `converge.yml` deploys the single service
+- `verify.yml` runs ALL deep service-specific checks
+- `cleanup.yml` tears down only its own container
+
+**Test sequence:** `dependency` → `syntax` → `cleanup` → `prepare` → `converge` → `verify` → `cleanup`
+
+See `molecule/UNIT_TEST_PATTERN.md` for the full pattern and examples.
+
+### E2E Integration Tests (default scenario)
+`molecule/default/` is an integration-only test:
+- `prepare.yml` asserts all images exist (hard-fails if missing)
+- `converge.yml` deploys all services
+- `verify.yml` checks ONLY infrastructure health, basic service liveness, cross-service integration (e.g., log reception), and deploy stamps
+- Deep service-specific diagnostics belong in per-feature scenarios
+
+**Principle:** E2E verify should NOT duplicate checks already covered by unit tests. It validates that services work *together*, not that each service works *internally*.
 
 **Previous bug:** blanket `qm list` / `pct list` cleanup destroyed everything on the host (including non-project resources), forced a full rebuild of ~820MB of templates on every test run, and was slower than explicit VMID lookup.
 
@@ -219,4 +243,4 @@ molecule test -s pihole-lxc           # Service-specific test
 molecule destroy
 ```
 
-This directory contains all molecule testing scenarios and follows the baseline preservation pattern for efficient development iteration.
+This directory contains all molecule testing scenarios. Use `molecule converge` + `molecule verify` for iteration (preserves baseline); the default scenario’s `test_sequence` does not end with a reconverge — see **Converge vs Full Test Workflow** above.

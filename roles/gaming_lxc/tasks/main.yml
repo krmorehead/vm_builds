@@ -1,17 +1,10 @@
 ---
 # ── Verify Gaming LXC template exists ────────────────────────────
-- name: Check Gaming LXC template exists on controller
-  ansible.builtin.stat:
-    path: "{{ role_path }}/../../{{ gaming_ct_template_path }}"
-  register: _gaming_template_stat
-  delegate_to: localhost
-
-- name: Fail if Gaming LXC template is missing
-  ansible.builtin.fail:
-    msg: >-
-      Gaming LXC template not found: {{ gaming_ct_template_path }}.
-      Run ./build-images.sh --only gaming to build it.
-  when: not (_gaming_template_stat.stat.exists | default(false))
+- name: Verify Gaming LXC template exists
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/verify_lxc_template.yml"
+  vars:
+    lxc_template_path: "{{ gaming_ct_template_path }}"
+    lxc_service_name: Gaming LXC
 
 # ── Determine container network based on host topology ───────────
 
@@ -84,58 +77,17 @@
     lxc_ct_skip_debian_cleanup: true
 
 # ── Device passthrough via lxc.mount.entry + cgroup allowlists ───
-# GPU render device sharing: host keeps amdgpu driver, container
-# accesses /dev/dri for VA-API encode + GPU-accelerated rendering.
-# Input devices for game controller / uinput support.
 
-- name: Check for existing device mount entries
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      grep -c 'lxc.mount.entry.*dev/dri' /etc/pve/lxc/{{ gaming_ct_id }}.conf 2>/dev/null || echo 0
-    executable: /bin/bash
-  register: _gaming_dev_mounts
-  changed_when: false
-  failed_when: false
-
-- name: Stop container for device mount config
-  ansible.builtin.command:
-    cmd: pct stop {{ gaming_ct_id }}
-  when: (_gaming_dev_mounts.stdout | trim | int) == 0
-  failed_when: false
-  changed_when: true
-
-- name: Apply device bind mounts and cgroup allowlists
-  ansible.builtin.shell:
-    cmd: |
-      lxc_conf="/etc/pve/lxc/{{ gaming_ct_id }}.conf"
-      for entry in \
-        "lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir" \
-        "lxc.mount.entry: /dev/input dev/input none bind,optional,create=dir" \
-        "lxc.cgroup2.devices.allow: c 226:* rwm" \
-        "lxc.cgroup2.devices.allow: c 13:* rwm" \
-        "lxc.cgroup2.devices.allow: c 10:223 rwm"; do
-        grep -qF "$entry" "$lxc_conf" 2>/dev/null || echo "$entry" >> "$lxc_conf"
-      done
-    executable: /bin/bash
-  when: (_gaming_dev_mounts.stdout | trim | int) == 0
-  changed_when: true
-
-- name: Start container with device mounts
-  ansible.builtin.command:
-    cmd: pct start {{ gaming_ct_id }}
-  when: (_gaming_dev_mounts.stdout | trim | int) == 0
-  changed_when: true
-
-- name: Wait for container to be ready after restart
-  ansible.builtin.command:
-    cmd: pct exec {{ gaming_ct_id }} -- ls /
-  register: _gaming_ready
-  retries: 10
-  delay: 3
-  until: _gaming_ready.rc == 0
-  changed_when: false
-  when: (_gaming_dev_mounts.stdout | trim | int) == 0
+- name: Apply device passthrough (DRI + input + uinput)
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_device_passthrough.yml"
+  vars:
+    lxc_dev_ct_id: "{{ gaming_ct_id }}"
+    lxc_dev_conf_entries:
+      - "lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir"
+      - "lxc.mount.entry: /dev/input dev/input none bind,optional,create=dir"
+      - "lxc.cgroup2.devices.allow: c 226:* rwm"
+      - "lxc.cgroup2.devices.allow: c 13:* rwm"
+      - "lxc.cgroup2.devices.allow: c 10:223 rwm"
 
 - name: Export Gaming container static IP for downstream roles
   ansible.builtin.set_fact:

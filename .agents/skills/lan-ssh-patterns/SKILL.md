@@ -1,6 +1,6 @@
 ---
 name: lan-ssh-patterns
-description: SSH ProxyJump for LAN hosts behind OpenWrt router. Baseline dependency, credential safety, keepalives.
+description: SSH ProxyCommand for LAN hosts behind OpenWrt router. Connection hardening, credential safety, keepalives.
 ---
 
 # LAN SSH Patterns
@@ -8,7 +8,7 @@ description: SSH ProxyJump for LAN hosts behind OpenWrt router. Baseline depende
 ## Architecture
 
 ```
-Controller → Primary host → OpenWrt VM → LAN host
+Controller → Primary host (ProxyCommand SSH) → LAN host
 ```
 
 Dependency: OpenWrt baseline must be running before LAN hosts reachable.
@@ -18,19 +18,61 @@ Dependency: OpenWrt baseline must be running before LAN hosts reachable.
 1. NEVER assume LAN hosts reachable without OpenWrt baseline running.
 2. NEVER remove SSH authorized_keys or API tokens in cleanup — operator prerequisites.
 3. NEVER manage SSH keys/passwords in playbooks — operator sets up manually.
-4. ALWAYS add ServerAliveInterval=15 and ServerAliveCountMax=4 for ProxyJump.
-5. ALWAYS export env vars before Molecule: `set -a; source test.env; set +a`
+4. ALWAYS use ProxyCommand (not ProxyJump) so keepalives apply to BOTH the jump and target connections.
+5. ALWAYS add ServerAliveInterval=15 and ServerAliveCountMax=4 to BOTH the ProxyCommand inner SSH and the outer SSH args.
+6. ALWAYS export env vars before Molecule: `set -a; source test.env; set +a`
+7. ALWAYS add `meta: reset_connection` + `wait_for_connection` pre_tasks to the first Phase 2 play targeting lan_hosts.
 
-## ProxyJump configuration
+## ProxyCommand configuration
 
 ```yaml
 # inventory/group_vars/lan_hosts.yml
 ansible_ssh_common_args: >-
-  -o ProxyJump=root@{{ lookup('env', 'PRIMARY_HOST') }}
-  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-  -o ConnectTimeout=10
-  -o ServerAliveInterval=15 -o ServerAliveCountMax=4
+  -o ProxyCommand="ssh
+  -o ServerAliveInterval=15
+  -o ServerAliveCountMax=4
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -W %h:%p root@{{ lookup('env', 'PRIMARY_HOST') }}"
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o ConnectTimeout=30
+  -o ServerAliveInterval=15
+  -o ServerAliveCountMax=4
 ```
+
+ProxyCommand (not ProxyJump) is required so we can pass `-o ServerAliveInterval`
+to the jump connection. With ProxyJump, only the outer connection gets keepalives
+from the command line — the jump connection inherits from ssh_config only.
+
+## ansible.cfg hardening
+
+```ini
+[ssh_connection]
+ssh_args = -o ControlMaster=auto -o ControlPersist=300s -o ServerAliveInterval=15 -o ServerAliveCountMax=4
+```
+
+- ControlPersist=300s (not 60s): keeps ControlMaster alive during long plays.
+- ServerAliveInterval on ssh_args: protects ALL connections including ControlMasters.
+
+## Connection priming for Phase 2 plays
+
+```yaml
+pre_tasks:
+  - name: Clear stale SSH state to LAN hosts
+    ansible.builtin.meta: reset_connection
+
+  - name: Wait for SSH via ProxyCommand to stabilize
+    ansible.builtin.wait_for_connection:
+      timeout: 120
+      delay: 5
+```
+
+Previous bug: mesh1 became UNREACHABLE mid-play during `proxmox_igpu` (54 tasks
+completed, then "Data could not be sent"). Root cause: the controller→home
+ControlMaster that carried the ProxyJump tunnel died silently because:
+(a) ControlPersist=60s was too short, (b) no keepalives on the jump connection,
+(c) no connection recovery at play boundaries.
 
 ## Testing connectivity
 

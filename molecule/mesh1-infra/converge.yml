@@ -25,15 +25,20 @@
     - name: Bootstrap LAN host
       ansible.builtin.include_tasks: ../../tasks/bootstrap_lan_host.yml
       vars:
-        _lan_host_ip: 10.10.10.210
+        _lan_host_ip: "{{ hostvars['mesh1'].ansible_host }}"
         _lan_host_name: mesh1
 
-- name: Verify mesh1 is reachable via ProxyJump
+- name: Prime SSH connection to LAN hosts
   hosts: lan_hosts
   gather_facts: false
   tasks:
-    - name: Ping mesh1
-      ansible.builtin.ping:
+    - name: Clear stale SSH state
+      ansible.builtin.meta: reset_connection
+
+    - name: Wait for SSH via ProxyCommand to stabilize
+      ansible.builtin.wait_for_connection:
+        timeout: 120
+        delay: 5
 
 - name: Run shared infrastructure on mesh1
   hosts: lan_hosts

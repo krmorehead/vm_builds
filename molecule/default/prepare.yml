@@ -1,0 +1,48 @@
+---
+- name: Assert all required images exist
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    images_dir: "{{ playbook_dir }}/../../images"
+    required_images:
+      - openwrt-mesh-lxc-24.10.0-x86-64-rootfs.tar.gz
+      - openwrt-router-24.10.0-x86-64-combined.img.gz
+      - pihole-debian-12-amd64.tar.zst
+      - rsyslog-debian-12-amd64.tar.zst
+      - jellyfin-debian-12-amd64.tar.zst
+      - netdata-debian-12-amd64.tar.zst
+      - wireguard-debian-12-amd64.tar.zst
+      - homeassistant-debian-12-amd64.tar.zst
+      - kodi-debian-12-amd64.tar.zst
+      - moonlight-debian-12-amd64.tar.zst
+      - desktop-debian-12-amd64.qcow2
+  tasks:
+    - name: Check which images exist
+      ansible.builtin.stat:
+        path: "{{ images_dir }}/{{ item }}"
+      loop: "{{ required_images }}"
+      register: _image_checks
+
+    - name: Identify missing images
+      ansible.builtin.set_fact:
+        missing_images: >-
+          {{ _image_checks.results
+             | selectattr('stat.exists', 'false')
+             | map(attribute='item')
+             | list }}
+
+    - name: Fail if images are missing
+      ansible.builtin.fail:
+        msg: |-
+          Missing images for E2E test:
+          {% for img in missing_images %}
+            - {{ img }}
+          {% endfor %}
+
+          Build them with:
+            ./build-images.sh --parallel
+
+          Or build individually:
+            ./build-images.sh --host <ip> --only <target>
+      when: missing_images | length > 0

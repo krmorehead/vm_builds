@@ -801,6 +801,10 @@ vm_builds/
 │   ├── reconstruct_pihole_group.yml      Reusable dynamic group reconstruction (Pi-hole)
 │   ├── reconstruct_rsyslog_group.yml     Reusable dynamic group reconstruction (rsyslog)
 │   ├── reconstruct_wireguard_group.yml   Reusable dynamic group reconstruction (WireGuard)
+│   ├── reconstruct_lxc_group.yml         Shared LXC group reconstruction (called by per-service wrappers)
+│   ├── lxc_device_passthrough.yml        Shared device passthrough (DRI/ALSA/input bind mounts + cgroups)
+│   ├── verify_lxc_template.yml           Shared pre-flight template existence check (8 LXC roles)
+│   ├── lxc_lan_network.yml               Shared LAN-only container IP computation (5 LXC roles)
 │   ├── bootstrap_lan_host.yml            SSH key check, DHCP lease, API token for LAN nodes
 │   └── cleanup_lan_host.yml              Reusable per-LAN-host cleanup (SSH from primary)
 │

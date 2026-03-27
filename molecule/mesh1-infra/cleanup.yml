@@ -3,7 +3,7 @@
   hosts: router_nodes
   gather_facts: false
   vars:
-    _lan_host_ip: 10.10.10.210
+    _lan_host_ip: "{{ hostvars['mesh1'].ansible_host }}"
   tasks:
     - name: Check if key auth works to mesh1
       ansible.builtin.command:

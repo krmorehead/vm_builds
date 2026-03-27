@@ -235,18 +235,11 @@
       qm importdisk output: {{ _gvm_disk_import.stdout_lines | default([]) | join('\n') }}
   when: not _gvm_exists | bool
 
-- name: Attach imported disk as scsi0
+- name: Attach imported disk and set boot order
   ansible.builtin.command:
     cmd: >-
       qm set {{ gaming_vm_id }}
       --scsi0 {{ _gvm_unused_disk.stdout | trim }},ssd=1
-  when: not _gvm_exists | bool
-  changed_when: true
-
-- name: Set boot order to scsi0
-  ansible.builtin.command:
-    cmd: >-
-      qm set {{ gaming_vm_id }}
       --boot order=scsi0
   when: not _gvm_exists | bool
   changed_when: true

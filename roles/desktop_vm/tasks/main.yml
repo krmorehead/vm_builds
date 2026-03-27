@@ -161,18 +161,12 @@
          | first }}
   when: not _desktop_vm_exists | bool
 
-- name: Attach disk and configure boot order
+- name: Attach disk, boot order, cloud-init user, and SSH keys
   ansible.builtin.command:
     cmd: >-
       qm set {{ desktop_vm_id }}
       --scsi0 {{ _desktop_imported_disk }}
       --boot order=scsi0
-  when: not _desktop_vm_exists | bool
-
-- name: Configure cloud-init user and SSH keys
-  ansible.builtin.command:
-    cmd: >-
-      qm set {{ desktop_vm_id }}
       --ciuser {{ desktop_user }}
       --cipassword {{ desktop_password }}
       --sshkeys {{ _desktop_ssh_pubkey_path }}

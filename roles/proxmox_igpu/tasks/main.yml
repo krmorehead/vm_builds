@@ -11,35 +11,31 @@
 
 # ── Detection ─────────────────────────────────────────────────────
 
-- name: Detect Intel VGA controller via lspci
+- name: Detect iGPU vendor via lspci (single call)
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
-      lspci -nn | grep -i 'VGA compatible controller.*Intel' | head -1
+      intel=$(lspci -nn | grep -i 'VGA compatible controller.*Intel' | head -1)
+      amd=$(lspci -nn | grep -iE 'VGA compatible controller.*(AMD|ATI)|Display controller.*(AMD|ATI)' | head -1)
+      echo "INTEL=${intel}"
+      echo "AMD=${amd}"
     executable: /bin/bash
-  register: _intel_igpu_lspci
-  changed_when: false
-  failed_when: false
-
-- name: Detect AMD VGA controller via lspci
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      lspci -nn | grep -iE 'VGA compatible controller.*(AMD|ATI)|Display controller.*(AMD|ATI)' | head -1
-    executable: /bin/bash
-  register: _amd_igpu_lspci
+  register: _igpu_detect
   changed_when: false
   failed_when: false
 
 - name: Set iGPU vendor and availability
   ansible.builtin.set_fact:
+    _intel_igpu_line: "{{ _igpu_detect.stdout | regex_search('INTEL=(.+)', '\\1') | default([''], true) | first }}"
+    _amd_igpu_line: "{{ _igpu_detect.stdout | regex_search('AMD=(.+)', '\\1') | default([''], true) | first }}"
+
+- name: Set iGPU vendor fact
+  ansible.builtin.set_fact:
     igpu_available: >-
-      {{ (_intel_igpu_lspci.rc == 0 and _intel_igpu_lspci.stdout | length > 0)
-         or (_amd_igpu_lspci.rc == 0 and _amd_igpu_lspci.stdout | length > 0) }}
+      {{ _intel_igpu_line | length > 0 or _amd_igpu_line | length > 0 }}
     igpu_vendor: >-
-      {{ 'intel' if (_intel_igpu_lspci.rc == 0 and _intel_igpu_lspci.stdout | length > 0)
-         else ('amd' if (_amd_igpu_lspci.rc == 0 and _amd_igpu_lspci.stdout | length > 0)
-         else 'none') }}
+      {{ 'intel' if _intel_igpu_line | length > 0
+         else ('amd' if _amd_igpu_line | length > 0 else 'none') }}
 
 - name: Fail if no iGPU detected
   ansible.builtin.fail:
@@ -52,8 +48,7 @@
 - name: Set iGPU lspci output reference
   ansible.builtin.set_fact:
     _igpu_lspci_stdout: >-
-      {{ _intel_igpu_lspci.stdout if igpu_vendor == 'intel'
-         else _amd_igpu_lspci.stdout }}
+      {{ _intel_igpu_line if igpu_vendor == 'intel' else _amd_igpu_line }}
 
 - name: Extract iGPU PCI address
   ansible.builtin.set_fact:
@@ -166,30 +161,29 @@
 
 # ── Render and video group GIDs ───────────────────────────────────
 
-- name: Read render group GID
-  ansible.builtin.command:
-    cmd: getent group render
-  register: _render_group
+- name: Read render and video group GIDs
+  ansible.builtin.shell:
+    cmd: |
+      render_gid=$(getent group render 2>/dev/null | cut -d: -f3)
+      video_gid=$(getent group video 2>/dev/null | cut -d: -f3)
+      echo "RENDER_GID=${render_gid}"
+      echo "VIDEO_GID=${video_gid}"
+  register: _group_gids
   changed_when: false
-  failed_when: false
-  when: igpu_available | bool
-
-- name: Read video group GID
-  ansible.builtin.command:
-    cmd: getent group video
-  register: _video_group
-  changed_when: false
-  failed_when: false
   when: igpu_available | bool
 
 - name: Set group GID facts
   ansible.builtin.set_fact:
     igpu_render_gid: >-
-      {{ _render_group.stdout.split(':')[2] | default('')
-      if _render_group.rc == 0 else '' }}
+      {{ _group_gids.stdout_lines
+         | select('match', '^RENDER_GID=\d+$')
+         | map('regex_replace', '^RENDER_GID=', '')
+         | first | default('') }}
     igpu_video_gid: >-
-      {{ _video_group.stdout.split(':')[2] | default('')
-      if _video_group.rc == 0 else '' }}
+      {{ _group_gids.stdout_lines
+         | select('match', '^VIDEO_GID=\d+$')
+         | map('regex_replace', '^VIDEO_GID=', '')
+         | first | default('') }}
   when: igpu_available | bool
 
 # ── DNS check (apt needs working DNS) ─────────────────────────────

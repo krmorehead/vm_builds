@@ -1,0 +1,14 @@
+---
+- name: Build rsyslog image
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Build rsyslog image if not cached
+      ansible.builtin.command:
+        cmd: >-
+          {{ playbook_dir }}/../../scripts/build-images.sh
+          --host {{ lookup('env', 'PRIMARY_HOST') }}
+          --only rsyslog
+      register: _build
+      changed_when: "'already exists' not in _build.stdout"

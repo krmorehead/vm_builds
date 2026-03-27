@@ -1,39 +1,17 @@
 ---
 # ── Verify Jellyfin template exists ───────────────────────────────
-- name: Check Jellyfin LXC template exists on controller
-  ansible.builtin.stat:
-    path: "{{ role_path }}/../../{{ jellyfin_ct_template_path }}"
-  register: _jellyfin_template_stat
-  delegate_to: localhost
-
-- name: Fail if Jellyfin template is missing
-  ansible.builtin.fail:
-    msg: >-
-      Jellyfin template not found: {{ jellyfin_ct_template_path }}.
-      Run ./build-images.sh to build it.
-  when: not (_jellyfin_template_stat.stat.exists | default(false))
+- name: Verify Jellyfin template exists
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/verify_lxc_template.yml"
+  vars:
+    lxc_template_path: "{{ jellyfin_ct_template_path }}"
+    lxc_service_name: Jellyfin
 
 # ── Determine container network ─────────────────────────────────
-
-- name: Read LAN gateway from generated env
-  ansible.builtin.set_fact:
-    _lan_gateway: >-
-      {{ lookup('pipe', 'grep "^LAN_GATEWAY=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
-         | default('10.10.10.1', true) }}
-    _lan_cidr: >-
-      {{ lookup('pipe', 'grep "^LAN_CIDR=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
-         | default('24', true) }}
-
-- name: Compute Jellyfin container IP
-  ansible.builtin.set_fact:
-    _jellyfin_ct_ip: >-
-      {{ _lan_gateway.split('.')[0:3] | join('.') }}.{{ jellyfin_ct_ip_offset }}
-
-- name: Report Jellyfin container IP assignment
-  ansible.builtin.debug:
-    msg: >-
-      {{ inventory_hostname }}: jellyfin IP={{ _jellyfin_ct_ip }}/{{ _lan_cidr }}
-      gw={{ _lan_gateway }} (OpenWrt LAN)
+- name: Compute Jellyfin LAN network
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_lan_network.yml"
+  vars:
+    lxc_net_service_name: jellyfin
+    lxc_net_ip_offset: "{{ jellyfin_ct_ip_offset }}"
 
 # ── Ensure media path exists on host ──────────────────────────────
 - name: Ensure media directory exists on host
@@ -68,7 +46,7 @@
     lxc_ct_startup_order: "{{ jellyfin_ct_startup_order }}"
     lxc_ct_template: "{{ jellyfin_ct_template }}"
     lxc_ct_template_path: "{{ jellyfin_ct_template_path }}"
-    lxc_ct_ip: "{{ _jellyfin_ct_ip }}/{{ _lan_cidr }}"
+    lxc_ct_ip: "{{ _lxc_ct_ip }}/{{ _lan_cidr }}"
     lxc_ct_gateway: "{{ _lan_gateway }}"
     lxc_ct_nameserver: "{{ _lan_gateway }}"
     lxc_ct_bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
@@ -77,56 +55,16 @@
     lxc_ct_mount_entries: "{{ _jellyfin_mount_entries }}"
 
 # ── Device passthrough via lxc.mount.entry + cgroup allowlist ────
-# Proxmox -mp mount points fail for /dev/* device directories
-# (pre-start hook exits 32). Use raw lxc.mount.entry instead.
 
-- name: Check for existing DRI mount entry
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      grep -c 'lxc.mount.entry.*dev/dri' /etc/pve/lxc/{{ jellyfin_ct_id }}.conf 2>/dev/null || echo 0
-    executable: /bin/bash
-  register: _jellyfin_dev_mounts
-  changed_when: false
-  failed_when: false
-
-- name: Stop container for device mount config
-  ansible.builtin.command:
-    cmd: pct stop {{ jellyfin_ct_id }}
-  when: (_jellyfin_dev_mounts.stdout | trim | int) == 0
-  failed_when: false
-  changed_when: true
-
-- name: Apply DRI device bind mount and cgroup allowlist
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      lxc_conf="/etc/pve/lxc/{{ jellyfin_ct_id }}.conf"
-      for entry in \
-        "lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir" \
-        "lxc.cgroup2.devices.allow: c 226:* rwm"; do
-        grep -qF "$entry" "$lxc_conf" 2>/dev/null || echo "$entry" >> "$lxc_conf"
-      done
-    executable: /bin/bash
-  when: (_jellyfin_dev_mounts.stdout | trim | int) == 0
-  changed_when: true
-
-- name: Start container with device mounts
-  ansible.builtin.command:
-    cmd: pct start {{ jellyfin_ct_id }}
-  when: (_jellyfin_dev_mounts.stdout | trim | int) == 0
-
-- name: Wait for container to be ready after restart
-  ansible.builtin.command:
-    cmd: pct exec {{ jellyfin_ct_id }} -- ls /
-  register: _jellyfin_ready
-  retries: 10
-  delay: 3
-  until: _jellyfin_ready.rc == 0
-  changed_when: false
-  when: (_jellyfin_dev_mounts.stdout | trim | int) == 0
+- name: Apply DRI device passthrough
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_device_passthrough.yml"
+  vars:
+    lxc_dev_ct_id: "{{ jellyfin_ct_id }}"
+    lxc_dev_conf_entries:
+      - "lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir"
+      - "lxc.cgroup2.devices.allow: c 226:* rwm"
 
 - name: Export Jellyfin static IP for downstream roles
   ansible.builtin.set_fact:
-    jellyfin_static_ip: "{{ _jellyfin_ct_ip }}"
+    jellyfin_static_ip: "{{ _lxc_ct_ip }}"
     cacheable: true

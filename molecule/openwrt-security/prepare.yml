@@ -1,0 +1,13 @@
+---
+- name: Build router VM image
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Build router VM image if not cached
+      ansible.builtin.command:
+        cmd: >-
+          {{ playbook_dir }}/../../scripts/build-images.sh
+          --only router
+      register: _build
+      changed_when: "'already exists' not in _build.stdout"

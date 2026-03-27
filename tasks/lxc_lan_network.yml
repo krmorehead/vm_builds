@@ -1,0 +1,35 @@
+---
+# Shared task: compute LAN-only container networking from the generated env.
+#
+# Use for services that are always behind OpenWrt (no WAN-connected case).
+# For services that may be WAN or LAN, use the inline topology block instead.
+#
+# Required variables (set via include_tasks vars:):
+#   lxc_net_service_name  — human-readable name for debug output
+#   lxc_net_ip_offset     — last octet for the container IP
+#
+# Exported facts:
+#   _lan_gateway  — OpenWrt LAN gateway IP
+#   _lan_cidr     — LAN CIDR prefix length
+#   _lxc_ct_ip    — computed container IP
+
+- name: Read LAN gateway from generated env
+  ansible.builtin.set_fact:
+    _lan_gateway: >-
+      {{ lookup('pipe', 'grep "^LAN_GATEWAY=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
+         | default('10.10.10.1', true) }}
+    _lan_cidr: >-
+      {{ lookup('pipe', 'grep "^LAN_CIDR=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
+         | default('24', true) }}
+
+- name: Compute container IP
+  ansible.builtin.set_fact:
+    _lxc_ct_ip: >-
+      {{ _lan_gateway.split('.')[0:3] | join('.') }}.{{ lxc_net_ip_offset }}
+
+- name: "Report container IP assignment — {{ lxc_net_service_name }}"
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: {{ lxc_net_service_name }}
+      IP={{ _lxc_ct_ip }}/{{ _lan_cidr }}
+      gw={{ _lan_gateway }} (OpenWrt LAN)
