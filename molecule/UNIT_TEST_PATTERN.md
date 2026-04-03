@@ -42,6 +42,10 @@ the service image if it doesn't already exist in `images/`.
       changed_when: "'already exists' not in _build.stdout"
 ```
 
+Most remote builds use `PRIMARY_HOST`. Services that require specific
+hardware (e.g., Gaming LXC needs AMD GPU on `ai`) use the appropriate host
+env var (e.g., `AI_HOST`).
+
 ### Local-built services (OpenWrt Image Builder)
 
 ```yaml

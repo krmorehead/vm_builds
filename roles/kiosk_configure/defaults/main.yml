@@ -1,6 +1,12 @@
 ---
+kiosk_desktop_url: ""
 kiosk_jellyfin_url: ""
+kiosk_kodi_url: ""
 kiosk_pihole_url: ""
 kiosk_netdata_url: ""
 kiosk_openwrt_url: ""
 kiosk_homeassistant_url: ""
+kiosk_moonlight_url: ""
+kiosk_gaming_url: ""
+kiosk_wireguard_url: ""
+kiosk_rsyslog_url: ""

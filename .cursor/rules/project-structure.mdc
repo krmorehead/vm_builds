@@ -112,9 +112,15 @@ Phase 3: Services (flavor groups span both primary + LAN hosts)
   Play 23: openwrt_mesh_lxc (wifi_nodes:!router_nodes) tag: mesh-wifi
            deploy_stamp: openwrt_mesh_lxc
   Play 24: openwrt_mesh_configure (openwrt_mesh) tag: mesh-wifi
-  Play 25: gaming_lxc (gaming_nodes)       tag: gaming, never
+  Play 25: desktop_vm (desktop_nodes)      tag: desktop
+           deploy_stamp: desktop_vm
+  Play 26: desktop_configure (desktop)     tag: desktop
+  Play 27: kiosk_lxc (desktop_nodes)       tag: kiosk
+           deploy_stamp: kiosk_lxc
+  Play 28: kiosk_configure (desktop_nodes) tag: kiosk
+  Play 29: gaming_lxc (gaming_nodes)       tag: gaming, never
            deploy_stamp: gaming_lxc
-  Play 26: gaming_lxc_configure (gaming_nodes) tag: gaming, never
+  Play 30: gaming_lxc_configure (gaming_nodes) tag: gaming, never
 
 Per-feature plays (opt-in via --tags, tagged with [never])
 Bootstrap cleanup (proxmox:!lan_hosts)    tag: cleanup

@@ -295,23 +295,6 @@
   roles:
     - openwrt_mesh_configure
 
-- name: Provision Kiosk LXC
-  hosts: desktop_nodes
-  gather_facts: false
-  tags: [kiosk]
-  roles:
-    - kiosk_lxc
-    - role: deploy_stamp
-      vars:
-        deploy_stamp_play: kiosk_lxc
-
-- name: Configure Kiosk
-  hosts: desktop_nodes
-  gather_facts: false
-  tags: [kiosk]
-  roles:
-    - kiosk_configure
-
 - name: Provision Desktop VM
   hosts: desktop_nodes
   gather_facts: false
@@ -328,6 +311,23 @@
   tags: [desktop]
   roles:
     - desktop_configure
+
+- name: Provision Kiosk LXC
+  hosts: desktop_nodes
+  gather_facts: false
+  tags: [kiosk]
+  roles:
+    - kiosk_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: kiosk_lxc
+
+- name: Configure Kiosk
+  hosts: desktop_nodes
+  gather_facts: false
+  tags: [kiosk]
+  roles:
+    - kiosk_configure
 
 - name: Provision Gaming LXC
   hosts: gaming_nodes

@@ -62,7 +62,7 @@ Bypassing it loses all of these capabilities.
 | `setup.sh` | Bootstrap .venv + pip + ansible-galaxy |
 | `run.sh` | Convenience wrapper — delegates to `build.py` |
 | `cleanup.sh` | Restore / full-restore / clean / rollback — delegates to `build.py` |
-| `build-images.sh` | Builds custom images (mesh LXC, router VM, Pi-hole, rsyslog, Netdata, WireGuard, Home Assistant, Jellyfin, Kodi, Sunshine). Use `--only <target>` for selective rebuilds |
+| `build-images.sh` | Builds all 14 custom images. Use `--only <target>` for selective rebuilds, `--parallel` for multi-host concurrent builds |
 | `wol.sh` | Wake-on-LAN utility: wake hosts by alias or MAC. Proxied WoL for LAN hosts via PRIMARY_HOST |
 
 ## Script Patterns
@@ -98,27 +98,58 @@ Supports tags for selective cleanup:
 - `[clean]` — Clean state removal
 
 ### build-images.sh
-Custom image building automation:
+Custom image building automation for all 14 service images.
 
 **Usage:**
 ```bash
-# Build all images
-./build-images.sh
+# Build all images on a single host (sequential)
+./build-images.sh --host 192.168.86.201
 
 # Build specific image
-./build-images.sh --only openwrt
-./build-images.sh --only pihole
-./build-images.sh --only wireguard
-./build-images.sh --only sunshine
+./build-images.sh --host 192.168.86.201 --only pihole
+./build-images.sh --host 192.168.86.201 --only kiosk
+
+# Parallel builds across multiple hosts (reads PRIMARY_HOST, AI_HOST, MESH_2_HOST from env)
+./build-images.sh --parallel
+
+# Parallel builds with explicit hosts
+./build-images.sh --hosts 192.168.86.201,192.168.86.220,192.168.86.211
+
+# Parallel, specific targets only
+./build-images.sh --parallel --only pihole --only rsyslog
+
+# Local-only targets (no --host needed)
+./build-images.sh --only mesh
+./build-images.sh --only router
+
+# Clean cached Image Builder before downloading fresh copy
+./build-images.sh --clean --host 192.168.86.201
 ```
 
-**Targets:**
-- `openwrt` — OpenWrt router VM image
-- `mesh` — OpenWrt Mesh LXC template
-- `pihole` — Pi-hole DNS container
-- `rsyslog` — rsyslog log collector
-- `netdata` — Netdata monitoring agent
-- `wireguard` — WireGuard VPN container
+**Targets (14 total):**
+- `mesh` — OpenWrt Mesh LXC rootfs (local build, no `--host` needed)
+- `router` — OpenWrt router VM image (local build, no `--host` needed)
+- `pihole` — Pi-hole DNS container (remote build on Proxmox)
+- `rsyslog` — rsyslog log collector (remote)
+- `jellyfin` — Jellyfin media server (remote)
+- `netdata` — Netdata monitoring agent (remote)
+- `wireguard` — WireGuard VPN container (remote)
+- `homeassistant` — Home Assistant with Docker (remote)
+- `kodi` — Kodi media player (remote)
+- `kiosk` — Kiosk dashboard with Cage + Chromium (remote)
+- `moonlight` — Moonlight streaming client (remote)
+- `gaming` — Gaming LXC with Sunshine + dsda-doom (remote, Fedora-based)
+- `sunshine` — Sunshine VM, Windows 11 (remote)
+- `desktop` — Desktop VM, Debian 12 with KDE + GNOME (remote)
+
+**Parallel build distribution:**
+Round-robin across available hosts. Local targets (mesh, router) build on the
+controller in parallel with remote builds. Each remote host builds its assigned
+images sequentially. `--parallel` auto-discovers hosts from env vars.
+
+**Idempotency:**
+All build functions skip if the output file already exists in `images/`. Delete
+the cached image and re-run to force a rebuild.
 
 **Image Build Process:**
 1. Each service gets its own build section

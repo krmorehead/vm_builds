@@ -517,6 +517,12 @@ None — rsyslog is pure userspace. No kernel modules, no host config files.
 | `netdata_ct_features` | `["nesting=1"]` | LXC features for systemd sandboxing |
 | `netdata_ct_mount_entries` | `/proc,mp=/host/proc,ro=1` and `/sys,mp=/host/sys,ro=1` | Host metrics bind mounts |
 
+### Exported Facts
+
+| Fact | Value | Description |
+|------|-------|-------------|
+| `netdata_static_ip` | string | Computed container IP for downstream config (e.g., Kiosk dashboard) |
+
 ### Host State Changes
 
 None — Netdata is pure userspace. No kernel modules, no host config files. The bind mounts are container-level configuration managed by `pct set`.

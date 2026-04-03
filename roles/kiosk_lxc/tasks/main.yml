@@ -58,39 +58,37 @@
   ansible.builtin.copy:
     content: |
       #!/bin/bash
-      # Display-exclusive hookscript: ensures only one display service
-      # uses the iGPU at a time. Kiosk (401) is the default idle state.
       VMID="$1"
       PHASE="$2"
-      KIOSK_ID=401
-      DISPLAY_IDS=(301 302 400 401)
+      KIOSK_ID={{ kiosk_ct_id }}
+      CT_IDS=({{ kodi_ct_id }} {{ moonlight_ct_id }} {{ kiosk_ct_id }})
+      VM_IDS=({{ desktop_vm_id }})
 
-      is_display_service() {
+      is_display() {
           local id="$1"
-          for did in "${DISPLAY_IDS[@]}"; do
-              [[ "$id" == "$did" ]] && return 0
+          for cid in "${CT_IDS[@]}" "${VM_IDS[@]}"; do
+              [[ "$id" == "$cid" ]] && return 0
           done
           return 1
       }
 
-      is_display_service "$VMID" || exit 0
+      is_display "$VMID" || exit 0
 
       case "$PHASE" in
           pre-start)
-              if [[ "$VMID" != "$KIOSK_ID" ]]; then
-                  for did in "${DISPLAY_IDS[@]}"; do
-                      [[ "$did" == "$VMID" ]] && continue
-                      if [[ "$did" -ge 100 && "$did" -le 199 ]] || [[ "$did" -ge 200 ]]; then
-                          pct status "$did" 2>/dev/null | grep -q running && pct stop "$did" 2>/dev/null || true
-                          qm status "$did" 2>/dev/null | grep -q running && qm stop "$did" 2>/dev/null || true
-                      fi
-                  done
-              fi
+              [[ "$VMID" == "$KIOSK_ID" ]] && exit 0
+              for cid in "${CT_IDS[@]}"; do
+                  [[ "$cid" == "$VMID" ]] && continue
+                  pct status "$cid" 2>/dev/null | grep -q running && pct stop "$cid" 2>/dev/null || true
+              done
+              for vid in "${VM_IDS[@]}"; do
+                  [[ "$vid" == "$VMID" ]] && continue
+                  qm status "$vid" 2>/dev/null | grep -q running && qm stop "$vid" 2>/dev/null || true
+              done
               ;;
           post-stop)
-              if [[ "$VMID" != "$KIOSK_ID" ]]; then
-                  pct status "$KIOSK_ID" 2>/dev/null | grep -q stopped && pct start "$KIOSK_ID" 2>/dev/null || true
-              fi
+              [[ "$VMID" == "$KIOSK_ID" ]] && exit 0
+              pct status "$KIOSK_ID" 2>/dev/null | grep -q stopped && pct start "$KIOSK_ID" 2>/dev/null || true
               ;;
       esac
       exit 0

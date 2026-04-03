@@ -91,3 +91,8 @@
       {{ proxmox_wan_bridge
          if not (_host_on_openwrt_lan | bool)
          else (proxmox_all_bridges[1] | default('vmbr0')) }}
+
+- name: Export Netdata static IP for downstream roles
+  ansible.builtin.set_fact:
+    netdata_static_ip: "{{ _netdata_ct_ip }}"
+    cacheable: true

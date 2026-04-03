@@ -1095,7 +1095,7 @@
         that: "'netdata_lxc' in stamp.plays"
         fail_msg: "deploy_stamp missing netdata_lxc entry"
 
-# ── Play 6: WireGuard health (vpn_nodes) ────────────────────────
+# ── Play 5: WireGuard health (vpn_nodes) ────────────────────────
 # Deep WireGuard checks (permissions, peers, sysctl, NAT, env.generated)
 # live in molecule/wireguard-lxc/verify.yml.
 
@@ -1144,7 +1144,7 @@
         that: "'wireguard_lxc' in stamp.plays"
         fail_msg: "deploy_stamp missing wireguard_lxc entry"
 
-# ── Play 4: LAN host assertions (mesh1-specific) ─────────────────
+# ── Play 6: LAN host assertions (mesh1-specific) ─────────────────
 
 - name: Verify LAN satellite hosts
   hosts: lan_hosts
@@ -1199,7 +1199,7 @@
           IOMMU={{ 'active' if (lan_iommu.stdout | int) > 0 else 'inactive' }},
           WiFi={{ lan_wifi_count.stdout | trim }} devices
 
-# ── Play 5: Mesh WiFi LXC assertions (wifi_nodes except router_nodes) ──
+# ── Play 7: Mesh WiFi LXC assertions (wifi_nodes except router_nodes) ──
 
 - name: Verify OpenWrt Mesh LXC on satellite nodes
   hosts: wifi_nodes:!router_nodes
@@ -1294,7 +1294,7 @@
           container={{ meshwifi_ct_id }}, running=yes,
           privileged=yes, hookscript=deployed
 
-# ── Play 7: Home Assistant health (service_nodes) ────────────────
+# ── Play 8: Home Assistant health (service_nodes) ────────────────
 # Deep HA checks (Docker install, Compose, cgroupfs, HA image, IP offset)
 # live in molecule/homeassistant-lxc/verify.yml.
 
@@ -1340,7 +1340,7 @@
         that: "'homeassistant_lxc' in stamp.plays"
         fail_msg: "deploy_stamp missing homeassistant_lxc entry"
 
-# ── Play 5: Media services health (media_nodes + streaming_nodes) ──
+# ── Play 9: Media services health (media_nodes + streaming_nodes) ──
 # Deep Jellyfin checks (VA-API, media path, port, web UI, IP offset)
 # live in molecule/jellyfin-lxc/verify.yml.
 # Deep Kodi checks (packages, device mounts, config files, ALSA)
@@ -1420,6 +1420,8 @@
         that: "'kodi_lxc' in stamp.plays"
         fail_msg: "deploy_stamp missing kodi_lxc entry"
 
+# ── Play 10: Moonlight streaming client (streaming_nodes) ────────
+
 - name: Verify Moonlight streaming client
   hosts: streaming_nodes
   gather_facts: false
@@ -1448,7 +1450,7 @@
         that: "'moonlight_lxc' in stamp.plays"
         fail_msg: "deploy_stamp missing moonlight_lxc entry on {{ inventory_hostname }}"
 
-# ── Verify Desktop VM health (desktop_nodes) ──────────────────────
+# ── Play 11: Desktop VM health (desktop_nodes) ───────────────────
 # Deep Desktop checks (KDE/GNOME shortcuts, apps, dotfiles, VA-API,
 # SDDM, groups) live in molecule/desktop-vm/verify.yml.
 
@@ -1495,7 +1497,7 @@
         that: "'desktop_vm' in stamp.plays"
         fail_msg: "deploy_stamp missing desktop_vm on {{ inventory_hostname }}"
 
-# ── Play 7: Kiosk health (desktop_nodes) ─────────────────────────
+# ── Play 12: Kiosk health (desktop_nodes) ────────────────────────
 # Deep Kiosk checks (Cage, Chromium, dashboard file, systemd service)
 # live in molecule/kiosk-lxc/verify.yml.
 
@@ -1539,6 +1541,29 @@
           - "'DASHBOARD=yes' in _kiosk_health.stdout"
         fail_msg: "Kiosk health check failed on {{ inventory_hostname }}: {{ _kiosk_health.stdout }}"
 
+    - name: Read dashboard HTML content
+      ansible.builtin.command:
+        cmd: pct exec {{ kiosk_ct_id }} -- cat /opt/kiosk/dashboard.html
+      register: _kiosk_dashboard
+      changed_when: false
+
+    - name: Assert dashboard has all service cards and no unresolved placeholders
+      ansible.builtin.assert:
+        that:
+          - "'desktop-card' in _kiosk_dashboard.stdout"
+          - "'jellyfin-card' in _kiosk_dashboard.stdout"
+          - "'kodi-card' in _kiosk_dashboard.stdout"
+          - "'ha-card' in _kiosk_dashboard.stdout"
+          - "'moonlight-card' in _kiosk_dashboard.stdout"
+          - "'gaming-card' in _kiosk_dashboard.stdout"
+          - "'openwrt-card' in _kiosk_dashboard.stdout"
+          - "'pihole-card' in _kiosk_dashboard.stdout"
+          - "'wireguard-card' in _kiosk_dashboard.stdout"
+          - "'netdata-card' in _kiosk_dashboard.stdout"
+          - "'rsyslog-card' in _kiosk_dashboard.stdout"
+          - _kiosk_dashboard.stdout | regex_search('\\{\\{[A-Z_]+\\}\\}') is none
+        fail_msg: "Dashboard content invalid on {{ inventory_hostname }}"
+
     - name: Check display-exclusive hookscript exists
       ansible.builtin.stat:
         path: /var/lib/vz/snippets/display-exclusive.sh
@@ -1554,7 +1579,7 @@
         that: "'kiosk_lxc' in stamp.plays"
         fail_msg: "deploy_stamp missing kiosk_lxc entry"
 
-# ── Verify Gaming LXC health (gaming_nodes) ──────────────────────
+# ── Play 13: Gaming LXC health (gaming_nodes) ───────────────────
 # Deep Gaming checks (VA-API profiles, render/card devices, dsda-doom,
 # Sunshine API) live in molecule/gaming-lxc/verify.yml.
 

@@ -57,7 +57,7 @@
         that: _kiosk_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/dri')
         fail_msg: "Expected lxc.mount.entry device rule for /dev/dri"
 
-    # ── Kiosk packages and service ──────────────────────────────
+    # ── Kiosk packages, service, and dashboard ───────────────────
 
     - name: Run Kiosk container health checks (single pct exec)
       ansible.builtin.shell:
@@ -97,6 +97,35 @@
         that: "'KIOSK_USER=exists' in _kiosk_health.stdout or 'uid=' in _kiosk_health.stdout"
         fail_msg: "kiosk user not found"
 
+    # ── Dashboard content verification ─────────────────────────
+
+    - name: Read dashboard HTML from container
+      ansible.builtin.command:
+        cmd: pct exec {{ kiosk_ct_id }} -- cat /opt/kiosk/dashboard.html
+      register: _dashboard_content
+      changed_when: false
+
+    - name: Assert dashboard contains all service cards
+      ansible.builtin.assert:
+        that:
+          - "'desktop-card' in _dashboard_content.stdout"
+          - "'jellyfin-card' in _dashboard_content.stdout"
+          - "'kodi-card' in _dashboard_content.stdout"
+          - "'ha-card' in _dashboard_content.stdout"
+          - "'moonlight-card' in _dashboard_content.stdout"
+          - "'gaming-card' in _dashboard_content.stdout"
+          - "'openwrt-card' in _dashboard_content.stdout"
+          - "'pihole-card' in _dashboard_content.stdout"
+          - "'wireguard-card' in _dashboard_content.stdout"
+          - "'netdata-card' in _dashboard_content.stdout"
+          - "'rsyslog-card' in _dashboard_content.stdout"
+        fail_msg: "Dashboard missing expected service cards"
+
+    - name: Assert no unresolved placeholders remain in dashboard
+      ansible.builtin.assert:
+        that: _dashboard_content.stdout | regex_search('\\{\\{[A-Z_]+\\}\\}') is none
+        fail_msg: "Dashboard still contains unresolved placeholders"
+
     # ── Hookscript ──────────────────────────────────────────────
 
     - name: Check display-exclusive hookscript exists
@@ -114,6 +143,19 @@
         that: "'hookscript' in _kiosk_cfg.stdout"
         fail_msg: "Hookscript not attached to container {{ kiosk_ct_id }}"
 
+    - name: Read hookscript content
+      ansible.builtin.slurp:
+        path: /var/lib/vz/snippets/display-exclusive.sh
+      register: _hookscript_content
+
+    - name: Assert hookscript uses correct VMIDs from group_vars
+      ansible.builtin.assert:
+        that:
+          - "'KIOSK_ID={{ kiosk_ct_id }}' in (_hookscript_content.content | b64decode)"
+          - "'{{ kodi_ct_id }}' in (_hookscript_content.content | b64decode)"
+          - "'{{ desktop_vm_id }}' in (_hookscript_content.content | b64decode)"
+        fail_msg: "Hookscript VMIDs don't match group_vars"
+
     # ── Report ──────────────────────────────────────────────────
 
     - name: Report Kiosk verification
@@ -125,4 +167,5 @@
           chromium={{ 'installed' if 'CHROMIUM_PKG=1' in _kiosk_health.stdout else 'missing' }},
           service={{ 'enabled' if 'SERVICE=enabled' in _kiosk_health.stdout else 'disabled' }},
           dri={{ 'mounted' if _dri_devices.rc == 0 else 'missing' }},
-          hookscript={{ 'deployed' if _hookscript.stat.exists else 'missing' }}
+          hookscript={{ 'deployed' if _hookscript.stat.exists else 'missing' }},
+          cards=11, placeholders={{ 'none' if '{{' not in _dashboard_content.stdout else 'FOUND' }}

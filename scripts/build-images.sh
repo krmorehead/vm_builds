@@ -269,6 +269,13 @@ download_imagebuilder() {
 }
 
 build_mesh_lxc() {
+    local output="${IMAGES_DIR}/${MESH_OUTPUT_NAME}"
+    if [[ -f "$output" ]]; then
+        log "Mesh LXC rootfs already exists at ${output}"
+        log "  Delete it and re-run to rebuild."
+        return
+    fi
+
     log "Building mesh LXC rootfs..."
     local ib_dir="${BUILD_DIR}/${IB_NAME}"
     local pkg_list
@@ -294,6 +301,13 @@ build_mesh_lxc() {
 }
 
 build_router_vm() {
+    local output="${IMAGES_DIR}/${ROUTER_OUTPUT_NAME}"
+    if [[ -f "$output" ]]; then
+        log "Router VM image already exists at ${output}"
+        log "  Delete it and re-run to rebuild."
+        return
+    fi
+
     log "Building router VM image..."
     local ib_dir="${BUILD_DIR}/${IB_NAME}"
     local pkg_list
@@ -2583,7 +2597,7 @@ parallel_build() {
     fi
 
     local -a all_local=(mesh router)
-    local -a all_remote=(pihole rsyslog jellyfin netdata wireguard homeassistant kodi moonlight gaming sunshine desktop)
+    local -a all_remote=(pihole rsyslog jellyfin netdata wireguard homeassistant kodi kiosk moonlight gaming sunshine desktop)
     local -a local_targets=() remote_targets=()
 
     if [[ ${#BUILD_TARGETS[@]} -gt 0 ]]; then
@@ -2703,7 +2717,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --only)
-            [[ -n "${2:-}" ]] || die "--only requires a target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, moonlight, gaming, sunshine, desktop)"
+            [[ -n "${2:-}" ]] || die "--only requires a target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, kiosk, moonlight, gaming, sunshine, desktop)"
             BUILD_TARGETS+=("$2")
             shift 2
             ;;
@@ -2724,6 +2738,18 @@ Usage: $0 [--host <ip>] [--only <target>] [--clean] [--parallel] [--hosts <ip1>,
             ;;
     esac
 done
+
+VALID_TARGETS=(mesh router pihole rsyslog jellyfin netdata wireguard homeassistant kodi kiosk moonlight gaming sunshine desktop)
+
+if [[ ${#BUILD_TARGETS[@]} -gt 0 ]]; then
+    for t in "${BUILD_TARGETS[@]}"; do
+        if ! printf '%s\n' "${VALID_TARGETS[@]}" | grep -qx "$t"; then
+            die "Unknown build target: '$t'
+Valid targets: ${VALID_TARGETS[*]}
+Hint: use 'router' (not 'openwrt') for the OpenWrt router VM image."
+        fi
+    done
+fi
 
 should_build() {
     [[ ${#BUILD_TARGETS[@]} -eq 0 ]] && return 0

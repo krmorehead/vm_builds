@@ -20,33 +20,72 @@
     executable: /bin/bash
   changed_when: true
 
-# ── Deploy dashboard HTML ────────────────────────────────────────
+# ── Resolve LAN gateway for OpenWrt URL ─────────────────────────
+
+- name: Read LAN gateway from generated env
+  ansible.builtin.set_fact:
+    _lan_gateway: >-
+      {{ lookup('pipe', 'grep "^LAN_GATEWAY=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
+         | default('10.10.10.1', true) | trim }}
+
+# ── Build service URLs from topology facts ─────────────────────
+# Each URL resolves in priority order:
+#   1. Explicit override from role defaults (operator-provided)
+#   2. Auto-computed from the service's exported static_ip fact
+#   3. Empty string (card renders as "Not available" on dashboard)
 
 - name: Build service URLs from LAN topology
   ansible.builtin.set_fact:
-    _kiosk_jellyfin_url: >-
-      {{ kiosk_jellyfin_url if kiosk_jellyfin_url | length > 0
-         else ('http://' + (jellyfin_static_ip | default('')) + ':8096')
-              if (jellyfin_static_ip | default('')) | length > 0
-         else '' }}
-    _kiosk_pihole_url: >-
-      {{ kiosk_pihole_url if kiosk_pihole_url | length > 0
-         else ('http://' + (pihole_static_ip | default('')) + '/admin')
-              if (pihole_static_ip | default('')) | length > 0
-         else '' }}
-    _kiosk_netdata_url: >-
-      {{ kiosk_netdata_url if kiosk_netdata_url | length > 0
-         else ('http://' + (netdata_static_ip | default('')) + ':19999')
-              if (netdata_static_ip | default('')) | length > 0
-         else '' }}
-    _kiosk_openwrt_url: >-
-      {{ kiosk_openwrt_url if kiosk_openwrt_url | length > 0
-         else 'http://10.10.10.1' }}
-    _kiosk_homeassistant_url: >-
-      {{ kiosk_homeassistant_url if kiosk_homeassistant_url | length > 0
-         else ('http://' + (homeassistant_static_ip | default('')) + ':8123')
-              if (homeassistant_static_ip | default('')) | length > 0
-         else '' }}
+    _kiosk_urls:
+      DESKTOP_URL: >-
+        {{ kiosk_desktop_url if kiosk_desktop_url | length > 0
+           else '' }}
+      JELLYFIN_URL: >-
+        {{ kiosk_jellyfin_url if kiosk_jellyfin_url | length > 0
+           else ('http://' + jellyfin_static_ip + ':8096')
+                if (jellyfin_static_ip | default('')) | length > 0
+           else '' }}
+      KODI_URL: >-
+        {{ kiosk_kodi_url if kiosk_kodi_url | length > 0
+           else ('http://' + kodi_static_ip + ':8080')
+                if (kodi_static_ip | default('')) | length > 0
+           else '' }}
+      HOMEASSISTANT_URL: >-
+        {{ kiosk_homeassistant_url if kiosk_homeassistant_url | length > 0
+           else ('http://' + homeassistant_static_ip + ':8123')
+                if (homeassistant_static_ip | default('')) | length > 0
+           else '' }}
+      MOONLIGHT_URL: >-
+        {{ kiosk_moonlight_url if kiosk_moonlight_url | length > 0
+           else '' }}
+      GAMING_URL: >-
+        {{ kiosk_gaming_url if kiosk_gaming_url | length > 0
+           else ('https://' + gaming_static_ip + ':47990')
+                if (gaming_static_ip | default('')) | length > 0
+           else '' }}
+      OPENWRT_URL: >-
+        {{ kiosk_openwrt_url if kiosk_openwrt_url | length > 0
+           else ('http://' + _lan_gateway)
+                if (_lan_gateway | default('')) | length > 0
+           else '' }}
+      PIHOLE_URL: >-
+        {{ kiosk_pihole_url if kiosk_pihole_url | length > 0
+           else ('http://' + pihole_static_ip + '/admin')
+                if (pihole_static_ip | default('')) | length > 0
+           else '' }}
+      WIREGUARD_URL: >-
+        {{ kiosk_wireguard_url if kiosk_wireguard_url | length > 0
+           else '' }}
+      NETDATA_URL: >-
+        {{ kiosk_netdata_url if kiosk_netdata_url | length > 0
+           else ('http://' + netdata_static_ip + ':19999')
+                if (netdata_static_ip | default('')) | length > 0
+           else '' }}
+      RSYSLOG_URL: >-
+        {{ kiosk_rsyslog_url if kiosk_rsyslog_url | length > 0
+           else '' }}
+
+# ── Deploy dashboard HTML ────────────────────────────────────────
 
 - name: Read dashboard template
   ansible.builtin.slurp:
@@ -58,11 +97,17 @@
   ansible.builtin.set_fact:
     _dashboard_html: >-
       {{ _dashboard_template.content | b64decode
-         | replace('{{JELLYFIN_URL}}', _kiosk_jellyfin_url)
-         | replace('{{PIHOLE_URL}}', _kiosk_pihole_url)
-         | replace('{{NETDATA_URL}}', _kiosk_netdata_url)
-         | replace('{{OPENWRT_URL}}', _kiosk_openwrt_url)
-         | replace('{{HOMEASSISTANT_URL}}', _kiosk_homeassistant_url) }}
+         | replace('{{DESKTOP_URL}}', _kiosk_urls.DESKTOP_URL | trim)
+         | replace('{{JELLYFIN_URL}}', _kiosk_urls.JELLYFIN_URL | trim)
+         | replace('{{KODI_URL}}', _kiosk_urls.KODI_URL | trim)
+         | replace('{{HOMEASSISTANT_URL}}', _kiosk_urls.HOMEASSISTANT_URL | trim)
+         | replace('{{MOONLIGHT_URL}}', _kiosk_urls.MOONLIGHT_URL | trim)
+         | replace('{{GAMING_URL}}', _kiosk_urls.GAMING_URL | trim)
+         | replace('{{OPENWRT_URL}}', _kiosk_urls.OPENWRT_URL | trim)
+         | replace('{{PIHOLE_URL}}', _kiosk_urls.PIHOLE_URL | trim)
+         | replace('{{WIREGUARD_URL}}', _kiosk_urls.WIREGUARD_URL | trim)
+         | replace('{{NETDATA_URL}}', _kiosk_urls.NETDATA_URL | trim)
+         | replace('{{RSYSLOG_URL}}', _kiosk_urls.RSYSLOG_URL | trim) }}
 
 - name: Write rendered dashboard to host temp
   ansible.builtin.copy:
@@ -102,11 +147,15 @@
 - name: Report Kiosk configuration
   ansible.builtin.debug:
     msg: >-
-      Kiosk configured successfully!
-      Dashboard: file:///opt/kiosk/dashboard.html
-      Display: Cage Wayland compositor via /dev/dri (DRM/KMS)
-      Service: kiosk-display (enabled, auto-start)
-      Jellyfin: {{ _kiosk_jellyfin_url | default('not configured') }}
-      Pi-hole: {{ _kiosk_pihole_url | default('not configured') }}
-      Netdata: {{ _kiosk_netdata_url | default('not configured') }}
-      Router: {{ _kiosk_openwrt_url | default('not configured') }}
+      Kiosk configured on {{ inventory_hostname }}:
+      Desktop={{ _kiosk_urls.DESKTOP_URL | trim | default('n/a', true) }},
+      Jellyfin={{ _kiosk_urls.JELLYFIN_URL | trim | default('n/a', true) }},
+      Kodi={{ _kiosk_urls.KODI_URL | trim | default('n/a', true) }},
+      HomeAssistant={{ _kiosk_urls.HOMEASSISTANT_URL | trim | default('n/a', true) }},
+      Moonlight={{ _kiosk_urls.MOONLIGHT_URL | trim | default('n/a', true) }},
+      Gaming={{ _kiosk_urls.GAMING_URL | trim | default('n/a', true) }},
+      Router={{ _kiosk_urls.OPENWRT_URL | trim | default('n/a', true) }},
+      Pi-hole={{ _kiosk_urls.PIHOLE_URL | trim | default('n/a', true) }},
+      WireGuard={{ _kiosk_urls.WIREGUARD_URL | trim | default('n/a', true) }},
+      Netdata={{ _kiosk_urls.NETDATA_URL | trim | default('n/a', true) }},
+      rsyslog={{ _kiosk_urls.RSYSLOG_URL | trim | default('n/a', true) }}

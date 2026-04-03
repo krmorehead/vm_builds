@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Custom UX Kiosk LXC** -- `kiosk_lxc` and `kiosk_configure` roles deploy a
+  lightweight dashboard container (VMID 401) using Cage Wayland compositor +
+  Chromium in kiosk mode. Serves as the default idle display (onboot, startup
+  order 6) showing a blue-themed hub with cards for all 11 services: Desktop VM,
+  Jellyfin, Kodi, Home Assistant, Moonlight, Gaming/Sunshine, OpenWrt router,
+  Pi-hole, WireGuard, Netdata, and rsyslog. Service URLs auto-populated from
+  LAN topology facts; unavailable services show as disabled cards. Shared iGPU
+  via `/dev/dri` bind mount. Deploys `display-exclusive.sh` hookscript to
+  orchestrate GPU exclusivity across Kiosk, Kodi, Moonlight, and Desktop VM.
+  Custom image via `build-images.sh --only kiosk` (~400MB). Per-feature molecule
+  scenario (`molecule/kiosk-lxc/`) with dashboard content assertions.
+- **Netdata static IP export** -- `netdata_lxc` now exports `netdata_static_ip`
+  cacheable fact for downstream roles (Kiosk dashboard auto-population).
 - **Parallel image building** -- `build-images.sh --parallel` distributes image
   builds across multiple Proxmox hosts concurrently. Uses round-robin assignment
   with automatic host discovery from env vars (`PRIMARY_HOST`, `AI_HOST`,

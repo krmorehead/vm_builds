@@ -13,7 +13,10 @@
     --accent-glow: rgba(59, 130, 246, 0.3);
     --text-primary: #e2e8f0;
     --text-secondary: #94a3b8;
+    --text-disabled: #475569;
     --border: rgba(59, 130, 246, 0.2);
+    --border-disabled: rgba(71, 85, 105, 0.3);
+    --card-disabled: rgba(20, 35, 60, 0.4);
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -30,7 +33,7 @@
 
   header {
     text-align: center;
-    padding: 2.5rem 1rem 1.5rem;
+    padding: 2rem 1rem 1rem;
   }
 
   header h1 {
@@ -45,16 +48,16 @@
 
   header p {
     color: var(--text-secondary);
-    font-size: 0.9rem;
-    margin-top: 0.4rem;
+    font-size: 0.85rem;
+    margin-top: 0.3rem;
   }
 
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-    gap: 1.25rem;
-    padding: 1rem 2rem 2rem;
-    max-width: 1200px;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 1rem;
+    padding: 0.75rem 1.5rem 1.5rem;
+    max-width: 1400px;
     margin: 0 auto;
     width: 100%;
     flex: 1;
@@ -64,45 +67,52 @@
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: 12px;
-    padding: 1.5rem;
+    padding: 1.25rem;
     text-decoration: none;
     color: var(--text-primary);
     transition: all 0.25s ease;
     backdrop-filter: blur(8px);
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 0.35rem;
   }
 
-  .card:hover {
+  .card:hover:not(.disabled) {
     background: var(--bg-card-hover);
     border-color: var(--accent);
     box-shadow: 0 0 20px var(--accent-glow);
     transform: translateY(-2px);
+    cursor: pointer;
   }
 
-  .card .icon {
-    font-size: 2rem;
-    margin-bottom: 0.25rem;
+  .card.disabled {
+    background: var(--card-disabled);
+    border-color: var(--border-disabled);
+    opacity: 0.45;
+    pointer-events: none;
   }
+
+  .card .icon { font-size: 1.75rem; }
 
   .card h2 {
-    font-size: 1.15rem;
+    font-size: 1.05rem;
     font-weight: 500;
   }
 
   .card p {
     color: var(--text-secondary);
-    font-size: 0.85rem;
-    line-height: 1.4;
+    font-size: 0.8rem;
+    line-height: 1.35;
   }
+
+  .card.disabled p { color: var(--text-disabled); }
 
   .card .tag {
     display: inline-block;
     background: rgba(59, 130, 246, 0.15);
     color: var(--accent);
-    font-size: 0.7rem;
-    padding: 0.15rem 0.5rem;
+    font-size: 0.65rem;
+    padding: 0.12rem 0.45rem;
     border-radius: 999px;
     margin-top: auto;
     align-self: flex-start;
@@ -110,13 +120,18 @@
     letter-spacing: 0.05em;
   }
 
+  .card.disabled .tag {
+    background: rgba(71, 85, 105, 0.2);
+    color: var(--text-disabled);
+  }
+
   .section-label {
     grid-column: 1 / -1;
     color: var(--text-secondary);
-    font-size: 0.75rem;
+    font-size: 0.7rem;
     text-transform: uppercase;
     letter-spacing: 0.1em;
-    padding: 0.5rem 0 0;
+    padding: 0.4rem 0 0;
     border-top: 1px solid var(--border);
   }
 
@@ -124,14 +139,14 @@
 
   footer {
     text-align: center;
-    padding: 1rem;
+    padding: 0.75rem;
     color: var(--text-secondary);
-    font-size: 0.75rem;
-    opacity: 0.6;
+    font-size: 0.7rem;
+    opacity: 0.5;
   }
 
   @media (max-width: 600px) {
-    .grid { padding: 1rem; }
+    .grid { padding: 0.5rem; gap: 0.75rem; }
     header h1 { font-size: 1.5rem; }
   }
 </style>
@@ -140,50 +155,92 @@
 
 <header>
   <h1>Home Hub</h1>
-  <p>Central dashboard &mdash; entertainment, settings &amp; monitoring</p>
+  <p>Entertainment, settings &amp; monitoring</p>
 </header>
 
 <div class="grid">
 
-  <div class="section-label">Entertainment</div>
+  <div class="section-label">Desktop &amp; Media</div>
 
-  <a class="card" href="{{JELLYFIN_URL}}" id="jellyfin-card">
-    <span class="icon">🎬</span>
+  <a class="card" data-url="{{DESKTOP_URL}}" id="desktop-card">
+    <span class="icon">&#128421;</span>
+    <h2>Desktop</h2>
+    <p>Full Debian KDE desktop &mdash; launch via Proxmox or remote control.</p>
+    <span class="tag">Desktop VM</span>
+  </a>
+
+  <a class="card" data-url="{{JELLYFIN_URL}}" id="jellyfin-card">
+    <span class="icon">&#127916;</span>
     <h2>Jellyfin</h2>
     <p>Stream movies, shows and music from your media library.</p>
     <span class="tag">Media Server</span>
   </a>
 
-  <a class="card" href="{{HOMEASSISTANT_URL}}" id="ha-card">
-    <span class="icon">🏠</span>
+  <a class="card" data-url="{{KODI_URL}}" id="kodi-card">
+    <span class="icon">&#127910;</span>
+    <h2>Kodi</h2>
+    <p>Media center with full-screen playback and remote control.</p>
+    <span class="tag">Media Player</span>
+  </a>
+
+  <a class="card" data-url="{{HOMEASSISTANT_URL}}" id="ha-card">
+    <span class="icon">&#127968;</span>
     <h2>Home Assistant</h2>
     <p>Smart home dashboard &mdash; automations, sensors and controls.</p>
     <span class="tag">Automation</span>
   </a>
 
-  <div class="section-label">Settings &amp; Admin</div>
+  <a class="card" data-url="{{MOONLIGHT_URL}}" id="moonlight-card">
+    <span class="icon">&#127918;</span>
+    <h2>Moonlight</h2>
+    <p>Game streaming client &mdash; stream from Sunshine server.</p>
+    <span class="tag">Streaming</span>
+  </a>
 
-  <a class="card" href="{{OPENWRT_URL}}" id="openwrt-card">
-    <span class="icon">🌐</span>
+  <a class="card" data-url="{{GAMING_URL}}" id="gaming-card">
+    <span class="icon">&#128377;</span>
+    <h2>Gaming</h2>
+    <p>Sunshine streaming server &mdash; manage streams and apps.</p>
+    <span class="tag">Game Server</span>
+  </a>
+
+  <div class="section-label">Settings &amp; Network</div>
+
+  <a class="card" data-url="{{OPENWRT_URL}}" id="openwrt-card">
+    <span class="icon">&#127760;</span>
     <h2>Router</h2>
-    <p>OpenWrt network settings &mdash; firewall, DHCP, WiFi and VLANs.</p>
+    <p>OpenWrt network management &mdash; firewall, DHCP, WiFi and VLANs.</p>
     <span class="tag">Network</span>
   </a>
 
-  <a class="card" href="{{PIHOLE_URL}}" id="pihole-card">
-    <span class="icon">🛡️</span>
+  <a class="card" data-url="{{PIHOLE_URL}}" id="pihole-card">
+    <span class="icon">&#128737;</span>
     <h2>Pi-hole</h2>
     <p>DNS ad-blocking &mdash; query logs, blocklists and statistics.</p>
     <span class="tag">DNS</span>
   </a>
 
+  <a class="card" data-url="{{WIREGUARD_URL}}" id="wireguard-card">
+    <span class="icon">&#128272;</span>
+    <h2>WireGuard</h2>
+    <p>VPN tunnel status and peer configuration.</p>
+    <span class="tag">VPN</span>
+  </a>
+
   <div class="section-label">Monitoring</div>
 
-  <a class="card" href="{{NETDATA_URL}}" id="netdata-card">
-    <span class="icon">📊</span>
+  <a class="card" data-url="{{NETDATA_URL}}" id="netdata-card">
+    <span class="icon">&#128200;</span>
     <h2>Netdata</h2>
     <p>Real-time system metrics &mdash; CPU, memory, disk and network.</p>
     <span class="tag">Metrics</span>
+  </a>
+
+  <a class="card" data-url="{{RSYSLOG_URL}}" id="rsyslog-card">
+    <span class="icon">&#128220;</span>
+    <h2>Logs</h2>
+    <p>Centralized syslog collector &mdash; system and service logs.</p>
+    <span class="tag">Logging</span>
   </a>
 
 </div>
@@ -192,10 +249,13 @@
 
 <script>
 document.querySelectorAll('.card').forEach(function(card) {
-  if (!card.href || card.href.indexOf('{{') !== -1) {
-    card.style.opacity = '0.4';
-    card.style.pointerEvents = 'none';
-    card.querySelector('.tag').textContent = 'Not configured';
+  var url = card.getAttribute('data-url');
+  if (url && url.length > 0 && url.indexOf('{{') === -1) {
+    card.href = url;
+  } else {
+    card.classList.add('disabled');
+    card.querySelector('.tag').textContent = 'Not available';
+    card.removeAttribute('href');
   }
 });
 </script>

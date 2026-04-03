@@ -537,10 +537,11 @@ site.yml (target)
 │   ├── Play 19: media_nodes      [media]       moonlight_lxc, deploy_stamp
 │   └── Play 20: media_nodes      [media]       moonlight_configure
 │
-├── Phase: Desktop
+├── Phase: Desktop & Kiosk
 │   ├── Play 21: desktop_nodes    [desktop]     desktop_vm, deploy_stamp
 │   ├── Play 22: desktop          [desktop]     desktop_configure
-│   └── (kiosk plays added by Kiosk project 2026-03-09-12)
+│   ├── Play 23: desktop_nodes    [kiosk]       kiosk_lxc, deploy_stamp
+│   └── Play 24: desktop_nodes    [kiosk]       kiosk_configure
 │
 ├── Phase: Gaming
 │   ├── Play 23: gaming_nodes     [gaming]      gaming_lxc, deploy_stamp
@@ -622,7 +623,7 @@ Service Roles
 │   └── openwrt_mesh_lxc / openwrt_mesh_configure  LXC  VMID 103   wifi_nodes:!router_nodes → openwrt_mesh
 │
 ├── Observability Tier
-│   ├── netdata_lxc / netdata_configure           LXC  VMID 500   monitoring_nodes → netdata
+│   ├── netdata_lxc / netdata_configure           LXC  VMID 500   monitoring_nodes → netdata    Exports: netdata_static_ip
 │   └── rsyslog_lxc / rsyslog_configure           LXC  VMID 501   monitoring_nodes → rsyslog
 │
 ├── Service Tier
@@ -809,11 +810,13 @@ vm_builds/
 │   └── cleanup_lan_host.yml              Reusable per-LAN-host cleanup (SSH from primary)
 │
 ├── molecule/
-│   ├── default/                   Full integration tests (home, mesh1, ai, mesh2 — 4-node)
+│   ├── UNIT_TEST_PATTERN.md       Per-feature unit test reference doc
+│   ├── default/                   E2E integration tests (4-node, pre-built images required)
 │   ├── desktop-vm/                Per-feature: Debian Desktop VM with iGPU passthrough
 │   ├── gaming-lxc/                Per-feature: Gaming LXC with GPU render device sharing
 │   ├── homeassistant-lxc/         Per-feature: Home Assistant LXC container
 │   ├── jellyfin-lxc/              Per-feature: Jellyfin media server container
+│   ├── kiosk-lxc/                 Per-feature: Kiosk dashboard container
 │   ├── kodi-lxc/                  Per-feature: Kodi media player container
 │   ├── mesh1-infra/               Lightweight infra-only on mesh1 (quick iteration)
 │   ├── moonlight-lxc/             Per-feature: Moonlight streaming client container

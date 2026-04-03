@@ -51,7 +51,7 @@ rsyslog_ct_ip_offset: 12
 # Run ./build-images.sh before first deploy.
 netdata_lxc_template: netdata-debian-12-amd64.tar.zst
 netdata_lxc_template_path: images/netdata-debian-12-amd64.tar.zst
-netdata_ct_ip_offset: 13
+netdata_ct_ip_offset: 21
 
 # ── Home Assistant LXC ──────────────────────────────────────────
 # Custom image built by build-images.sh: Debian 12 + Docker CE pre-installed

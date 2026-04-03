@@ -16,6 +16,7 @@
       - homeassistant-debian-12-amd64.tar.zst
       - kodi-debian-12-amd64.tar.zst
       - moonlight-debian-12-amd64.tar.zst
+      - kiosk-debian-12-amd64.tar.zst
       - desktop-debian-12-amd64.qcow2
   tasks:
     - name: Check which images exist
