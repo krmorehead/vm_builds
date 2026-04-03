@@ -1,0 +1,12 @@
+---
+- name: Provision Kiosk LXC container
+  hosts: desktop_nodes
+  gather_facts: false
+  roles:
+    - kiosk_lxc
+
+- name: Configure Kiosk
+  hosts: desktop_nodes
+  gather_facts: false
+  roles:
+    - kiosk_configure

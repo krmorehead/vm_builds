@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Builds custom images for the vm_builds project.
-# Produces thirteen outputs:
+# Produces fourteen outputs:
 #   1. Mesh LXC rootfs         — minimal OpenWrt, no firewall, WiFi packages      (local build)
 #   2. Router VM combined      — full OpenWrt with mesh/security/DNS packages      (local build)
 #   3. Pi-hole LXC template    — Debian 12 with Pi-hole pre-installed              (remote build on Proxmox)
@@ -13,15 +13,16 @@ set -euo pipefail
 #   8. Home Assistant template  — Debian 12 with Docker CE and HA container pre-pulled (remote build on Proxmox)
 #   9. Kodi LXC template       — Debian 12 with kodi-standalone + GBM/DRM + Mesa + libcec (remote build on Proxmox)
 #  10. Moonlight LXC template  — Debian 12 with moonlight-embedded + VA-API drivers   (remote build on Proxmox)
-#  11. Gaming LXC template     — Fedora with Sunshine + dsda-doom + Mesa VA-API + PipeWire (remote build on Proxmox)
-#  12. Sunshine VM image        — Windows 11 with Sunshine + dsda-doom + virtio drivers    (remote build on Proxmox)
-#  13. Desktop VM image         — Debian 12 with KDE + GNOME + SDDM + apps baked in    (remote build on Proxmox)
+#  11. Kiosk LXC template       — Debian 12 with Cage + Chromium + Mesa for kiosk dashboard (remote build on Proxmox)
+#  12. Gaming LXC template     — Fedora with Sunshine + dsda-doom + Mesa VA-API + PipeWire (remote build on Proxmox)
+#  13. Sunshine VM image        — Windows 11 with Sunshine + dsda-doom + virtio drivers    (remote build on Proxmox)
+#  14. Desktop VM image         — Debian 12 with KDE + GNOME + SDDM + apps baked in    (remote build on Proxmox)
 #
 # Usage: ./build-images.sh [--clean] [--host <proxmox-ip>] [--only <target>]
 #                          [--parallel] [--hosts <ip1>,<ip2>,...]
 #   --clean          Remove cached Image Builder before downloading fresh copy
 #   --host <ip>      Proxmox host for remote image builds. Required for remote-built templates.
-#   --only <target>  Build only the specified target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, moonlight, gaming, sunshine, desktop).
+#   --only <target>  Build only the specified target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, kiosk, moonlight, gaming, sunshine, desktop).
 #   --parallel       Build images across multiple hosts in parallel.
 #                    Reads host IPs from PRIMARY_HOST, AI_HOST, MESH_2_HOST env vars.
 #   --hosts <ips>    Comma-separated list of Proxmox host IPs for parallel builds.
@@ -978,6 +979,10 @@ WIREGUARD_BUILD_VMID=989
 KODI_OUTPUT_NAME="kodi-debian-12-amd64.tar.zst"
 KODI_BUILD_VMID=993
 
+# Kiosk LXC template (built remotely on Proxmox via pct create/exec/vzdump)
+KIOSK_OUTPUT_NAME="kiosk-debian-12-amd64.tar.zst"
+KIOSK_BUILD_VMID=992
+
 # Moonlight LXC template (built remotely on Proxmox via pct create/exec/vzdump)
 MOONLIGHT_OUTPUT_NAME="moonlight-debian-12-amd64.tar.zst"
 MOONLIGHT_BUILD_VMID=988
@@ -1167,6 +1172,180 @@ SETTINGS_EOF
     trap - EXIT
 
     log "Kodi LXC template: ${output}"
+    log "  Size: $(du -h "$output" | cut -f1)"
+}
+
+cleanup_kiosk_build() { cleanup_lxc_build "${KIOSK_BUILD_VMID}"; }
+
+build_kiosk_lxc() {
+    log "Building Kiosk LXC template (remote on Proxmox)..."
+    local base_template="${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}"
+    local output="${IMAGES_DIR}/${KIOSK_OUTPUT_NAME}"
+    local vmid="${KIOSK_BUILD_VMID}"
+
+    if [[ -f "$output" ]]; then
+        log "Kiosk template already exists at ${output}"
+        log "  Delete it and re-run to rebuild."
+        return
+    fi
+
+    if [[ -z "$PROXMOX_HOST" ]]; then
+        die "Kiosk build requires --host <proxmox-ip>. Example:
+  ./build-images.sh --host 192.168.86.201"
+    fi
+
+    if [[ ! -f "$base_template" ]]; then
+        die "Base template not found: ${base_template}. Download it first:
+  wget -O ${base_template} \\
+    http://download.proxmox.com/images/system/${DEBIAN_BASE_TEMPLATE}"
+    fi
+
+    trap cleanup_kiosk_build EXIT
+
+    remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
+
+    local remote_template="/var/lib/vz/template/cache/${DEBIAN_BASE_TEMPLATE}"
+    if ! remote_cmd "test -f ${remote_template}"; then
+        log "Uploading base template to Proxmox host..."
+        # shellcheck disable=SC2086
+        scp $SSH_OPTS "$base_template" "root@${PROXMOX_HOST}:${remote_template}"
+    fi
+
+    local mgmt_bridge
+    mgmt_bridge=$(remote_cmd "ip -o route show default | awk '{print \$5}' | head -1")
+    log "Management bridge: ${mgmt_bridge}"
+
+    log "Creating temporary build container (VMID ${vmid})..."
+    remote_cmd "pct create ${vmid} local:vztmpl/${DEBIAN_BASE_TEMPLATE} \
+        --hostname kiosk-build \
+        --memory 1024 \
+        --cores 2 \
+        --rootfs local-lvm:2 \
+        --net0 name=eth0,bridge=${mgmt_bridge},ip=dhcp \
+        --nameserver 8.8.8.8 \
+        --unprivileged 1 \
+        --features nesting=1 \
+        --start false"
+
+    log "Starting build container..."
+    remote_cmd "pct start ${vmid}"
+
+    log "Waiting for container to start..."
+    local retries=0
+    while ! remote_cmd "pct exec ${vmid} -- ls / >/dev/null 2>&1"; do
+        retries=$((retries + 1))
+        if (( retries > 20 )); then
+            remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
+            die "Build container never became ready after 40s"
+        fi
+        sleep 2
+    done
+    log "Container is ready."
+
+    log "Waiting for network inside build container..."
+    local net_retries=0
+    while ! remote_cmd "pct exec ${vmid} -- bash -c 'getent hosts deb.debian.org >/dev/null 2>&1'"; do
+        net_retries=$((net_retries + 1))
+        if (( net_retries > 15 )); then
+            remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
+            die "Build container never got network after 30s"
+        fi
+        sleep 2
+    done
+    log "Network ready."
+
+    log "Installing Cage compositor, Chromium, and Mesa drivers..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+
+        apt-get install -y --no-install-recommends \
+            cage \
+            chromium \
+            fonts-noto \
+            fonts-noto-color-emoji
+
+        # VA-API drivers for both Intel and AMD iGPU
+        apt-get install -y --no-install-recommends \
+            intel-media-va-driver \
+            mesa-va-drivers \
+            vainfo
+
+        # Create kiosk system user for headless operation
+        useradd -r -m -G video,render -s /bin/bash kiosk 2>/dev/null || true
+        mkdir -p /opt/kiosk
+        chown kiosk:kiosk /opt/kiosk
+
+        # Pre-configure kiosk-display systemd service
+        cat > /etc/systemd/system/kiosk-display.service << \"SERVICE_EOF\"
+[Unit]
+Description=Kiosk Dashboard (Cage + Chromium)
+After=systemd-user-sessions.service
+Wants=network-online.target
+
+[Service]
+User=kiosk
+Group=kiosk
+PAMName=login
+Type=simple
+Environment=WLR_LIBINPUT_NO_DEVICES=1
+Environment=XDG_RUNTIME_DIR=/run/user/0
+ExecStartPre=/bin/mkdir -p /run/user/0
+ExecStart=/usr/bin/cage -- /usr/bin/chromium --kiosk --no-sandbox --ozone-platform=wayland --disable-gpu-compositing --noerrdialogs --disable-infobars --no-first-run --disable-translate --disable-features=TranslateUI --start-fullscreen file:///opt/kiosk/dashboard.html
+Restart=on-failure
+RestartSec=5
+StandardInput=tty
+TTYPath=/dev/tty7
+TTYReset=yes
+TTYVHangup=yes
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+        systemctl daemon-reload
+
+        apt-get clean 2>/dev/null || true
+        rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    '"
+
+    log "Verifying Kiosk installation..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        dpkg -l cage | grep -c ^ii || { echo FAIL: cage not installed; exit 1; }
+        dpkg -l chromium | grep -c ^ii || { echo FAIL: chromium not installed; exit 1; }
+        test -f /etc/systemd/system/kiosk-display.service || { echo FAIL: service missing; exit 1; }
+        id kiosk || { echo FAIL: kiosk user missing; exit 1; }
+        test -d /opt/kiosk || { echo FAIL: kiosk dir missing; exit 1; }
+        echo ALL CHECKS PASSED
+    '"
+    log "Kiosk smoke test passed."
+
+    log "Stopping build container..."
+    remote_cmd "pct stop ${vmid}"
+    sleep 2
+
+    log "Exporting container as template via vzdump..."
+    remote_cmd "vzdump ${vmid} --dumpdir /tmp --compress zstd --mode stop"
+
+    local vzdump_file
+    vzdump_file=$(remote_cmd "ls -t /tmp/vzdump-lxc-${vmid}-*.tar.zst 2>/dev/null | head -1")
+    if [[ -z "$vzdump_file" ]]; then
+        remote_cmd "pct destroy ${vmid} --purge 2>/dev/null; true"
+        die "vzdump archive not found on Proxmox host"
+    fi
+    log "vzdump archive: ${vzdump_file}"
+
+    log "Downloading template to ${output}..."
+    mkdir -p "$IMAGES_DIR"
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS "root@${PROXMOX_HOST}:${vzdump_file}" "$output"
+
+    log "Cleaning up build container and vzdump archive..."
+    remote_cmd "pct destroy ${vmid} --purge 2>/dev/null; rm -f '${vzdump_file}'; true"
+
+    trap - EXIT
+
+    log "Kiosk LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
 
@@ -2541,7 +2720,7 @@ while [[ $# -gt 0 ]]; do
         *)
             die "Unknown argument: $1
 Usage: $0 [--host <ip>] [--only <target>] [--clean] [--parallel] [--hosts <ip1>,<ip2>,...]
-  Targets: mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, moonlight, gaming, sunshine, desktop"
+  Targets: mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, kiosk, moonlight, gaming, sunshine, desktop"
             ;;
     esac
 done
@@ -2577,6 +2756,7 @@ should_build netdata    && build_netdata_lxc
 should_build wireguard  && build_wireguard_lxc
 should_build homeassistant && build_homeassistant_lxc
 should_build kodi         && build_kodi_lxc
+should_build kiosk        && build_kiosk_lxc
 should_build moonlight    && build_moonlight_lxc
 should_build gaming       && build_gaming_lxc
 should_build sunshine     && build_sunshine_vm
@@ -2588,7 +2768,8 @@ ls -lh "${IMAGES_DIR}/${MESH_OUTPUT_NAME}" "${IMAGES_DIR}/${ROUTER_OUTPUT_NAME}"
     "${IMAGES_DIR}/${PIHOLE_OUTPUT_NAME}" "${IMAGES_DIR}/${RSYSLOG_OUTPUT_NAME}" \
     "${IMAGES_DIR}/${JELLYFIN_OUTPUT_NAME}" "${IMAGES_DIR}/${NETDATA_OUTPUT_NAME}" \
     "${IMAGES_DIR}/${WIREGUARD_OUTPUT_NAME}" "${IMAGES_DIR}/${HOMEASSISTANT_OUTPUT_NAME}" \
-    "${IMAGES_DIR}/${KODI_OUTPUT_NAME}" "${IMAGES_DIR}/${MOONLIGHT_OUTPUT_NAME}" \
+    "${IMAGES_DIR}/${KODI_OUTPUT_NAME}" "${IMAGES_DIR}/${KIOSK_OUTPUT_NAME}" \
+    "${IMAGES_DIR}/${MOONLIGHT_OUTPUT_NAME}" \
     "${IMAGES_DIR}/${GAMING_OUTPUT_NAME}" "${IMAGES_DIR}/${SUNSHINE_OUTPUT_NAME}" \
     "${IMAGES_DIR}/${DESKTOP_OUTPUT_NAME}" \
     2>/dev/null || true

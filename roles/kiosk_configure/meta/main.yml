@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: kiosk_configure
+  description: Configure Kiosk LXC with dashboard URLs and display service
+  author: vm_builds
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm
+dependencies: []

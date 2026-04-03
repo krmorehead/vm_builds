@@ -47,6 +47,7 @@
       - "{{ jellyfin_ct_id }}"
       - "{{ kodi_ct_id }}"
       - "{{ moonlight_ct_id }}"
+      - "{{ kiosk_ct_id }}"
       - "{{ gaming_ct_id }}"
   tasks:
     - name: Probe host connectivity
@@ -198,6 +199,7 @@
         cmd: |
           rm -f /var/lib/vz/snippets/mesh-wifi-phy-*.sh
           rm -f /var/lib/vz/snippets/gpu-passthrough-hook.sh
+          rm -f /var/lib/vz/snippets/display-exclusive.sh
         executable: /bin/bash
       changed_when: true
       failed_when: false

@@ -1,0 +1,128 @@
+---
+- name: Reconstruct kiosk dynamic group
+  hosts: desktop_nodes
+  gather_facts: false
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_kiosk_group.yml
+
+- name: Verify Kiosk LXC container
+  hosts: desktop_nodes
+  gather_facts: false
+  vars:
+    kiosk_ct_id: 401
+  tasks:
+    # ── Container state ──────────────────────────────────────────
+
+    - name: Read container state and config
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct status {{ kiosk_ct_id }}
+          pct config {{ kiosk_ct_id }}
+        executable: /bin/bash
+      register: _kiosk_cfg
+      changed_when: false
+
+    - name: Assert container is running
+      ansible.builtin.assert:
+        that: "'running' in _kiosk_cfg.stdout"
+        fail_msg: "Container {{ kiosk_ct_id }} is not running"
+
+    - name: Assert onboot is enabled (default display state)
+      ansible.builtin.assert:
+        that: "'onboot: 1' in _kiosk_cfg.stdout"
+        fail_msg: "Container {{ kiosk_ct_id }} should have onboot: 1"
+
+    - name: Assert startup order is 6
+      ansible.builtin.assert:
+        that: _kiosk_cfg.stdout is regex('startup:.*order=6')
+        fail_msg: "Container {{ kiosk_ct_id }} should have startup order=6"
+
+    # ── Device mounts ────────────────────────────────────────────
+
+    - name: Check DRI devices are mounted
+      ansible.builtin.command:
+        cmd: pct exec {{ kiosk_ct_id }} -- ls /dev/dri/
+      register: _dri_devices
+      changed_when: false
+
+    - name: Assert DRI devices exist
+      ansible.builtin.assert:
+        that: _dri_devices.rc == 0
+        fail_msg: "DRI devices not mounted at /dev/dri/"
+
+    - name: Assert device bind mount is configured
+      ansible.builtin.assert:
+        that: _kiosk_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/dri')
+        fail_msg: "Expected lxc.mount.entry device rule for /dev/dri"
+
+    # ── Kiosk packages and service ──────────────────────────────
+
+    - name: Run Kiosk container health checks (single pct exec)
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ kiosk_ct_id }} -- /bin/sh -c '
+          echo "CAGE_PKG=$(dpkg -l cage 2>/dev/null | grep -c ^ii)";
+          echo "CHROMIUM_PKG=$(dpkg -l chromium 2>/dev/null | grep -c ^ii)";
+          echo "SERVICE=$(systemctl is-enabled kiosk-display 2>/dev/null || echo disabled)";
+          echo "DASHBOARD=$(test -f /opt/kiosk/dashboard.html && echo exists || echo missing)";
+          echo "KIOSK_USER=$(id kiosk 2>/dev/null && echo exists || echo missing)"
+          '
+      register: _kiosk_health
+      changed_when: false
+
+    - name: Assert Cage compositor is installed
+      ansible.builtin.assert:
+        that: "'CAGE_PKG=1' in _kiosk_health.stdout"
+        fail_msg: "cage package not installed"
+
+    - name: Assert Chromium is installed
+      ansible.builtin.assert:
+        that: "'CHROMIUM_PKG=1' in _kiosk_health.stdout"
+        fail_msg: "chromium package not installed"
+
+    - name: Assert kiosk-display service is enabled
+      ansible.builtin.assert:
+        that: "'SERVICE=enabled' in _kiosk_health.stdout"
+        fail_msg: "kiosk-display service not enabled"
+
+    - name: Assert dashboard HTML exists
+      ansible.builtin.assert:
+        that: "'DASHBOARD=exists' in _kiosk_health.stdout"
+        fail_msg: "Dashboard HTML not found at /opt/kiosk/dashboard.html"
+
+    - name: Assert kiosk user exists
+      ansible.builtin.assert:
+        that: "'KIOSK_USER=exists' in _kiosk_health.stdout or 'uid=' in _kiosk_health.stdout"
+        fail_msg: "kiosk user not found"
+
+    # ── Hookscript ──────────────────────────────────────────────
+
+    - name: Check display-exclusive hookscript exists
+      ansible.builtin.stat:
+        path: /var/lib/vz/snippets/display-exclusive.sh
+      register: _hookscript
+
+    - name: Assert hookscript deployed
+      ansible.builtin.assert:
+        that: _hookscript.stat.exists
+        fail_msg: "Display-exclusive hookscript not deployed"
+
+    - name: Assert hookscript attached to container
+      ansible.builtin.assert:
+        that: "'hookscript' in _kiosk_cfg.stdout"
+        fail_msg: "Hookscript not attached to container {{ kiosk_ct_id }}"
+
+    # ── Report ──────────────────────────────────────────────────
+
+    - name: Report Kiosk verification
+      ansible.builtin.debug:
+        msg: >-
+          Kiosk per-feature verify passed:
+          ct={{ kiosk_ct_id }}, running=yes,
+          cage={{ 'installed' if 'CAGE_PKG=1' in _kiosk_health.stdout else 'missing' }},
+          chromium={{ 'installed' if 'CHROMIUM_PKG=1' in _kiosk_health.stdout else 'missing' }},
+          service={{ 'enabled' if 'SERVICE=enabled' in _kiosk_health.stdout else 'disabled' }},
+          dri={{ 'mounted' if _dri_devices.rc == 0 else 'missing' }},
+          hookscript={{ 'deployed' if _hookscript.stat.exists else 'missing' }}

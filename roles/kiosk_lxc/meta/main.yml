@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: kiosk_lxc
+  description: Provision Kiosk LXC container with Cage + Chromium dashboard
+  author: vm_builds
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm
+dependencies: []

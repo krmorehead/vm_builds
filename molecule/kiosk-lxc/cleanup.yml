@@ -1,0 +1,27 @@
+---
+- name: Destroy Kiosk container and hookscript
+  hosts: desktop_nodes
+  gather_facts: false
+  vars:
+    kiosk_ct_id: 401
+  tasks:
+    - name: Stop Kiosk container
+      ansible.builtin.command:
+        cmd: pct stop {{ kiosk_ct_id }}
+      failed_when: false
+      changed_when: true
+
+    - name: Wait for container to stop
+      ansible.builtin.pause:
+        seconds: 2
+
+    - name: Destroy Kiosk container
+      ansible.builtin.command:
+        cmd: pct destroy {{ kiosk_ct_id }} --purge
+      failed_when: false
+      changed_when: true
+
+    - name: Remove display-exclusive hookscript
+      ansible.builtin.file:
+        path: /var/lib/vz/snippets/display-exclusive.sh
+        state: absent

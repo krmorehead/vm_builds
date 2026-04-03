@@ -1,0 +1,112 @@
+---
+# ── Verify Kiosk packages are available ──────────────────────────
+
+- name: Verify Cage compositor installed in container
+  ansible.builtin.command:
+    cmd: pct exec {{ kiosk_ct_id }} -- dpkg -l cage
+  register: _cage_pkg_check
+  changed_when: false
+  failed_when: _cage_pkg_check.rc != 0
+
+# ── Configure iGPU access ───────────────────────────────────────
+
+- name: Create render group and add kiosk user to groups
+  ansible.builtin.shell:
+    cmd: |
+      pct exec {{ kiosk_ct_id }} -- bash -c '
+        groupadd -g {{ igpu_render_gid }} render 2>/dev/null || true
+        usermod -a -G render,video kiosk 2>/dev/null || true
+      '
+    executable: /bin/bash
+  changed_when: true
+
+# ── Deploy dashboard HTML ────────────────────────────────────────
+
+- name: Build service URLs from LAN topology
+  ansible.builtin.set_fact:
+    _kiosk_jellyfin_url: >-
+      {{ kiosk_jellyfin_url if kiosk_jellyfin_url | length > 0
+         else ('http://' + (jellyfin_static_ip | default('')) + ':8096')
+              if (jellyfin_static_ip | default('')) | length > 0
+         else '' }}
+    _kiosk_pihole_url: >-
+      {{ kiosk_pihole_url if kiosk_pihole_url | length > 0
+         else ('http://' + (pihole_static_ip | default('')) + '/admin')
+              if (pihole_static_ip | default('')) | length > 0
+         else '' }}
+    _kiosk_netdata_url: >-
+      {{ kiosk_netdata_url if kiosk_netdata_url | length > 0
+         else ('http://' + (netdata_static_ip | default('')) + ':19999')
+              if (netdata_static_ip | default('')) | length > 0
+         else '' }}
+    _kiosk_openwrt_url: >-
+      {{ kiosk_openwrt_url if kiosk_openwrt_url | length > 0
+         else 'http://10.10.10.1' }}
+    _kiosk_homeassistant_url: >-
+      {{ kiosk_homeassistant_url if kiosk_homeassistant_url | length > 0
+         else ('http://' + (homeassistant_static_ip | default('')) + ':8123')
+              if (homeassistant_static_ip | default('')) | length > 0
+         else '' }}
+
+- name: Read dashboard template
+  ansible.builtin.slurp:
+    src: "{{ role_path }}/files/dashboard.html"
+  register: _dashboard_template
+  delegate_to: localhost
+
+- name: Render dashboard with service URLs
+  ansible.builtin.set_fact:
+    _dashboard_html: >-
+      {{ _dashboard_template.content | b64decode
+         | replace('{{JELLYFIN_URL}}', _kiosk_jellyfin_url)
+         | replace('{{PIHOLE_URL}}', _kiosk_pihole_url)
+         | replace('{{NETDATA_URL}}', _kiosk_netdata_url)
+         | replace('{{OPENWRT_URL}}', _kiosk_openwrt_url)
+         | replace('{{HOMEASSISTANT_URL}}', _kiosk_homeassistant_url) }}
+
+- name: Write rendered dashboard to host temp
+  ansible.builtin.copy:
+    content: "{{ _dashboard_html }}"
+    dest: /tmp/kiosk_dashboard.html
+    mode: "0644"
+
+- name: Ensure dashboard directory exists in container
+  ansible.builtin.command:
+    cmd: pct exec {{ kiosk_ct_id }} -- mkdir -p /opt/kiosk
+  changed_when: true
+
+- name: Push dashboard into container
+  ansible.builtin.command:
+    cmd: pct push {{ kiosk_ct_id }} /tmp/kiosk_dashboard.html /opt/kiosk/dashboard.html
+  changed_when: true
+
+- name: Set dashboard ownership
+  ansible.builtin.command:
+    cmd: pct exec {{ kiosk_ct_id }} -- chown kiosk:kiosk /opt/kiosk/dashboard.html
+  changed_when: true
+
+- name: Clean up host temp file
+  ansible.builtin.file:
+    path: /tmp/kiosk_dashboard.html
+    state: absent
+
+# ── Enable kiosk display service ─────────────────────────────────
+
+- name: Enable kiosk-display service
+  ansible.builtin.command:
+    cmd: pct exec {{ kiosk_ct_id }} -- systemctl enable kiosk-display
+  changed_when: true
+
+# ── Report completion ────────────────────────────────────────────
+
+- name: Report Kiosk configuration
+  ansible.builtin.debug:
+    msg: >-
+      Kiosk configured successfully!
+      Dashboard: file:///opt/kiosk/dashboard.html
+      Display: Cage Wayland compositor via /dev/dri (DRM/KMS)
+      Service: kiosk-display (enabled, auto-start)
+      Jellyfin: {{ _kiosk_jellyfin_url | default('not configured') }}
+      Pi-hole: {{ _kiosk_pihole_url | default('not configured') }}
+      Netdata: {{ _kiosk_netdata_url | default('not configured') }}
+      Router: {{ _kiosk_openwrt_url | default('not configured') }}

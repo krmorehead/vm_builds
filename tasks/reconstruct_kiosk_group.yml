@@ -1,0 +1,17 @@
+---
+# Reconstruct the kiosk dynamic group.
+# Thin wrapper around the shared LXC group reconstruction.
+#
+# Consumed by:
+#   - Per-feature molecule converge.yml (kiosk-lxc scenario)
+#   - Per-feature molecule verify.yml
+#   - playbooks/cleanup.yml (rollback plays)
+#
+# Must run on a host in the desktop_nodes/proxmox group.
+
+- name: Reconstruct Kiosk dynamic group
+  ansible.builtin.include_tasks: reconstruct_lxc_group.yml
+  vars:
+    reconstruct_service_name: Kiosk
+    reconstruct_service_prefix: kiosk
+    reconstruct_ct_id: "{{ kiosk_ct_id }}"

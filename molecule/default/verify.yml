@@ -1495,6 +1495,65 @@
         that: "'desktop_vm' in stamp.plays"
         fail_msg: "deploy_stamp missing desktop_vm on {{ inventory_hostname }}"
 
+# ── Play 7: Kiosk health (desktop_nodes) ─────────────────────────
+# Deep Kiosk checks (Cage, Chromium, dashboard file, systemd service)
+# live in molecule/kiosk-lxc/verify.yml.
+
+- name: Verify Kiosk on desktop nodes
+  hosts: desktop_nodes
+  gather_facts: false
+  tasks:
+    - name: Read Kiosk container state and config
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct status {{ kiosk_ct_id }}
+          pct config {{ kiosk_ct_id }}
+        executable: /bin/bash
+      register: _kiosk_cfg
+      changed_when: false
+
+    - name: Assert Kiosk container is running with correct config
+      ansible.builtin.assert:
+        that:
+          - "'running' in _kiosk_cfg.stdout"
+          - "'onboot: 1' in _kiosk_cfg.stdout"
+          - _kiosk_cfg.stdout is regex('startup:.*order=6')
+          - _kiosk_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/dri')
+        fail_msg: "Kiosk container {{ kiosk_ct_id }} config incorrect on {{ inventory_hostname }}"
+
+    - name: Check Kiosk display service is enabled (single pct exec)
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ kiosk_ct_id }} -- /bin/sh -c '
+          echo "SERVICE=$(systemctl is-enabled kiosk-display 2>/dev/null || echo disabled)";
+          echo "DASHBOARD=$(test -f /opt/kiosk/dashboard.html && echo yes || echo no)"
+          '
+      register: _kiosk_health
+      changed_when: false
+
+    - name: Assert Kiosk service enabled and dashboard present
+      ansible.builtin.assert:
+        that:
+          - "'SERVICE=enabled' in _kiosk_health.stdout"
+          - "'DASHBOARD=yes' in _kiosk_health.stdout"
+        fail_msg: "Kiosk health check failed on {{ inventory_hostname }}: {{ _kiosk_health.stdout }}"
+
+    - name: Check display-exclusive hookscript exists
+      ansible.builtin.stat:
+        path: /var/lib/vz/snippets/display-exclusive.sh
+      register: _hookscript_verify
+
+    - name: Assert display-exclusive hookscript deployed
+      ansible.builtin.assert:
+        that: _hookscript_verify.stat.exists
+        fail_msg: "Display-exclusive hookscript missing on {{ inventory_hostname }}"
+
+    - name: Assert stamp contains kiosk_lxc
+      ansible.builtin.assert:
+        that: "'kiosk_lxc' in stamp.plays"
+        fail_msg: "deploy_stamp missing kiosk_lxc entry"
+
 # ── Verify Gaming LXC health (gaming_nodes) ──────────────────────
 # Deep Gaming checks (VA-API profiles, render/card devices, dsda-doom,
 # Sunshine API) live in molecule/gaming-lxc/verify.yml.

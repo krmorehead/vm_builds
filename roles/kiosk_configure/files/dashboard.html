@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Home Hub</title>
+<style>
+  :root {
+    --bg-primary: #0a1628;
+    --bg-card: rgba(30, 58, 95, 0.6);
+    --bg-card-hover: rgba(40, 78, 125, 0.8);
+    --accent: #3b82f6;
+    --accent-glow: rgba(59, 130, 246, 0.3);
+    --text-primary: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --border: rgba(59, 130, 246, 0.2);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: linear-gradient(135deg, #0a1628 0%, #1a2744 50%, #0f2035 100%);
+    color: var(--text-primary);
+    min-height: 100vh;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    text-align: center;
+    padding: 2.5rem 1rem 1.5rem;
+  }
+
+  header h1 {
+    font-size: 2rem;
+    font-weight: 300;
+    letter-spacing: 0.05em;
+    background: linear-gradient(90deg, #60a5fa, #3b82f6, #818cf8);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  header p {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    margin-top: 0.4rem;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 1.25rem;
+    padding: 1rem 2rem 2rem;
+    max-width: 1200px;
+    margin: 0 auto;
+    width: 100%;
+    flex: 1;
+  }
+
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    text-decoration: none;
+    color: var(--text-primary);
+    transition: all 0.25s ease;
+    backdrop-filter: blur(8px);
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .card:hover {
+    background: var(--bg-card-hover);
+    border-color: var(--accent);
+    box-shadow: 0 0 20px var(--accent-glow);
+    transform: translateY(-2px);
+  }
+
+  .card .icon {
+    font-size: 2rem;
+    margin-bottom: 0.25rem;
+  }
+
+  .card h2 {
+    font-size: 1.15rem;
+    font-weight: 500;
+  }
+
+  .card p {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    line-height: 1.4;
+  }
+
+  .card .tag {
+    display: inline-block;
+    background: rgba(59, 130, 246, 0.15);
+    color: var(--accent);
+    font-size: 0.7rem;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    margin-top: auto;
+    align-self: flex-start;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .section-label {
+    grid-column: 1 / -1;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    padding: 0.5rem 0 0;
+    border-top: 1px solid var(--border);
+  }
+
+  .section-label:first-child { border-top: none; }
+
+  footer {
+    text-align: center;
+    padding: 1rem;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    opacity: 0.6;
+  }
+
+  @media (max-width: 600px) {
+    .grid { padding: 1rem; }
+    header h1 { font-size: 1.5rem; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Home Hub</h1>
+  <p>Central dashboard &mdash; entertainment, settings &amp; monitoring</p>
+</header>
+
+<div class="grid">
+
+  <div class="section-label">Entertainment</div>
+
+  <a class="card" href="{{JELLYFIN_URL}}" id="jellyfin-card">
+    <span class="icon">🎬</span>
+    <h2>Jellyfin</h2>
+    <p>Stream movies, shows and music from your media library.</p>
+    <span class="tag">Media Server</span>
+  </a>
+
+  <a class="card" href="{{HOMEASSISTANT_URL}}" id="ha-card">
+    <span class="icon">🏠</span>
+    <h2>Home Assistant</h2>
+    <p>Smart home dashboard &mdash; automations, sensors and controls.</p>
+    <span class="tag">Automation</span>
+  </a>
+
+  <div class="section-label">Settings &amp; Admin</div>
+
+  <a class="card" href="{{OPENWRT_URL}}" id="openwrt-card">
+    <span class="icon">🌐</span>
+    <h2>Router</h2>
+    <p>OpenWrt network settings &mdash; firewall, DHCP, WiFi and VLANs.</p>
+    <span class="tag">Network</span>
+  </a>
+
+  <a class="card" href="{{PIHOLE_URL}}" id="pihole-card">
+    <span class="icon">🛡️</span>
+    <h2>Pi-hole</h2>
+    <p>DNS ad-blocking &mdash; query logs, blocklists and statistics.</p>
+    <span class="tag">DNS</span>
+  </a>
+
+  <div class="section-label">Monitoring</div>
+
+  <a class="card" href="{{NETDATA_URL}}" id="netdata-card">
+    <span class="icon">📊</span>
+    <h2>Netdata</h2>
+    <p>Real-time system metrics &mdash; CPU, memory, disk and network.</p>
+    <span class="tag">Metrics</span>
+  </a>
+
+</div>
+
+<footer>Home Hub &bull; Powered by Proxmox VE</footer>
+
+<script>
+document.querySelectorAll('.card').forEach(function(card) {
+  if (!card.href || card.href.indexOf('{{') !== -1) {
+    card.style.opacity = '0.4';
+    card.style.pointerEvents = 'none';
+    card.querySelector('.tag').textContent = 'Not configured';
+  }
+});
+</script>
+
+</body>
+</html>

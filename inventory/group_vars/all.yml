@@ -86,6 +86,15 @@ moonlight_lxc_template: moonlight-debian-12-amd64.tar.zst
 moonlight_lxc_template_path: images/moonlight-debian-12-amd64.tar.zst
 moonlight_ct_ip_offset: 17
 
+# ── Kiosk LXC (custom dashboard on physical display) ─────────────
+# Custom image built by build-images.sh --only kiosk: Cage Wayland
+# compositor + Chromium kiosk + Mesa VA-API drivers (Intel + AMD).
+# Displays a local dashboard as the default idle screen.
+# Run ./build-images.sh --only kiosk before first deploy.
+kiosk_lxc_template: kiosk-debian-12-amd64.tar.zst
+kiosk_lxc_template_path: images/kiosk-debian-12-amd64.tar.zst
+kiosk_ct_ip_offset: 19
+
 # ── Desktop VM (Debian 12 + KDE/GNOME baked image) ───────────────
 # Custom image built by build-images.sh --only desktop: KDE Plasma,
 # GNOME, SDDM, and shared applications pre-installed. GPU drivers
