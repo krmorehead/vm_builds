@@ -77,6 +77,7 @@
     cmd: >-
       pct exec {{ gaming_ct_id }} --
       bash -c '/usr/bin/sunshine --creds {{ sunshine_user }} {{ _sunshine_password }}'
+  no_log: true
   changed_when: true
   failed_when: false
 

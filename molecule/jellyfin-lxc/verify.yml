@@ -41,16 +41,19 @@
 
     # ── iGPU device mounting ──────────────────────────────────────
 
-    - name: Check iGPU device is mounted
-      ansible.builtin.command:
-        cmd: pct exec {{ jellyfin_ct_id }} -- ls -la /dev/dri/renderD128
+    - name: Check iGPU render device is mounted
+      ansible.builtin.shell:
+        cmd: pct exec {{ jellyfin_ct_id }} -- ls /dev/dri/renderD* 2>/dev/null | head -1
+        executable: /bin/bash
       register: _igpu_device
       changed_when: false
 
-    - name: Assert iGPU device exists
+    - name: Assert iGPU render device exists
       ansible.builtin.assert:
-        that: _igpu_device.rc == 0
-        fail_msg: "iGPU device /dev/dri/renderD128 not mounted"
+        that:
+          - _igpu_device.rc == 0
+          - _igpu_device.stdout | trim | length > 0
+        fail_msg: "No iGPU render device found in /dev/dri/"
 
     # ── Media path mounting ───────────────────────────────────────
 

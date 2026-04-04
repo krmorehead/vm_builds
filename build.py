@@ -46,6 +46,7 @@ Available tags (site.yml plays):
     wireguard       WireGuard VPN container
     mesh-wifi       OpenWrt mesh WiFi LXC containers
     desktop         Debian desktop VM
+    kiosk           Custom UX kiosk LXC container
     gaming          Gaming LXC container (opt-in, tagged with never)
     lan-satellite   LAN host bootstrap
     cleanup         Remove temporary bootstrap networking
@@ -113,6 +114,31 @@ def load_env(env_path: Path) -> dict[str, str]:
 def validate_env(env: dict[str, str]) -> list[str]:
     """Return list of missing or empty required variables."""
     return [var for var in REQUIRED_ENV if not env.get(var)]
+
+
+OPTIONAL_HOST_VARS = ["AI_HOST", "MESH_2_HOST"]
+
+TOKEN_SUFFIX = "_API_TOKEN"
+
+KNOWN_HOSTS = ["HOME", "MESH1", "MESH2", "AI"]
+
+
+def warn_multi_host(env: dict[str, str]) -> list[str]:
+    """Return warnings for optional multi-host variables that look misconfigured.
+
+    Not hard failures — single-host runs are valid without these.
+    """
+    warnings = []
+    for var in OPTIONAL_HOST_VARS:
+        val = env.get(var, "")
+        if val and not val.replace(".", "").isdigit():
+            warnings.append(f"{var}={val!r} does not look like an IP address")
+
+    for host in KNOWN_HOSTS:
+        token_var = f"{host}{TOKEN_SUFFIX}"
+        if token_var in env and not env[token_var]:
+            warnings.append(f"{token_var} is set but empty")
+    return warnings
 
 
 STATE_DIR = PROJECT_ROOT / ".state"
@@ -239,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
         epilog=(
             "Any arguments after -- are passed directly to ansible-playbook.\n\n"
             "Available tags: backup, infra, openwrt, pihole, monitoring, homeassistant, "
-            "media, moonlight, wireguard, mesh-wifi, desktop, gaming, lan-satellite, cleanup"
+            "media, moonlight, wireguard, mesh-wifi, desktop, kiosk, gaming, lan-satellite, cleanup"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -303,6 +329,9 @@ def main(argv: list[str] | None = None) -> int:
         for var in missing:
             print(f"  - {var}", file=sys.stderr)
         return 1
+
+    for warning in warn_multi_host(env):
+        print(f"WARNING: {warning}", file=sys.stderr)
 
     # Pre-flight: find a reachable IP for the Proxmox host
     host = resolve_proxmox_host(env)

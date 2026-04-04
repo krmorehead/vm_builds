@@ -67,7 +67,7 @@ Usage: ./wol.sh [--wait] <target>
 
 Targets:
   <mac-address>   Send magic packet to a specific MAC (e.g., 8c:16:45:d1:87:a6)
-  <alias>         Wake a known host by name (home, ai, mesh2, mesh1)
+  <alias>         Wake a known host by name (home, mesh2, mesh1)
   all             Wake all known hosts
   --list          Show known hosts and their MAC addresses
   --wait          After sending WoL, poll until SSH is reachable (120s timeout)
@@ -87,12 +87,20 @@ is_mac() {
 
 send_wol_local() {
     local name="$1" mac="$2"
+    if ! is_mac "$mac"; then
+        echo "ERROR: Invalid MAC address for ${name}: '${mac}'" >&2
+        return 1
+    fi
     echo "Waking ${name} (${mac}) via local broadcast..."
     wakeonlan "$mac"
 }
 
 send_wol_via_proxy() {
     local name="$1" mac="$2" proxy_host="$3"
+    if ! is_mac "$mac"; then
+        echo "ERROR: Invalid MAC address for ${name}: '${mac}'" >&2
+        return 1
+    fi
     echo "Waking ${name} (${mac}) via proxy ${proxy_host}..."
     # Python one-liner to send a magic packet. No extra packages needed
     # on the proxy host (Python 3 is always available on Proxmox).

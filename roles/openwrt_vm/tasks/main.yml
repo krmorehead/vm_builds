@@ -98,6 +98,7 @@
       {{ _openwrt_disk_image }}
       {{ proxmox_storage }}
   register: disk_import
+  changed_when: true
   when: not vm_exists | bool
 
 - name: Parse imported disk path
@@ -114,6 +115,7 @@
       qm set {{ openwrt_vm_id }}
       --scsi0 {{ imported_disk }}
       --boot order=scsi0
+  changed_when: true
   when: not vm_exists | bool
 
 - name: Resize boot disk
@@ -121,6 +123,7 @@
     cmd: >-
       qm resize {{ openwrt_vm_id }}
       scsi0 {{ openwrt_vm_disk_size }}
+  changed_when: true
   when: not vm_exists | bool
 
 # ── Bridge ordering (WAN first) ─────────────────────────────────
@@ -155,6 +158,7 @@
   loop_control:
     index_var: idx
     loop_var: bridge
+  changed_when: true
   when: not vm_exists | bool
 
 # ── Auto-start on Proxmox boot ──────────────────────────────────
@@ -165,6 +169,7 @@
       qm set {{ openwrt_vm_id }}
       --onboot 1
       --startup order={{ openwrt_vm_startup_order }}
+  changed_when: true
 
 # ── WiFi PCIe passthrough ──────────────────────────────────────
 
@@ -177,6 +182,7 @@
   loop_control:
     index_var: idx
     loop_var: pci_addr
+  changed_when: true
   when:
     - not vm_exists | bool
     - wifi_pci_devices | default([]) | length > 0

@@ -43,6 +43,7 @@
     cmd: pct exec {{ jellyfin_ct_id }} -- openssl rand -base64 24
   register: _generated_password
   changed_when: false
+  no_log: true
   when: jellyfin_admin_password | length == 0
 
 - name: Set generated admin password

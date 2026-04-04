@@ -1139,6 +1139,23 @@
           - "'SVC=enabled' in wg_health.stdout"
         fail_msg: "WireGuard health check failed on {{ inventory_hostname }}: {{ wg_health.stdout }}"
 
+    - name: Count WireGuard peers configured
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ wireguard_ct_id }} -- /bin/sh -c '
+          wg show wg0 peers 2>/dev/null | wc -l
+          '
+      register: wg_peer_count
+      changed_when: false
+      failed_when: false
+
+    - name: Assert at least one WireGuard peer exists
+      ansible.builtin.assert:
+        that: (wg_peer_count.stdout | trim | int) >= 1
+        fail_msg: >-
+          WireGuard on {{ inventory_hostname }} has {{ wg_peer_count.stdout | trim }}
+          peers — expected at least 1 for cross-node connectivity
+
     - name: Assert stamp contains wireguard_lxc
       ansible.builtin.assert:
         that: "'wireguard_lxc' in stamp.plays"
@@ -1334,6 +1351,28 @@
       ansible.builtin.assert:
         that: "'DAEMON=active' in ha_health.stdout"
         fail_msg: "Docker daemon not active in Home Assistant container on {{ inventory_hostname }}"
+
+    - name: Check Home Assistant HTTP endpoint via Docker
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ homeassistant_ct_id }} -- /bin/sh -c '
+          curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8123 2>/dev/null || echo 000
+          '
+        executable: /bin/bash
+      register: ha_http
+      changed_when: false
+      failed_when: false
+      retries: 3
+      delay: 10
+      until: ha_http.stdout | trim in ['200', '301', '302']
+
+    - name: Assert Home Assistant is responding
+      ansible.builtin.assert:
+        that: ha_http.stdout | trim in ['200', '301', '302']
+        fail_msg: >-
+          Home Assistant HTTP not responding on {{ inventory_hostname }}
+          (got {{ ha_http.stdout | trim }}, expected 200/301/302)
 
     - name: Assert stamp contains homeassistant_lxc
       ansible.builtin.assert:

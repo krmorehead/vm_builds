@@ -6,33 +6,12 @@
 #   - Per-feature molecule verify.yml
 #   - playbooks/cleanup.yml (rollback plays)
 #
-# Must run on a host in the service_nodes/proxmox group that has
-# access to pct commands and container state.
+# Delegates to the shared reconstruct_lxc_group.yml helper for
+# consistency with all other LXC service reconstruct wrappers.
 
-- name: Verify Home Assistant container is running
-  ansible.builtin.command:
-    cmd: pct status {{ homeassistant_ct_id }}
-  register: _ct_status
-  changed_when: false
-  failed_when: "'running' not in _ct_status.stdout"
-
-- name: Add Home Assistant to dynamic group
-  ansible.builtin.add_host:
-    name: "homeassistant-{{ inventory_hostname }}"
-    groups: homeassistant
-    ansible_connection: community.proxmox.proxmox_pct_remote
-    ansible_host: "{{ ansible_host }}"
-    ansible_user: root
-    proxmox_vmid: "{{ homeassistant_ct_id }}"
-    ansible_paramiko_host_key_checking: false
-    ansible_paramiko_proxy_command: >-
-      {{ 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@'
-         + lookup('env', 'PRIMARY_HOST')
-         if 'lan_hosts' in (group_names | default([]))
-         else omit }}
-
-- name: Report reconstructed group
-  ansible.builtin.debug:
-    msg: >-
-      Reconstructed homeassistant group: container={{ homeassistant_ct_id }},
-      connection=pct_remote via {{ ansible_host }}
+- name: Reconstruct Home Assistant group
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/reconstruct_lxc_group.yml"
+  vars:
+    reconstruct_service_name: Home Assistant
+    reconstruct_service_prefix: homeassistant
+    reconstruct_ct_id: "{{ homeassistant_ct_id }}"

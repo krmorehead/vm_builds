@@ -6,6 +6,121 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **Credential exposure** -- Added `no_log: true` to 10 tasks that handle
+  private keys, passwords, or PINs: WireGuard key generation (4 tasks),
+  desktop_vm cloud-init password, gaming_configure Sunshine web API,
+  moonlight_configure pairing PIN, jellyfin_configure password generation,
+  homeassistant_configure password generation, gaming_lxc_configure Sunshine
+  CLI credentials.
+- **World-readable API key** -- `netdata_configure` stream.conf mode changed
+  from `0644` to `0640` (root + netdata group only).
+
+### Fixed
+
+- **build-images.sh VMID collision (Pass 2)** -- `SUNSHINE_BUILD_VMID`
+  changed from 991 to 989. The previous review created a new collision
+  with `DESKTOP_BUILD_VMID` (both 991).
+- **build-images.sh parallel_build temp dir leak** -- log directory now
+  cleaned up on both success and failure paths.
+- **build-images.sh Sunshine local temp dir** -- `answer_tmp` directory
+  from `mktemp -d` now covered by the EXIT trap via module-level variable.
+- **run.sh missing .venv guard** -- fails immediately with a clear message
+  if `.venv` is not found, instead of opaque shell errors.
+- **gather_facts buffer overflow risk** -- Changed `gather_facts: true` to
+  `false` on 4 per-feature molecule scenarios (pihole-lxc, rsyslog-lxc,
+  netdata-lxc, wireguard-lxc) that target `pct_remote` dynamic groups.
+- **Jellyfin verify hardcoded renderD128** -- `molecule/jellyfin-lxc/verify.yml`
+  now uses `ls /dev/dri/renderD*` glob for dynamic device detection.
+- **banIP status unasserted** -- `molecule/openwrt-security/verify.yml` now
+  asserts banIP service is running (not just installed).
+- **build.py CLI missing kiosk tag** -- Added `kiosk` to both docstring
+  and epilog tag lists.
+- **build-images.sh VMID collision** -- `SUNSHINE_BUILD_VMID` changed from 992
+  to 991 to avoid colliding with `KIOSK_BUILD_VMID`.
+- **build-images.sh silent build failures** -- `make | tail -5` pipelines now
+  use `tee` + `PIPESTATUS[0]` to propagate make exit codes.
+- **BusyBox grep -oP** -- `tasks/cleanup_lan_host.yml` DHCP lease cleanup
+  replaced `grep -oP` with `sed -n` for OpenWrt BusyBox compatibility.
+- **Hardcoded renderD128** -- `gaming_vm` hookscript post-stop now uses
+  `ls /dev/dri/renderD*` glob instead of hardcoded device path.
+- **Hardcoded ALSA card** -- `kodi_configure` ALSA config now uses
+  `kodi_alsa_card` / `kodi_alsa_device` defaults (configurable per host).
+- **HA password leak** -- `homeassistant_configure` onboarding curl task
+  now uses `no_log: true` to prevent password exposure in logs.
+- **rsyslog nesting** -- `rsyslog_lxc` now passes `nesting=1` feature to
+  prevent systemd sandboxing failures inside the container.
+
+### Changed
+
+- **Shared WAN/LAN network task** -- New `tasks/lxc_wan_or_lan_network.yml`
+  replaces ~200 lines of duplicated topology logic across 4 LXC roles
+  (wireguard, rsyslog, netdata, gaming). Single source of truth for container
+  IP computation and bridge selection.
+- **Moonlight render GID** -- `moonlight_configure` now uses `igpu_render_gid`
+  from `proxmox_igpu` instead of local `stat` detection.
+- **Desktop DE gating** -- `desktop_configure/polish.yml` KDE and GNOME blocks
+  are now gated on `desktop_default_session` so only the active DE is configured.
+- **HA group reconstruction** -- `reconstruct_homeassistant_group.yml` refactored
+  to use shared `reconstruct_lxc_group.yml` helper for consistency.
+- **run.sh env fallback** -- `run.sh` now falls back to `test.env` when `.env`
+  is missing, with a clear error if neither exists.
+- **changed_when coverage** -- Added `changed_when: true` to all command/shell
+  tasks in `openwrt_vm`, `desktop_vm`, and `proxmox_pci_passthrough` handlers.
+- **API token validation** -- `site.yml` first play now asserts that the
+  per-host API token is non-empty, with a clear error message naming the
+  missing env variable.
+- **build.py multi-host warnings** -- `warn_multi_host()` emits warnings for
+  malformed `AI_HOST`/`MESH_2_HOST` IPs and empty per-host API tokens.
+- **Netdata streaming guard** -- `netdata_configure` now fails early when
+  `NETDATA_PARENT_IP` is set but `NETDATA_STREAM_API_KEY` is empty.
+- **Sunshine credentials** -- `gaming_lxc_configure` Sunshine `--creds` task
+  now uses `no_log: true` to prevent credential exposure in logs.
+- **wol.sh MAC validation** -- `send_wol_local` and `send_wol_via_proxy`
+  now validate MAC format before sending magic packets.
+- **Startup order documentation** -- `proxmox_startup_order` table in
+  `group_vars/all.yml` now has comments clarifying intentional groupings.
+- **sys.path cleanup** -- Moved `sys.path` hack from `test_build.py` into
+  `tests/conftest.py` for cleaner imports.
+- **wol regex guard test** -- New `test_parsed_hosts_non_empty` assertion
+  prevents regex drift from silently disabling all WoL safety tests.
+
+### Removed
+
+- **Dead code cleanup** -- Removed `molecule/piodi-luc/` ghost directory,
+  unreachable igpu fact-setting block, orphaned `homeassistant_configure`
+  templates, and unused `debian_lxc_*` helpers from `build-images.sh`.
+- **MESH_1_HOST** -- Removed unused `MESH_1_HOST` from `test.env`. mesh1 is
+  a LAN host whose IP is discovered dynamically via DHCP.
+
+### Changed (Pass 2)
+
+- **Gaming image in E2E prepare** -- Added `gaming-fedora-amd64.tar.zst` to
+  the required images list in `molecule/default/prepare.yml`.
+- **Safety linter expanded** -- `test_host_safety.py` now scans shell scripts
+  (`scripts/`, `roles/*/files/`) for GPU driver unloads and host shutdown
+  commands, with VM/container shutdown exclusions.
+- **warn_multi_host test coverage** -- Added `TestWarnMultiHost` class with
+  5 tests for malformed IP, empty token, and no-false-positive scenarios.
+
+### Documentation (Pass 2)
+
+- **Play ordering** -- `docs/architecture/AGENTS.md` Phase 3 now lists all
+  service plays (Jellyfin, Kodi, Moonlight, Desktop, Kiosk, Gaming) matching
+  actual `site.yml`.
+- **Moonlight flavor group** -- Fixed `overview.md` and `AGENTS.md` to show
+  Moonlight under `streaming_nodes` (not `media_nodes`).
+- **Gaming VM→LXC** -- Updated `inventory/AGENTS.md` and architecture docs
+  to reflect active Gaming LXC (VMID 601), not legacy Gaming VM.
+- **Missing molecule scenarios** -- Added `kiosk-lxc/`, `proxmox-igpu/`,
+  `proxmox-lxc/` to `project-structure.mdc` key files table.
+- **verify_lxc_template consumer count** -- Fixed from 8 to 9 LXC roles.
+  Error message now mentions `--only <target>` for selective rebuilds.
+- **test_sequence docs alignment** -- Fixed `testing-workflow.mdc` and
+  `project-structure.mdc` to match actual `molecule.yml` behavior (no
+  trailing reconverge — sequence ends at `verify`).
+
 ### Added
 
 - **Custom UX Kiosk LXC** -- `kiosk_lxc` and `kiosk_configure` roles deploy a

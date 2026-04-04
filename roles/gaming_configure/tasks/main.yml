@@ -54,6 +54,7 @@
     } catch {
       echo 'credentials-skipped'
     }
+  no_log: true
   register: _sunshine_creds
   changed_when: "'credentials-set' in _sunshine_creds.stdout"
   failed_when: false

@@ -10,6 +10,7 @@
     cmd: wg genkey
   register: _wg_client_privkey
   changed_when: true
+  no_log: true
   when: _wg_needs_keygen | bool
 
 - name: Derive client public key
@@ -20,6 +21,7 @@
     executable: /bin/bash
   register: _wg_client_pubkey
   changed_when: false
+  no_log: true
   when: _wg_needs_keygen | bool
 
 - name: Generate dummy server keypair for config validity
@@ -27,6 +29,7 @@
     cmd: wg genkey
   register: _wg_dummy_server_privkey
   changed_when: false
+  no_log: true
   when:
     - _wg_needs_keygen | bool
     - wireguard_server_public_key | length == 0
@@ -39,6 +42,7 @@
     executable: /bin/bash
   register: _wg_dummy_server_pubkey
   changed_when: false
+  no_log: true
   when:
     - _wg_needs_keygen | bool
     - wireguard_server_public_key | length == 0

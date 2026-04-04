@@ -111,7 +111,8 @@ Build Profiles
 │   ├── wifi_nodes         → Mesh WiFi Controller
 │   ├── monitoring_nodes   → Netdata, rsyslog
 │   ├── service_nodes      → Home Assistant
-│   ├── media_nodes        → Jellyfin, Kodi, Moonlight
+│   ├── media_nodes        → Jellyfin, Kodi
+│   ├── streaming_nodes    → Moonlight
 │   └── desktop_nodes      → Debian Desktop, UX Kiosk
 │
 ├── AI Node (ai — directly reachable, 192.168.86.220)
@@ -133,7 +134,7 @@ Build Profiles
 │   └── monitoring_nodes   → Netdata, rsyslog
 │
 └── Gaming Rig
-    ├── gaming_nodes       → Gaming VM
+    ├── gaming_nodes       → Gaming LXC (Sunshine streaming)
     └── monitoring_nodes   → Netdata, rsyslog
 ```
 
@@ -804,7 +805,7 @@ vm_builds/
 │   ├── reconstruct_wireguard_group.yml   Reusable dynamic group reconstruction (WireGuard)
 │   ├── reconstruct_lxc_group.yml         Shared LXC group reconstruction (called by per-service wrappers)
 │   ├── lxc_device_passthrough.yml        Shared device passthrough (DRI/ALSA/input bind mounts + cgroups)
-│   ├── verify_lxc_template.yml           Shared pre-flight template existence check (8 LXC roles)
+│   ├── verify_lxc_template.yml           Shared pre-flight template existence check (9 LXC roles)
 │   ├── lxc_lan_network.yml               Shared LAN-only container IP computation (5 LXC roles)
 │   ├── bootstrap_lan_host.yml            SSH key check, DHCP lease, API token for LAN nodes
 │   └── cleanup_lan_host.yml              Reusable per-LAN-host cleanup (SSH from primary)

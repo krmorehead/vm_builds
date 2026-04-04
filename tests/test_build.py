@@ -3,12 +3,9 @@
 Run with: pytest tests/ -v
 """
 
-import sys
 from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import build
 
@@ -93,6 +90,44 @@ class TestValidateEnv:
     def test_empty_value_treated_as_missing(self, complete_env):
         complete_env["PRIMARY_HOST"] = ""
         assert build.validate_env(complete_env) == ["PRIMARY_HOST"]
+
+
+# ── warn_multi_host ──────────────────────────────────────────────────
+
+
+class TestWarnMultiHost:
+    """Validate optional multi-host env variable warnings."""
+
+    def test_no_warnings_on_valid_env(self):
+        env = {
+            "AI_HOST": "192.168.86.220",
+            "MESH_2_HOST": "192.168.86.211",
+            "HOME_API_TOKEN": "abc-123",
+            "MESH1_API_TOKEN": "def-456",
+        }
+        assert build.warn_multi_host(env) == []
+
+    def test_warns_on_malformed_ip(self):
+        env = {"AI_HOST": "not-an-ip"}
+        warnings = build.warn_multi_host(env)
+        assert len(warnings) == 1
+        assert "AI_HOST" in warnings[0]
+
+    def test_warns_on_empty_token(self):
+        env = {"HOME_API_TOKEN": ""}
+        warnings = build.warn_multi_host(env)
+        assert len(warnings) == 1
+        assert "HOME_API_TOKEN" in warnings[0]
+        assert "empty" in warnings[0]
+
+    def test_no_warning_on_absent_optional_vars(self):
+        warnings = build.warn_multi_host({})
+        assert warnings == []
+
+    def test_no_false_positive_on_absent_token(self):
+        env = {"PRIMARY_HOST": "192.168.1.1"}
+        warnings = build.warn_multi_host(env)
+        assert warnings == []
 
 
 # ── resolve_playbook ─────────────────────────────────────────────────
@@ -301,6 +336,79 @@ class TestInfrastructureHealth:
         assert isinstance(data["ips"], list), "'ips' must be a list"
         for ip in data["ips"]:
             assert isinstance(ip, str) and ip, f"Invalid IP entry: {ip!r}"
+
+
+# ── resolve_proxmox_host fallback ────────────────────────────────────
+
+
+class TestResolveProxmoxHostFallback:
+    """Fallback logic uses the state file when PRIMARY_HOST is down."""
+
+    def test_returns_primary_when_reachable(self, monkeypatch):
+        monkeypatch.setattr(build, "probe_host", lambda *a, **kw: True)
+        env = {"PRIMARY_HOST": "10.0.0.1"}
+        assert build.resolve_proxmox_host(env) == "10.0.0.1"
+
+    def test_falls_back_to_cached_ip(self, tmp_path, monkeypatch):
+        import json
+
+        state_dir = tmp_path / ".state"
+        state_dir.mkdir()
+        state_file = state_dir / "addresses.json"
+        state_file.write_text(json.dumps({"ips": ["10.0.0.1", "10.0.0.2"]}))
+        monkeypatch.setattr(build, "STATE_DIR", state_dir)
+
+        call_count = {"n": 0}
+        def fake_probe(ip, **kw):
+            call_count["n"] += 1
+            return ip == "10.0.0.2"
+
+        monkeypatch.setattr(build, "probe_host", fake_probe)
+        env = {"PRIMARY_HOST": "10.0.0.1"}
+        assert build.resolve_proxmox_host(env) == "10.0.0.2"
+
+    def test_returns_empty_when_all_unreachable(self, tmp_path, monkeypatch):
+        import json
+
+        state_dir = tmp_path / ".state"
+        state_dir.mkdir()
+        state_file = state_dir / "addresses.json"
+        state_file.write_text(json.dumps({"ips": ["10.0.0.1", "10.0.0.2"]}))
+        monkeypatch.setattr(build, "STATE_DIR", state_dir)
+        monkeypatch.setattr(build, "probe_host", lambda *a, **kw: False)
+        env = {"PRIMARY_HOST": "10.0.0.1"}
+        assert build.resolve_proxmox_host(env) == ""
+
+    def test_skips_primary_in_fallback_list(self, tmp_path, monkeypatch):
+        """If primary appears in state file, don't re-probe it."""
+        import json
+
+        state_dir = tmp_path / ".state"
+        state_dir.mkdir()
+        state_file = state_dir / "addresses.json"
+        state_file.write_text(json.dumps({"ips": ["10.0.0.1", "10.0.0.3"]}))
+        monkeypatch.setattr(build, "STATE_DIR", state_dir)
+
+        probed = []
+        def tracking_probe(ip, **kw):
+            probed.append(ip)
+            return ip == "10.0.0.3"
+
+        monkeypatch.setattr(build, "probe_host", tracking_probe)
+        env = {"PRIMARY_HOST": "10.0.0.1"}
+        result = build.resolve_proxmox_host(env)
+        assert result == "10.0.0.3"
+        assert probed.count("10.0.0.1") == 1
+
+    def test_handles_corrupt_state_file(self, tmp_path, monkeypatch):
+        """Corrupt state file doesn't crash resolve_proxmox_host."""
+        state_dir = tmp_path / ".state"
+        state_dir.mkdir()
+        (state_dir / "addresses.json").write_text("{invalid json")
+        monkeypatch.setattr(build, "STATE_DIR", state_dir)
+        monkeypatch.setattr(build, "probe_host", lambda *a, **kw: False)
+        env = {"PRIMARY_HOST": "10.0.0.1"}
+        assert build.resolve_proxmox_host(env) == ""
 
 
 # ── main (integration-style) ────────────────────────────────────────

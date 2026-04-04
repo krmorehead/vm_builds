@@ -91,3 +91,16 @@ class TestWolHostExclusion:
                     "scripts/wol.sh. WoL-capable hosts should be "
                     "registered for remote recovery."
                 )
+
+    def test_parsed_hosts_non_empty(self):
+        """Guard against regex drift silently returning an empty set.
+
+        If _parse_wol_hosts() finds zero hosts, the exclusion tests become
+        vacuously true and stop catching real problems.
+        """
+        wol_hosts = _parse_wol_hosts()
+        assert len(wol_hosts) > 0, (
+            "_parse_wol_hosts() returned an empty set. Either wol.sh "
+            "has no HOST_MAC/LAN_HOST_MAC entries or the regex in "
+            "_parse_wol_hosts() no longer matches the file format."
+        )

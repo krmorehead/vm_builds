@@ -14,6 +14,6 @@
 
 - name: Configure rsyslog
   hosts: rsyslog
-  gather_facts: true
+  gather_facts: false
   roles:
     - rsyslog_configure

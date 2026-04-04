@@ -89,7 +89,8 @@
 
 - name: Configure banIP blocklist sources
   ansible.builtin.raw: >-
-    uci set banip.global.ban_enabled='1'
+    uci set banip.global.ban_enabled='1' &&
+    uci set banip.global.ban_feed='{{ openwrt_banip_sources | join(" ") }}'
   changed_when: true
 
 - name: Enable and start banIP service

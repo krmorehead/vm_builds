@@ -107,10 +107,22 @@ Run once per host before any service roles:
 - Play 12: `netdata_configure` (netdata) — tag: `monitoring`
 - Play 13: `homeassistant_lxc` (service_nodes) — tag: `homeassistant`, deploy_stamp: `homeassistant_lxc`
 - Play 14: `homeassistant_configure` (service_nodes) — tag: `homeassistant`
-- Play 15: `wireguard_lxc` (vpn_nodes) — tag: `wireguard`, deploy_stamp: `wireguard_lxc`
-- Play 16: `wireguard_configure` (wireguard) — tag: `wireguard`
-- Play 17: `openwrt_mesh_lxc` (wifi_nodes:!router_nodes) — tag: `mesh-wifi`, deploy_stamp: `openwrt_mesh_lxc`
-- Play 18: `openwrt_mesh_configure` (openwrt_mesh) — tag: `mesh-wifi`
+- Play 15: `jellyfin_lxc` (media_nodes) — tag: `media`, deploy_stamp: `jellyfin_lxc`
+- Play 16: `jellyfin_configure` (media_nodes) — tag: `media`
+- Play 17: `kodi_lxc` (media_nodes) — tag: `media`, deploy_stamp: `kodi_lxc`
+- Play 18: `kodi_configure` (media_nodes) — tag: `media`
+- Play 19: `moonlight_lxc` (streaming_nodes) — tag: `moonlight`, deploy_stamp: `moonlight_lxc`
+- Play 20: `moonlight_configure` (streaming_nodes) — tag: `moonlight`
+- Play 21: `wireguard_lxc` (vpn_nodes) — tag: `wireguard`, deploy_stamp: `wireguard_lxc`
+- Play 22: `wireguard_configure` (wireguard) — tag: `wireguard`
+- Play 23: `openwrt_mesh_lxc` (wifi_nodes:!router_nodes) — tag: `mesh-wifi`, deploy_stamp: `openwrt_mesh_lxc`
+- Play 24: `openwrt_mesh_configure` (openwrt_mesh) — tag: `mesh-wifi`
+- Play 25: `desktop_vm` (desktop_nodes) — tag: `desktop`, deploy_stamp: `desktop_vm`
+- Play 26: `desktop_configure` (desktop) — tag: `desktop`
+- Play 27: `kiosk_lxc` (desktop_nodes) — tag: `kiosk`, deploy_stamp: `kiosk_lxc`
+- Play 28: `kiosk_configure` (desktop_nodes) — tag: `kiosk`
+- Play 29: `gaming_lxc` (gaming_nodes) — tag: `gaming`, `never`, deploy_stamp: `gaming_lxc`
+- Play 30: `gaming_lxc_configure` (gaming_nodes) — tag: `gaming`, `never`
 
 ## Network Topology
 
@@ -143,9 +155,10 @@ Hosts belong to child groups under `proxmox` that determine which services they 
 - `wifi_nodes` — Mesh WiFi Controller (router_nodes on primary); OpenWrt Mesh LXC on wifi_nodes:!router_nodes (mesh1, mesh2)
 - `monitoring_nodes` — Netdata, rsyslog
 - `service_nodes` — Home Assistant
-- `media_nodes` — Jellyfin, Kodi, Moonlight
+- `media_nodes` — Jellyfin, Kodi
+- `streaming_nodes` — Moonlight
 - `desktop_nodes` — Desktop VM, UX Kiosk
-- `gaming_nodes` — Gaming VM (separate physical machine)
+- `gaming_nodes` — Gaming LXC (separate physical machine)
 - `lan_hosts` — Satellite Proxmox nodes behind the OpenWrt router (accessed via ProxyJump; mesh1 only)
 
 A host can belong to multiple flavor groups.
@@ -157,7 +170,7 @@ A host can belong to multiple flavor groups.
 - **300-399**: Media (300 Jellyfin, 301 Kodi, 302 Moonlight)
 - **400-499**: Desktop (400 Desktop VM, 401 Kiosk)
 - **500-599**: Observability (500 Netdata, 501 rsyslog)
-- **600-699**: Gaming (600 Gaming VM)
+- **600-699**: Gaming (600 Gaming VM legacy, 601 Gaming LXC active)
 - **999**: reserved for molecule test containers
 
 All VMIDs defined in `group_vars/all.yml`.

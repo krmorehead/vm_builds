@@ -29,11 +29,20 @@
 
 # ── Deploy or remove streaming config ────────────────────────────
 
+- name: Fail if streaming parent set without API key
+  ansible.builtin.fail:
+    msg: >-
+      NETDATA_PARENT_IP is set ({{ netdata_parent_ip }}) but
+      NETDATA_STREAM_API_KEY is empty. Both are required for streaming.
+  when:
+    - netdata_parent_ip | length > 0
+    - netdata_stream_api_key | length == 0
+
 - name: Deploy streaming config to netdata
   ansible.builtin.template:
     src: stream.conf.j2
     dest: "{{ _netdata_conf_dir }}/stream.conf"
-    mode: "0644"
+    mode: "0640"
   when: netdata_parent_ip | length > 0
   notify: _restart_netdata
 

@@ -183,9 +183,9 @@ do_post_stop() {
             sleep 2
         fi
 
-        # Wait for DRI devices to appear (GPU needs time to re-probe)
+        # Wait for any render device to appear (GPU needs time to re-probe)
         for i in $(seq 1 10); do
-            [ -e /dev/dri/renderD128 ] && break
+            ls /dev/dri/renderD* >/dev/null 2>&1 && break
             sleep 1
         done
 

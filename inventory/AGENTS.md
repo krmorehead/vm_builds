@@ -167,9 +167,10 @@ Hosts belong to child groups under `proxmox` that determine which services they 
 - `wifi_nodes` — Mesh WiFi Controller
 - `monitoring_nodes` — Netdata, rsyslog
 - `service_nodes` — Home Assistant
-- `media_nodes` — Jellyfin, Kodi, Moonlight
+- `media_nodes` — Jellyfin, Kodi
+- `streaming_nodes` — Moonlight
 - `desktop_nodes` — Desktop VM, UX Kiosk
-- `gaming_nodes` — Gaming VM
+- `gaming_nodes` — Gaming LXC (Sunshine streaming)
 - `lan_hosts` — Satellite Proxmox nodes behind OpenWrt router
 
 A host can belong to multiple flavor groups.
@@ -181,7 +182,7 @@ A host can belong to multiple flavor groups.
 **300-399**: Media (300 Jellyfin, 301 Kodi, 302 Moonlight)
 **400-499**: Desktop (400 Desktop VM, 401 Kiosk)
 **500-599**: Observability (500 Netdata, 501 rsyslog)
-**600-699**: Gaming (600 Gaming VM)
+**600-699**: Gaming (600 Gaming VM legacy, 601 Gaming LXC active)
 **999**: reserved for molecule test containers
 
 All VMIDs defined in `group_vars/all.yml`.

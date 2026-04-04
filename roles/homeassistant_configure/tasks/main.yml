@@ -20,6 +20,7 @@
     cmd: pct exec {{ homeassistant_ct_id }} -- openssl rand -base64 32
   register: _generated_password
   changed_when: false
+  no_log: true
   when: ha_admin_password | length == 0
 
 - name: Set generated admin password
@@ -150,6 +151,7 @@
            \"password\": \"{{ _ha_admin_password }}\",
            \"language\": \"en\"}"
       http://127.0.0.1:8123/api/onboarding/users 2>/dev/null || true'
+  no_log: true
   failed_when: false
   changed_when: false
 

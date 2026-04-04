@@ -14,6 +14,6 @@
 
 - name: Configure Netdata
   hosts: netdata
-  gather_facts: true
+  gather_facts: false
   roles:
     - netdata_configure

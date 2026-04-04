@@ -19,6 +19,7 @@
     - .config/gtk-3.0
     - .local/share/plasma/layout-templates
   become: true
+  when: "'plasma' in desktop_default_session"
 
 - name: Configure KDE global settings (dark theme, single-click)
   ansible.builtin.copy:
@@ -34,8 +35,10 @@
     group: "{{ desktop_user }}"
     mode: "0644"
   become: true
+  when: "'plasma' in desktop_default_session"
 
 - name: Configure KDE keyboard shortcuts
+  when: "'plasma' in desktop_default_session"
   ansible.builtin.copy:
     content: |
       [kwin]
@@ -69,6 +72,7 @@
   become: true
 
 - name: Configure KDE panel (bottom taskbar, Windows-style)
+  when: "'plasma' in desktop_default_session"
   ansible.builtin.copy:
     content: |
       [PlasmaViews][Panel 2]
@@ -99,6 +103,7 @@
 # mirror macOS. We add a dock, dark mode, and Mac-like keybindings.
 
 - name: Ensure dconf local database directories exist
+  when: "'gnome' in desktop_default_session"
   ansible.builtin.file:
     path: "{{ item }}"
     state: directory
@@ -121,8 +126,10 @@
     group: root
     mode: "0644"
   become: true
+  when: "'gnome' in desktop_default_session"
 
 - name: Configure GNOME dark theme and dock via dconf defaults
+  when: "'gnome' in desktop_default_session"
   ansible.builtin.copy:
     content: |
       [org/gnome/desktop/interface]
@@ -178,6 +185,7 @@
   become: true
 
 - name: Lock GNOME dock and theme settings
+  when: "'gnome' in desktop_default_session"
   ansible.builtin.copy:
     content: |
       [org/gnome/shell]
@@ -196,6 +204,7 @@
     cmd: dconf update
   become: true
   changed_when: true
+  when: "'gnome' in desktop_default_session"
 
 # ── Shared shortcuts (non-conflicting, both sessions) ──────────────
 #

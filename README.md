@@ -1,6 +1,6 @@
 # vm_builds
 
-Ansible project for provisioning and configuring VMs on Proxmox VE. Currently deploys an **OpenWrt** router VM with full NIC bridge passthrough, WiFi PCIe passthrough with 802.11s mesh, collision-free LAN subnet selection, and baseline firewall/DHCP. Designed to expand to additional VM types using a consistent two-role architecture.
+Ansible project for provisioning and configuring VMs and LXC containers on Proxmox VE. Deploys a complete home entertainment stack: **OpenWrt** router VM, **WireGuard** VPN, **Pi-hole** DNS, **rsyslog** + **Netdata** monitoring, **Home Assistant**, **Jellyfin** + **Kodi** + **Moonlight** media, **Desktop VM** (KDE/GNOME), **Gaming LXC** (Sunshine), **Mesh WiFi**, and a **Kiosk** dashboard. All services use a consistent two-role architecture with baked images and shared infrastructure.
 
 ## Architecture
 
@@ -254,7 +254,7 @@ molecule test        # full pipeline: cleanup -> prepare -> converge -> verify
 
 | Variable | Default | Description |
 |---|---|---|
-| `project_version` | `1.0.0` | Project version stamped on managed hosts after each run |
+| `project_version` | `1.2.0` | Project version stamped on managed hosts after each run |
 | `openwrt_image_path` | `images/openwrt-router-24.10.0-x86-64-combined.img.gz` | Path to the custom OpenWrt router image (built by `build-images.sh`) |
 | `openwrt_vm_id` | `100` | Proxmox VM ID |
 | `openwrt_vm_name` | `openwrt-router` | VM display name |
@@ -267,9 +267,11 @@ molecule test        # full pipeline: cleanup -> prepare -> converge -> verify
 
 | Variable | Required | Description |
 |---|---|---|
-| `PROXMOX_API_TOKEN_SECRET` | Yes | API token secret value |
-| `PROXMOX_HOST` | Yes | IP address of the target Proxmox node |
+| `HOME_API_TOKEN` | Yes | Proxmox API token secret (per-host: `<HOST>_API_TOKEN`) |
+| `PRIMARY_HOST` | Yes | IP address of the primary Proxmox node |
 | `MESH_KEY` | Yes | WPA3-SAE passphrase for 802.11s mesh |
+| `AI_HOST` | No | IP address of the AI/gaming Proxmox node |
+| `MESH_2_HOST` | No | IP address of the mesh2 Proxmox node |
 | `WAN_MAC` | No | Clone old router's MAC onto OpenWrt WAN NIC for ISP compatibility |
 
 ### Bridge role (`roles/proxmox_bridges/defaults/main.yml`)
@@ -454,11 +456,19 @@ vm_builds/
 │   ├── site.yml                       # Main orchestration playbook
 │   └── cleanup.yml                    # Tag-driven restore playbook
 ├── molecule/
-│   └── default/
-│       ├── molecule.yml
-│       ├── converge.yml
-│       ├── verify.yml
-│       └── cleanup.yml
+│   ├── default/                       # E2E integration (4 nodes)
+│   ├── pihole-lxc/                    # Pi-hole per-feature
+│   ├── wireguard-lxc/                 # WireGuard per-feature
+│   ├── rsyslog-lxc/                   # rsyslog per-feature
+│   ├── netdata-lxc/                   # Netdata per-feature
+│   ├── homeassistant-lxc/             # Home Assistant per-feature
+│   ├── jellyfin-lxc/                  # Jellyfin per-feature
+│   ├── kodi-lxc/                      # Kodi per-feature
+│   ├── moonlight-lxc/                 # Moonlight per-feature
+│   ├── desktop-vm/                    # Desktop VM per-feature
+│   ├── gaming-lxc/                    # Gaming LXC per-feature
+│   ├── kiosk-lxc/                     # Kiosk per-feature
+│   └── openwrt-*/                     # OpenWrt feature scenarios
 ├── docs/
 │   └── architecture/
 │       ├── overview.md                # High-level architecture
@@ -466,13 +476,41 @@ vm_builds/
 │       ├── roles.md                   # Role reference
 │       └── roadmap.md                 # Future plans
 ├── images/                            # VM disk images (gitignored)
+├── tasks/                             # Shared task files (reusable across roles)
 └── roles/
     ├── deploy_stamp/                  # Record deployment state as local facts
     ├── proxmox_backup/                # Host config + VM backup
     ├── proxmox_bridges/               # NIC discovery, bridge creation
     ├── proxmox_pci_passthrough/       # WiFi IOMMU/vfio setup
-    ├── openwrt_vm/                    # VM lifecycle management
-    └── openwrt_configure/             # OpenWrt UCI configuration
+    ├── proxmox_igpu/                  # iGPU detection (Intel/AMD)
+    ├── proxmox_lxc/                   # Shared LXC provisioning helper
+    ├── openwrt_vm/                    # OpenWrt VM lifecycle
+    ├── openwrt_configure/             # OpenWrt UCI configuration
+    ├── openwrt_mesh_lxc/              # OpenWrt mesh WiFi LXC
+    ├── openwrt_mesh_configure/        # Mesh WiFi UCI config
+    ├── wireguard_lxc/                 # WireGuard VPN container
+    ├── wireguard_configure/           # WireGuard key exchange
+    ├── pihole_lxc/                    # Pi-hole DNS container
+    ├── pihole_configure/              # Pi-hole FTL config
+    ├── rsyslog_lxc/                   # rsyslog log collector
+    ├── rsyslog_configure/             # rsyslog forwarding rules
+    ├── netdata_lxc/                   # Netdata monitoring agent
+    ├── netdata_configure/             # Netdata streaming config
+    ├── homeassistant_lxc/             # Home Assistant container
+    ├── homeassistant_configure/       # HA Docker + onboarding
+    ├── jellyfin_lxc/                  # Jellyfin media server
+    ├── jellyfin_configure/            # Jellyfin VA-API + library
+    ├── kodi_lxc/                      # Kodi media player
+    ├── kodi_configure/                # Kodi web UI + ALSA
+    ├── moonlight_lxc/                 # Moonlight streaming client
+    ├── moonlight_configure/           # Moonlight server pairing
+    ├── desktop_vm/                    # Debian Desktop VM (KDE/GNOME)
+    ├── desktop_configure/             # Desktop polish + SDDM
+    ├── kiosk_lxc/                     # Dashboard kiosk container
+    ├── kiosk_configure/               # Kiosk Chromium + dashboard
+    ├── gaming_lxc/                    # Gaming LXC (Sunshine)
+    ├── gaming_lxc_configure/          # Gaming Sunshine + Doom
+    └── gaming_vm/                     # Legacy gaming VM (hookscript)
 ```
 
 ---

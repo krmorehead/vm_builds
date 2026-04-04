@@ -46,6 +46,11 @@ VGA_COUNT_GUARD = re.compile(
 
 SAFE_MODPROBE_UNLOADS = {"iwlwifi", "iwlmvm", "wireguard", "vfio_pci", "vfio-pci"}
 
+SHELL_DIRS = [
+    REPO_ROOT / "scripts",
+    REPO_ROOT / "roles",
+]
+
 
 def _collect_yaml_files() -> list[Path]:
     """Collect all .yml files from playbook/molecule/role/task dirs."""
@@ -56,6 +61,15 @@ def _collect_yaml_files() -> list[Path]:
     return sorted(files)
 
 
+def _collect_shell_files() -> list[Path]:
+    """Collect all .sh files from scripts/ and roles/*/files/."""
+    files = []
+    for d in SHELL_DIRS:
+        if d.exists():
+            files.extend(d.rglob("*.sh"))
+    return sorted(files)
+
+
 def _file_has_vga_guard(content: str) -> bool:
     """Check if the file contains a VGA controller count check."""
     return bool(VGA_COUNT_GUARD.search(content))
@@ -63,22 +77,44 @@ def _file_has_vga_guard(content: str) -> bool:
 
 def _get_broad_scope_plays(filepath: Path) -> list[dict]:
     """Return plays that target all proxmox hosts (broad scope)."""
-    try:
-        docs = yaml.safe_load_all(filepath.read_text())
-        plays = []
-        for doc in docs:
-            if not isinstance(doc, list):
+    docs = yaml.safe_load_all(filepath.read_text())
+    plays = []
+    for doc in docs:
+        if not isinstance(doc, list):
+            continue
+        for play in doc:
+            if not isinstance(play, dict):
                 continue
-            for play in doc:
-                if not isinstance(play, dict):
-                    continue
-                hosts = play.get("hosts", "")
-                if isinstance(hosts, str) and "proxmox" in hosts:
-                    if "gaming_nodes" not in hosts:
-                        plays.append(play)
-        return plays
-    except Exception:
-        return []
+            hosts = play.get("hosts", "")
+            if isinstance(hosts, str) and "proxmox" in hosts:
+                if "gaming_nodes" not in hosts:
+                    plays.append(play)
+    return plays
+
+
+def _extract_commands_from_tasks(tasks: list) -> list[str]:
+    """Recursively extract shell/command strings from task structures.
+
+    Handles block/rescue/always nesting and all command module variants.
+    """
+    commands = []
+    if not isinstance(tasks, list):
+        return commands
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        for key in ("ansible.builtin.shell", "ansible.builtin.command",
+                    "ansible.builtin.raw", "shell", "command", "raw"):
+            cmd = task.get(key, "")
+            if isinstance(cmd, dict):
+                cmd = cmd.get("cmd", "")
+            if isinstance(cmd, str) and cmd:
+                commands.append(cmd)
+        for nested_key in ("block", "rescue", "always"):
+            nested = task.get(nested_key, [])
+            if isinstance(nested, list):
+                commands.extend(_extract_commands_from_tasks(nested))
+    return commands
 
 
 class TestNoUnguardedGPUDriverUnload:
@@ -98,19 +134,12 @@ class TestNoUnguardedGPUDriverUnload:
 
             plays = _get_broad_scope_plays(filepath)
             for play in plays:
-                tasks = play.get("tasks", [])
-                for task in tasks:
-                    if not isinstance(task, dict):
-                        continue
-                    for key in ("ansible.builtin.shell", "ansible.builtin.command",
-                                "shell", "command"):
-                        cmd = task.get(key, "")
-                        if isinstance(cmd, dict):
-                            cmd = cmd.get("cmd", "")
-                        if isinstance(cmd, str) and GPU_DRIVER_UNLOAD.search(cmd):
-                            rel = filepath.relative_to(REPO_ROOT)
-                            name = task.get("name", "<unnamed>")
-                            violations.append(f"{rel}: '{name}'")
+                all_tasks = play.get("tasks", []) + play.get("pre_tasks", []) + play.get("post_tasks", [])
+                commands = _extract_commands_from_tasks(all_tasks)
+                for cmd in commands:
+                    if GPU_DRIVER_UNLOAD.search(cmd):
+                        rel = filepath.relative_to(REPO_ROOT)
+                        violations.append(f"{rel}: broad-scope GPU unload")
 
         assert not violations, (
             "GPU driver unload (modprobe -r amdgpu/i915) found in broad-scope "
@@ -146,6 +175,25 @@ class TestNoUnguardedGPUDriverUnload:
             "VGA controller count >= 2. On single-GPU AMD hosts, modprobe -r "
             "amdgpu causes a kernel panic.\n"
             "Violations:\n  - " + "\n  - ".join(violations)
+        )
+
+
+class TestYAMLValidity:
+    """All YAML files in scanned directories must parse without errors."""
+
+    def test_all_yaml_files_parse(self):
+        """YAML syntax errors would hide dangerous commands from the safety linter."""
+        failures = []
+        for filepath in _collect_yaml_files():
+            try:
+                list(yaml.safe_load_all(filepath.read_text()))
+            except yaml.YAMLError as e:
+                rel = filepath.relative_to(REPO_ROOT)
+                failures.append(f"{rel}: {e}")
+        assert not failures, (
+            "YAML parse errors found. These files are invisible to the safety "
+            "linter — dangerous commands in them would go undetected.\n"
+            "Failures:\n  - " + "\n  - ".join(failures)
         )
 
 
@@ -234,5 +282,58 @@ class TestModprobeRPatternSafety:
             "  - A safe module (WiFi, wireguard)\n"
             "  - A GPU driver gated on VGA count >= 2\n"
             "  - In a narrow-scope play (not targeting all proxmox hosts)\n"
+            "Violations:\n  - " + "\n  - ".join(violations)
+        )
+
+
+class TestShellScriptSafety:
+    """Shell scripts in roles/*/files/ and scripts/ must not contain
+    unguarded destructive operations."""
+
+    def test_shell_files_found(self):
+        files = _collect_shell_files()
+        assert len(files) > 0, "No shell scripts found to scan"
+
+    def test_no_ungated_gpu_unload_in_shell(self):
+        """Shell scripts must not unload GPU drivers without a VGA count guard."""
+        violations = []
+        for filepath in _collect_shell_files():
+            content = filepath.read_text()
+            for match in GPU_DRIVER_UNLOAD.finditer(content):
+                if _file_has_vga_guard(content):
+                    continue
+                rel = filepath.relative_to(REPO_ROOT)
+                line_num = content[:match.start()].count("\n") + 1
+                violations.append(
+                    f"{rel}:{line_num}: modprobe -r {match.group(1)} "
+                    f"without VGA count check"
+                )
+        assert not violations, (
+            "GPU driver unload in shell scripts without VGA count guard.\n"
+            "Violations:\n  - " + "\n  - ".join(violations)
+        )
+
+    def test_no_shutdown_in_shell_scripts(self):
+        """Shell scripts must never shut down or power off hosts.
+
+        VM/container shutdown commands (pct shutdown, qm shutdown, ssh
+        ... shutdown) are safe and excluded from this check.
+        """
+        vm_shutdown = re.compile(
+            r"(pct\s+shutdown|qm\s+(shutdown|guest\s+cmd\s+\S+\s+shutdown)|ssh\s+.*shutdown)",
+            re.IGNORECASE,
+        )
+        violations = []
+        for filepath in _collect_shell_files():
+            for i, line in enumerate(filepath.read_text().splitlines(), 1):
+                if HOST_SHUTDOWN.search(line) and not vm_shutdown.search(line):
+                    if line.lstrip().startswith("#"):
+                        continue
+                    rel = filepath.relative_to(REPO_ROOT)
+                    violations.append(
+                        f"{rel}:{i}: '{line.strip()[:80]}'"
+                    )
+        assert not violations, (
+            "Host shutdown/poweroff commands found in shell scripts.\n"
             "Violations:\n  - " + "\n  - ".join(violations)
         )

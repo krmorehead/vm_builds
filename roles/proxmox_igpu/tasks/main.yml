@@ -345,18 +345,6 @@
     - igpu_available | bool
     - _vainfo.rc != 0
 
-# ── Set empty facts when iGPU is absent ───────────────────────────
-
-- name: Set empty iGPU facts when not available
-  ansible.builtin.set_fact:
-    igpu_pci_address: ""
-    igpu_render_device: ""
-    igpu_card_device: ""
-    igpu_render_gid: ""
-    igpu_video_gid: ""
-    igpu_vendor: "none"
-  when: not igpu_available | bool
-
 # ── Summary ───────────────────────────────────────────────────────
 
 - name: Display iGPU detection summary

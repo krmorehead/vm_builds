@@ -160,18 +160,19 @@ gaming_ct_id: 601
 
 # ── Startup order ────────────────────────────────────────────────
 # Maps VMID to Proxmox boot priority. Lower numbers start first.
+# Services at the same priority level start in parallel (intentional).
 # On-demand services use onboot: false (no startup order needed).
 proxmox_startup_order:
-  100: 1     # OpenWrt Router
-  101: 2     # WireGuard VPN
-  102: 3     # Pi-hole
-  500: 3     # Netdata
-  501: 3     # rsyslog
-  103: 4     # Mesh WiFi Controller
-  200: 5     # Home Assistant
-  300: 5     # Jellyfin
-  401: 6     # Custom UX Kiosk
-  601: 1     # Gaming LXC (Sunshine streaming server)
+  100: 1     # OpenWrt Router — network must be first
+  601: 1     # Gaming LXC (Sunshine) — independent, can parallel with router
+  101: 2     # WireGuard VPN — needs network
+  102: 3     # Pi-hole — needs network
+  500: 3     # Netdata — parallel with Pi-hole (same tier)
+  501: 3     # rsyslog — parallel with Pi-hole (same tier)
+  103: 4     # Mesh WiFi Controller — after DNS/monitoring
+  200: 5     # Home Assistant — after infrastructure
+  300: 5     # Jellyfin — parallel with HA (same tier)
+  401: 6     # Custom UX Kiosk — after all services
 
 # On-demand services (onboot: false, started manually)
 proxmox_ondemand_services:

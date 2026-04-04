@@ -1,0 +1,79 @@
+---
+# Shared task: compute container networking based on host topology.
+#
+# Hosts behind OpenWrt (router_nodes, lan_hosts) use the OpenWrt LAN subnet.
+# All other hosts use their WAN subnet with a +200 IP offset to avoid collisions.
+#
+# Required variables (set via include_tasks vars:):
+#   lxc_net_service_name  — human-readable name for debug output
+#   lxc_net_ip_offset     — base IP offset for this service
+#   lxc_net_flavor_group  — inventory group for per-host indexing
+#
+# Exported facts:
+#   _lxc_net_on_lan     — whether host is behind OpenWrt
+#   _lxc_net_gateway    — container gateway IP
+#   _lxc_net_cidr       — subnet prefix length
+#   _lxc_net_ip         — computed container IP
+#   _lxc_net_nameserver — DNS nameserver for the container
+#   _lxc_net_bridge     — Proxmox bridge to attach to
+
+- name: Determine if host is on the OpenWrt LAN
+  ansible.builtin.set_fact:
+    _lxc_net_on_lan: >-
+      {{ 'router_nodes' in group_names or 'lan_hosts' in group_names }}
+
+- name: Read LAN gateway from generated env
+  ansible.builtin.set_fact:
+    _lan_gateway: >-
+      {{ lookup('pipe', 'grep "^LAN_GATEWAY=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2') }}
+    _lan_cidr: >-
+      {{ lookup('pipe', 'grep "^LAN_CIDR=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2') }}
+  when: _lxc_net_on_lan | bool
+
+- name: "Fail if LAN_GATEWAY is missing — {{ lxc_net_service_name }}"
+  ansible.builtin.fail:
+    msg: >-
+      LAN_GATEWAY not found in {{ env_generated_path }}.
+      Run the OpenWrt baseline first — it writes LAN_GATEWAY during configure.
+  when:
+    - _lxc_net_on_lan | bool
+    - (_lan_gateway | default('') | trim) | length == 0
+
+- name: "Fail if LAN_CIDR is missing — {{ lxc_net_service_name }}"
+  ansible.builtin.fail:
+    msg: >-
+      LAN_CIDR not found in {{ env_generated_path }}.
+      Run the OpenWrt baseline first — it writes LAN_CIDR during configure.
+  when:
+    - _lxc_net_on_lan | bool
+    - (_lan_cidr | default('') | trim) | length == 0
+
+- name: "Set container network for OpenWrt LAN — {{ lxc_net_service_name }}"
+  ansible.builtin.set_fact:
+    _lxc_net_gateway: "{{ _lan_gateway }}"
+    _lxc_net_cidr: "{{ _lan_cidr }}"
+    _lxc_net_ip: >-
+      {{ _lan_gateway.split('.')[0:3] | join('.') }}.{{
+         lxc_net_ip_offset + groups[lxc_net_flavor_group].index(inventory_hostname) }}
+    _lxc_net_nameserver: "{{ _lan_gateway }}"
+    _lxc_net_bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
+  when: _lxc_net_on_lan | bool
+
+- name: "Set container network for WAN — {{ lxc_net_service_name }}"
+  ansible.builtin.set_fact:
+    _lxc_net_gateway: "{{ ansible_default_ipv4.gateway }}"
+    _lxc_net_cidr: "{{ ansible_default_ipv4.prefix }}"
+    _lxc_net_ip: >-
+      {{ ansible_default_ipv4.network.split('.')[0:3] | join('.') }}.{{
+         lxc_net_ip_offset + 200 + groups[lxc_net_flavor_group].index(inventory_hostname) }}
+    _lxc_net_nameserver: "8.8.8.8"
+    _lxc_net_bridge: "{{ proxmox_wan_bridge }}"
+  when: not (_lxc_net_on_lan | bool)
+
+- name: "Report container IP — {{ lxc_net_service_name }}"
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: {{ lxc_net_service_name }}
+      IP={{ _lxc_net_ip }}/{{ _lxc_net_cidr }}
+      gw={{ _lxc_net_gateway }}
+      ({{ 'OpenWrt LAN' if (_lxc_net_on_lan | bool) else 'WAN subnet' }})

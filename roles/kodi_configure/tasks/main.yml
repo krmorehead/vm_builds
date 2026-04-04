@@ -58,12 +58,12 @@
     content: |
       pcm.!default {
         type hw
-        card 0
-        device 3
+        card {{ kodi_alsa_card }}
+        device {{ kodi_alsa_device }}
       }
       ctl.!default {
         type hw
-        card 0
+        card {{ kodi_alsa_card }}
       }
     dest: /tmp/kodi_asoundrc
     mode: "0644"

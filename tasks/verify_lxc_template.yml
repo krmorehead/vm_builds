@@ -1,5 +1,7 @@
 ---
 # Shared pre-flight check: verify an LXC template exists on the controller.
+# Used by 9 LXC roles: pihole, rsyslog, netdata, homeassistant, jellyfin,
+#   kodi, moonlight, kiosk, gaming.
 #
 # Required variables (set via include_tasks vars:):
 #   lxc_template_path  — relative path to the template file (e.g. images/pihole.tar.gz)
@@ -15,5 +17,5 @@
   ansible.builtin.fail:
     msg: >-
       {{ lxc_service_name }} template not found: {{ lxc_template_path }}.
-      Run ./build-images.sh to build it.
+      Run ./build-images.sh (or --only <target> for selective rebuild) to build it.
   when: not (_lxc_template_stat.stat.exists | default(false))

@@ -151,97 +151,6 @@ cleanup_lxc_build() {
     fi
 }
 
-# TODO: Wire these helpers into per-service build functions to eliminate
-# duplicated preflight/prepare/wait/export logic. Each per-service function
-# currently inlines this same sequence. Integration deferred until we can
-# run `./build-images.sh` end-to-end to validate.
-
-# Shared pre-flight checks for Debian-based LXC builds.
-# Returns 1 (skip) if output already exists, dies on missing prerequisites.
-debian_lxc_preflight() {
-    local output="$1" service_name="$2"
-    if [[ -f "$output" ]]; then
-        log "${service_name} template already exists at ${output}"
-        log "  Delete it and re-run to rebuild."
-        return 1
-    fi
-    if [[ -z "$PROXMOX_HOST" ]]; then
-        die "${service_name} build requires --host <proxmox-ip>. Example:
-  ./build-images.sh --host 192.168.86.201"
-    fi
-    local base_template="${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}"
-    if [[ ! -f "$base_template" ]]; then
-        die "Base template not found: ${base_template}. Download it first:
-  wget -O ${base_template} \\
-    http://download.proxmox.com/images/system/${DEBIAN_BASE_TEMPLATE}"
-    fi
-    return 0
-}
-
-# Shared: upload base template and detect management bridge.
-# Prints the bridge name to stdout.
-debian_lxc_prepare() {
-    local vmid="$1"
-    remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
-    local remote_template="/var/lib/vz/template/cache/${DEBIAN_BASE_TEMPLATE}"
-    if ! remote_cmd "test -f ${remote_template}"; then
-        log "Uploading base template to Proxmox host..."
-        # shellcheck disable=SC2086
-        scp $SSH_OPTS "${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}" "root@${PROXMOX_HOST}:${remote_template}"
-    fi
-    remote_cmd "ip -o route show default | awk '{print \$5}' | head -1"
-}
-
-# Shared: wait for container shell readiness + DNS resolution
-debian_lxc_wait_ready() {
-    local vmid="$1"
-    log "Waiting for container readiness..."
-    local retries=0
-    while ! remote_cmd "pct exec ${vmid} -- ls / >/dev/null 2>&1"; do
-        retries=$((retries + 1))
-        if (( retries > 30 )); then
-            die "Build container never became ready after 60s"
-        fi
-        sleep 2
-    done
-    log "Waiting for DNS resolution..."
-    retries=0
-    while ! remote_cmd "pct exec ${vmid} -- getent hosts deb.debian.org >/dev/null 2>&1"; do
-        retries=$((retries + 1))
-        if (( retries > 30 )); then
-            die "Build container never got DNS resolution after 60s"
-        fi
-        sleep 2
-    done
-    log "Container has network access."
-}
-
-# Shared: stop container, vzdump, download, cleanup
-debian_lxc_export() {
-    local vmid="$1" output="$2" service_name="$3"
-    log "Stopping build container..."
-    remote_cmd "pct stop ${vmid}"
-    sleep 2
-    log "Exporting container as template via vzdump..."
-    remote_cmd "vzdump ${vmid} --dumpdir /tmp --compress zstd --mode stop"
-    local vzdump_file
-    vzdump_file=$(remote_cmd "ls -t /tmp/vzdump-lxc-${vmid}-*.tar.zst 2>/dev/null | head -1")
-    if [[ -z "$vzdump_file" ]]; then
-        remote_cmd "pct destroy ${vmid} --purge 2>/dev/null; true"
-        die "vzdump archive not found on Proxmox host"
-    fi
-    log "vzdump archive: ${vzdump_file}"
-    log "Downloading template to ${output}..."
-    mkdir -p "$IMAGES_DIR"
-    # shellcheck disable=SC2086
-    scp $SSH_OPTS "root@${PROXMOX_HOST}:${vzdump_file}" "$output"
-    log "Cleaning up build container and vzdump archive..."
-    remote_cmd "pct destroy ${vmid} --purge 2>/dev/null; rm -f '${vzdump_file}'; true"
-    trap - EXIT
-    log "${service_name} LXC template: ${output}"
-    log "  Size: $(du -h "$output" | cut -f1)"
-}
-
 check_deps() {
     local missing=()
     for cmd in wget tar make zstd; do
@@ -281,12 +190,16 @@ build_mesh_lxc() {
     local pkg_list
     pkg_list=$(IFS=' '; echo "${MESH_PACKAGES[*]}")
 
+    local make_log="${BUILD_DIR}/mesh-build.log"
     make -C "$ib_dir" image \
         PROFILE="generic" \
         PACKAGES="$pkg_list" \
         FILES="$MESH_FILES_DIR" \
         EXTRA_IMAGE_NAME="mesh-lxc" \
-        2>&1 | tail -5
+        2>&1 | tee "$make_log" | tail -5
+    if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
+        die "Mesh LXC image build failed. Full log: ${make_log}"
+    fi
 
     local rootfs
     rootfs=$(find "${ib_dir}/bin" -name '*rootfs.tar.gz' -print -quit 2>/dev/null)
@@ -316,11 +229,15 @@ build_router_vm() {
     # Clean previous build artifacts to avoid profile collision
     make -C "$ib_dir" clean 2>/dev/null || true
 
+    local make_log="${BUILD_DIR}/router-build.log"
     make -C "$ib_dir" image \
         PROFILE="generic" \
         PACKAGES="$pkg_list" \
         EXTRA_IMAGE_NAME="router" \
-        2>&1 | tail -5
+        2>&1 | tee "$make_log" | tail -5
+    if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
+        die "Router VM image build failed. Full log: ${make_log}"
+    fi
 
     local combined
     combined=$(find "${ib_dir}/bin" -name '*combined-ext4.img.gz' -print -quit 2>/dev/null)
@@ -2345,10 +2262,12 @@ INSTALL_EOF
 SUNSHINE_ISO="Tiny11-2026-03-15.iso"
 SUNSHINE_VIRTIO_ISO="virtio-win.iso"
 SUNSHINE_OUTPUT_NAME="sunshine-win11-amd64.qcow2"
-SUNSHINE_BUILD_VMID=992
+SUNSHINE_BUILD_VMID=989
 SUNSHINE_ANSWER_DIR="${SCRIPT_DIR}/../roles/gaming_vm/files"
 
+_sunshine_answer_tmp=""
 cleanup_sunshine_build() {
+    [[ -n "$_sunshine_answer_tmp" ]] && rm -rf "$_sunshine_answer_tmp"
     local vmid="${SUNSHINE_BUILD_VMID}"
     if [[ -n "$PROXMOX_HOST" ]]; then
         log "Cleaning up Sunshine build VM ${vmid}..."
@@ -2399,8 +2318,8 @@ build_sunshine_vm() {
 
     # Create answer ISO with autounattend.xml and post-install script
     log "Creating answer ISO..."
-    local answer_tmp
-    answer_tmp=$(mktemp -d)
+    _sunshine_answer_tmp=$(mktemp -d)
+    local answer_tmp="$_sunshine_answer_tmp"
     cp "${SUNSHINE_ANSWER_DIR}/autounattend.xml" "${answer_tmp}/"
     cp "${SUNSHINE_ANSWER_DIR}/post-install.ps1" "${answer_tmp}/"
     local answer_iso="${answer_tmp}/sunshine-answer.iso"
@@ -2692,6 +2611,7 @@ parallel_build() {
         done
         log ""
         log "Full logs in: ${log_dir}/"
+        rm -rf "$log_dir"
         return 1
     fi
 

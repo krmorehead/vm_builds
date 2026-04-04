@@ -40,11 +40,12 @@ works, then implement the feature.
   preserves the OpenWrt baseline so leaf nodes (mesh1) remain accessible and
   layered scenarios don't need a full rebuild (~4 min saved).
 - Use `molecule test` for clean-state validation (CI, pre-commit, final
-  proof). The test_sequence ends with a reconverge that restores the baseline —
-  mesh1 stays accessible when tests pass. The final converge also proves the
-  build is reproducible after cleanup.
-- NEVER end the test_sequence with just `cleanup`. That tears down OpenWrt and
-  makes mesh1 permanently unreachable.
+  proof). The test_sequence runs: `dependency → cleanup → syntax → prepare
+  → converge → verify`. There is NO trailing converge or cleanup — the
+  baseline is left running after a successful test. If you need a clean
+  rebuild, run `molecule converge` manually afterward.
+- NEVER add `cleanup` or `destroy` to the end of the test_sequence. That
+  tears down OpenWrt and makes mesh1 permanently unreachable.
 - NEVER consider a fix complete until `molecule test` passes end-to-end.
 
 ## Service-specific cleanup

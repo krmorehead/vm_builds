@@ -156,7 +156,7 @@
         root@10.10.10.1 "
       changed=0;
       while uci show dhcp 2>/dev/null | grep -q \"name='{{ _lan_host_name }}'\"; do
-        idx=\$(uci show dhcp | grep \"name='{{ _lan_host_name }}'\" | head -1 | grep -oP 'dhcp\.@host\[\\K[0-9]+');
+        idx=\$(uci show dhcp | grep \"name='{{ _lan_host_name }}'\" | head -1 | sed -n 's/.*@host\[\([0-9]*\)\].*/\1/p');
         [ -z \"\$idx\" ] && break;
         uci delete dhcp.@host[\$idx];
         changed=1;

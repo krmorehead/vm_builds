@@ -25,6 +25,14 @@
       register: _banip_status
       changed_when: false
 
+    - name: Assert banIP service is running
+      ansible.builtin.assert:
+        that: >-
+          'running' in (_banip_status.stdout | default('') | lower)
+          or 'active' in (_banip_status.stdout | default('') | lower)
+        fail_msg: >-
+          banIP service is not running: {{ _banip_status.stdout | default('') | trim }}
+
     - name: Check SYN flood protection
       ansible.builtin.raw: uci get firewall.@defaults[0].syn_flood
       register: _syn_flood

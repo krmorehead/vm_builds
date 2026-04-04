@@ -140,6 +140,7 @@
       --hostpci0 host={{ igpu_pci_address }},pcie=1
       --ide2 {{ proxmox_storage }}:cloudinit
       --onboot {{ '1' if desktop_vm_onboot else '0' }}
+  changed_when: true
   when: not _desktop_vm_exists | bool
 
 # ── Disk import and boot config ────────────────────────────────────
@@ -151,6 +152,7 @@
       {{ _desktop_tmp_upload }}
       {{ proxmox_storage }}
   register: _desktop_disk_import
+  changed_when: true
   when: not _desktop_vm_exists | bool
 
 - name: Parse imported disk path
@@ -171,6 +173,8 @@
       --cipassword {{ desktop_password }}
       --sshkeys {{ _desktop_ssh_pubkey_path }}
       --ipconfig0 ip=dhcp
+  no_log: true
+  changed_when: true
   when: not _desktop_vm_exists | bool
 
 - name: Resize boot disk
@@ -178,6 +182,7 @@
     cmd: >-
       qm resize {{ desktop_vm_id }}
       scsi0 {{ desktop_vm_disk_size }}
+  changed_when: true
   when: not _desktop_vm_exists | bool
 
 # ── Clean up temp files ────────────────────────────────────────────
@@ -208,6 +213,7 @@
     cmd: >-
       qm set {{ desktop_vm_id }}
       --hookscript local:snippets/display-exclusive.sh
+  changed_when: true
   when: _hookscript_check.stat.exists | default(false)
 
 # ── Start VM and discover IP ──────────────────────────────────────

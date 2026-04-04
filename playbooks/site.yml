@@ -5,6 +5,13 @@
   hosts: proxmox:!lan_hosts
   gather_facts: true
   tags: [backup]
+  pre_tasks:
+    - name: Validate API token is configured
+      ansible.builtin.assert:
+        that: proxmox_api_token_secret | length > 0
+        fail_msg: >-
+          {{ _api_token_env_var }} is missing or empty in your .env file.
+          Create a token: pveum user token add root@pam ansible --privsep=0
   roles:
     - proxmox_backup
     - role: deploy_stamp
