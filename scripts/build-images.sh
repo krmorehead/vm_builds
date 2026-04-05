@@ -1202,17 +1202,41 @@ build_kiosk_lxc() {
             mesa-va-drivers \
             vainfo
 
+        # Install Python and NiceGUI for the Home Hub web UI
+        apt-get install -y --no-install-recommends python3 python3-pip
+        pip3 install --break-system-packages nicegui==3.9.0
+
         # Create kiosk system user for headless operation
         useradd -r -m -G video,render -s /bin/bash kiosk 2>/dev/null || true
-        mkdir -p /opt/kiosk
-        chown kiosk:kiosk /opt/kiosk
+        mkdir -p /opt/kiosk/webui/pages
+        chown -R kiosk:kiosk /opt/kiosk
+
+        # Pre-configure kiosk-web systemd service (NiceGUI Home Hub server)
+        cat > /etc/systemd/system/kiosk-web.service << \"WEB_EOF\"
+[Unit]
+Description=Kiosk Home Hub Web Server (NiceGUI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=kiosk
+Group=kiosk
+Type=simple
+WorkingDirectory=/opt/kiosk
+ExecStart=/usr/bin/python3 /opt/kiosk/webui/kiosk_server.py --port 8080
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+WEB_EOF
 
         # Pre-configure kiosk-display systemd service
         cat > /etc/systemd/system/kiosk-display.service << \"SERVICE_EOF\"
 [Unit]
 Description=Kiosk Dashboard (Cage + Chromium)
-After=systemd-user-sessions.service
-Wants=network-online.target
+After=systemd-user-sessions.service kiosk-web.service
+Wants=network-online.target kiosk-web.service
 
 [Service]
 User=kiosk
@@ -1222,7 +1246,8 @@ Type=simple
 Environment=WLR_LIBINPUT_NO_DEVICES=1
 Environment=XDG_RUNTIME_DIR=/run/user/0
 ExecStartPre=/bin/mkdir -p /run/user/0
-ExecStart=/usr/bin/cage -- /usr/bin/chromium --kiosk --no-sandbox --ozone-platform=wayland --disable-gpu-compositing --noerrdialogs --disable-infobars --no-first-run --disable-translate --disable-features=TranslateUI --start-fullscreen file:///opt/kiosk/dashboard.html
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 15); do curl -sf http://127.0.0.1:8080/ >/dev/null 2>&1 && exit 0; sleep 1; done; echo "Hub server not ready"; exit 1'
+ExecStart=/usr/bin/cage -- /usr/bin/chromium --kiosk --no-sandbox --ozone-platform=wayland --disable-gpu-compositing --noerrdialogs --disable-infobars --no-first-run --disable-translate --disable-features=TranslateUI --start-fullscreen http://127.0.0.1:8080/hub
 Restart=on-failure
 RestartSec=5
 StandardInput=tty
@@ -1244,9 +1269,11 @@ SERVICE_EOF
     remote_cmd "pct exec ${vmid} -- bash -c '
         dpkg -l cage | grep -c ^ii || { echo FAIL: cage not installed; exit 1; }
         dpkg -l chromium | grep -c ^ii || { echo FAIL: chromium not installed; exit 1; }
-        test -f /etc/systemd/system/kiosk-display.service || { echo FAIL: service missing; exit 1; }
+        python3 -c "import nicegui" || { echo FAIL: nicegui not installed; exit 1; }
+        test -f /etc/systemd/system/kiosk-display.service || { echo FAIL: display service missing; exit 1; }
+        test -f /etc/systemd/system/kiosk-web.service || { echo FAIL: web service missing; exit 1; }
         id kiosk || { echo FAIL: kiosk user missing; exit 1; }
-        test -d /opt/kiosk || { echo FAIL: kiosk dir missing; exit 1; }
+        test -d /opt/kiosk/webui || { echo FAIL: kiosk webui dir missing; exit 1; }
         echo ALL CHECKS PASSED
     '"
     log "Kiosk smoke test passed."

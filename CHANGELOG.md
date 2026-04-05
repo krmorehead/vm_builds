@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Interactive Web UI** -- `scripts/webui.sh` launches a NiceGUI-based web
+  interface for managing the entire vm_builds project interactively:
+  - Environment editor with validation, inline editing, and save
+  - Host connectivity dashboard with SSH testing and WoL status
+  - Fleet node registry with call-home status and per-node SSH testing
+  - Service selection with deployment profiles (Full Deploy, Network Only,
+    Core Services, Media Stack, Custom)
+  - Live deployment output with dry run mode, verbose control, and cancellation
+  - Image build management with parallel and per-target builds
+  - Dashboard home screen with host/image/fleet summaries and deploy history
+  - Kiosk Home Hub with service launcher cards for TV display mode
+  - Page-based navigation via sidebar
+  - Unified NiceGUI framework shared between build menu and kiosk home hub
+  - 219 automated tests (data layer + functional UI via NiceGUI user_simulation)
+- **Fleet call-home system** -- Managed nodes report status to the Web UI via
+  `scripts/callhome.py` (Python, stdlib-only) or `scripts/callhome.sh`
+  (BusyBox-compatible shell). HMAC-SHA256 authentication, IP change detection,
+  system metrics (disk, memory, uptime, running VMs/containers). REST API
+  endpoints `/api/checkin` and `/api/nodes` on the management server.
+
 ### Security
 
 - **Credential exposure** -- Added `no_log: true` to 10 tasks that handle

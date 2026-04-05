@@ -31,6 +31,17 @@ collections/
 # Logs
 *.log
 
+# NiceGUI local storage
+.nicegui/
+
+# Coverage reports
+.coverage
+htmlcov/
+
+# Python packaging
+dist/
+build/
+
 # IDE
 .idea/
 .vscode/

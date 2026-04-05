@@ -85,62 +85,75 @@
         {{ kiosk_rsyslog_url if kiosk_rsyslog_url | length > 0
            else '' }}
 
-# ── Deploy dashboard HTML ────────────────────────────────────────
+# ── Deploy NiceGUI webui files and service URL config ─────────────
 
-- name: Read dashboard template
-  ansible.builtin.slurp:
-    src: "{{ role_path }}/files/dashboard.html"
-  register: _dashboard_template
-  delegate_to: localhost
-
-- name: Render dashboard with service URLs
-  ansible.builtin.set_fact:
-    _dashboard_html: >-
-      {{ _dashboard_template.content | b64decode
-         | replace('{{DESKTOP_URL}}', _kiosk_urls.DESKTOP_URL | trim)
-         | replace('{{JELLYFIN_URL}}', _kiosk_urls.JELLYFIN_URL | trim)
-         | replace('{{KODI_URL}}', _kiosk_urls.KODI_URL | trim)
-         | replace('{{HOMEASSISTANT_URL}}', _kiosk_urls.HOMEASSISTANT_URL | trim)
-         | replace('{{MOONLIGHT_URL}}', _kiosk_urls.MOONLIGHT_URL | trim)
-         | replace('{{GAMING_URL}}', _kiosk_urls.GAMING_URL | trim)
-         | replace('{{OPENWRT_URL}}', _kiosk_urls.OPENWRT_URL | trim)
-         | replace('{{PIHOLE_URL}}', _kiosk_urls.PIHOLE_URL | trim)
-         | replace('{{WIREGUARD_URL}}', _kiosk_urls.WIREGUARD_URL | trim)
-         | replace('{{NETDATA_URL}}', _kiosk_urls.NETDATA_URL | trim)
-         | replace('{{RSYSLOG_URL}}', _kiosk_urls.RSYSLOG_URL | trim) }}
-
-- name: Write rendered dashboard to host temp
+- name: Copy webui source files to host temp directory
   ansible.builtin.copy:
-    content: "{{ _dashboard_html }}"
-    dest: /tmp/kiosk_dashboard.html
+    src: "{{ item.src }}"
+    dest: "/tmp/kiosk_webui/{{ item.dest }}"
+    mode: "0644"
+  loop:
+    - { src: "{{ playbook_dir }}/../scripts/webui/__init__.py", dest: "__init__.py" }
+    - { src: "{{ playbook_dir }}/../scripts/webui/theme.py", dest: "theme.py" }
+    - { src: "{{ playbook_dir }}/../scripts/webui/data.py", dest: "data.py" }
+    - { src: "{{ playbook_dir }}/../scripts/webui/kiosk_server.py", dest: "kiosk_server.py" }
+    - { src: "{{ playbook_dir }}/../scripts/webui/pages/__init__.py", dest: "pages/__init__.py" }
+    - { src: "{{ playbook_dir }}/../scripts/webui/pages/hub.py", dest: "pages/hub.py" }
+
+- name: Ensure webui directories exist in container
+  ansible.builtin.command:
+    cmd: pct exec {{ kiosk_ct_id }} -- mkdir -p /opt/kiosk/webui/pages
+  changed_when: true
+
+- name: Push webui files into container
+  ansible.builtin.command:
+    cmd: pct push {{ kiosk_ct_id }} /tmp/kiosk_webui/{{ item.dest }} /opt/kiosk/webui/{{ item.dest }}
+  changed_when: true
+  loop:
+    - { dest: "__init__.py" }
+    - { dest: "theme.py" }
+    - { dest: "data.py" }
+    - { dest: "kiosk_server.py" }
+    - { dest: "pages/__init__.py" }
+    - { dest: "pages/hub.py" }
+
+- name: Build service URL config JSON
+  ansible.builtin.set_fact:
+    _kiosk_config_json: "{{ _kiosk_urls | to_json }}"
+
+- name: Write config JSON to host temp
+  ansible.builtin.copy:
+    content: "{{ _kiosk_config_json }}"
+    dest: /tmp/kiosk_config.json
     mode: "0644"
 
-- name: Ensure dashboard directory exists in container
+- name: Push config JSON into container
   ansible.builtin.command:
-    cmd: pct exec {{ kiosk_ct_id }} -- mkdir -p /opt/kiosk
+    cmd: pct push {{ kiosk_ct_id }} /tmp/kiosk_config.json /opt/kiosk/config.json
   changed_when: true
 
-- name: Push dashboard into container
+- name: Set ownership on kiosk files
   ansible.builtin.command:
-    cmd: pct push {{ kiosk_ct_id }} /tmp/kiosk_dashboard.html /opt/kiosk/dashboard.html
+    cmd: pct exec {{ kiosk_ct_id }} -- chown -R kiosk:kiosk /opt/kiosk
   changed_when: true
 
-- name: Set dashboard ownership
-  ansible.builtin.command:
-    cmd: pct exec {{ kiosk_ct_id }} -- chown kiosk:kiosk /opt/kiosk/dashboard.html
-  changed_when: true
-
-- name: Clean up host temp file
+- name: Clean up host temp files
   ansible.builtin.file:
-    path: /tmp/kiosk_dashboard.html
+    path: "{{ item }}"
     state: absent
+  loop:
+    - /tmp/kiosk_webui
+    - /tmp/kiosk_config.json
 
 # ── Enable kiosk display service ─────────────────────────────────
 
-- name: Enable kiosk-display service
+- name: Enable kiosk services
   ansible.builtin.command:
-    cmd: pct exec {{ kiosk_ct_id }} -- systemctl enable kiosk-display
+    cmd: pct exec {{ kiosk_ct_id }} -- systemctl enable {{ item }}
   changed_when: true
+  loop:
+    - kiosk-web
+    - kiosk-display
 
 # ── Report completion ────────────────────────────────────────────
 

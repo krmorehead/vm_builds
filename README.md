@@ -176,6 +176,33 @@ ansible-playbook playbooks/site.yml
 At the end of the run, a debug message prints the chosen LAN address
 (e.g. `10.10.10.1`) so you know where to reach the new router.
 
+### Interactive Web UI
+
+A web-based interface (NiceGUI) wraps all build operations into a single dashboard:
+
+```bash
+./scripts/webui.sh                  # uses .env (production)
+./scripts/webui.sh --env test.env   # uses test.env
+```
+
+**Pages:**
+
+| Page | Path | Description |
+|------|------|-------------|
+| Dashboard | `/` | Host status, last deploy, image counts, quick actions |
+| Environment | `/environment` | View/edit .env values, validate, save |
+| Hosts | `/hosts` | Probe connectivity, SSH test, WoL capability |
+| Nodes | `/nodes` | Fleet node registry, call-home status, SSH test |
+| Services | `/services` | Select services by tag, deployment profiles |
+| Images | `/images` | Show built/missing images, trigger builds |
+| Deploy | `/deploy` | Live output streaming, dry run, cancellation |
+| Home Hub | `/hub` | Kiosk service launcher with card-based dashboard |
+
+The same NiceGUI framework also powers the Kiosk Home Hub on desktop nodes.
+
+The CLI tools (`build.py`, `build-images.sh`, `run.sh`) continue to work
+independently — the Web UI is an optional frontend.
+
 ---
 
 ## Testing

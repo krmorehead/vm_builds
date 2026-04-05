@@ -1563,45 +1563,50 @@
           - _kiosk_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/dri')
         fail_msg: "Kiosk container {{ kiosk_ct_id }} config incorrect on {{ inventory_hostname }}"
 
-    - name: Check Kiosk display service is enabled (single pct exec)
+    - name: Check Kiosk services and NiceGUI files (single pct exec)
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ kiosk_ct_id }} -- /bin/sh -c '
-          echo "SERVICE=$(systemctl is-enabled kiosk-display 2>/dev/null || echo disabled)";
-          echo "DASHBOARD=$(test -f /opt/kiosk/dashboard.html && echo yes || echo no)"
+          echo "DISPLAY_SVC=$(systemctl is-enabled kiosk-display 2>/dev/null || echo disabled)";
+          echo "WEB_SVC=$(systemctl is-enabled kiosk-web 2>/dev/null || echo disabled)";
+          echo "CONFIG=$(test -f /opt/kiosk/config.json && echo yes || echo no)";
+          echo "SERVER=$(test -f /opt/kiosk/webui/kiosk_server.py && echo yes || echo no)";
+          echo "HUB=$(test -f /opt/kiosk/webui/pages/hub.py && echo yes || echo no)"
           '
       register: _kiosk_health
       changed_when: false
 
-    - name: Assert Kiosk service enabled and dashboard present
+    - name: Assert Kiosk services enabled and NiceGUI files present
       ansible.builtin.assert:
         that:
-          - "'SERVICE=enabled' in _kiosk_health.stdout"
-          - "'DASHBOARD=yes' in _kiosk_health.stdout"
+          - "'DISPLAY_SVC=enabled' in _kiosk_health.stdout"
+          - "'WEB_SVC=enabled' in _kiosk_health.stdout"
+          - "'CONFIG=yes' in _kiosk_health.stdout"
+          - "'SERVER=yes' in _kiosk_health.stdout"
+          - "'HUB=yes' in _kiosk_health.stdout"
         fail_msg: "Kiosk health check failed on {{ inventory_hostname }}: {{ _kiosk_health.stdout }}"
 
-    - name: Read dashboard HTML content
+    - name: Read kiosk config.json
       ansible.builtin.command:
-        cmd: pct exec {{ kiosk_ct_id }} -- cat /opt/kiosk/dashboard.html
-      register: _kiosk_dashboard
+        cmd: pct exec {{ kiosk_ct_id }} -- cat /opt/kiosk/config.json
+      register: _kiosk_config
       changed_when: false
 
-    - name: Assert dashboard has all service cards and no unresolved placeholders
+    - name: Assert kiosk config has all service URL keys
       ansible.builtin.assert:
         that:
-          - "'desktop-card' in _kiosk_dashboard.stdout"
-          - "'jellyfin-card' in _kiosk_dashboard.stdout"
-          - "'kodi-card' in _kiosk_dashboard.stdout"
-          - "'ha-card' in _kiosk_dashboard.stdout"
-          - "'moonlight-card' in _kiosk_dashboard.stdout"
-          - "'gaming-card' in _kiosk_dashboard.stdout"
-          - "'openwrt-card' in _kiosk_dashboard.stdout"
-          - "'pihole-card' in _kiosk_dashboard.stdout"
-          - "'wireguard-card' in _kiosk_dashboard.stdout"
-          - "'netdata-card' in _kiosk_dashboard.stdout"
-          - "'rsyslog-card' in _kiosk_dashboard.stdout"
-          - _kiosk_dashboard.stdout | regex_search('\\{\\{[A-Z_]+\\}\\}') is none
-        fail_msg: "Dashboard content invalid on {{ inventory_hostname }}"
+          - "'DESKTOP_URL' in _kiosk_config.stdout"
+          - "'JELLYFIN_URL' in _kiosk_config.stdout"
+          - "'KODI_URL' in _kiosk_config.stdout"
+          - "'HOMEASSISTANT_URL' in _kiosk_config.stdout"
+          - "'MOONLIGHT_URL' in _kiosk_config.stdout"
+          - "'GAMING_URL' in _kiosk_config.stdout"
+          - "'OPENWRT_URL' in _kiosk_config.stdout"
+          - "'PIHOLE_URL' in _kiosk_config.stdout"
+          - "'WIREGUARD_URL' in _kiosk_config.stdout"
+          - "'NETDATA_URL' in _kiosk_config.stdout"
+          - "'RSYSLOG_URL' in _kiosk_config.stdout"
+        fail_msg: "Kiosk config missing service URLs on {{ inventory_hostname }}"
 
     - name: Check display-exclusive hookscript exists
       ansible.builtin.stat:

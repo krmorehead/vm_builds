@@ -65,8 +65,11 @@
           pct exec {{ kiosk_ct_id }} -- /bin/sh -c '
           echo "CAGE_PKG=$(dpkg -l cage 2>/dev/null | grep -c ^ii)";
           echo "CHROMIUM_PKG=$(dpkg -l chromium 2>/dev/null | grep -c ^ii)";
-          echo "SERVICE=$(systemctl is-enabled kiosk-display 2>/dev/null || echo disabled)";
-          echo "DASHBOARD=$(test -f /opt/kiosk/dashboard.html && echo exists || echo missing)";
+          echo "DISPLAY_SVC=$(systemctl is-enabled kiosk-display 2>/dev/null || echo disabled)";
+          echo "WEB_SVC=$(systemctl is-enabled kiosk-web 2>/dev/null || echo disabled)";
+          echo "CONFIG=$(test -f /opt/kiosk/config.json && echo yes || echo no)";
+          echo "SERVER=$(test -f /opt/kiosk/webui/kiosk_server.py && echo yes || echo no)";
+          echo "HUB=$(test -f /opt/kiosk/webui/pages/hub.py && echo yes || echo no)";
           echo "KIOSK_USER=$(id kiosk 2>/dev/null && echo exists || echo missing)"
           '
       register: _kiosk_health
@@ -84,47 +87,50 @@
 
     - name: Assert kiosk-display service is enabled
       ansible.builtin.assert:
-        that: "'SERVICE=enabled' in _kiosk_health.stdout"
+        that: "'DISPLAY_SVC=enabled' in _kiosk_health.stdout"
         fail_msg: "kiosk-display service not enabled"
 
-    - name: Assert dashboard HTML exists
+    - name: Assert kiosk-web service is enabled
       ansible.builtin.assert:
-        that: "'DASHBOARD=exists' in _kiosk_health.stdout"
-        fail_msg: "Dashboard HTML not found at /opt/kiosk/dashboard.html"
+        that: "'WEB_SVC=enabled' in _kiosk_health.stdout"
+        fail_msg: "kiosk-web service not enabled"
+
+    - name: Assert NiceGUI kiosk files present
+      ansible.builtin.assert:
+        that:
+          - "'CONFIG=yes' in _kiosk_health.stdout"
+          - "'SERVER=yes' in _kiosk_health.stdout"
+          - "'HUB=yes' in _kiosk_health.stdout"
+        fail_msg: "NiceGUI kiosk files missing"
 
     - name: Assert kiosk user exists
       ansible.builtin.assert:
         that: "'KIOSK_USER=exists' in _kiosk_health.stdout or 'uid=' in _kiosk_health.stdout"
         fail_msg: "kiosk user not found"
 
-    # ── Dashboard content verification ─────────────────────────
+    # ── Kiosk config verification ──────────────────────────────
 
-    - name: Read dashboard HTML from container
+    - name: Read kiosk config.json from container
       ansible.builtin.command:
-        cmd: pct exec {{ kiosk_ct_id }} -- cat /opt/kiosk/dashboard.html
-      register: _dashboard_content
+        cmd: pct exec {{ kiosk_ct_id }} -- cat /opt/kiosk/config.json
+      register: _kiosk_config
       changed_when: false
 
-    - name: Assert dashboard contains all service cards
+    - name: Assert kiosk config has all service URL keys
       ansible.builtin.assert:
         that:
-          - "'desktop-card' in _dashboard_content.stdout"
-          - "'jellyfin-card' in _dashboard_content.stdout"
-          - "'kodi-card' in _dashboard_content.stdout"
-          - "'ha-card' in _dashboard_content.stdout"
-          - "'moonlight-card' in _dashboard_content.stdout"
-          - "'gaming-card' in _dashboard_content.stdout"
-          - "'openwrt-card' in _dashboard_content.stdout"
-          - "'pihole-card' in _dashboard_content.stdout"
-          - "'wireguard-card' in _dashboard_content.stdout"
-          - "'netdata-card' in _dashboard_content.stdout"
-          - "'rsyslog-card' in _dashboard_content.stdout"
-        fail_msg: "Dashboard missing expected service cards"
-
-    - name: Assert no unresolved placeholders remain in dashboard
-      ansible.builtin.assert:
-        that: _dashboard_content.stdout | regex_search('\\{\\{[A-Z_]+\\}\\}') is none
-        fail_msg: "Dashboard still contains unresolved placeholders"
+          - "'DESKTOP_URL' in _kiosk_config.stdout"
+          - "'JELLYFIN_URL' in _kiosk_config.stdout"
+          - "'KODI_URL' in _kiosk_config.stdout"
+          - "'HOMEASSISTANT_URL' in _kiosk_config.stdout"
+          - "'MOONLIGHT_URL' in _kiosk_config.stdout"
+          - "'GAMING_URL' in _kiosk_config.stdout"
+          - "'OPENWRT_URL' in _kiosk_config.stdout"
+          - "'PIHOLE_URL' in _kiosk_config.stdout"
+          - "'WIREGUARD_URL' in _kiosk_config.stdout"
+          - "'NETDATA_URL' in _kiosk_config.stdout"
+          - "'RSYSLOG_URL' in _kiosk_config.stdout"
+        fail_msg: "Kiosk config missing service URLs"
 
     # ── Hookscript ──────────────────────────────────────────────
 
@@ -165,7 +171,8 @@
           ct={{ kiosk_ct_id }}, running=yes,
           cage={{ 'installed' if 'CAGE_PKG=1' in _kiosk_health.stdout else 'missing' }},
           chromium={{ 'installed' if 'CHROMIUM_PKG=1' in _kiosk_health.stdout else 'missing' }},
-          service={{ 'enabled' if 'SERVICE=enabled' in _kiosk_health.stdout else 'disabled' }},
+          display_svc={{ 'enabled' if 'DISPLAY_SVC=enabled' in _kiosk_health.stdout else 'disabled' }},
+          web_svc={{ 'enabled' if 'WEB_SVC=enabled' in _kiosk_health.stdout else 'disabled' }},
           dri={{ 'mounted' if _dri_devices.rc == 0 else 'missing' }},
           hookscript={{ 'deployed' if _hookscript.stat.exists else 'missing' }},
-          cards=11, placeholders={{ 'none' if '{{' not in _dashboard_content.stdout else 'FOUND' }}
+          config=present, nicegui=deployed

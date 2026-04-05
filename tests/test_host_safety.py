@@ -61,12 +61,20 @@ def _collect_yaml_files() -> list[Path]:
     return sorted(files)
 
 
+VENDORED_DIRS = {".image-builder-cache"}
+
+
 def _collect_shell_files() -> list[Path]:
-    """Collect all .sh files from scripts/ and roles/*/files/."""
+    """Collect all .sh files from scripts/ and roles/*/files/.
+
+    Excludes vendored/third-party directories that we don't control.
+    """
     files = []
     for d in SHELL_DIRS:
         if d.exists():
-            files.extend(d.rglob("*.sh"))
+            for f in d.rglob("*.sh"):
+                if not any(v in f.parts for v in VENDORED_DIRS):
+                    files.append(f)
     return sorted(files)
 
 

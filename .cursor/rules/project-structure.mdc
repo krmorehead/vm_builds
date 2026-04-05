@@ -6,7 +6,7 @@ alwaysApply: true
 # vm_builds Project Context
 
 ## What this project is
-An Ansible project that automates VM and LXC container provisioning on Proxmox VE. Currently deploys an OpenWrt router VM with shared LXC infrastructure ready for service containers.
+An Ansible project that automates VM and LXC container provisioning on Proxmox VE. Deploys 14 services across 4 nodes — OpenWrt router, WireGuard VPN, Pi-hole DNS, monitoring (rsyslog + Netdata), Home Assistant, media (Jellyfin + Kodi + Moonlight), Desktop VM, Gaming LXC, Mesh WiFi, and Kiosk — with an interactive NiceGUI Web UI for environment management, deployment, fleet monitoring, and a kiosk Home Hub.
 
 ## Design principles
 
@@ -257,6 +257,10 @@ All VMIDs defined in `group_vars/all.yml`.
 | `molecule/openwrt-syslog/` | Per-feature scenario for OpenWrt syslog forwarding to rsyslog |
 | `molecule/mesh1-infra/` | Lightweight infra-only on mesh1 (quick iteration) |
 | `wol.sh` | Wake-on-LAN utility: wake hosts by alias or MAC. Proxied WoL for LAN hosts via PRIMARY_HOST |
+| `scripts/webui.sh` | Interactive Web UI launcher (wraps scripts/webui/app.py) |
+| `scripts/webui/` | NiceGUI-based interactive build menu and kiosk hub (data.py, app.py, pages/) |
+| `scripts/callhome.py` | Call-home client for fleet nodes (Python, stdlib-only). Cron-driven IP change detection + system metrics |
+| `scripts/callhome.sh` | Call-home client for BusyBox/OpenWrt nodes (shell, curl/wget). Lightweight alternative to callhome.py |
 
 ## Adding a new LXC service — checklist
 1. **Build the image first.** Add the service's image build to `build-images.sh` (or create a new build script). All packages baked in. Define the image path in `group_vars/all.yml`.
@@ -273,6 +277,7 @@ All VMIDs defined in `group_vars/all.yml`.
 12. Add the VMID to cleanup lists: `molecule/default/cleanup.yml` (`project_ct_ids`), `molecule/default/cleanup_lan_host.yml`, and `tasks/cleanup_lan_host.yml`
 13. Update `docs/architecture/` with a `<type>-build.md`
 14. Add a CHANGELOG entry under `[Unreleased]`
+15. Update `scripts/webui/data.py` `SERVICE_TAGS` with the new service tag, description, category, and target hosts
 
 ## Adding a new VM type — checklist
 1. **Build the image first.** Add the service's image build to `build-images.sh` (or create a new build script). All packages baked in. Define the image path in `group_vars/all.yml`.
@@ -289,6 +294,7 @@ All VMIDs defined in `group_vars/all.yml`.
 12. Add the VMID to cleanup lists: `molecule/default/cleanup.yml` (`project_vm_ids`), `molecule/default/cleanup_lan_host.yml`, and `tasks/cleanup_lan_host.yml`
 13. Update `docs/architecture/` with a `<type>-build.md`
 14. Add a CHANGELOG entry under `[Unreleased]`
+15. Update `scripts/webui/data.py` `SERVICE_TAGS` with the new service tag, description, category, and target hosts
 
 ## Image and template management
 - Per the Design principles above: every VM and container uses a purpose-built image with all packages baked in. Images are REQUIRED — provision roles verify existence and hard-fail if missing. Configure roles NEVER install packages at runtime.

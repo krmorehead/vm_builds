@@ -1,0 +1,8 @@
+[project]
+name = "vm-builds"
+version = "1.0.0"
+description = "Ansible automation for Proxmox VE VM and LXC provisioning with interactive Web UI"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
