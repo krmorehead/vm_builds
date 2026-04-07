@@ -10,13 +10,14 @@ import httpx
 from nicegui import ui
 
 from scripts.webui import theme
+from scripts.webui.data import get_api_base_url
 
 
 async def _fetch_guests() -> list[dict]:
     """Fetch the guest list from the local manager API."""
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.get("http://127.0.0.1:8080/api/guests", timeout=15)
+            resp = await client.get(f"{get_api_base_url()}/api/guests", timeout=15)
             if resp.status_code == 200:
                 return resp.json().get("guests", [])
     except Exception:
@@ -29,7 +30,7 @@ async def _guest_action(vmid: str, action: str) -> dict:
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"http://127.0.0.1:8080/api/guests/{vmid}/{action}", timeout=30,
+                f"{get_api_base_url()}/api/guests/{vmid}/{action}", timeout=30,
             )
             return resp.json()
     except Exception as exc:

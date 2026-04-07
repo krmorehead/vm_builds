@@ -388,8 +388,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--port",
         type=int,
-        default=8080,
-        help="Port to serve on (default: 8080)",
+        default=9001,
+        help="Port to serve on (default: 9001)",
     )
     parser.add_argument(
         "--host",
@@ -413,6 +413,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     env_path = Path(args.env) if args.env else None
     configure(env_path=env_path)
+    data.set_server_port(args.port)
     _init_manager()
     if not args.headless:
         register_pages()

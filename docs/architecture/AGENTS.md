@@ -43,7 +43,7 @@ For project structure and architecture patterns: .agents/skills/project-structur
 
 ## What This Project Is
 
-An Ansible project that automates VM and LXC container provisioning on Proxmox VE. Currently deploys an OpenWrt router VM with shared LXC infrastructure ready for service containers.
+An Ansible project that automates VM and LXC container provisioning on Proxmox VE. Deploys 15 services across 6 nodes — OpenWrt router, WireGuard VPN, Pi-hole DNS, rsyslog + Netdata monitoring, Home Assistant, Jellyfin + Kodi + Moonlight media, Desktop VM, Gaming LXC, Mesh WiFi, WiFi Bridge, and Kiosk — with a NiceGUI Web UI for deployment, fleet monitoring, and kiosk management.
 
 ## Core Design Principles
 
@@ -167,7 +167,7 @@ A host can belong to multiple flavor groups.
 
 ## VMID Allocation
 
-- **100-199**: Network (100 OpenWrt, 101 WireGuard, 102 Pi-hole, 103 Mesh WiFi)
+- **100-199**: Network (100 OpenWrt, 101 WireGuard, 102 Pi-hole, 103 Mesh WiFi, 104 WiFi Bridge)
 - **200-299**: Services (200 Home Assistant)
 - **300-399**: Media (300 Jellyfin, 301 Kodi, 302 Moonlight)
 - **400-499**: Desktop (400 Desktop VM, 401 Kiosk)
@@ -185,17 +185,25 @@ All VMIDs defined in `group_vars/all.yml`.
 | `setup.sh` | Bootstrap .venv + pip + ansible-galaxy |
 | `run.sh` | Convenience wrapper — delegates to `build.py` |
 | `cleanup.sh` | Restore / full-restore / clean / rollback — delegates to `build.py` |
-| `build-images.sh` | Builds custom images (mesh LXC, router VM, Pi-hole, rsyslog, Jellyfin, Netdata, WireGuard, Home Assistant) |
+| `build-images.sh` | Builds custom images (mesh, router, Pi-hole, rsyslog, Jellyfin, Netdata, WireGuard, Home Assistant, Kodi, Moonlight, Gaming, Sunshine, Desktop) |
+| `scripts/webui.sh` | Launch the NiceGUI Web UI |
+| `scripts/webui/app.py` | Web UI entry point (13 pages, deploy profiles, fleet dashboard) |
+| `scripts/webui/kiosk_server.py` | Kiosk-mode server for per-host Home Hub display |
+| `scripts/webui/data.py` | Central data store (SERVICE_TAGS, DEPLOY_PROFILES, HUB_SERVICES) |
+| `scripts/callhome.py` | Container heartbeat agent (Python, for Debian containers) |
+| `scripts/callhome.sh` | Container heartbeat agent (shell, for BusyBox/OpenWrt) |
 | `test.env` | Test machine config (committed, IP: 192.168.86.201) |
 | `.env` | Production secrets (gitignored) |
 | `test.env.generated` | Auto-generated secrets during test runs (gitignored) |
 | `.env.generated` | Auto-generated secrets during production runs (gitignored) |
 | `.state/addresses.json` | Cached host IPs for cross-run discovery (gitignored) |
+| `.state/callhome_url` | API server URL written by build.py/prepare.yml (gitignored) |
 
 **Architecture Implementation Patterns:**
 - Reference @.agents/skills/build-entry-point for entry point architecture
 - Use @.agents/skills/vm-provisioning-patterns for VM lifecycle patterns
 - Apply @.agents/skills/image-management-patterns for build automation patterns
+- Reference @.agents/skills/manager-api-pattern for Web UI and Manager API patterns
 
 ## Architecture Documentation Standards
 

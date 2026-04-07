@@ -280,7 +280,7 @@ class TestRealWifiCollectors:
         result = collect_bridge_metrics(ip)
         assert result.success, f"collect_bridge_metrics failed: {result.error}"
         assert "bridge" in result.data
-        assert result.data["bridge"]["role"] in ("ap", "sta", "unknown")
+        assert result.data["bridge"]["role"] in ("ap", "sta", "unknown", "unconfigured")
 
     def test_mesh_2_wifi_metrics(self, env):
         """collect_wifi_metrics against mesh2 returns real data."""

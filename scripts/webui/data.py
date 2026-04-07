@@ -29,6 +29,22 @@ if str(PROJECT_ROOT) not in sys.path:
 import build  # noqa: E402
 
 
+# ── Server port for internal API calls ────────────────────────────────
+
+_SERVER_PORT: int = 9001
+
+
+def set_server_port(port: int) -> None:
+    """Set the port used for internal API calls. Called once during startup."""
+    global _SERVER_PORT
+    _SERVER_PORT = port
+
+
+def get_api_base_url() -> str:
+    """Return the base URL for internal API calls (e.g. http://127.0.0.1:9001)."""
+    return f"http://127.0.0.1:{_SERVER_PORT}"
+
+
 # ── Event bus for SSE streaming ───────────────────────────────────────
 
 _log = logging.getLogger("vm_builds.events")
@@ -221,7 +237,7 @@ ENV_TEMPLATE: list[EnvVar] = [
     EnvVar("DESKTOP_AUTOLOGIN", "Enable autologin on desktop VM", False, "false", False),
     EnvVar("DESKTOP_DEFAULT_SESSION", "Default desktop session (plasma/gnome)", False, "plasma", False),
     EnvVar("HA_ADMIN_PASSWORD", "Home Assistant admin password", False, "", True),
-    EnvVar("CALLHOME_SERVER", "Management server URL for fleet call-home", False, "http://localhost:8080", False),
+    EnvVar("CALLHOME_SERVER", "Management server URL for fleet call-home", False, "http://localhost:9001", False),
     EnvVar("CALLHOME_PRIVATE_KEY", "Server-side secret for validating call-home tokens", False, "", True),
     EnvVar("CALLHOME_PUBLIC_KEY", "Token distributed to nodes for call-home auth", False, "", True),
     EnvVar("BRIDGE_1_HOST", "IP of the first WiFi bridge node", False, "192.168.86.230", False),
@@ -412,11 +428,39 @@ class DeployProfile:
     description: str
 
 
+def _tags_for_host(host: str) -> list[str]:
+    """Return all non-opt-in service tags that target a given host."""
+    return [
+        t.tag for t in SERVICE_TAGS
+        if host in t.hosts and not t.is_opt_in and t.tag != "cleanup"
+    ]
+
+
 DEPLOY_PROFILES: list[DeployProfile] = [
     DeployProfile(
         "Full Deploy",
         [t.tag for t in SERVICE_TAGS if not t.is_opt_in and t.tag != "cleanup"],
         "Deploy all services (except opt-in gaming and cleanup)",
+    ),
+    DeployProfile(
+        "Home Unit",
+        _tags_for_host("home"),
+        "All services on home: router, DNS, VPN, monitoring, media, desktop, kiosk",
+    ),
+    DeployProfile(
+        "Mesh Unit",
+        _tags_for_host("mesh1"),
+        "All services on mesh1: VPN, mesh WiFi, Moonlight, kiosk",
+    ),
+    DeployProfile(
+        "Gamer Unit",
+        [*_tags_for_host("ai"), "gaming"],
+        "All services on ai: VPN, kiosk, gaming LXC (Sunshine)",
+    ),
+    DeployProfile(
+        "Bridge Units",
+        _tags_for_host("bridge-1"),
+        "WiFi bridge on bridge-1 and bridge-2",
     ),
     DeployProfile(
         "Network Only",

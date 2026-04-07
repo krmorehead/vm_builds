@@ -28,11 +28,15 @@ OpenWrt is a router VM — it consumes ALL Proxmox bridges (WAN + every LAN port
 
 ## Custom images (build-images.sh)
 
-The project uses the OpenWrt Image Builder to create pre-configured images
-with packages pre-installed and sane defaults baked in. This eliminates
-EPERM/opkg failures during converge and significantly speeds up configuration.
+`build-images.sh` builds pre-configured images for all 15 services. This
+section covers the **OpenWrt-specific** images. For the full list of targets,
+see `./build-images.sh --help` or the image management skill.
 
-Two images are produced:
+Available targets: `router`, `mesh`, `pihole`, `rsyslog`, `netdata`,
+`wireguard`, `homeassistant`, `jellyfin`, `kodi`, `moonlight`, `gaming`,
+`sunshine`, `desktop`. Use `--only <target>` for selective rebuilds.
+
+Two **OpenWrt** images are produced via the OpenWrt Image Builder:
 
 1. **Mesh LXC rootfs** (`openwrt-mesh-lxc-*-rootfs.tar.gz`):
    - WiFi packages pre-installed (`wpad-mesh-openssl`, `iw`, `kmod-iwlwifi`,
@@ -52,9 +56,13 @@ Two images are produced:
 Build: `./build-images.sh` (downloads Image Builder once, caches in
 `.image-builder-cache/`). Use `--clean` to force re-download.
 
+All other service images (Debian/Fedora LXC templates) are built via
+`pct create` + package install + `vzdump`. Each is ~2 min to build.
+
 Per the project's design principles (`project-structure.mdc`): custom images
 are REQUIRED, there is no fallback, and configure roles NEVER run
-`opkg install`. To add a package, add it to `build-images.sh` and rebuild.
+`opkg install` or `apt install`. To add a package, add it to
+`build-images.sh` and rebuild.
 
 ### Shell syntax and PATH through pct_remote
 

@@ -11,7 +11,7 @@ Three strict layers with no shortcuts between them.
 ┌─────────────────────────────────────────────────────────────┐
 │  Super Manager (NiceGUI Web UI)                             │
 │  External users, dashboards, kiosk pages                    │
-│  ONLY talks to: Manager API (HTTP on localhost:8080)        │
+│  ONLY talks to: Manager API (HTTP on localhost:9001)        │
 │  NEVER: SSH, pct exec, or direct container access           │
 └────────────────────────┬────────────────────────────────────┘
                          │ HTTP (localhost)
@@ -35,7 +35,7 @@ Three strict layers with no shortcuts between them.
 
 **Super Manager (UI pages in `scripts/webui/pages/`):**
 - NEVER import or call `heartbeat._ssh_exec`. NEVER run shell commands.
-- ALL mutations go through `httpx.AsyncClient` to `http://127.0.0.1:8080/api/...`
+- ALL mutations go through `httpx.AsyncClient` to `{get_api_base_url()}/api/...`
 - Status reads come from the manager's metric cache (subscriptions) or API queries.
 
 **Manager (`scripts/webui/manager.py`):**

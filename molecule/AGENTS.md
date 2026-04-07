@@ -184,7 +184,7 @@ it provides false confidence.
 
 **Rules:**
 - NEVER mock `probe_host`, network connectivity, or hardware detection against
-  hosts you control. We own 4 nodes at known IPs. Probe the REAL hosts.
+  hosts you control. We own 6 nodes at known IPs. Probe the REAL hosts.
 - NEVER write pytest tests that only read YAML files and check string content.
   That's a linter pretending to be a test. Write an actual linter (like
   `test_host_safety.py`) or test real behavior via Molecule.
@@ -235,7 +235,7 @@ molecule verify
 molecule test
 
 # Test specific scenarios
-molecule test -s default              # Full integration (4 nodes)
+molecule test -s default              # Full integration (6 nodes)
 molecule test -s openwrt-security     # Per-feature scenario
 molecule test -s pihole-lxc           # Service-specific test
 

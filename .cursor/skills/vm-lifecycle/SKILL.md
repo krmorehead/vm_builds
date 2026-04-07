@@ -272,22 +272,34 @@ the available list. Switching to local hosting eliminated the dependency.
 
 ```
 images/                                              (gitignored)
-├── openwrt-router-24.10.0-x86-64-combined.img.gz   Custom router VM (build-images.sh)
-├── openwrt-mesh-lxc-24.10.0-x86-64-rootfs.tar.gz   Custom mesh LXC (build-images.sh)
-├── debian-12-standard_12.12-1_amd64.tar.zst         LXC template
-└── ...future images...
+├── openwrt-router-24.10.0-x86-64-combined.img.gz   Router VM (build-images.sh --only router)
+├── openwrt-mesh-lxc-24.10.0-x86-64-rootfs.tar.gz   Mesh LXC (build-images.sh --only mesh)
+├── pihole-debian-12-*.tar.zst                       Pi-hole LXC template
+├── wireguard-debian-12-*.tar.zst                    WireGuard LXC template
+├── rsyslog-debian-12-*.tar.zst                      rsyslog LXC template
+├── netdata-debian-12-*.tar.zst                      Netdata LXC template
+├── homeassistant-debian-12-*.tar.zst                Home Assistant LXC template
+├── jellyfin-debian-12-*.tar.zst                     Jellyfin LXC template
+├── kodi-debian-12-*.tar.zst                         Kodi LXC template
+├── moonlight-debian-12-*.tar.zst                    Moonlight LXC template
+├── gaming-fedora-41-*.tar.zst                       Gaming LXC template (Fedora)
+└── ...
 ```
 
 NEVER commit images to git. The `images/` directory is listed in `.gitignore`.
 Document the expected image filename and download URL in role defaults and
 in `docs/architecture/`.
 
-### Custom images via Image Builder
+### Custom images via build-images.sh
 
-`build-images.sh` uses the OpenWrt Image Builder to create pre-configured
-images with packages pre-installed and UCI defaults baked in. This eliminates
-runtime `opkg install` and resolves firewall/networking conflicts in LXC
-containers.
+`build-images.sh` builds pre-configured images for all services. OpenWrt
+images use the OpenWrt Image Builder; Debian/Fedora LXC templates are built
+via `pct create` + `apt/dnf install` + `vzdump`. Use `--only <target>` for
+selective rebuilds (~2 min each vs ~15 min for all).
+
+Available targets: `router`, `mesh`, `pihole`, `rsyslog`, `netdata`,
+`wireguard`, `homeassistant`, `jellyfin`, `kodi`, `moonlight`, `gaming`,
+`sunshine`, `desktop`.
 
 Per the project's "Bake, don't configure at runtime" principle
 (`project-structure.mdc`), custom images are REQUIRED. Provision roles
@@ -627,9 +639,9 @@ IOMMU groups were invalid. Root cause was VT-d disabled in BIOS — a
 
 ## Test strategy
 
-- `molecule/default/` is the full integration test (rebuilds everything from scratch).
+- `molecule/default/` is the full integration test (rebuilds everything from scratch across 6 nodes).
 - Per-feature scenarios (`molecule/<feature>/`) test incremental changes on top of the baseline.
-- Per-feature scenarios assume the baseline exists (router VM running). They do NOT rebuild.
+- Per-feature scenarios assume the baseline exists (all infrastructure + services running). They do NOT rebuild.
 - Use `molecule converge` + `molecule verify` for day-to-day iteration (preserves baseline).
 - Use `molecule test` only for clean-state validation (CI, pre-commit). It destroys the baseline.
 - After `molecule test`, ALWAYS re-run `molecule converge` to restore the baseline before working on layered scenarios.

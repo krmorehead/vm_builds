@@ -57,8 +57,8 @@ them.
 Three strict tiers — no shortcuts between layers:
 
 1. **Super Manager** (NiceGUI Web UI pages) — ONLY talks to the Manager
-   via HTTP on `localhost:8080`. NEVER SSHes, NEVER runs shell commands,
-   NEVER imports `heartbeat._ssh_exec`.
+   via HTTP on `localhost` (default port 9001). NEVER SSHes, NEVER runs
+   shell commands, NEVER imports `heartbeat._ssh_exec`.
 2. **Manager** (`manager.py` REST endpoints) — receives HTTP from the
    super manager, executes operations via container-side scripts over SSH.
    Hypervisor ops (`pct`/`qm`) go to the Proxmox host. Heartbeat

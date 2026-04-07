@@ -3,14 +3,17 @@
 ## Purpose
 
 **vm_builds** is an Ansible project that automates the provisioning and
-configuration of virtual machines and LXC containers on Proxmox VE. The
-primary target is a "home entertainment box" -- a single small-form-factor
-PC that replaces multiple consumer devices (router, NAS, media server, smart
-home hub, desktop) with a fully software-defined stack.
+configuration of virtual machines and LXC containers on Proxmox VE. It
+deploys 15 services across 6 Proxmox nodes — OpenWrt router, WireGuard VPN,
+Pi-hole DNS, monitoring (rsyslog + Netdata), Home Assistant, media
+(Jellyfin + Kodi + Moonlight), Desktop VM, Gaming LXC, Mesh WiFi, WiFi
+Bridge, and Kiosk — with a NiceGUI Web UI for deployment, fleet monitoring,
+and kiosk management.
 
-**A single command should take a bare Proxmox host and produce fully
-functional, production-ready VMs and containers** -- no manual Proxmox UI
-interaction, no SSH-and-paste workflows, no guesswork.
+**A single command (`./scripts/webui.sh`) launches the management interface.**
+From there, pick a deploy profile or individual service tags and stream
+live Ansible output. Alternatively, `./run.sh` drives the full deployment
+from the CLI.
 
 ## Design Philosophy
 
@@ -117,16 +120,21 @@ Build Profiles
 │   └── desktop_nodes      → Debian Desktop, UX Kiosk
 │
 ├── AI Node (ai — directly reachable, 192.168.86.220)
-│   └── vpn_nodes          → WireGuard
+│   ├── vpn_nodes          → WireGuard
+│   ├── gaming_nodes       → Gaming LXC (Sunshine streaming)
+│   └── kiosk_nodes        → Custom UX Kiosk
 │
 ├── Mesh Node 2 (mesh2 — directly reachable, 192.168.86.211)
 │   ├── vpn_nodes          → WireGuard
-│   └── wifi_nodes         → OpenWrt Mesh LXC (WDS STA, WiFi PHY namespace move)
+│   ├── wifi_nodes         → OpenWrt Mesh LXC (WDS STA, WiFi PHY namespace move)
+│   └── kiosk_nodes        → Custom UX Kiosk
 │
 ├── LAN Satellite (mesh1 — via ProxyJump through home, requires OpenWrt running)
 │   ├── lan_hosts          → ProxyJump SSH config (group_vars/lan_hosts.yml)
-│   ├── vpn_nodes          → WireGuard (same service as primary host)
-│   └── wifi_nodes         → OpenWrt Mesh LXC (WDS STA, WiFi PHY namespace move)
+│   ├── vpn_nodes          → WireGuard
+│   ├── wifi_nodes         → OpenWrt Mesh LXC (WDS STA)
+│   ├── streaming_nodes    → Moonlight streaming client
+│   └── kiosk_nodes        → Custom UX Kiosk
 │
 ├── Minimal Router
 │   ├── router_nodes       → OpenWrt

@@ -15,12 +15,14 @@ container provisioning plays target specific flavor groups.
 | `router_nodes` | OpenWrt router VM | 100 |
 | `vpn_nodes` | WireGuard VPN | 101 |
 | `dns_nodes` | Pi-hole DNS | 102 |
-| `wifi_nodes` | Mesh WiFi controller | 103 |
+| `wifi_nodes` | Mesh WiFi LXC (on wifi_nodes:!router_nodes) | 103 |
+| `bridge_nodes` | WiFi Bridge LXC | 104 |
 | `service_nodes` | Home Assistant | 200 |
-| `media_nodes` | Jellyfin, Kodi, Moonlight | 300-302 |
+| `media_nodes` | Jellyfin, Kodi | 300-301 |
+| `streaming_nodes` | Moonlight | 302 |
 | `desktop_nodes` | Desktop VM, Custom UX Kiosk | 400-401 |
 | `monitoring_nodes` | Netdata, rsyslog | 500-501 |
-| `gaming_nodes` | Gaming VM | 600 |
+| `gaming_nodes` | Gaming LXC (Sunshine + dsda-doom) | 601 |
 
 ## How It Works
 
@@ -106,8 +108,30 @@ Flavor groups: router_nodes, vpn_nodes, dns_nodes
 3. Add the group to `molecule/default/molecule.yml` platform groups.
 4. Create the provision play in `site.yml` targeting the new group.
 
-No code changes are needed to create a new profile -- profiles are purely
+No code changes are needed to create a new profile — profiles are purely
 a composition of existing flavor groups in the inventory.
+
+## Web UI Deploy Profiles
+
+The Web UI (`scripts/webui.sh`) provides pre-built deploy profiles that
+select the right service tags for common deployment targets:
+
+| Profile | Tags selected | Target hosts |
+|---------|--------------|--------------|
+| **Home Unit** | All services for `home` | home |
+| **Mesh Unit** | All services for `mesh1` | mesh1 |
+| **Gamer Unit** | All services for `ai` + gaming | ai |
+| **Bridge Units** | All services for `bridge-1` | bridge-1, bridge-2 |
+| **Full Deploy** | All non-opt-in services | all nodes |
+| **Network Only** | backup, infra, openwrt, lan-satellite | all nodes |
+| **Core Services** | Network + DNS + VPN + monitoring | home, mesh1, ai, mesh2 |
+| **Media Stack** | backup, infra, media, moonlight | home, mesh1 |
+| **Custom** | Manual selection | varies |
+
+Deploy profiles are defined in `scripts/webui/data.py` (`DEPLOY_PROFILES`).
+Host-targeted profiles (Home Unit, Mesh Unit, etc.) are auto-computed from
+`SERVICE_TAGS` — adding a new service tag with a host automatically includes
+it in the right profile.
 
 ## Auto-Start and Boot Order
 

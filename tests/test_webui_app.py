@@ -1683,7 +1683,7 @@ class TestExtensionsRoundTrip:
             "container_health": {
                 "container_id": "kiosk",
                 "systemd_services": {"kiosk-web": "active"},
-                "listening_ports": [8080],
+                "listening_ports": [9001],
                 "ready": True,
                 "extensions": {
                     "config_files": {

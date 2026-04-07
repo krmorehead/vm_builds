@@ -225,6 +225,43 @@ class TestServiceTags:
             for tag in profile.tags:
                 assert tag in all_tags, f"Profile {profile.name!r} references unknown tag {tag!r}"
 
+    def test_deploy_profile_home_unit(self):
+        profiles = data.get_deploy_profiles()
+        home = next(p for p in profiles if p.name == "Home Unit")
+        assert "openwrt" in home.tags
+        assert "pihole" in home.tags
+        assert "media" in home.tags
+        assert "desktop" in home.tags
+        assert "gaming" not in home.tags
+        hosts = data.get_hosts_for_tags(home.tags)
+        assert "home" in hosts
+
+    def test_deploy_profile_mesh_unit(self):
+        profiles = data.get_deploy_profiles()
+        mesh = next(p for p in profiles if p.name == "Mesh Unit")
+        assert "mesh-wifi" in mesh.tags
+        assert "moonlight" in mesh.tags
+        assert "openwrt" not in mesh.tags
+        hosts = data.get_hosts_for_tags(mesh.tags)
+        assert "mesh1" in hosts
+
+    def test_deploy_profile_gamer_unit(self):
+        profiles = data.get_deploy_profiles()
+        gamer = next(p for p in profiles if p.name == "Gamer Unit")
+        assert "gaming" in gamer.tags
+        assert "wireguard" in gamer.tags
+        assert "openwrt" not in gamer.tags
+        hosts = data.get_hosts_for_tags(gamer.tags)
+        assert "ai" in hosts
+
+    def test_deploy_profile_bridge_units(self):
+        profiles = data.get_deploy_profiles()
+        bridge = next(p for p in profiles if p.name == "Bridge Units")
+        assert "bridge" in bridge.tags
+        hosts = data.get_hosts_for_tags(bridge.tags)
+        assert "bridge-1" in hosts
+        assert "bridge-2" in hosts
+
     def test_get_hosts_for_tags(self):
         hosts = data.get_hosts_for_tags(["gaming"])
         assert hosts == ["ai"]
@@ -567,7 +604,7 @@ class TestAppConfigure:
         from scripts.webui.app import parse_args
         args = parse_args([])
         assert args.env is None
-        assert args.port == 8080
+        assert args.port == 9001
         assert args.host == "127.0.0.1"
 
     def test_parse_args_custom(self):

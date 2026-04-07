@@ -3,13 +3,14 @@
 ## Definition
 
 The **baseline** is the system state after `site.yml` converges successfully
-(plays 0–4). Every per-feature enhancement (security, VLANs, DNS, mesh)
-builds on top of this state and can be rolled back to it without a full rebuild.
+through all phases. The core network baseline (plays 0–4) must succeed before
+any service plays can run. Per-feature enhancements build on top and can be
+rolled back without a full rebuild.
 
 ## What site.yml produces
 
 ```
-Baseline State
+Core Baseline (plays 0–4)
 ├── Play 0: proxmox_backup
 │   ├── /var/lib/ansible-backup/host-config.tar.gz
 │   ├── /var/lib/ansible-backup/manifest.json (includes project_version)
@@ -18,7 +19,7 @@ Baseline State
 ├── Play 1: shared infrastructure
 │   ├── Virtual bridges (one per physical NIC)
 │   ├── PCI passthrough (WiFi to vfio-pci, if present)
-│   ├── iGPU driver + Quick Sync validation (if Intel GPU present)
+│   ├── iGPU driver + VA-API validation (Intel i915 or AMD amdgpu)
 │   └── deploy_stamp: backup, infrastructure plays recorded
 │
 ├── Play 2: openwrt_vm
@@ -39,8 +40,27 @@ Baseline State
 │   ├── DHCP static lease for Proxmox host
 │   └── .state/addresses.json on controller
 │
-└── Play 4: bootstrap cleanup
-    └── Temporary bootstrap IP removed from LAN bridge
+├── Play 4: bootstrap cleanup
+│   └── Temporary bootstrap IP removed from LAN bridge
+│
+Service Baseline (plays 5–32)
+├── LAN satellite bootstrap (mesh1)
+├── Pi-hole DNS (VMID 102)
+├── rsyslog log collector (VMID 501)
+├── Netdata monitoring (VMID 500)
+├── Home Assistant (VMID 200)
+├── Jellyfin media server (VMID 300)
+├── Kodi media player (VMID 301)
+├── Moonlight streaming client (VMID 302)
+├── WireGuard VPN (VMID 101)
+├── Mesh WiFi LXC (VMID 103)
+├── WiFi Bridge LXC (VMID 104)
+├── Desktop VM (VMID 400)
+├── Kiosk (VMID 401)
+└── Gaming LXC (VMID 601, opt-in)
+│
+Fleet Baseline (play 33)
+└── Heartbeat circuit breaker — hard-fails if any healthy container stopped
 ```
 
 ## Invariants

@@ -18,7 +18,7 @@ import httpx
 from nicegui import ui
 
 from scripts.webui import theme
-from scripts.webui.data import DISPLAY_APPS
+from scripts.webui.data import DISPLAY_APPS, get_api_base_url
 
 
 async def _launch_guest(vmid: str) -> dict:
@@ -26,7 +26,7 @@ async def _launch_guest(vmid: str) -> dict:
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"http://127.0.0.1:8080/api/guests/{vmid}/start",
+                f"{get_api_base_url()}/api/guests/{vmid}/start",
                 timeout=5,
             )
             return resp.json()

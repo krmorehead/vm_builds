@@ -9,7 +9,7 @@ trigger API calls.
 Reads service URLs, node IPs, and MESH_KEY from /opt/kiosk/config.json.
 
 Usage:
-    python3 /opt/kiosk/webui/kiosk_server.py [--port 8080]
+    python3 /opt/kiosk/webui/kiosk_server.py [--port 9001]
 """
 
 from __future__ import annotations
@@ -102,7 +102,7 @@ def create_app(config_path: Path | None = None) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Kiosk Home Hub server")
-    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--port", type=int, default=9001)
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument(
         "--host", default="0.0.0.0",

@@ -57,18 +57,19 @@ molecule converge -s wireguard-lxc # run layered scenario
 molecule verify -s wireguard-lxc
 ```
 
-Pre-commit: `molecule test && molecule converge`
+Pre-commit: `molecule test`
 
 ## Pipeline sequence
 
-`molecule test` runs: dependency → cleanup → syntax → converge → verify → cleanup → converge
+`molecule test` runs: dependency → cleanup → syntax → prepare → converge → verify
 
-The final converge is NOT optional — it serves two purposes:
-1. **Tests rebuilding works** after cleanup (proves the build is reproducible)
-2. **Restores the baseline** so mesh1 (behind OpenWrt) remains accessible
+There is NO trailing cleanup or converge. The baseline is left running after
+verify. NEVER add `cleanup` or `destroy` to the end of the test_sequence —
+that tears down OpenWrt and makes mesh1 permanently unreachable.
 
-NEVER end the test_sequence with just `cleanup`. That leaves the infrastructure
-torn down and mesh1 unreachable. The reconverge at the end is itself a test.
+The `prepare` phase starts the callhome API server and writes
+`.state/callhome_url`. The `cleanup` phase at the beginning resets the
+host from any previous run.
 
 No lint phase — run `ansible-lint && yamllint .` separately.
 

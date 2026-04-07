@@ -393,10 +393,12 @@ async def _bridge_action(target: str) -> None:
     """Restart WiFi on bridge nodes via the manager API."""
     import httpx
 
+    from scripts.webui.data import get_api_base_url
+
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                "http://127.0.0.1:8080/api/bridge/restart-wifi",
+                f"{get_api_base_url()}/api/bridge/restart-wifi",
                 json={"target": target},
                 timeout=20.0,
             )

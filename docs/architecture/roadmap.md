@@ -1,19 +1,20 @@
 # Roadmap
 
-## Current State (v1.0)
+## Current State (v1.1)
 
-A single playbook that provisions and configures an OpenWrt router VM on Proxmox with:
+Full-stack home infrastructure automation deploying 15 services across 6
+Proxmox nodes (home, mesh1, ai, mesh2, bridge-1, bridge-2):
 
-- Dynamic NIC discovery and bridge-per-port passthrough.
-- WiFi PCIe passthrough with IOMMU setup and in-VM driver installation.
-- 802.11s mesh networking on all detected radios.
-- First-bridge WAN assignment with collision-free LAN subnet selection.
-- Router replacement workflow (stage/swap/downstream).
-- Baseline firewall, DHCP, and DNS (dnsmasq).
-- Environment-driven secrets (`.env`).
-- Backup/restore with `vzdump` and host config tar archives.
-- Integration test framework (Molecule) against a dedicated test node.
-- LLM-optimized rules and skills for AI-assisted development continuity.
+- **Network**: OpenWrt router VM, WireGuard VPN, Pi-hole DNS, Mesh WiFi, WiFi Bridge
+- **Services**: Home Assistant, rsyslog log collector, Netdata monitoring
+- **Media**: Jellyfin (hardware transcoding), Kodi (direct display), Moonlight (streaming client)
+- **Desktop**: Debian Desktop VM (KDE + GNOME), Custom UX Kiosk
+- **Gaming**: Gaming LXC with Sunshine streaming server (opt-in)
+- **Management**: NiceGUI Web UI with deploy profiles, fleet monitoring, kiosk dashboard
+- **Fleet monitoring**: Callhome heartbeat agents on every container, central API, circuit breaker
+- **Testing**: Molecule integration tests (~20 scenarios), pytest suite, TDD workflow
+- **Images**: All services use pre-built images (`build-images.sh`); zero runtime package installs
+- **Entry point**: `build.py` handles env validation, host probing, state fallback; Web UI wraps it
 
 ## Active Projects
 
@@ -205,7 +206,7 @@ Delivered:
 - Rollback plays in `playbooks/cleanup.yml` (`gaming-rollback` tag)
 - Opt-in via `--tags gaming` (mutually exclusive with media container iGPU use)
 
-### `2026-03-09-11` Debian Desktop VM
+### `2026-03-09-11` Debian Desktop VM ✓
 
 Full Debian 12 VM with KDE Plasma (Windows-style) and GNOME (Mac-style)
 desktop sessions. Takes exclusive iGPU access via hostpci passthrough.
@@ -223,6 +224,100 @@ Delivered:
 - `tasks/reconstruct_desktop_group.yml` for dynamic group reconstruction
 - Rollback plays in `playbooks/cleanup.yml` (`desktop-rollback` tag)
 - Display-exclusive hookscript attachment (deployed by Kiosk project)
+
+### `2026-03-09-06` Home Assistant ✓
+
+LXC container running Home Assistant via Docker-in-LXC. Provides home
+automation with a web dashboard.
+
+Delivered:
+- `homeassistant_lxc` role (Docker-ready LXC with nesting)
+- `homeassistant_configure` role (Docker compose, admin user, integration config)
+- Per-feature molecule scenario (`homeassistant-lxc`)
+- `tasks/reconstruct_homeassistant_group.yml` for dynamic group reconstruction
+
+### `2026-03-09-10` Moonlight Streaming Client ✓
+
+LXC container running Moonlight for streaming from a Sunshine server on a
+different host. Uses iGPU for hardware decode and renders to physical display.
+
+Delivered:
+- `moonlight_lxc` role (iGPU + input device passthrough)
+- `moonlight_configure` role (Sunshine server endpoint, display config)
+- Per-feature molecule scenario (`moonlight-lxc`)
+- Display-exclusive hookscript for Kiosk handoff
+
+### `2026-03-09-12` Custom UX Kiosk ✓
+
+LXC container running a NiceGUI-based kiosk dashboard (Home Hub). Manages
+display-exclusive apps (Moonlight, Kodi, Desktop) via Proxmox hookscripts.
+Deploys to all `desktop_nodes`.
+
+Delivered:
+- `kiosk_lxc` role (DRI + input + ALSA passthrough, Cage Wayland compositor)
+- `kiosk_configure` role (config.json with service URLs, callhome agent)
+- Proxmox hookscript for display-exclusive app lifecycle
+- NiceGUI kiosk server (`scripts/webui/kiosk_server.py`)
+- Per-feature molecule scenario (`kiosk-lxc`)
+
+### `2026-03-09-13` Mesh WiFi LXC ✓
+
+OpenWrt LXC containers with WiFi PHY namespace-moved from the host. WDS
+STA links back to the router's hidden WDS AP for transparent L2 backhaul.
+
+Delivered:
+- `openwrt_mesh_lxc` role (PHY namespace move, kernel module loading)
+- `openwrt_mesh_configure` role (WDS STA, batman-adv toggle)
+- `tasks/configure_wifi_wds.yml` shared WDS configuration
+- Per-feature molecule scenario (`mesh-wifi`)
+
+### `2026-03-09-14` WiFi Bridge LXC ✓
+
+Dedicated WiFi bridge containers for transparent L2 WDS AP/STA linking
+between two bridge nodes.
+
+Delivered:
+- `openwrt_bridge_lxc` role (WiFi PHY passthrough, bridge topology)
+- `openwrt_bridge_configure` role (WDS AP/STA configuration)
+- Per-feature molecule scenario (`bridge-lxc`)
+
+### `2026-03-09-15` Gaming LXC ✓
+
+Fedora-based LXC container with GPU render device sharing for Sunshine
+game streaming. Replaces the earlier Windows Gaming VM approach.
+
+Delivered:
+- `gaming_lxc` role (DRI render device, Fedora 41 template)
+- `gaming_lxc_configure` role (Sunshine + dsda-doom, VA-API)
+- Per-feature molecule scenario (`gaming-lxc`)
+- Opt-in via `--tags gaming` (not included in Full Deploy)
+
+### NiceGUI Web UI ✓
+
+Full management interface for the project: deploy services, monitor fleet
+health, manage kiosk displays.
+
+Delivered:
+- `scripts/webui/app.py` — main entry point (13 pages)
+- Deploy profiles: Full, Home Unit, Mesh Unit, Gamer Unit, Bridge Units, etc.
+- Live Ansible output streaming with cancel and dry-run
+- Fleet health dashboard with heartbeat monitoring
+- Kiosk server (`kiosk_server.py`) for per-host Home Hub display
+- Manager API for SSH-based host operations
+- `scripts/webui.sh` launcher script
+
+### Callhome Fleet Monitoring ✓
+
+Inverted data flow: containers heartbeat health to a central API, replacing
+SSH polling for readiness checks.
+
+Delivered:
+- `scripts/callhome.py` (Python agent for Debian containers)
+- `scripts/callhome.sh` (BusyBox agent for OpenWrt containers)
+- Composable extensions: network, wireguard, docker, config_files, wifi
+- Fleet readiness gate in verify.yml
+- Circuit breaker for detecting container deaths mid-run
+- API endpoints: `/api/checkin`, `/api/fleet/ready`, `/api/fleet/stale`
 
 ## Medium-Term Goals
 

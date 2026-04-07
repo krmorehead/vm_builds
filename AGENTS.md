@@ -180,13 +180,13 @@ molecule verify       # Run assertions on converged state
 molecule test         # Full clean-state test (destroys all)
 
 # Test specific scenarios
-molecule test -s default              # Full integration (4 nodes)
+molecule test -s default              # Full integration (6 nodes)
 molecule test -s openwrt-security     # Per-feature scenario
 molecule test -s pihole-lxc           # Service-specific test
 
 # Build custom images
-./build-images.sh --only openwrt     # Build single image
-./build-images.sh                     # Build all images
+./scripts/build-images.sh --only router  # Build single image
+./scripts/build-images.sh               # Build all images
 
 # Python testing (for build.py changes)
 pytest tests/ -v
@@ -355,7 +355,7 @@ When working in specific directories or on particular tasks, load the relevant d
 
 ## Deployment and Testing Strategy
 
-- **Molecule default**: Full integration test with 4 nodes (home, mesh1, ai, mesh2)
+- **Molecule default**: Full integration test with 6 nodes (home, mesh1, ai, mesh2, bridge-1, bridge-2)
 - **Per-feature scenarios**: Test individual features in isolation
 - **Baseline workflow**: Use converge/verify for iteration, test for validation
 - **Test machine**: Use for debugging before touching production

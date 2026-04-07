@@ -62,13 +62,8 @@ molecule verify -s mesh1-infra     # verify layered scenario
 
 **Clean-state validation (CI, pre-commit, final proof):**
 ```bash
-molecule test                      # full pipeline — destroys everything at the end
-molecule converge                  # restore baseline for further work
+molecule test                      # full pipeline — baseline left running after verify
 ```
-
-**After a full `molecule test`:** ALWAYS re-run `molecule converge` to restore
-the baseline before working on layered scenarios. Otherwise leaf nodes are
-unreachable (no OpenWrt = no LAN).
 
 ## Molecule pipeline sequence
 
@@ -76,22 +71,26 @@ unreachable (no OpenWrt = no LAN).
 1. `dependency` — install Galaxy requirements
 2. `cleanup` — reset host from previous runs
 3. `syntax` — ansible syntax check
-4. `converge` — run `playbooks/site.yml`
-5. `verify` — run `molecule/default/verify.yml`
-6. `cleanup` — reset host after test (destroys baseline)
+4. `prepare` — start callhome API server, write `.state/callhome_url`
+5. `converge` — run `playbooks/site.yml`
+6. `verify` — run `molecule/default/verify.yml`
 
-There is NO `lint` phase in the Molecule config. Run `ansible-lint` and `yamllint` separately.
+There is NO trailing cleanup or converge — the baseline is left running
+after verify. NEVER add `cleanup` or `destroy` to the end of the
+test_sequence. That tears down OpenWrt and makes mesh1 permanently
+unreachable. There is NO `lint` phase in the Molecule config. Run
+`ansible-lint` and `yamllint` separately.
 
 ## Architecture
 
 - **Driver**: `default` with `managed: false` (real Proxmox hardware, not Docker)
-- **Platforms**: 4 nodes — `home` (primary), `ai` and `mesh2` (directly reachable), `mesh1` (LAN satellite via ProxyJump)
+- **Platforms**: 6 nodes — `home` (primary), `ai`, `mesh2`, `bridge-1`, `bridge-2` (directly reachable), `mesh1` (LAN satellite via ProxyJump)
 - **Platform groups**: `home` gets `proxmox` + all primary flavor groups (including `wifi_nodes`); `ai` gets `proxmox`, `vpn_nodes`; `mesh2` gets `proxmox`, `vpn_nodes`, `wifi_nodes`; `mesh1` gets `proxmox`, `lan_hosts`, `vpn_nodes`, `wifi_nodes`
 - **Provisioner**: `playbooks/site.yml` (phased: primary hosts → LAN bootstrap → services)
 - **Cleanup**: two-play cleanup — `proxmox:!lan_hosts` for primary, `router_nodes` for LAN hosts via SSH
 - **Config**: `molecule/default/molecule.yml`
 
-### 4-node topology
+### 6-node topology
 
 ```
 ISP Router (192.168.86.x supernet)
@@ -110,15 +109,15 @@ Home          AI Node          Mesh2
 
 - **home**, **ai**, **mesh2**: directly reachable on the supernet (no ProxyJump)
 - **mesh1**: behind home's OpenWrt, reachable via ProxyJump through home
-- All 4 nodes are in `vpn_nodes` — WireGuard containers deploy on all 4 in parallel
+- home, mesh1, ai, mesh2 are in `vpn_nodes` — WireGuard containers deploy on all 4 in parallel
 - `mesh1` and `mesh2` are also in `wifi_nodes` — OpenWrt Mesh LXC deploys on both
 - `home` is the only `router_nodes` member (runs OpenWrt)
 - `mesh1` is the only `lan_hosts` member (requires OpenWrt to be running)
 
 ### Parallelism within plays
 
-With 4 nodes in `vpn_nodes`, Ansible's linear strategy runs tasks on all
-4 hosts concurrently within each play. No molecule-level parallelization
+With 4 nodes in `vpn_nodes`, Ansible's linear strategy runs VPN tasks on all
+4 hosts concurrently. Bridge nodes (bridge-1, bridge-2) run only WiFi bridge plays. No molecule-level parallelization
 is needed — the parallelism is automatic. Each host gets its own WireGuard
 container provisioned and configured simultaneously. Similarly, the
 `wifi_nodes:!router_nodes` play runs mesh LXC provisioning on mesh1 and
@@ -138,9 +137,11 @@ reachable after OpenWrt provisions the LAN bridge.
 ## Baseline testing model
 
 The **baseline** is the state after `molecule/default` converges successfully:
-router VM running, WAN/LAN configured, DHCP serving, firewall active, all 4
-nodes reachable. All per-feature molecule scenarios start from this baseline
-and only converge/revert their own changes.
+all 15 services deployed across 6 nodes (home, mesh1, ai, mesh2, bridge-1,
+bridge-2), fleet heartbeat active, all hosts reachable. The core network
+baseline (OpenWrt router, bridges, PCI, iGPU) must succeed before any
+service plays run. All per-feature molecule scenarios start from this
+baseline and only converge/revert their own changes.
 
 **CRITICAL: The OpenWrt baseline stays up.** Only tear down the specific
 containers being tested. Full `molecule test` is reserved for final
@@ -148,7 +149,7 @@ validation only.
 
 ```
 Scenario Hierarchy
-├── molecule/default/              Full integration (home, mesh1, ai, mesh2 — 4-node)
+├── molecule/default/              Full integration (home, mesh1, ai, mesh2, bridge-1, bridge-2 — 6-node)
 │   ├── converge.yml               imports site.yml (phased: primary → LAN → services)
 │   ├── verify.yml                 Multi-play: common infra, router, WireGuard, LAN host, mesh LXC
 │   ├── cleanup.yml                Two-play: primary hosts + LAN hosts via SSH
@@ -171,13 +172,14 @@ Scenario Hierarchy
 ```
 
 **Primary workflow:** Per-feature scenarios are the main test loop:
-1. `molecule converge` (once) — build the full baseline with all 4 nodes
+1. `molecule converge` (once) — build the full baseline with all 6 nodes
 2. `molecule converge -s wireguard-lxc` + `molecule verify -s wireguard-lxc` — iterate
 3. Each per-feature scenario tears down only its own containers, verifies, then cleans up
-4. Baseline (OpenWrt, bridges, PCI, iGPU) is assumed to exist and left running
+4. Baseline (all infrastructure + services) is assumed to exist and left running
 
-**Final validation only:** `molecule test` runs the full clean-state pipeline and
-destroys everything at the end. Use only before committing or for CI.
+**Final validation only:** `molecule test` runs the full clean-state pipeline.
+The test_sequence ends at `verify` — there is NO trailing cleanup or converge.
+Use only before committing or for CI.
 
 Full `molecule test` takes 4-5 minutes. Per-feature scenarios take
 30-60 seconds. During development, iterate with per-feature scenarios.
@@ -569,10 +571,13 @@ The cleanup playbook MUST restore the host to a clean state using
 by explicit VMID from `group_vars/all.yml`.
 
 1. Destroy project VMs by explicit VMID (check existence first with
-   `qm status`, then stop + destroy). Current VMIDs: OpenWrt (100).
+   `qm status`, then stop + destroy). Current VMIDs: OpenWrt (100),
+   Desktop VM (400).
 2. Destroy project containers by explicit VMID (check with `pct status`,
    then stop + destroy). Current VMIDs: WireGuard (101), Pi-hole (102),
-   Mesh WiFi (103), Netdata (500), rsyslog (501).
+   Mesh WiFi (103), WiFi Bridge (104), Home Assistant (200),
+   Jellyfin (300), Kodi (301), Moonlight (302), Kiosk (401),
+   Netdata (500), rsyslog (501), Gaming LXC (601).
 3. Unbind all devices from `vfio-pci`. Without this, WiFi hardware is invisible.
 4. Remove modprobe blacklist files (`/etc/modprobe.d/blacklist-wifi.conf`, `/etc/modprobe.d/vfio-pci.conf`).
 5. Reload WiFi kernel modules: `modprobe -r iwlmvm iwlwifi; modprobe iwlwifi`.
@@ -601,7 +606,7 @@ across 4 hosts on every run. Template deletion is only appropriate in
 Previous bug: molecule cleanup deleted all cached templates. Each subsequent
 `molecule test` re-uploaded pihole (205MB), rsyslog (143MB), netdata (315MB),
 wireguard (143MB), and openwrt-mesh (14MB) to every host. Removing the
-template deletion saved ~7 minutes on a 4-node test run.
+template deletion saved ~7 minutes on a 6-node test run.
 
 **NEVER restore the host config from backup archive in molecule cleanup.**
 The explicit file removal tasks already remove all ansible-managed files.
@@ -738,7 +743,7 @@ Previous bug: `ansible-proxmox-lan.conf` was deployed by `openwrt_configure` but
 
 ## Test performance optimization
 
-The full 4-node `molecule test` takes ~13-14 minutes. Most time goes to
+The full 6-node `molecule test` takes ~13-14 minutes. Most time goes to
 template uploads, NTP sync, `pct_remote` overhead, and SSH round trips in
 verify. Apply these rules to avoid wasting time:
 
@@ -1036,7 +1041,7 @@ molecule runs from starting.
 
 ## Multi-node E2E testing
 
-When a service needs testing on all 4 nodes (home, mesh1, ai, mesh2), add the
+When a service needs testing on multiple nodes (home, mesh1, ai, mesh2, bridge-1, bridge-2), add the
 flavor group to ALL platforms in the molecule default scenario — not just the
 static inventory. This is a test-only change that doesn't affect production.
 
@@ -1065,7 +1070,7 @@ This pattern:
   and IP assertions — eliminating redundant SSH round trips
 
 Previous bug: rsyslog verify computed IP as `LAN_GATEWAY + offset`. This only
-worked for LAN hosts and used a fallback default for the gateway. With 4-node
+worked for LAN hosts and used a fallback default for the gateway. With 6-node
 testing, WAN hosts had wrong computed IPs. Fixed by querying `pct config`.
 
 ## Verify task conventions

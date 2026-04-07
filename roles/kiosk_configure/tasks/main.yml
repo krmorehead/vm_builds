@@ -140,7 +140,7 @@
            else '' }}
       MANAGEMENT_SERVER: >-
         {{ kiosk_management_server if (kiosk_management_server | default('')) | length > 0
-           else ('http://' + ansible_host + ':8080')
+           else ('http://' + ansible_host + ':9001')
                 if (ansible_host | default('')) | length > 0
            else '' }}
       CALLHOME_SERVER: "{{ callhome_server }}"

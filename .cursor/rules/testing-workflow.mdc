@@ -139,7 +139,7 @@ the single most expensive failure mode in this project.
 The test suite is an early warning system. A test that passes while machines
 are down is a lie. Apply these rules to EVERY test written in this project:
 
-- NEVER mock `probe_host` to test infrastructure health. We own 4 nodes at
+- NEVER mock `probe_host` to test infrastructure health. We own 6 nodes at
   known IPs. Probe the REAL hosts. If one is down, the test MUST fail.
 - NEVER write pytest tests that only check YAML string content (e.g., "does
   this file contain `ansible.builtin`?"). That's a linter pretending to be

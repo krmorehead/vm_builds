@@ -46,18 +46,24 @@ Two-role service pattern:
     - <type>_configure
 ```
 
-VMID allocation:
+VMID allocation (all defined in `group_vars/all.yml`):
 
 ```yaml
-# In group_vars/all.yml
-openwrt_vm_id: 100          # Network services
+openwrt_vm_id: 100          # Network
 wireguard_ct_id: 101
 pihole_ct_id: 102
+openwrt_mesh_ct_id: 103
+openwrt_bridge_ct_id: 104
 
-homeassistant_vm_id: 200    # Services  
-jellyfin_vm_id: 300         # Media
+homeassistant_ct_id: 200    # Services
+jellyfin_ct_id: 300         # Media
+kodi_ct_id: 301
+moonlight_ct_id: 302
 desktop_vm_id: 400          # Desktop
+kiosk_ct_id: 401
 netdata_ct_id: 500          # Observability
+rsyslog_ct_id: 501
+gaming_ct_id: 601           # Gaming (opt-in)
 ```
 
 ## Anti-patterns

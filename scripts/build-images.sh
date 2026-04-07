@@ -1295,7 +1295,7 @@ User=kiosk
 Group=kiosk
 Type=simple
 WorkingDirectory=/opt/kiosk
-ExecStart=/usr/bin/python3 /opt/kiosk/webui/kiosk_server.py --port 8080
+ExecStart=/usr/bin/python3 /opt/kiosk/webui/kiosk_server.py --port 9001
 Restart=always
 RestartSec=3
 
@@ -1306,7 +1306,7 @@ WEB_EOF
     cat > "${tmpdir}/wait-for-hub.sh" << 'WAIT_EOF'
 #!/bin/bash
 for i in $(seq 1 15); do
-    curl -sf http://127.0.0.1:8080/ >/dev/null 2>&1 && exit 0
+    curl -sf http://127.0.0.1:9001/ >/dev/null 2>&1 && exit 0
     sleep 1
 done
 echo "Hub server not ready"
@@ -1328,7 +1328,7 @@ Environment=WLR_LIBINPUT_NO_DEVICES=1
 Environment=XDG_RUNTIME_DIR=/run/user/0
 ExecStartPre=/bin/mkdir -p /run/user/0
 ExecStartPre=/opt/kiosk/wait-for-hub.sh
-ExecStart=/usr/bin/cage -- /usr/bin/chromium --kiosk --no-sandbox --ozone-platform=wayland --disable-gpu-compositing --noerrdialogs --disable-infobars --no-first-run --disable-translate --disable-features=TranslateUI --start-fullscreen http://127.0.0.1:8080/hub
+ExecStart=/usr/bin/cage -- /usr/bin/chromium --kiosk --no-sandbox --ozone-platform=wayland --disable-gpu-compositing --noerrdialogs --disable-infobars --no-first-run --disable-translate --disable-features=TranslateUI --start-fullscreen http://127.0.0.1:9001/hub
 Restart=always
 RestartSec=3
 StandardInput=tty

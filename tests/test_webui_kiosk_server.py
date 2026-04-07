@@ -46,7 +46,7 @@ HOME_CONFIG = {
     "WIREGUARD_URL": "",
     "NETDATA_URL": "http://10.10.10.21:19999",
     "RSYSLOG_URL": "",
-    "MANAGEMENT_SERVER": "http://192.168.86.201:8080",
+    "MANAGEMENT_SERVER": "http://192.168.86.201:9001",
     "CALLHOME_SERVER": "http://192.168.86.30:8088",
     "HOST_IP": "192.168.86.201",
     "NODE_IPS": {
@@ -68,7 +68,7 @@ AI_CONFIG = {
     "WIREGUARD_URL": "http://10.10.10.5:51821",
     "NETDATA_URL": "http://10.10.10.22:19999",
     "RSYSLOG_URL": "",
-    "MANAGEMENT_SERVER": "http://192.168.86.220:8080",
+    "MANAGEMENT_SERVER": "http://192.168.86.220:9001",
     "CALLHOME_SERVER": "http://192.168.86.30:8088",
     "HOST_IP": "192.168.86.220",
     "NODE_IPS": {

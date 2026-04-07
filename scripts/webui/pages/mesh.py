@@ -234,10 +234,11 @@ def _render_batman_section(container) -> None:
 
             async def _check_status() -> None:
                 import httpx
+                from scripts.webui.data import get_api_base_url
                 try:
                     async with httpx.AsyncClient() as client:
                         resp = await client.get(
-                            "http://127.0.0.1:8080/api/batman/status",
+                            f"{get_api_base_url()}/api/batman/status",
                             timeout=15.0,
                         )
                         if resp.status_code == 200:
@@ -322,11 +323,12 @@ def _render_batman_section(container) -> None:
 
             async def _toggle_batman(enable: bool) -> None:
                 import httpx
+                from scripts.webui.data import get_api_base_url
                 action = "enable" if enable else "disable"
                 try:
                     async with httpx.AsyncClient() as client:
                         resp = await client.post(
-                            f"http://127.0.0.1:8080/api/batman/{action}",
+                            f"{get_api_base_url()}/api/batman/{action}",
                             timeout=60.0,
                         )
                         if resp.status_code == 200:
