@@ -7,9 +7,11 @@ All functions are synchronous and testable without a running UI.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import secrets
 import shutil
 import subprocess
@@ -18,12 +20,159 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import build  # noqa: E402
+
+
+# ── Event bus for SSE streaming ───────────────────────────────────────
+
+_log = logging.getLogger("vm_builds.events")
+
+
+class EventBus:
+    """Async fan-out event bus for SSE subscribers.
+
+    Callers subscribe via ``subscribe()`` which returns an ``asyncio.Queue``.
+    Events emitted via ``emit()`` are pushed to every active subscriber queue.
+    """
+
+    def __init__(self) -> None:
+        self._subscribers: list[asyncio.Queue[dict[str, Any]]] = []
+
+    def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
+        q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=256)
+        self._subscribers.append(q)
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue[dict[str, Any]]) -> None:
+        try:
+            self._subscribers.remove(q)
+        except ValueError:
+            pass
+
+    def emit(self, event: dict[str, Any]) -> None:
+        dead: list[asyncio.Queue[dict[str, Any]]] = []
+        for q in self._subscribers:
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                dead.append(q)
+                _log.warning("Dropping slow SSE subscriber (queue full)")
+        for q in dead:
+            self._subscribers.remove(q)
+
+    @property
+    def subscriber_count(self) -> int:
+        return len(self._subscribers)
+
+
+event_bus = EventBus()
+
+
+# ── Deployment timeline tracking ─────────────────────────────────────
+
+
+@dataclass
+class ServiceTimestamp:
+    """Timing data for a single service's readiness during deployment."""
+
+    service_id: str
+    first_checkin: float | None = None
+    ready_at: float | None = None
+
+
+@dataclass
+class DeployTimeline:
+    """Tracks per-service provisioning and readiness timing for a deployment."""
+
+    start_time: float = 0.0
+    end_time: float = 0.0
+    services: dict[str, ServiceTimestamp] = field(default_factory=dict)
+
+    @property
+    def duration(self) -> float:
+        if self.end_time and self.start_time:
+            return self.end_time - self.start_time
+        return 0.0
+
+
+_active_timeline: DeployTimeline | None = None
+
+
+def start_timeline() -> DeployTimeline:
+    """Begin tracking a new deployment timeline."""
+    global _active_timeline
+    _active_timeline = DeployTimeline(start_time=time.monotonic())
+    return _active_timeline
+
+
+def stop_timeline() -> DeployTimeline | None:
+    """Stop tracking and return the completed timeline."""
+    global _active_timeline
+    if _active_timeline:
+        _active_timeline.end_time = time.monotonic()
+    tl = _active_timeline
+    _active_timeline = None
+    return tl
+
+
+def get_active_timeline() -> DeployTimeline | None:
+    """Return the currently active timeline, if any."""
+    return _active_timeline
+
+
+def record_service_event(service_id: str, event_type: str) -> None:
+    """Record a service check-in or readiness event on the active timeline."""
+    if not _active_timeline:
+        return
+    now = time.monotonic()
+    if service_id not in _active_timeline.services:
+        _active_timeline.services[service_id] = ServiceTimestamp(service_id=service_id)
+    svc = _active_timeline.services[service_id]
+    if event_type in ("node_checkin", "container_ready") and svc.first_checkin is None:
+        svc.first_checkin = now
+    if event_type == "container_ready" and svc.ready_at is None:
+        svc.ready_at = now
+
+
+def save_timeline(state_dir: Path, timeline: DeployTimeline) -> None:
+    """Persist a completed timeline to the state directory."""
+    state_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out: dict[str, Any] = {
+        "start_time": timeline.start_time,
+        "end_time": timeline.end_time,
+        "duration": timeline.duration,
+        "services": {},
+    }
+    for sid, svc in timeline.services.items():
+        entry: dict[str, Any] = {"service_id": sid}
+        if svc.first_checkin is not None:
+            entry["checkin_offset"] = round(svc.first_checkin - timeline.start_time, 2)
+        if svc.ready_at is not None:
+            entry["ready_offset"] = round(svc.ready_at - timeline.start_time, 2)
+        out["services"][sid] = entry
+    tl_file = state_dir / f"timeline_{ts}.json"
+    tl_file.write_text(json.dumps(out, indent=2) + "\n")
+
+
+def load_timelines(state_dir: Path, max_count: int = 10) -> list[dict[str, Any]]:
+    """Load recent timeline files from the state directory."""
+    if not state_dir.exists():
+        return []
+    files = sorted(state_dir.glob("timeline_*.json"), reverse=True)[:max_count]
+    results: list[dict[str, Any]] = []
+    for f in files:
+        try:
+            results.append(json.loads(f.read_text()))
+        except (json.JSONDecodeError, OSError):
+            continue
+    return results
 
 
 # ── Environment management ───────────────────────────────────────────
@@ -838,12 +987,26 @@ def _write_fleet_ips(state_dir: Path, nodes: list[RegisteredNode]) -> None:
 
 
 def register_checkin(state_dir: Path, checkin: NodeCheckin, remote_ip: str) -> RegisteredNode:
-    """Process a call-home heartbeat: upsert the node in the registry."""
+    """Process a call-home heartbeat: upsert the node in the registry.
+
+    Emits SSE events on state transitions:
+      - ``container_ready``  — first check-in or readiness flip to True
+      - ``container_stale``  — readiness flips to False (was previously ready)
+      - ``node_checkin``     — every successful check-in
+    """
     nodes = load_node_registry(state_dir)
     now = datetime.now().isoformat(timespec="seconds")
 
+    container_id = ""
+    if checkin.container_health:
+        container_id = checkin.container_health.container_id or checkin.hostname
+
     existing = next((n for n in nodes if n.node_id == checkin.node_id), None)
     if existing:
+        was_ready = bool(
+            existing.container_health
+            and existing.container_health.ready
+        )
         existing.hostname = checkin.hostname
         existing.last_ip = remote_ip
         existing.local_ips = checkin.local_ips
@@ -857,6 +1020,32 @@ def register_checkin(state_dir: Path, checkin: NodeCheckin, remote_ip: str) -> R
         existing.status = "online"
         _save_node_registry(state_dir, nodes)
         _append_metric_snapshot(state_dir, checkin)
+
+        is_ready = bool(checkin.container_health and checkin.container_health.ready)
+        if is_ready and not was_ready:
+            event_bus.emit({
+                "type": "container_ready",
+                "container_id": container_id,
+                "node_id": checkin.node_id,
+                "timestamp": now,
+            })
+            record_service_event(container_id, "container_ready")
+        elif was_ready and not is_ready:
+            event_bus.emit({
+                "type": "container_stale",
+                "container_id": container_id,
+                "node_id": checkin.node_id,
+                "timestamp": now,
+            })
+        event_bus.emit({
+            "type": "node_checkin",
+            "node_id": checkin.node_id,
+            "hostname": checkin.hostname,
+            "container_id": container_id,
+            "ready": is_ready,
+            "timestamp": now,
+        })
+        record_service_event(container_id, "node_checkin")
         return existing
 
     new_node = RegisteredNode(
@@ -877,6 +1066,19 @@ def register_checkin(state_dir: Path, checkin: NodeCheckin, remote_ip: str) -> R
     nodes.append(new_node)
     _save_node_registry(state_dir, nodes)
     _append_metric_snapshot(state_dir, checkin)
+
+    is_ready = bool(checkin.container_health and checkin.container_health.ready)
+    etype = "container_ready" if is_ready else "node_checkin"
+    event_bus.emit({
+        "type": etype,
+        "container_id": container_id,
+        "node_id": checkin.node_id,
+        "hostname": checkin.hostname,
+        "ready": is_ready,
+        "first_seen": True,
+        "timestamp": now,
+    })
+    record_service_event(container_id, etype)
     return new_node
 
 
@@ -982,6 +1184,58 @@ def check_fleet_readiness(
         "total": len(expected_services),
         "ready_count": sum(1 for r in results.values() if r["ready"]),
         "services": results,
+    }
+
+
+def check_fleet_staleness(
+    state_dir: Path,
+    expected_services: list[str],
+    max_age_seconds: int = CONTAINER_READY_SECONDS,
+) -> dict:
+    """Detect services whose heartbeat was once active but has gone stale.
+
+    Categorizes each service as:
+      - healthy: last heartbeat within max_age_seconds
+      - stale: previously seen but heartbeat expired (circuit breaker trigger)
+      - never_seen: no record — still provisioning, not an error
+
+    Returns ``has_stale: True`` when any service has regressed from healthy
+    to stale, signaling that something went wrong mid-run.
+    """
+    nodes = load_node_registry(state_dir)
+    healthy: list[str] = []
+    stale: list[dict] = []
+    never_seen: list[str] = []
+
+    for svc in expected_services:
+        found = False
+        for n in nodes:
+            match_id = svc in (n.hostname, n.node_id)
+            match_container = (
+                n.container_health is not None
+                and n.container_health.container_id == svc
+            )
+            if match_id or match_container:
+                recent = _is_recently_seen(n.last_seen, max_age_seconds)
+                if recent:
+                    healthy.append(svc)
+                else:
+                    stale.append({
+                        "service": svc,
+                        "last_seen": n.last_seen,
+                        "node_id": n.node_id,
+                        "status": n.status,
+                    })
+                found = True
+                break
+        if not found:
+            never_seen.append(svc)
+
+    return {
+        "has_stale": len(stale) > 0,
+        "healthy": healthy,
+        "stale": stale,
+        "never_seen": never_seen,
     }
 
 

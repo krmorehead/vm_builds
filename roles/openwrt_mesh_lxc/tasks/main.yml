@@ -181,6 +181,24 @@
     lxc_ct_gateway: "{{ _mesh_gateway }}"
     lxc_ct_nameserver: "{{ _mesh_nameserver }}"
 
+# ── Configure callhome agent (OpenWrt / cron-based) ─────────
+# callhome.sh and crontab are baked into the image.
+# Write the server URL so heartbeats start immediately.
+
+- name: Configure callhome on mesh container
+  ansible.builtin.shell:
+    cmd: >-
+      pct exec {{ meshwifi_ct_id }} -- sh -c
+      'printf "CALLHOME_SERVER=%s\nCALLHOME_PUBLIC_KEY=%s\nCALLHOME_CONTAINER=%s\n"
+      "{{ callhome_server }}" "{{ callhome_public_key }}"
+      "{{ openwrt_mesh_ct_hostname }}"
+      > /etc/default/callhome;
+      /etc/init.d/cron restart 2>/dev/null || true'
+    executable: /bin/bash
+  changed_when: true
+  failed_when: false
+  when: callhome_server | default('') | length > 0
+
 # ── Move WiFi PHY into container namespace ───────────────────────
 
 - name: Move WiFi PHY devices into container namespace

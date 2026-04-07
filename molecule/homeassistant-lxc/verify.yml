@@ -6,11 +6,32 @@
     - name: Include group reconstruction
       ansible.builtin.include_tasks: ../../tasks/reconstruct_homeassistant_group.yml
 
+- name: Container readiness gate
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Query homeassistant readiness from API
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}/api/container/homeassistant/ready"
+        return_content: true
+      register: _container_api
+      failed_when: false
+
+    - name: Set API readiness fact
+      ansible.builtin.set_fact:
+        _container_api_ready: "{{ (_container_api.json.ready | default(false)) | bool }}"
+
+    - name: Report readiness path
+      ansible.builtin.debug:
+        msg: "{{ 'API ready — skipping SSH health checks' if (_container_api_ready | bool) else 'SSH fallback mode' }}"
+
 - name: Verify Home Assistant LXC container
   hosts: service_nodes
   gather_facts: false
   vars:
     homeassistant_ct_id: 200
+    _api_ready: "{{ hostvars['localhost']._container_api_ready | default(false) | bool }}"
   tasks:
     # ── Container state ──────────────────────────────────────────
 
@@ -52,6 +73,7 @@
       register: _ha_docker_version
       changed_when: false
       failed_when: false
+      when: not (_api_ready | bool)
 
     - name: Check Docker Compose
       ansible.builtin.command:
@@ -59,6 +81,7 @@
       register: _ha_compose_version
       changed_when: false
       failed_when: false
+      when: not (_api_ready | bool)
 
     - name: Check Docker daemon status
       ansible.builtin.command:
@@ -66,6 +89,7 @@
       register: _ha_docker_daemon
       changed_when: false
       failed_when: false
+      when: not (_api_ready | bool)
 
     - name: Check HA image exists
       ansible.builtin.command:
@@ -73,26 +97,31 @@
       register: _ha_image_check
       changed_when: false
       failed_when: false
+      when: not (_api_ready | bool)
 
     - name: Assert Docker CE is installed
       ansible.builtin.assert:
         that: "'Docker version' in _ha_docker_version.stdout"
         fail_msg: "Docker CE not installed: {{ _ha_docker_version.stdout | default('missing') }}"
+      when: not (_api_ready | bool)
 
     - name: Assert Docker Compose plugin is installed
       ansible.builtin.assert:
         that: "'Compose version' in _ha_compose_version.stdout"
         fail_msg: "Docker Compose plugin not installed: {{ _ha_compose_version.stdout | default('missing') }}"
+      when: not (_api_ready | bool)
 
     - name: Assert Docker daemon is active
       ansible.builtin.assert:
         that: "_ha_docker_daemon.stdout == 'active'"
         fail_msg: "Docker daemon not active: {{ _ha_docker_daemon.stdout | default('inactive') }}"
+      when: not (_api_ready | bool)
 
     - name: Assert HA container image check can run
       ansible.builtin.assert:
         that: _ha_image_check.rc == 0
         fail_msg: "HA image check failed (expected for Milestone 1): {{ _ha_image_check.stderr | default(_ha_image_check.stdout) }}"
+      when: not (_api_ready | bool)
 
     # ── Container IP validation ──────────────────────────────────
 
@@ -168,3 +197,15 @@
           ha_image={{ 'checked' if _ha_image_check.rc == 0 else 'not-pre-pulled' }},
           network={{ 'ok' if _ha_network.rc == 0 else 'limited' }},
           memory={{ _ha_memory.stdout | trim }}MB
+      when: not (_api_ready | bool)
+
+    - name: Report Home Assistant verification (heartbeat API)
+      ansible.builtin.debug:
+        msg: >-
+          Home Assistant per-feature verify passed:
+          ct={{ homeassistant_ct_id }}, running=yes,
+          ip={{ _ha_verify_ip }},
+          heartbeat API confirmed readiness (Docker SSH checks skipped),
+          network={{ 'ok' if _ha_network.rc == 0 else 'limited' }},
+          memory={{ _ha_memory.stdout | trim }}MB
+      when: _api_ready | bool

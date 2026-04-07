@@ -569,16 +569,15 @@ class TestNodes:
             await user.should_see("test-node-1")
             await user.should_see("Fleet Health")
 
-    async def test_shows_setup_instructions(self, tmp_path):
+    async def test_shows_empty_state(self, tmp_path):
         async with webui(tmp_path) as user:
             await user.open("/nodes")
-            await user.should_see("callhome.py")
+            await user.should_see("No nodes registered")
 
-    async def test_ssh_button_no_selection(self, tmp_path):
+    async def test_auto_refresh_toggle(self, tmp_path):
         async with webui(tmp_path) as user:
             await user.open("/nodes")
-            user.find("Test SSH").click()
-            await user.should_see("Select a row first")
+            await user.should_see("Auto-refresh")
 
     async def test_dashboard_shows_fleet_card(self, tmp_path):
         async with webui(tmp_path) as user:
@@ -1475,6 +1474,52 @@ class TestFleetReadyEndpoint:
             assert body["all_ready"] is False
             assert body["ready_count"] == 1
             assert body["total"] == 2
+
+
+class TestFleetStaleEndpoint:
+    """Tests for GET /api/fleet/stale circuit breaker endpoint."""
+
+    async def test_missing_services_param(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            resp = await client.get("/api/fleet/stale")
+            assert resp.status_code == 400
+
+    async def test_all_healthy(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            await client.post("/api/checkin", json=CONTAINER_CHECKIN)
+            resp = await client.get("/api/fleet/stale?services=pihole")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["has_stale"] is False
+            assert "pihole" in body["healthy"]
+
+    async def test_never_seen_not_stale(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            resp = await client.get("/api/fleet/stale?services=netdata")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["has_stale"] is False
+            assert "netdata" in body["never_seen"]
+
+    async def test_stale_returns_409(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            await client.post("/api/checkin", json=CONTAINER_CHECKIN)
+            resp = await client.get(
+                "/api/fleet/stale?services=pihole&max_age_seconds=0",
+            )
+            assert resp.status_code == 409
+            body = resp.json()
+            assert body["has_stale"] is True
+            assert len(body["stale"]) == 1
+            assert body["stale"][0]["service"] == "pihole"
+
+    async def test_invalid_max_age(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            resp = await client.get(
+                "/api/fleet/stale?services=pihole&max_age_seconds=abc",
+            )
+            assert resp.status_code == 400
+            assert "integer" in resp.json()["error"].lower()
 
 
 class TestContainerReadyEndpoint:

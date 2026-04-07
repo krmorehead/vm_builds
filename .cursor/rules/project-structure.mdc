@@ -158,6 +158,10 @@ Phase 3: Services (flavor groups span both primary + LAN hosts)
            deploy_stamp: gaming_lxc
   Play 32: gaming_lxc_configure (gaming_nodes) tag: gaming, never
 
+Phase 3d: Heartbeat circuit breaker (post-configure)
+  Play 33: localhost — Query /api/fleet/stale, hard-fail if any
+           previously-healthy container stopped heartbeating
+
 Per-feature plays (opt-in via --tags, tagged with [never])
 Bootstrap cleanup (proxmox:!lan_hosts)    tag: cleanup
 ```
@@ -272,6 +276,7 @@ All VMIDs defined in `group_vars/all.yml`.
 | `tasks/reconstruct_gaming_group.yml` | Reusable dynamic group reconstruction for Gaming LXC |
 | `tasks/reconstruct_bridge_group.yml` | Reusable dynamic group reconstruction for WiFi Bridge |
 | `tasks/configure_wifi_wds.yml` | Shared WDS WiFi configuration for OpenWrt LXC containers (used by mesh + bridge) |
+| `tasks/fleet_heartbeat_gate.yml` | Circuit breaker: hard-fails if any previously-healthy container's heartbeat has gone stale |
 | `tasks/reconstruct_lxc_group.yml` | Shared LXC group reconstruction (called by per-service wrappers) |
 | `tasks/lxc_device_passthrough.yml` | Shared device passthrough (DRI/ALSA/input bind mounts + cgroups) |
 | `tasks/verify_lxc_template.yml` | Shared pre-flight template existence check (10 LXC roles) |
@@ -354,9 +359,13 @@ collector, implement it in `callhome.py:collect_<name>()`, add it to
 4. Containers begin heartbeating to the API within seconds
 5. In container mode, heartbeats are sent every interval (no IP-change gate)
 
-### Verify phase: fleet readiness gate + per-service API queries
+### Verify phase: fleet readiness gate + circuit breaker + per-service API queries
 `molecule/default/verify.yml` includes a "Fleet readiness gate" play that
-queries `/api/fleet/ready?services=...` before running per-service checks.
+queries `/api/fleet/ready?services=...` before running per-service checks,
+followed by a "Heartbeat circuit breaker" play that queries
+`/api/fleet/stale?services=...` and hard-fails if any previously-healthy
+service has stopped heartbeating. This catches host crashes, container
+deaths, and network partitions before producing confusing per-service errors.
 When the API confirms all services are ready:
 - `_fleet_api_ready` fact is set on localhost
 - Per-service `pct exec` health checks are SKIPPED (heartbeat already
@@ -380,6 +389,7 @@ These categories CANNOT be replaced by heartbeats:
 - `POST /api/checkin` — receive heartbeats (with extensions) from callhome agents
 - `GET /api/nodes` — list all nodes with container_health and extensions
 - `GET /api/fleet/ready?services=a,b,c` — aggregate readiness check
+- `GET /api/fleet/stale?services=a,b,c&max_age_seconds=120` — circuit breaker: detect services whose heartbeat was once active but has gone stale (returns 409 if any stale)
 - `GET /api/fleet/health` — fleet health summary
 - `GET /api/container/{id}/ready` — individual container readiness + extensions
 

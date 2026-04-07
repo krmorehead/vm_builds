@@ -12,3 +12,20 @@
           --only gaming
       register: _build
       changed_when: "'already exists' not in _build.stdout"
+
+- name: Start heartbeat API server
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    _project_root: "{{ playbook_dir }}/../.."
+  tasks:
+    - name: Detect controller IP and start API server
+      ansible.builtin.command:
+        cmd: "{{ _project_root }}/.venv/bin/python3 {{ _project_root }}/scripts/start_test_api.py"
+      register: _api_start
+      changed_when: true
+
+    - name: Report API server URL
+      ansible.builtin.debug:
+        msg: "Heartbeat API server: {{ _api_start.stdout }}"

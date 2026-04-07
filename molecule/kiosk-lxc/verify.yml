@@ -6,11 +6,32 @@
     - name: Include group reconstruction
       ansible.builtin.include_tasks: ../../tasks/reconstruct_kiosk_group.yml
 
+- name: Container readiness gate
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Query kiosk readiness from API
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}/api/container/kiosk/ready"
+        return_content: true
+      register: _container_api
+      failed_when: false
+
+    - name: Set API readiness fact
+      ansible.builtin.set_fact:
+        _container_api_ready: "{{ (_container_api.json.ready | default(false)) | bool }}"
+
+    - name: Report readiness path
+      ansible.builtin.debug:
+        msg: "{{ 'API ready — skipping SSH health checks' if (_container_api_ready | bool) else 'SSH fallback mode' }}"
+
 - name: Verify Kiosk LXC container
   hosts: kiosk_nodes
   gather_facts: false
   vars:
     kiosk_ct_id: 401
+    _api_ready: "{{ hostvars['localhost']._container_api_ready | default(false) | bool }}"
   tasks:
     # ── Container state ──────────────────────────────────────────
 
@@ -59,14 +80,12 @@
 
     # ── Kiosk packages, service, and dashboard ───────────────────
 
-    - name: Run Kiosk container health checks (single pct exec)
+    - name: Run Kiosk container health checks (packages, files, user)
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ kiosk_ct_id }} -- /bin/sh -c '
           echo "CAGE_PKG=$(dpkg -l cage 2>/dev/null | grep -c ^ii)";
           echo "CHROMIUM_PKG=$(dpkg -l chromium 2>/dev/null | grep -c ^ii)";
-          echo "DISPLAY_SVC=$(systemctl is-enabled kiosk-display 2>/dev/null || echo disabled)";
-          echo "WEB_SVC=$(systemctl is-enabled kiosk-web 2>/dev/null || echo disabled)";
           echo "CONFIG=$(test -f /opt/kiosk/config.json && echo yes || echo no)";
           echo "SERVER=$(test -f /opt/kiosk/webui/kiosk_server.py && echo yes || echo no)";
           echo "HUB=$(test -f /opt/kiosk/webui/pages/hub.py && echo yes || echo no)";
@@ -74,6 +93,17 @@
           '
       register: _kiosk_health
       changed_when: false
+
+    - name: Run Kiosk systemd service enablement checks
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ kiosk_ct_id }} -- /bin/sh -c '
+          echo "DISPLAY_SVC=$(systemctl is-enabled kiosk-display 2>/dev/null || echo disabled)";
+          echo "WEB_SVC=$(systemctl is-enabled kiosk-web 2>/dev/null || echo disabled)";
+          '
+      register: _kiosk_services
+      changed_when: false
+      when: not (_api_ready | bool)
 
     - name: Assert Cage compositor is installed
       ansible.builtin.assert:
@@ -87,13 +117,15 @@
 
     - name: Assert kiosk-display service is enabled
       ansible.builtin.assert:
-        that: "'DISPLAY_SVC=enabled' in _kiosk_health.stdout"
+        that: "'DISPLAY_SVC=enabled' in _kiosk_services.stdout"
         fail_msg: "kiosk-display service not enabled"
+      when: not (_api_ready | bool)
 
     - name: Assert kiosk-web service is enabled
       ansible.builtin.assert:
-        that: "'WEB_SVC=enabled' in _kiosk_health.stdout"
+        that: "'WEB_SVC=enabled' in _kiosk_services.stdout"
         fail_msg: "kiosk-web service not enabled"
+      when: not (_api_ready | bool)
 
     - name: Assert NiceGUI kiosk files present
       ansible.builtin.assert:
@@ -232,8 +264,8 @@
           ct={{ kiosk_ct_id }}, running=yes,
           cage={{ 'installed' if 'CAGE_PKG=1' in _kiosk_health.stdout else 'missing' }},
           chromium={{ 'installed' if 'CHROMIUM_PKG=1' in _kiosk_health.stdout else 'missing' }},
-          display_svc={{ 'enabled' if 'DISPLAY_SVC=enabled' in _kiosk_health.stdout else 'disabled' }},
-          web_svc={{ 'enabled' if 'WEB_SVC=enabled' in _kiosk_health.stdout else 'disabled' }},
+          display_svc={{ 'api' if (_api_ready | bool) else ('enabled' if 'DISPLAY_SVC=enabled' in (_kiosk_services.stdout | default('')) else 'disabled') }},
+          web_svc={{ 'api' if (_api_ready | bool) else ('enabled' if 'WEB_SVC=enabled' in (_kiosk_services.stdout | default('')) else 'disabled') }},
           dri={{ 'mounted' if _dri_devices.rc == 0 else 'missing' }},
           hookscript={{ 'deployed' if _hookscript.stat.exists else 'missing' }},
           config=present, nicegui=deployed

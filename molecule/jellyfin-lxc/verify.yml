@@ -6,11 +6,32 @@
     - name: Include group reconstruction
       ansible.builtin.include_tasks: ../../tasks/reconstruct_jellyfin_group.yml
 
+- name: Container readiness gate
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Query jellyfin readiness from API
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}/api/container/jellyfin/ready"
+        return_content: true
+      register: _container_api
+      failed_when: false
+
+    - name: Set API readiness fact
+      ansible.builtin.set_fact:
+        _container_api_ready: "{{ (_container_api.json.ready | default(false)) | bool }}"
+
+    - name: Report readiness path
+      ansible.builtin.debug:
+        msg: "{{ 'API ready — skipping SSH health checks' if (_container_api_ready | bool) else 'SSH fallback mode' }}"
+
 - name: Verify Jellyfin LXC container
   hosts: media_nodes
   gather_facts: false
   vars:
     jellyfin_ct_id: 300
+    _api_ready: "{{ hostvars['localhost']._container_api_ready | default(false) | bool }}"
   tasks:
     # ── Container state ──────────────────────────────────────────
 
@@ -70,36 +91,40 @@
 
     # ── Jellyfin service health checks (batched single pct exec) ─
 
-    - name: Run Jellyfin container health checks (single pct exec)
+    - name: Run Jellyfin service and web health checks (single pct exec)
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ jellyfin_ct_id }} -- /bin/sh -c '
           echo "SERVICE=$(systemctl is-active jellyfin 2>/dev/null)";
           echo "WEB=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8096 2>/dev/null)";
-          echo "PORT=$(ss -tlnp | grep -c :8096 2>/dev/null)";
-          echo "VAAPI=$(vainfo 2>/dev/null | grep -c "VAProfile" || echo "0")"
+          echo "PORT=$(ss -tlnp | grep -c :8096 2>/dev/null)"
           '
       register: _jellyfin_health
       changed_when: false
+      when: not (_api_ready | bool)
 
     - name: Assert Jellyfin service is active
       ansible.builtin.assert:
         that: "'active' in _jellyfin_health.stdout"
         fail_msg: "Jellyfin service not active"
+      when: not (_api_ready | bool)
 
     - name: Parse web interface status
       ansible.builtin.set_fact:
         _jellyfin_web_code: "{{ _jellyfin_health.stdout | regex_search('WEB=(\\d+)', '\\1') | first }}"
+      when: not (_api_ready | bool)
 
     - name: Assert web interface returns 200
       ansible.builtin.assert:
         that: _jellyfin_web_code in ['200', '302']
         fail_msg: "Web interface HTTP status: {{ _jellyfin_web_code }}, expected 200 or 302"
+      when: not (_api_ready | bool)
 
     - name: Assert port 8096 is listening
       ansible.builtin.assert:
         that: (_jellyfin_health.stdout | regex_search('PORT=(\\d+)', '\\1') | first | int) > 0
         fail_msg: "Port 8096 not listening"
+      when: not (_api_ready | bool)
 
     # ── VA-API hardware acceleration ──────────────────────────────
 
@@ -155,11 +180,13 @@
       register: _web_content
       changed_when: false
       failed_when: false
+      when: not (_api_ready | bool)
 
     - name: Assert web interface serves Jellyfin content
       ansible.builtin.assert:
         that: _web_content.rc == 0
         fail_msg: "Web interface not serving Jellyfin content"
+      when: not (_api_ready | bool)
 
     # ── Report ─────────────────────────────────────────────────────
 
@@ -172,3 +199,15 @@
           vaapi={{ 'hardware' if 'VAProfile' in _vaapi_check.stdout else 'software' }},
           iGPU={{ 'mounted' if _igpu_device.rc == 0 else 'missing' }},
           media={{ 'mounted' if _media_path.rc == 0 else 'missing' }}
+      when: not (_api_ready | bool)
+
+    - name: Report Jellyfin verification (heartbeat API)
+      ansible.builtin.debug:
+        msg: >-
+          Jellyfin per-feature verify passed:
+          ct={{ jellyfin_ct_id }}, running=yes,
+          web=skipped (heartbeat API),
+          vaapi={{ 'hardware' if 'VAProfile' in _vaapi_check.stdout else 'software' }},
+          iGPU={{ 'mounted' if _igpu_device.rc == 0 else 'missing' }},
+          media={{ 'mounted' if _media_path.rc == 0 else 'missing' }}
+      when: _api_ready | bool

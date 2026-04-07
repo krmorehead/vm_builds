@@ -83,6 +83,26 @@
   become_user: "{{ desktop_user }}"
   changed_when: false
 
+# ── Configure callhome agent ──────────────────────────────────────
+
+- name: Write callhome config
+  ansible.builtin.copy:
+    dest: /etc/default/callhome
+    mode: "0644"
+    content: |
+      CALLHOME_SERVER={{ callhome_server }}
+      CALLHOME_PUBLIC_KEY={{ callhome_public_key }}
+  become: true
+  when: callhome_server | default('') | length > 0
+
+- name: Start callhome service
+  ansible.builtin.systemd:
+    name: callhome
+    state: restarted
+    enabled: true
+  become: true
+  when: callhome_server | default('') | length > 0
+
 # ── Include session polish ─────────────────────────────────────────
 
 - name: Apply desktop session polish

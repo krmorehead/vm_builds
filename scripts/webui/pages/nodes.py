@@ -2,6 +2,7 @@
 
 Shows fleet health overview, per-node status cards with resource gauges,
 alerts panel, service matrix, and metric history sparklines.
+Live-updates via periodic timer refresh.
 """
 
 from __future__ import annotations
@@ -9,7 +10,6 @@ from __future__ import annotations
 from nicegui import ui
 
 from scripts.webui import data, theme
-from scripts.webui.components import test_ssh_from_table
 
 
 def register() -> None:
@@ -18,57 +18,47 @@ def register() -> None:
         from scripts.webui.app import get_state_dir
 
         state_dir = get_state_dir()
-        nodes = data.load_node_registry(state_dir)
-        health = data.compute_fleet_health(nodes)
-        alerts = data.compute_alerts(nodes)
 
         with theme.page_shell("nodes"):
             theme.page_header("Fleet Nodes", "Real-time fleet health and service monitoring")
 
-            _health_banner(health)
+            with ui.column().classes("w-full gap-4") as live_container:
+                pass
 
-            if alerts:
-                _alerts_panel(alerts)
+            _render_live_content(live_container, state_dir)
 
-            theme.section_label("Node Status")
-            _node_cards(nodes, state_dir)
+            auto_refresh = ui.timer(
+                5.0, lambda: _render_live_content(live_container, state_dir)
+            )
 
-            if any(n.services for n in nodes):
-                theme.section_label("Service Matrix")
-                _service_matrix(nodes)
-
-            theme.section_label("Node Details")
-            table = _detail_table(nodes)
-            with ui.row().classes("gap-3"):
-                ui.button(
-                    "Refresh",
-                    icon="refresh",
-                    on_click=lambda: _refresh_all(
-                        state_dir, health_container, alerts_container,
-                        cards_container, matrix_container, table,
-                    ),
-                ).classes("outline-btn")
-                ui.button(
-                    "Test SSH",
-                    icon="terminal",
-                    on_click=lambda: test_ssh_from_table(table),
-                ).classes("outline-btn")
-
-            with ui.card().classes("w-full mt-4"):
-                theme.card_title("Setup")
-                theme.card_subtitle(
-                    "Deploy the call-home client to register nodes automatically"
+            with ui.row().classes("items-center gap-3 mt-2"):
+                ui.switch("Auto-refresh (5s)", value=True).bind_value(
+                    auto_refresh, "active"
                 )
-                ui.markdown(
-                    "Copy `scripts/callhome.py` to each node and add a cron entry:\n\n"
-                    "```\n* * * * * python3 /usr/local/bin/callhome.py --once\n```\n\n"
-                    "Or use `scripts/callhome.sh` for BusyBox/OpenWrt nodes."
-                ).classes("text-sm").style(f"color: {theme.TEXT_SECONDARY}")
 
-        health_container = None
-        alerts_container = None
-        cards_container = None
-        matrix_container = None
+
+def _render_live_content(container: ui.column, state_dir: data.Path) -> None:
+    """Re-render the entire live content area (health, alerts, nodes, matrix, table)."""
+    container.clear()
+    with container:
+        nodes_list = data.load_node_registry(state_dir)
+        health = data.compute_fleet_health(nodes_list)
+        alerts = data.compute_alerts(nodes_list)
+
+        _health_banner(health)
+
+        if alerts:
+            _alerts_panel(alerts)
+
+        theme.section_label("Node Status")
+        _node_cards(nodes_list, state_dir)
+
+        if any(n.services for n in nodes_list):
+            theme.section_label("Service Matrix")
+            _service_matrix(nodes_list)
+
+        theme.section_label("Node Details")
+        _detail_table(nodes_list)
 
 
 # ── Health banner ────────────────────────────────────────────────────
@@ -326,24 +316,4 @@ def _detail_table(nodes: list[data.RegisteredNode]) -> ui.table:
     return table
 
 
-# ── Refresh ──────────────────────────────────────────────────────────
-
-
-def _refresh_all(state_dir, health_c, alerts_c, cards_c, matrix_c, table):
-    """Reload data and update the detail table (card sections are static renders)."""
-    nodes = data.load_node_registry(state_dir)
-    rows: list[dict] = []
-    for n in nodes:
-        rows.append({
-            "hostname": n.hostname,
-            "ip": n.last_ip or "--",
-            "status": data.format_node_status(n.status),
-            "uptime": data.format_uptime(n.uptime_seconds),
-            "disk": f"{n.disk_usage_pct}%" if n.disk_usage_pct else "--",
-            "memory": f"{n.memory_usage_pct}%" if n.memory_usage_pct else "--",
-            "services": ", ".join(n.services) if n.services else "--",
-            "version": n.version or "--",
-            "last_seen": n.last_seen or "--",
-        })
-    table.rows = rows
-    ui.notify("Fleet data refreshed", type="info")
+# ── Refresh (kept for programmatic triggers) ────────────────────────

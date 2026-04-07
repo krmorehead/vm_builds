@@ -30,7 +30,19 @@
 
 # ── Post-restart health check ────────────────────────────────────
 
-- name: Wait for rsyslog to be active after config change
+- name: Wait for rsyslog readiness via API
+  ansible.builtin.uri:
+    url: "{{ callhome_server }}/api/container/rsyslog/ready"
+    return_content: true
+  register: _rsyslog_api_check
+  delegate_to: localhost
+  retries: 5
+  delay: 2
+  until: (_rsyslog_api_check.json.ready | default(false)) | bool
+  failed_when: false
+  when: callhome_server | default('') | length > 0
+
+- name: Wait for rsyslog to be active after config change (SSH fallback)
   ansible.builtin.command:
     cmd: systemctl is-active rsyslog
   register: _rsyslog_status
@@ -38,9 +50,11 @@
   retries: 5
   delay: 2
   until: _rsyslog_status.stdout | trim == 'active'
+  when: callhome_server | default('') | length == 0 or not (_rsyslog_api_check.json.ready | default(false)) | bool
 
 - name: Report rsyslog status
   ansible.builtin.debug:
     msg: >-
-      rsyslog service: {{ _rsyslog_status.stdout | trim }},
+      rsyslog service: {{ 'ready (via API)' if (_rsyslog_api_check.json.ready | default(false)) | bool
+        else (_rsyslog_status.stdout | default('unknown') | trim) }},
       forwarding={{ 'enabled to ' + rsyslog_home_server if rsyslog_home_server | length > 0 else 'disabled (local only)' }}

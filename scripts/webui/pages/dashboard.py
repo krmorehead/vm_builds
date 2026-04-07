@@ -28,7 +28,14 @@ def register() -> None:
                 _image_card(images_dir)
                 _deploy_card(state_dir)
 
-            _fleet_card(state_dir)
+            with ui.column().classes("w-full") as fleet_container:
+                _fleet_card(state_dir)
+
+            ui.timer(
+                10.0,
+                lambda: _refresh_fleet(fleet_container, state_dir),
+            )
+
             _history_section(state_dir)
 
             theme.section_label("Quick Actions")
@@ -48,6 +55,18 @@ def register() -> None:
                     icon="dns",
                     on_click=lambda: ui.navigate.to("/hosts"),
                 ).classes("outline-btn")
+                ui.button(
+                    "Deploy Timeline",
+                    icon="timeline",
+                    on_click=lambda: ui.navigate.to("/timeline"),
+                ).classes("outline-btn")
+
+
+def _refresh_fleet(container: ui.column, state_dir: Path) -> None:
+    """Re-render the fleet card with fresh data."""
+    container.clear()
+    with container:
+        _fleet_card(state_dir)
 
 
 def _env_banner(env_path: Path) -> None:

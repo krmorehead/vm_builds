@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1088,6 +1089,84 @@ class TestCheckFleetReadiness:
         result = data.check_fleet_readiness(tmp_path, ["wireguard-home"])
         assert result["all_ready"] is True
         assert result["services"]["wireguard-home"]["ready"] is True
+
+
+class TestCheckFleetStaleness:
+    """Tests for check_fleet_staleness() circuit breaker."""
+
+    def _register_service(
+        self, tmp_path, node_id, container_id, ready=True,
+    ):
+        checkin = data.NodeCheckin(
+            node_id=node_id, hostname=node_id,
+            local_ips=["10.10.10.10"], uptime_seconds=120,
+            services=[], disk_usage_pct=30, memory_usage_pct=40,
+            version="1.0",
+            container_health=data.ContainerHealth(
+                container_id=container_id,
+                systemd_services={"svc": "running"},
+                listening_ports=[80],
+                ready=ready,
+            ),
+        )
+        data.register_checkin(tmp_path, checkin, "10.10.10.10")
+
+    def _make_service_stale(self, tmp_path, container_id):
+        """Backdate a service's last_seen to make it stale."""
+        nodes = data.load_node_registry(tmp_path)
+        for n in nodes:
+            if n.container_health and n.container_health.container_id == container_id:
+                stale_time = datetime.now() - timedelta(seconds=300)
+                n.last_seen = stale_time.isoformat(timespec="seconds")
+                break
+        data._save_node_registry(tmp_path, nodes)
+
+    def test_all_healthy(self, tmp_path):
+        self._register_service(tmp_path, "pihole-ct", "pihole")
+        self._register_service(tmp_path, "rsyslog-ct", "rsyslog")
+        result = data.check_fleet_staleness(tmp_path, ["pihole", "rsyslog"])
+        assert result["has_stale"] is False
+        assert len(result["healthy"]) == 2
+        assert len(result["stale"]) == 0
+        assert len(result["never_seen"]) == 0
+
+    def test_stale_service_detected(self, tmp_path):
+        self._register_service(tmp_path, "pihole-ct", "pihole")
+        self._register_service(tmp_path, "rsyslog-ct", "rsyslog")
+        self._make_service_stale(tmp_path, "rsyslog")
+        result = data.check_fleet_staleness(tmp_path, ["pihole", "rsyslog"])
+        assert result["has_stale"] is True
+        assert "pihole" in result["healthy"]
+        assert len(result["stale"]) == 1
+        assert result["stale"][0]["service"] == "rsyslog"
+
+    def test_never_seen_not_stale(self, tmp_path):
+        self._register_service(tmp_path, "pihole-ct", "pihole")
+        result = data.check_fleet_staleness(
+            tmp_path, ["pihole", "gaming"],
+        )
+        assert result["has_stale"] is False
+        assert "pihole" in result["healthy"]
+        assert "gaming" in result["never_seen"]
+
+    def test_empty_services_list(self, tmp_path):
+        result = data.check_fleet_staleness(tmp_path, [])
+        assert result["has_stale"] is False
+        assert len(result["healthy"]) == 0
+        assert len(result["stale"]) == 0
+        assert len(result["never_seen"]) == 0
+
+    def test_custom_max_age(self, tmp_path):
+        self._register_service(tmp_path, "pihole-ct", "pihole")
+        self._make_service_stale(tmp_path, "pihole")
+        result_short = data.check_fleet_staleness(
+            tmp_path, ["pihole"], max_age_seconds=60,
+        )
+        assert result_short["has_stale"] is True
+        result_long = data.check_fleet_staleness(
+            tmp_path, ["pihole"], max_age_seconds=600,
+        )
+        assert result_long["has_stale"] is False
 
 
 # ── Extensions round-trip ─────────────────────────────────────────────

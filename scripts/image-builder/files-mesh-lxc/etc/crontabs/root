@@ -1,0 +1,2 @@
+# Callhome heartbeat — reports container health to the management API
+* * * * * CALLHOME_CONTAINER=1 /usr/sbin/callhome.sh 2>/dev/null

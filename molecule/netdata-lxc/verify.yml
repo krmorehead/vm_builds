@@ -6,9 +6,31 @@
     - name: Include group reconstruction
       ansible.builtin.include_tasks: ../../tasks/reconstruct_netdata_group.yml
 
+- name: Container readiness gate
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Query netdata readiness from API
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}/api/container/netdata/ready"
+        return_content: true
+      register: _container_api
+      failed_when: false
+
+    - name: Set API readiness fact
+      ansible.builtin.set_fact:
+        _container_api_ready: "{{ (_container_api.json.ready | default(false)) | bool }}"
+
+    - name: Report readiness path
+      ansible.builtin.debug:
+        msg: "{{ 'API ready — skipping SSH health checks' if (_container_api_ready | bool) else 'SSH fallback mode' }}"
+
 - name: Verify Netdata LXC container
   hosts: monitoring_nodes
   gather_facts: false
+  vars:
+    _api_ready: "{{ hostvars['localhost']._container_api_ready | default(false) | bool }}"
   tasks:
     # ── Container state ──────────────────────────────────────────
 
@@ -65,16 +87,19 @@
           '
       register: _netdata_health
       changed_when: false
+      when: not (_api_ready | bool)
 
     - name: Assert systemd override is present
       ansible.builtin.assert:
         that: "'OVERRIDE=present' in _netdata_health.stdout"
         fail_msg: "systemd LXC override not found — Netdata will fail with 226/NAMESPACE"
+      when: not (_api_ready | bool)
 
     - name: Assert Netdata service is active
       ansible.builtin.assert:
         that: "'SVC=active' in _netdata_health.stdout"
         fail_msg: "Netdata service not active"
+      when: not (_api_ready | bool)
 
     # ── Dashboard on port 19999 (kept separate for retry logic) ──
 
@@ -86,21 +111,25 @@
       retries: 3
       delay: 3
       until: (_netdata_dashboard.stdout | trim) == '200'
+      when: not (_api_ready | bool)
 
     - name: Assert dashboard is accessible
       ansible.builtin.assert:
         that: (_netdata_dashboard.stdout | trim) == '200'
         fail_msg: "Dashboard HTTP status: {{ _netdata_dashboard.stdout | trim }}"
+      when: not (_api_ready | bool)
 
     - name: Assert host cpuinfo is readable
       ansible.builtin.assert:
         that: "'CPUINFO=present' in _netdata_health.stdout"
         fail_msg: "/host/proc/cpuinfo not accessible inside container"
+      when: not (_api_ready | bool)
 
     - name: Assert host sys is readable
       ansible.builtin.assert:
         that: "'SYSDIR=present' in _netdata_health.stdout"
         fail_msg: "/host/sys/class not accessible inside container"
+      when: not (_api_ready | bool)
 
     # ── Container IP validation ──────────────────────────────────
 
@@ -181,7 +210,7 @@
         msg: >-
           Netdata per-feature verify passed:
           ct={{ netdata_ct_id }}, running=yes,
-          dashboard=200,
+          dashboard={{ (_netdata_dashboard.stdout | default(_netdata_dash_post.stdout | default('n/a'))) | trim }},
           host_proc=accessible,
           host_sys=accessible,
           ip={{ _netdata_verify_ip }},

@@ -6,11 +6,32 @@
     - name: Include group reconstruction
       ansible.builtin.include_tasks: ../../tasks/reconstruct_kodi_group.yml
 
+- name: Container readiness gate
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Query kodi readiness from API
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}/api/container/kodi/ready"
+        return_content: true
+      register: _container_api
+      failed_when: false
+
+    - name: Set API readiness fact
+      ansible.builtin.set_fact:
+        _container_api_ready: "{{ (_container_api.json.ready | default(false)) | bool }}"
+
+    - name: Report readiness path
+      ansible.builtin.debug:
+        msg: "{{ 'API ready — skipping SSH health checks' if (_container_api_ready | bool) else 'SSH fallback mode' }}"
+
 - name: Verify Kodi LXC container
   hosts: media_nodes
   gather_facts: false
   vars:
     kodi_ct_id: 301
+    _api_ready: "{{ hostvars['localhost']._container_api_ready | default(false) | bool }}"
   tasks:
     # ── Container state ──────────────────────────────────────────
 
@@ -79,17 +100,23 @@
 
     # ── Kodi packages and service ────────────────────────────────
 
-    - name: Run Kodi container health checks (single pct exec)
+    - name: Run Kodi container package and config checks (pct exec)
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ kodi_ct_id }} -- /bin/sh -c '
           echo "KODI_PKG=$(dpkg -l kodi 2>/dev/null | grep -c ^ii)";
-          echo "SERVICE=$(systemctl is-enabled kodi-standalone 2>/dev/null)";
           echo "SETTINGS=$(test -f /home/kodi/.kodi/userdata/advancedsettings.xml && echo exists || echo missing)";
           echo "KODI_USER=$(id kodi 2>/dev/null && echo exists || echo missing)"
           '
       register: _kodi_health
       changed_when: false
+
+    - name: Check kodi-standalone service is enabled
+      ansible.builtin.command:
+        cmd: pct exec {{ kodi_ct_id }} -- systemctl is-enabled kodi-standalone
+      register: _kodi_service
+      changed_when: false
+      when: not (_api_ready | bool)
 
     - name: Assert Kodi package is installed
       ansible.builtin.assert:
@@ -98,8 +125,9 @@
 
     - name: Assert kodi-standalone service is enabled
       ansible.builtin.assert:
-        that: "'enabled' in _kodi_health.stdout"
+        that: _kodi_service.stdout | trim == 'enabled'
         fail_msg: "kodi-standalone service not enabled"
+      when: not (_api_ready | bool)
 
     - name: Assert advancedsettings.xml exists
       ansible.builtin.assert:
@@ -147,6 +175,6 @@
           Kodi per-feature verify passed:
           ct={{ kodi_ct_id }}, running=yes,
           kodi={{ 'installed' if 'KODI_PKG=1' in _kodi_health.stdout else 'missing' }},
-          service={{ 'enabled' if 'enabled' in _kodi_health.stdout else 'disabled' }},
+          service={{ 'api' if (_api_ready | bool) else ('enabled' if (_kodi_service.stdout | default('') | trim == 'enabled') else 'disabled') }},
           dri={{ 'mounted' if _dri_devices.rc == 0 else 'missing' }},
           snd={{ 'mounted' if _snd_devices.rc == 0 else 'missing' }}

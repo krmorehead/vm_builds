@@ -18,8 +18,8 @@ env_generated_path: >-
 
 # ── Callhome fleet management ─────────────────────────────────────
 # Sole source of truth: .state/callhome_url written by build.py (production)
-# or molecule prepare.yml (test). Hard-fails if the file is missing.
-callhome_server: "{{ lookup('file', project_root + '/.state/callhome_url') }}"
+# or molecule prepare.yml (test). Empty when file is absent (API disabled).
+callhome_server: "{{ lookup('file', project_root + '/.state/callhome_url', errors='ignore') | default('', true) }}"
 callhome_public_key: "{{ lookup('env', 'CALLHOME_PUBLIC_KEY') }}"
 callhome_private_key: "{{ lookup('env', 'CALLHOME_PRIVATE_KEY') }}"
 

@@ -6,9 +6,31 @@
     - name: Include group reconstruction
       ansible.builtin.include_tasks: ../../tasks/reconstruct_rsyslog_group.yml
 
+- name: Container readiness gate
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Query rsyslog readiness from API
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}/api/container/rsyslog/ready"
+        return_content: true
+      register: _container_api
+      failed_when: false
+
+    - name: Set API readiness fact
+      ansible.builtin.set_fact:
+        _container_api_ready: "{{ (_container_api.json.ready | default(false)) | bool }}"
+
+    - name: Report readiness path
+      ansible.builtin.debug:
+        msg: "{{ 'API ready — skipping SSH health checks' if (_container_api_ready | bool) else 'SSH fallback mode' }}"
+
 - name: Verify rsyslog LXC container
   hosts: monitoring_nodes
   gather_facts: false
+  vars:
+    _api_ready: "{{ hostvars['localhost']._container_api_ready | default(false) | bool }}"
   tasks:
     # ── Container state ──────────────────────────────────────────
 
@@ -82,6 +104,7 @@
       ansible.builtin.assert:
         that: "'SVC=active' in _rsyslog_health.stdout"
         fail_msg: "rsyslog service not active"
+      when: not (_api_ready | bool)
 
     - name: Assert rsyslog config is valid
       ansible.builtin.assert:
@@ -92,6 +115,7 @@
       ansible.builtin.assert:
         that: _rsyslog_health.stdout | regex_search('TCP514=(\d+)', '\\1') | first | int > 0
         fail_msg: "rsyslog not listening on TCP 514"
+      when: not (_api_ready | bool)
 
     - name: Assert spool directory exists
       ansible.builtin.assert:

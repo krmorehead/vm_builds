@@ -47,6 +47,10 @@ def register() -> None:
                 state["running"] = False
                 _sync_buttons()
 
+                tl = data.stop_timeline()
+                if tl:
+                    data.save_timeline(state_dir, tl)
+
                 if exit_code == 0:
                     theme.status_text(status_label, f"Deploy succeeded in {elapsed:.0f}s", "success")
                 elif exit_code == -15:
@@ -92,6 +96,7 @@ def register() -> None:
                 theme.status_text(status_label, "Deploying...", "info")
                 state["running"] = True
                 state["start_time"] = time.monotonic()
+                data.start_timeline()
                 _sync_buttons()
 
                 env_extra: dict[str, str] = {"ANSIBLE_FORCE_COLOR": "true"}

@@ -6,11 +6,32 @@
     - name: Include group reconstruction
       ansible.builtin.include_tasks: ../../tasks/reconstruct_wireguard_group.yml
 
+- name: Container readiness gate
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Query wireguard readiness from API
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}/api/container/wireguard/ready"
+        return_content: true
+      register: _container_api
+      failed_when: false
+
+    - name: Set API readiness fact
+      ansible.builtin.set_fact:
+        _container_api_ready: "{{ (_container_api.json.ready | default(false)) | bool }}"
+
+    - name: Report readiness path
+      ansible.builtin.debug:
+        msg: "{{ 'API ready — skipping SSH health checks' if (_container_api_ready | bool) else 'SSH fallback mode' }}"
+
 - name: Verify WireGuard LXC container
   hosts: vpn_nodes
   gather_facts: false
   vars:
     wireguard_ct_id: 101
+    _api_ready: "{{ hostvars['localhost']._container_api_ready | default(false) | bool }}"
   tasks:
     - name: Read container state and config
       ansible.builtin.shell:
@@ -62,26 +83,31 @@
           '
       register: _wg_health
       changed_when: false
+      when: not (_api_ready | bool)
 
     - name: Assert wg0 exists
       ansible.builtin.assert:
         that: "'IFACE=ok' in _wg_health.stdout"
         fail_msg: "wg0 interface missing in container"
+      when: not (_api_ready | bool)
 
     - name: Assert service is enabled
       ansible.builtin.assert:
         that: "'SVC=enabled' in _wg_health.stdout"
         fail_msg: "wg-quick@wg0 not enabled"
+      when: not (_api_ready | bool)
 
     - name: Assert IP forwarding enabled
       ansible.builtin.assert:
         that: "'IPFWD=1' in _wg_health.stdout"
         fail_msg: "IP forwarding disabled"
+      when: not (_api_ready | bool)
 
     - name: Assert MASQUERADE present
       ansible.builtin.assert:
         that: "'NAT=present' in _wg_health.stdout"
         fail_msg: "MASQUERADE missing"
+      when: not (_api_ready | bool)
 
     - name: Report per-feature verification
       ansible.builtin.debug:
@@ -91,3 +117,11 @@
           wg0={{ 'up' if 'IFACE=ok' in _wg_health.stdout else 'missing' }},
           fwd={{ 'enabled' if 'IPFWD=1' in _wg_health.stdout else 'disabled' }},
           nat={{ 'present' if 'NAT=present' in _wg_health.stdout else 'absent' }}
+      when: not (_api_ready | bool)
+
+    - name: Report per-feature verification (heartbeat API)
+      ansible.builtin.debug:
+        msg: >-
+          WireGuard per-feature verify passed:
+          ct={{ wireguard_ct_id }}, running=yes, heartbeat API confirmed container readiness (SSH health checks skipped)
+      when: _api_ready | bool

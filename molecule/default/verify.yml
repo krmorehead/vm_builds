@@ -891,7 +891,7 @@
         url: >-
           http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}/api/fleet/ready?services={{
             ['pihole', 'rsyslog', 'netdata', 'wireguard', 'kiosk',
-             'homeassistant', 'jellyfin', 'moonlight'] | join(',')
+             'homeassistant', 'jellyfin', 'kodi', 'moonlight', 'gaming'] | join(',')
           }}
         method: GET
         return_content: true
@@ -928,6 +928,38 @@
         - _fleet_api_available | bool
         - not (_fleet_api_ready | bool)
         - _fleet_ready.json is defined
+
+# ── Play 2.6: Heartbeat circuit breaker ──────────────────────────
+# Hard-fail if any container that was healthy at the readiness gate
+# has since stopped heartbeating. Catches host crashes, container
+# deaths, and network partitions before running per-service checks
+# that would produce confusing errors.
+
+- name: Heartbeat circuit breaker (pre-verify)
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Run heartbeat staleness check
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../../tasks/fleet_heartbeat_gate.yml"
+      vars:
+        gate_services:
+          - pihole
+          - rsyslog
+          - netdata
+          - wireguard
+          - homeassistant
+          - jellyfin
+          - kodi
+          - moonlight
+          - kiosk
+          - gaming
+          - openwrt-mesh
+          - openwrt-bridge
+        gate_max_age_seconds: 180
+      when:
+        - hostvars['localhost']._fleet_api_available | default(false) | bool
+        - callhome_server | default('') | length > 0
 
 # ── Play 3: Pi-hole health + integration (dns_nodes) ─────────────
 # Deep Pi-hole checks (FTL diagnostics, ad-block, DNS retry loops)
@@ -1742,6 +1774,25 @@
           - _kodi_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/input')
         fail_msg: "Kodi container {{ kodi_ct_id }} config incorrect on {{ inventory_hostname }}"
 
+    - name: Query Kodi readiness from API
+      ansible.builtin.uri:
+        url: "{{ _api_base }}/api/container/kodi/ready"
+        return_content: true
+      register: _kodi_api
+      delegate_to: localhost
+      failed_when: false
+      when: _api_ready | bool
+
+    - name: Assert Kodi ready via API
+      ansible.builtin.assert:
+        that:
+          - _kodi_api.json.ready | default(false) | bool
+        fail_msg: "Kodi not ready via API: {{ _kodi_api.json | default({}) }}"
+      when:
+        - _api_ready | bool
+        - _kodi_api.status | default(0) == 200
+        - "'running' in _kodi_cfg.stdout"
+
     - name: Check if Desktop VM is running (display-exclusive stops Kodi)
       ansible.builtin.command:
         cmd: qm status {{ desktop_vm_id }}
@@ -1758,6 +1809,26 @@
           Kodi container {{ kodi_ct_id }} is stopped but Desktop VM is not running —
           expected either Kodi running or Kodi stopped due to display-exclusive hookscript
 
+    - name: Check Kodi service (pct exec, SSH fallback)
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ kodi_ct_id }} -- /bin/sh -c '
+          echo "SERVICE=$(systemctl is-active kodi 2>/dev/null || echo inactive)"
+          '
+      register: _kodi_health
+      changed_when: false
+      when:
+        - not (_api_ready | bool)
+        - "'running' in _kodi_cfg.stdout"
+
+    - name: Assert Kodi service active (SSH fallback)
+      ansible.builtin.assert:
+        that:
+          - "'SERVICE=active' in _kodi_health.stdout"
+        fail_msg: "Kodi health check failed on {{ inventory_hostname }}: {{ _kodi_health.stdout | default('') }}"
+      when:
+        - _kodi_health is defined and _kodi_health is not skipped
+
     - name: Assert stamp contains kodi_lxc
       ansible.builtin.assert:
         that: "'kodi_lxc' in stamp.plays"
@@ -1768,6 +1839,9 @@
 - name: Verify Moonlight streaming client
   hosts: streaming_nodes
   gather_facts: false
+  vars:
+    _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}"
   tasks:
     - name: Read Moonlight container state and config
       ansible.builtin.shell:
@@ -1787,6 +1861,41 @@
           - _moonlight_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/dri')
           - _moonlight_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/input')
         fail_msg: "Moonlight container {{ moonlight_ct_id }} config incorrect on {{ inventory_hostname }}"
+
+    - name: Query Moonlight readiness from API
+      ansible.builtin.uri:
+        url: "{{ _api_base }}/api/container/moonlight/ready"
+        return_content: true
+      register: _moonlight_api
+      delegate_to: localhost
+      failed_when: false
+      when: _api_ready | bool
+
+    - name: Assert Moonlight ready via API
+      ansible.builtin.assert:
+        that:
+          - _moonlight_api.json.ready | default(false) | bool
+        fail_msg: "Moonlight not ready via API: {{ _moonlight_api.json | default({}) }}"
+      when:
+        - _api_ready | bool
+        - _moonlight_api.status | default(0) == 200
+
+    - name: Check Moonlight service (pct exec, SSH fallback)
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ moonlight_ct_id }} -- /bin/sh -c '
+          echo "SERVICE=$(systemctl is-active moonlight 2>/dev/null || echo inactive)"
+          '
+      register: _moonlight_health
+      changed_when: false
+      when: not (_api_ready | bool)
+
+    - name: Assert Moonlight service active (SSH fallback)
+      ansible.builtin.assert:
+        that:
+          - "'SERVICE=active' in _moonlight_health.stdout"
+        fail_msg: "Moonlight health check failed on {{ inventory_hostname }}: {{ _moonlight_health.stdout | default('') }}"
+      when: not (_api_ready | bool)
 
     - name: Assert stamp contains moonlight_lxc
       ansible.builtin.assert:

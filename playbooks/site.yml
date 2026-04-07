@@ -165,7 +165,10 @@
   roles:
     - kiosk_configure
 
-# ── Phase 3: Services (flavor groups span all hosts) ─────────────
+# ── Phase 3a: Service provisioning (all containers created first) ──
+# Provisions run back-to-back so containers start booting in parallel.
+# The fleet readiness gate (Phase 3b) waits for all containers to
+# report ready via the callhome API before any configure play runs.
 
 - name: Provision Pi-hole LXC
   hosts: dns_nodes
@@ -177,13 +180,6 @@
       vars:
         deploy_stamp_play: pihole_lxc
 
-- name: Configure Pi-hole
-  hosts: pihole
-  gather_facts: false
-  tags: [pihole]
-  roles:
-    - pihole_configure
-
 - name: Provision rsyslog LXC
   hosts: monitoring_nodes
   gather_facts: false
@@ -193,13 +189,6 @@
     - role: deploy_stamp
       vars:
         deploy_stamp_play: rsyslog_lxc
-
-- name: Configure rsyslog
-  hosts: rsyslog
-  gather_facts: false
-  tags: [monitoring]
-  roles:
-    - rsyslog_configure
 
 - name: Provision Netdata LXC
   hosts: monitoring_nodes
@@ -211,27 +200,6 @@
       vars:
         deploy_stamp_play: netdata_lxc
 
-- name: Configure Netdata
-  hosts: monitoring_nodes
-  gather_facts: false
-  tags: [monitoring]
-  tasks:
-    - name: Check netdata service health inside container
-      ansible.builtin.command:
-        cmd: pct exec {{ netdata_ct_id }} -- systemctl is-active netdata
-      register: _netdata_check
-      changed_when: false
-      failed_when: false
-      retries: 10
-      delay: 3
-      until: _netdata_check.stdout | trim == 'active'
-
-    - name: Report netdata status
-      ansible.builtin.debug:
-        msg: >-
-          Netdata on {{ inventory_hostname }}: {{ _netdata_check.stdout | trim }},
-          streaming=disabled (local dashboard only)
-
 - name: Provision Home Assistant LXC
   hosts: service_nodes
   gather_facts: false
@@ -241,13 +209,6 @@
     - role: deploy_stamp
       vars:
         deploy_stamp_play: homeassistant_lxc
-
-- name: Configure Home Assistant
-  hosts: service_nodes
-  gather_facts: false
-  tags: [homeassistant]
-  roles:
-    - homeassistant_configure
 
 - name: Provision Jellyfin LXC
   hosts: media_nodes
@@ -259,13 +220,6 @@
       vars:
         deploy_stamp_play: jellyfin_lxc
 
-- name: Configure Jellyfin
-  hosts: media_nodes
-  gather_facts: false
-  tags: [media]
-  roles:
-    - jellyfin_configure
-
 - name: Provision Kodi LXC
   hosts: media_nodes
   gather_facts: false
@@ -275,13 +229,6 @@
     - role: deploy_stamp
       vars:
         deploy_stamp_play: kodi_lxc
-
-- name: Configure Kodi
-  hosts: media_nodes
-  gather_facts: false
-  tags: [media]
-  roles:
-    - kodi_configure
 
 - name: Provision Moonlight LXC
   hosts: streaming_nodes
@@ -293,13 +240,6 @@
       vars:
         deploy_stamp_play: moonlight_lxc
 
-- name: Configure Moonlight
-  hosts: streaming_nodes
-  gather_facts: false
-  tags: [moonlight]
-  roles:
-    - moonlight_configure
-
 - name: Provision WireGuard LXC
   hosts: vpn_nodes
   gather_facts: false
@@ -310,14 +250,6 @@
       vars:
         deploy_stamp_play: wireguard_lxc
 
-- name: Configure WireGuard
-  hosts: wireguard
-  gather_facts: false
-  serial: 2
-  tags: [wireguard]
-  roles:
-    - wireguard_configure
-
 - name: Provision OpenWrt Mesh LXC
   hosts: wifi_nodes:!router_nodes
   gather_facts: false
@@ -327,13 +259,6 @@
     - role: deploy_stamp
       vars:
         deploy_stamp_play: openwrt_mesh_lxc
-
-- name: Configure OpenWrt Mesh
-  hosts: openwrt_mesh
-  gather_facts: false
-  tags: [mesh-wifi]
-  roles:
-    - openwrt_mesh_configure
 
 - name: Provision WiFi Bridge LXC
   hosts: bridge_nodes
@@ -346,14 +271,6 @@
       vars:
         deploy_stamp_play: openwrt_bridge_lxc
 
-- name: Configure WiFi Bridge
-  hosts: openwrt_bridge
-  gather_facts: false
-  tags: [bridge]
-  max_fail_percentage: 100
-  roles:
-    - openwrt_bridge_configure
-
 - name: Provision Desktop VM
   hosts: desktop_nodes
   gather_facts: false
@@ -363,13 +280,6 @@
     - role: deploy_stamp
       vars:
         deploy_stamp_play: desktop_vm
-
-- name: Configure Desktop
-  hosts: desktop
-  gather_facts: true
-  tags: [desktop]
-  roles:
-    - desktop_configure
 
 - name: Provision Gaming LXC
   hosts: gaming_nodes
@@ -381,6 +291,137 @@
       vars:
         deploy_stamp_play: gaming_lxc
 
+# ── Phase 3b: Fleet readiness gate ────────────────────────────────
+# All containers have been created and started. Wait for them to
+# report ready via the callhome API before running configure plays.
+# This replaces per-service sequential waiting with a single
+# aggregate check, allowing containers to boot in parallel.
+
+- name: Fleet readiness gate (pre-configure)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [pihole, monitoring, homeassistant, media, moonlight, wireguard, kiosk, gaming]
+  tasks:
+    - name: Query fleet readiness from API
+      ansible.builtin.uri:
+        url: >-
+          {{ callhome_server }}/api/fleet/ready?services={{
+            ['pihole', 'rsyslog', 'netdata', 'wireguard',
+             'homeassistant', 'jellyfin', 'kodi', 'moonlight',
+             'kiosk', 'gaming'] | join(',')
+          }}
+        return_content: true
+      register: _pre_configure_ready
+      retries: 24
+      delay: 5
+      until: (_pre_configure_ready.json.all_ready | default(false)) | bool
+      failed_when: false
+      when: callhome_server | default('') | length > 0
+
+    - name: Report fleet readiness
+      ansible.builtin.debug:
+        msg: >-
+          Pre-configure fleet gate:
+          {{ 'ALL READY — proceeding to configure phase'
+             if (_pre_configure_ready.json.all_ready | default(false)) | bool
+             else 'Some services not ready — configures will use SSH fallback' }}
+
+    - name: Report stale services
+      ansible.builtin.debug:
+        msg: >-
+          Not ready: {{
+            _pre_configure_ready.json.services | dict2items
+            | selectattr('value.ready', 'equalto', false)
+            | map(attribute='key') | list | join(', ')
+          }}
+      when:
+        - _pre_configure_ready.json is defined
+        - not (_pre_configure_ready.json.all_ready | default(false)) | bool
+
+# ── Phase 3c: Service configuration ──────────────────────────────
+# All containers confirmed ready (or best-effort). Configure plays
+# apply host-specific settings to each service.
+
+- name: Configure Pi-hole
+  hosts: pihole
+  gather_facts: false
+  tags: [pihole]
+  roles:
+    - pihole_configure
+
+- name: Configure rsyslog
+  hosts: rsyslog
+  gather_facts: false
+  tags: [monitoring]
+  roles:
+    - rsyslog_configure
+
+- name: Configure Netdata
+  hosts: monitoring_nodes
+  gather_facts: false
+  tags: [monitoring]
+  roles:
+    - netdata_configure
+
+- name: Configure Home Assistant
+  hosts: service_nodes
+  gather_facts: false
+  tags: [homeassistant]
+  roles:
+    - homeassistant_configure
+
+- name: Configure Jellyfin
+  hosts: media_nodes
+  gather_facts: false
+  tags: [media]
+  roles:
+    - jellyfin_configure
+
+- name: Configure Kodi
+  hosts: media_nodes
+  gather_facts: false
+  tags: [media]
+  roles:
+    - kodi_configure
+
+- name: Configure Moonlight
+  hosts: streaming_nodes
+  gather_facts: false
+  tags: [moonlight]
+  roles:
+    - moonlight_configure
+
+- name: Configure WireGuard
+  hosts: wireguard
+  gather_facts: false
+  serial: 2
+  tags: [wireguard]
+  roles:
+    - wireguard_configure
+
+- name: Configure OpenWrt Mesh
+  hosts: openwrt_mesh
+  gather_facts: false
+  tags: [mesh-wifi]
+  roles:
+    - openwrt_mesh_configure
+
+- name: Configure WiFi Bridge
+  hosts: openwrt_bridge
+  gather_facts: false
+  tags: [bridge]
+  max_fail_percentage: 100
+  roles:
+    - openwrt_bridge_configure
+
+- name: Configure Desktop
+  hosts: desktop
+  gather_facts: true
+  tags: [desktop]
+  roles:
+    - desktop_configure
+
 - name: Configure Gaming LXC
   hosts: gaming_nodes
   gather_facts: false
@@ -388,12 +429,42 @@
   roles:
     - gaming_lxc_configure
 
+# ── Heartbeat circuit breaker (post-configure) ──────────────────
+# All configure plays have run. Verify that every container that was
+# healthy at the Phase 3b gate is still heartbeating. If any
+# previously-healthy service has gone stale, abort immediately.
+
+- name: Heartbeat circuit breaker (post-configure)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [pihole, monitoring, homeassistant, media, moonlight, wireguard, kiosk, gaming, mesh-wifi, bridge]
+  tasks:
+    - name: Run heartbeat staleness check
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/fleet_heartbeat_gate.yml"
+      vars:
+        gate_services:
+          - pihole
+          - rsyslog
+          - netdata
+          - wireguard
+          - homeassistant
+          - jellyfin
+          - kodi
+          - moonlight
+          - kiosk
+          - gaming
+          - openwrt-mesh
+          - openwrt-bridge
+        gate_max_age_seconds: 180
+      when: callhome_server | default('') | length > 0
+
 # ── Configure callhome agents on all LXC containers ──────────────
 
 - name: Configure callhome on LXC containers
   hosts: proxmox
   gather_facts: false
-  tags: [kiosk, pihole, monitoring, homeassistant, media, moonlight, wireguard, gaming]
+  tags: [kiosk, pihole, monitoring, homeassistant, media, moonlight, wireguard, gaming, mesh-wifi, bridge]
   tasks:
     - name: Write callhome config to each running container
       ansible.builtin.shell:
@@ -402,15 +473,14 @@
           CALLHOME_SERVER="{{ callhome_server }}"
           CALLHOME_KEY="{{ callhome_public_key }}"
           for ctid in $(pct list 2>/dev/null | awk 'NR>1 && $2=="running" {print $1}'); do
+            # Debian containers (Python callhome agent + systemd)
             pct exec "$ctid" -- bash -c "
               [ -d /opt/callhome ] || exit 0
               cat > /etc/default/callhome << EOF
           CALLHOME_SERVER=$CALLHOME_SERVER
           CALLHOME_PUBLIC_KEY=$CALLHOME_KEY
           EOF
-              # Config file reporting for containers with known JSON configs
               [ -f /opt/kiosk/config.json ] && echo 'CALLHOME_CONFIG_FILES=/opt/kiosk/config.json' >> /etc/default/callhome
-              # HTTP probe URLs for services with web UIs (self-check liveness)
               PROBES=''
               [ -x /usr/bin/jellyfin ] && PROBES='http://127.0.0.1:8096'
               [ -f /usr/share/netdata/web/index.html ] && PROBES='http://127.0.0.1:19999'
@@ -419,6 +489,18 @@
               command -v docker >/dev/null 2>&1 && [ -f /etc/homeassistant/docker-compose.yml ] && PROBES='http://127.0.0.1:8123'
               [ -n \"\$PROBES\" ] && echo \"CALLHOME_HTTP_PROBES=\$PROBES\" >> /etc/default/callhome
               systemctl restart callhome.service 2>/dev/null || true
+            " 2>/dev/null || true
+            # OpenWrt containers (shell callhome agent + cron)
+            pct exec "$ctid" -- sh -c "
+              [ -x /usr/sbin/callhome.sh ] || exit 0
+              [ -d /opt/callhome ] && exit 0
+              CT_HOSTNAME=\$(hostname 2>/dev/null || echo unknown)
+              cat > /etc/default/callhome << EOF
+          CALLHOME_SERVER=$CALLHOME_SERVER
+          CALLHOME_PUBLIC_KEY=$CALLHOME_KEY
+          CALLHOME_CONTAINER=\$CT_HOSTNAME
+          EOF
+              /etc/init.d/cron restart 2>/dev/null || true
             " 2>/dev/null || true
           done
         executable: /bin/bash

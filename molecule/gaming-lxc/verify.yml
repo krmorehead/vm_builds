@@ -1,7 +1,29 @@
 ---
+- name: Container readiness gate
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Query gaming readiness from API
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}/api/container/gaming/ready"
+        return_content: true
+      register: _container_api
+      failed_when: false
+
+    - name: Set API readiness fact
+      ansible.builtin.set_fact:
+        _container_api_ready: "{{ (_container_api.json.ready | default(false)) | bool }}"
+
+    - name: Report readiness path
+      ansible.builtin.debug:
+        msg: "{{ 'API ready — skipping SSH health checks' if (_container_api_ready | bool) else 'SSH fallback mode' }}"
+
 - name: Verify Gaming LXC container
   hosts: gaming_nodes
   gather_facts: false
+  vars:
+    _api_ready: "{{ hostvars['localhost']._container_api_ready | default(false) | bool }}"
   tasks:
     # ── Container existence and state ────────────────────────────
     - name: Check Gaming LXC container is running
@@ -109,11 +131,13 @@
       register: _sunshine_active
       changed_when: false
       failed_when: false
+      when: not (_api_ready | bool)
 
     - name: Assert Sunshine is running
       ansible.builtin.assert:
         that: _sunshine_active.stdout | trim == 'active'
         fail_msg: "Sunshine service is not active in Gaming LXC"
+      when: not (_api_ready | bool)
 
     # ── Game installation ────────────────────────────────────────
     - name: Check dsda-doom binary exists
@@ -122,11 +146,13 @@
       register: _dsdadoom_exists
       changed_when: false
       failed_when: false
+      when: not (_api_ready | bool)
 
     - name: Assert dsda-doom is installed
       ansible.builtin.assert:
         that: _dsdadoom_exists.rc == 0
         fail_msg: "dsda-doom is not installed in Gaming LXC"
+      when: not (_api_ready | bool)
 
     - name: Check Freedoom WADs exist
       ansible.builtin.command:
@@ -134,11 +160,13 @@
       register: _freedoom_exists
       changed_when: false
       failed_when: false
+      when: not (_api_ready | bool)
 
     - name: Assert Freedoom WADs are installed
       ansible.builtin.assert:
         that: _freedoom_exists.rc == 0 and _freedoom_exists.stdout | trim | length > 0
         fail_msg: "Freedoom WADs not found in Gaming LXC"
+      when: not (_api_ready | bool)
 
     # ── Sunshine API health ───────────────────────────────────────
     - name: Get Gaming container IP
@@ -149,6 +177,7 @@
         executable: /bin/bash
       register: _gaming_ip
       changed_when: false
+      when: not (_api_ready | bool)
 
     - name: Check Sunshine web UI is responding
       ansible.builtin.command:
@@ -161,6 +190,7 @@
       retries: 6
       delay: 5
       until: _sunshine_api.rc == 0
+      when: not (_api_ready | bool)
 
     - name: Assert Sunshine web UI returns valid HTTP response
       ansible.builtin.assert:
@@ -169,6 +199,7 @@
           Sunshine web UI returned invalid response at
           https://{{ _gaming_ip.stdout | trim }}:47990
           (http={{ _sunshine_api.stdout | default('none') }})
+      when: not (_api_ready | bool)
 
     # ── Deploy stamp ─────────────────────────────────────────────
     - name: Check deploy_stamp exists

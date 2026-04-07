@@ -79,8 +79,11 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
+from urllib.request import urlopen, Request
+from urllib.error import URLError
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 VENV_DIR = PROJECT_ROOT / ".venv"
@@ -329,6 +332,85 @@ def build_command(
     return cmd
 
 
+class FleetProgressMonitor:
+    """Background thread that polls fleet health and prints live status."""
+
+    _INTERVAL = 10
+    _ANSI_CLEAR_LINE = "\033[2K"
+    _ANSI_UP = "\033[A"
+    _STATUS_ICONS = {"online": "+", "stale": "?", "offline": "-", "unknown": " "}
+
+    def __init__(self, api_url: str) -> None:
+        self._api_url = api_url.rstrip("/")
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._known_containers: set[str] = set()
+        self._last_line_count = 0
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
+
+    def _fetch_json(self, path: str) -> dict | list | None:
+        try:
+            with urlopen(f"{self._api_url}{path}", timeout=3) as resp:
+                return json.loads(resp.read())
+        except (URLError, OSError, json.JSONDecodeError):
+            return None
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._poll_once()
+            self._stop.wait(self._INTERVAL)
+
+    def _poll_once(self) -> None:
+        health = self._fetch_json("/api/fleet/health")
+        nodes = self._fetch_json("/api/nodes")
+        if health is None or nodes is None:
+            return
+
+        lines: list[str] = []
+        lines.append(
+            f"  Fleet: {health.get('online_nodes', 0)} online, "
+            f"{health.get('stale_nodes', 0)} stale, "
+            f"{health.get('offline_nodes', 0)} offline  "
+            f"(score: {health.get('health_score', 0):.0f}%)"
+        )
+
+        for node in sorted(nodes, key=lambda n: n.get("hostname", "")):
+            ch = node.get("container_health")
+            if not ch:
+                continue
+            cid = ch.get("container_id", node.get("hostname", "?"))
+            ready = ch.get("ready", False)
+            status = node.get("status", "unknown")
+            icon = self._STATUS_ICONS.get(status, " ")
+
+            is_new = cid not in self._known_containers
+            self._known_containers.add(cid)
+
+            marker = " NEW" if is_new else ""
+            ready_str = "ready" if ready else "starting"
+            lines.append(f"  [{icon}] {cid:<20s} {ready_str:<10s} {status}{marker}")
+
+        if self._last_line_count > 0:
+            sys.stderr.write(self._ANSI_UP * self._last_line_count)
+
+        for line in lines:
+            sys.stderr.write(f"{self._ANSI_CLEAR_LINE}{line}\n")
+
+        if self._last_line_count > len(lines):
+            for _ in range(self._last_line_count - len(lines)):
+                sys.stderr.write(f"{self._ANSI_CLEAR_LINE}\n")
+            sys.stderr.write(self._ANSI_UP * (self._last_line_count - len(lines)))
+
+        self._last_line_count = len(lines)
+        sys.stderr.flush()
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse arguments, validate environment, and run the playbook.
 
@@ -492,9 +574,38 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print("WARNING: Continuing without API server", file=sys.stderr)
 
-    print()
+    fleet_monitor: FleetProgressMonitor | None = None
+    if api_proc and not args.no_api:
+        fleet_monitor = FleetProgressMonitor(callhome_url)
+        fleet_monitor.start()
+        print("Fleet monitor:  active (live status on stderr)\n")
+        try:
+            req = Request(
+                f"{callhome_url}/api/timeline/start", method="POST",
+            )
+            urlopen(req, timeout=5)
+        except Exception:
+            pass
+    else:
+        print()
 
     result = subprocess.run(cmd, env={**os.environ, **env})
+
+    if fleet_monitor:
+        fleet_monitor.stop()
+        try:
+            req = Request(
+                f"{callhome_url}/api/timeline/stop", method="POST",
+            )
+            resp = urlopen(req, timeout=5)
+            tl_data = json.loads(resp.read())
+            svc_count = tl_data.get("services", 0)
+            duration = tl_data.get("duration", 0)
+            if svc_count > 0:
+                print(f"\nTimeline: {svc_count} services tracked over {duration:.0f}s")
+        except Exception:
+            pass
+        print()
 
     stop_api_server(api_proc)
     return result.returncode

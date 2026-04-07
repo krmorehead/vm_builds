@@ -2335,6 +2335,50 @@ cloud-init clean --logs
 echo "==> Desktop image build complete."
 INSTALL_EOF
 
+    # Inject callhome Python agent into the VM (same agent as Debian LXC containers)
+    local callhome_src="${SCRIPT_DIR}/callhome.py"
+    if [[ -f "$callhome_src" ]]; then
+        log "Injecting callhome agent into Desktop VM..."
+        # shellcheck disable=SC2086
+        scp $SSH_OPTS "$callhome_src" "root@${PROXMOX_HOST}:/tmp/callhome.py"
+        remote_cmd "scp -o StrictHostKeyChecking=no /tmp/callhome.py root@${vm_ip}:/tmp/callhome.py"
+        remote_cmd "rm -f /tmp/callhome.py"
+        remote_cmd "ssh -o StrictHostKeyChecking=no root@${vm_ip} bash -s" << 'CALLHOME_EOF'
+set -euo pipefail
+mkdir -p /opt/callhome
+mv /tmp/callhome.py /opt/callhome/callhome.py
+chmod +x /opt/callhome/callhome.py
+
+cat > /etc/default/callhome << "CONF_EOF"
+# Populated by Ansible configure role at deploy time
+CALLHOME_SERVER=
+CALLHOME_PUBLIC_KEY=
+CONF_EOF
+
+cat > /etc/systemd/system/callhome.service << "UNIT_EOF"
+[Unit]
+Description=Call-home heartbeat agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/callhome/callhome.py --container --interval 60 --interval-startup 5
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+UNIT_EOF
+
+systemctl enable callhome.service 2>/dev/null || true
+echo "Callhome agent installed."
+CALLHOME_EOF
+        log "Callhome agent injected into Desktop VM."
+    else
+        log "WARNING: callhome.py not found at ${callhome_src}, skipping agent injection"
+    fi
+
     # Shutdown VM (use SSH shutdown since guest agent may not be started yet)
     log "Shutting down build VM..."
     remote_cmd "ssh -o StrictHostKeyChecking=no root@${vm_ip} 'shutdown -h now' 2>/dev/null || qm stop ${vmid}"

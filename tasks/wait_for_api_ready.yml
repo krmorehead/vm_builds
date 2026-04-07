@@ -1,0 +1,66 @@
+---
+# Reusable task file: wait for a container to report ready via the
+# callhome API.  Falls back to pct exec health check when the API
+# server is not available.
+#
+# Required variables:
+#   wait_container_id   — container hostname used by the callhome agent
+#   wait_ct_vmid        — numeric Proxmox VMID for pct exec fallback
+#
+# Optional variables:
+#   wait_retries        — max retry count (default: 12)
+#   wait_delay          — seconds between retries (default: 5)
+#
+# Exports:
+#   _wait_api_ready     — true when the API confirmed readiness
+
+- name: Query container readiness via API
+  ansible.builtin.uri:
+    url: "{{ callhome_server }}/api/container/{{ wait_container_id }}/ready"
+    return_content: true
+  register: _wait_api_result
+  delegate_to: localhost
+  retries: "{{ wait_retries | default(12) }}"
+  delay: "{{ wait_delay | default(5) }}"
+  until: (_wait_api_result.json.ready | default(false)) | bool
+  failed_when: false
+  when: callhome_server | default('') | length > 0
+
+- name: Set API readiness fact
+  ansible.builtin.set_fact:
+    _wait_api_ready: "{{ (_wait_api_result.json.ready | default(false)) | bool }}"
+  when: callhome_server | default('') | length > 0
+
+- name: Set API readiness fact (no API server)
+  ansible.builtin.set_fact:
+    _wait_api_ready: false
+  when: callhome_server | default('') | length == 0
+
+- name: Wait for container to be ready (pct exec fallback)
+  ansible.builtin.command:
+    cmd: "pct exec {{ wait_ct_vmid }} -- ls /"
+  register: _wait_pct_ready
+  retries: "{{ wait_retries | default(12) }}"
+  delay: "{{ wait_delay | default(5) }}"
+  until: _wait_pct_ready.rc == 0
+  changed_when: false
+  when: not (_wait_api_ready | bool)
+
+- name: Wait for container networking (pct exec fallback)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct exec {{ wait_ct_vmid }} -- ip -o -4 addr show eth0 2>/dev/null | grep -c "inet "
+    executable: /bin/bash
+  register: _wait_pct_net
+  retries: 15
+  delay: 3
+  until: (_wait_pct_net.stdout | default('0') | trim | int) > 0
+  changed_when: false
+  when: not (_wait_api_ready | bool)
+
+- name: Report readiness path
+  ansible.builtin.debug:
+    msg: >-
+      Container {{ wait_container_id }} (VMID {{ wait_ct_vmid }}):
+      {{ 'ready via API' if (_wait_api_ready | bool) else 'ready via pct exec fallback' }}

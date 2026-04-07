@@ -458,56 +458,76 @@ site.yml (current — phased for multi-node)
 │   ├── Play 5:  lan_hosts           [lan-satellite]  proxmox_backup, deploy_stamp
 │   └── Play 6:  lan_hosts           [lan-satellite]  pre_tasks: NTP clock sync; proxmox_bridges, proxmox_pci_passthrough, proxmox_igpu, deploy_stamp
 │
-├── Phase 3: Services (flavor groups span primary + LAN hosts)
+├── Phase 3a: Service provisioning (containers start and boot in parallel)
 │   ├── Play 7:  dns_nodes           [pihole]        pihole_lxc, deploy_stamp
-│   ├── Play 8:  pihole              [pihole]        pihole_configure
-│   ├── Play 9:  monitoring_nodes    [monitoring]    rsyslog_lxc, deploy_stamp
-│   ├── Play 10: rsyslog             [monitoring]    rsyslog_configure
-│   ├── Play 11: monitoring_nodes    [monitoring]    netdata_lxc, deploy_stamp
-│   ├── Play 12: netdata             [monitoring]    netdata_configure
-│   ├── Play 13: service_nodes       [homeassistant] homeassistant_lxc, deploy_stamp
-│   ├── Play 14: service_nodes       [homeassistant] homeassistant_configure
-│   ├── Play 15: media_nodes         [media]         jellyfin_lxc, deploy_stamp
-│   ├── Play 16: media_nodes         [media]         jellyfin_configure
-│   ├── Play 17: media_nodes         [media]         kodi_lxc, deploy_stamp
-│   ├── Play 18: media_nodes         [media]         kodi_configure
-│   ├── Play 19: streaming_nodes     [moonlight]     moonlight_lxc, deploy_stamp
-│   ├── Play 20: streaming_nodes     [moonlight]     moonlight_configure
-│   ├── Play 21: vpn_nodes           [wireguard]     wireguard_lxc, deploy_stamp
-│   ├── Play 22: wireguard           [wireguard]     wireguard_configure
-│   ├── Play 23: wifi_nodes:!router_nodes [mesh-wifi] openwrt_mesh_lxc, deploy_stamp
-│   ├── Play 24: openwrt_mesh        [mesh-wifi]     openwrt_mesh_configure
-│   ├── Play 25: bridge_nodes        [bridge]        openwrt_bridge_lxc, deploy_stamp
-│   ├── Play 26: openwrt_bridge      [bridge]        openwrt_bridge_configure
-│   ├── Play 27: desktop_nodes       [desktop]       desktop_vm, deploy_stamp
-│   └── Play 28: desktop             [desktop]       desktop_configure
+│   ├── Play 8:  monitoring_nodes    [monitoring]    rsyslog_lxc, deploy_stamp
+│   ├── Play 9:  monitoring_nodes    [monitoring]    netdata_lxc, deploy_stamp
+│   ├── Play 10: service_nodes       [homeassistant] homeassistant_lxc, deploy_stamp
+│   ├── Play 11: media_nodes         [media]         jellyfin_lxc, deploy_stamp
+│   ├── Play 12: media_nodes         [media]         kodi_lxc, deploy_stamp
+│   ├── Play 13: streaming_nodes     [moonlight]     moonlight_lxc, deploy_stamp
+│   ├── Play 14: vpn_nodes           [wireguard]     wireguard_lxc, deploy_stamp
+│   ├── Play 15: wifi_nodes:!router_nodes [mesh-wifi] openwrt_mesh_lxc, deploy_stamp
+│   ├── Play 16: bridge_nodes        [bridge]        openwrt_bridge_lxc, deploy_stamp
+│   ├── Play 17: desktop_nodes       [desktop]       desktop_vm, deploy_stamp
+│   ├── Play 18: desktop_nodes       [kiosk]         kiosk_lxc, deploy_stamp
+│   └── Play 19: proxmox             [callhome-config] Configure callhome on all running containers
+│
+├── Phase 3b: Fleet readiness gate
+│   └── Play 20: localhost            [multi-tag]     Query /api/fleet/ready for all services
+│       Waits for callhome heartbeats to confirm all containers are ready.
+│       Soft gate: proceeds even if some services time out.
+│
+├── Phase 3c: Service configuration
+│   ├── Play 21: pihole              [pihole]        pihole_configure
+│   ├── Play 22: rsyslog             [monitoring]    rsyslog_configure
+│   ├── Play 23: monitoring_nodes    [monitoring]    netdata_configure
+│   ├── Play 24: service_nodes       [homeassistant] homeassistant_configure
+│   ├── Play 25: media_nodes         [media]         jellyfin_configure
+│   ├── Play 26: media_nodes         [media]         kodi_configure
+│   ├── Play 27: streaming_nodes     [moonlight]     moonlight_configure
+│   ├── Play 28: wireguard           [wireguard]     wireguard_configure
+│   ├── Play 29: openwrt_mesh        [mesh-wifi]     openwrt_mesh_configure
+│   ├── Play 30: openwrt_bridge      [bridge]        openwrt_bridge_configure
+│   ├── Play 31: desktop             [desktop]       desktop_configure
+│   └── Play 32: desktop_nodes       [kiosk]         kiosk_configure
+│
+├── Phase 3d: Heartbeat circuit breaker (post-configure)
+│   └── Play 33: localhost            [multi-tag]     Query /api/fleet/stale
+│       Hard-fails if any container that was healthy at the readiness gate
+│       has since stopped heartbeating. Catches host crashes, container
+│       deaths, and network partitions before proceeding.
 │
 ├── Per-feature plays (opt-in via --tags <name>, tagged with [never]):
-│   ├── Play 29: gaming_nodes        [gaming]        gaming_lxc, deploy_stamp
-│   ├── Play 30: gaming_nodes        [gaming]        gaming_lxc_configure
-│   ├── Play 31: openwrt             [openwrt-security]   include_role: openwrt_configure/security.yml
-│   ├── Play 32: router_nodes        [openwrt-security]   deploy_stamp (openwrt_security)
-│   ├── Play 33: openwrt             [openwrt-vlans]      include_role: openwrt_configure/vlans.yml
-│   ├── Play 34: router_nodes        [openwrt-vlans]      deploy_stamp (openwrt_vlans)
-│   ├── Play 35: openwrt             [openwrt-dns]        include_role: openwrt_configure/dns.yml
-│   ├── Play 36: router_nodes        [openwrt-dns]        deploy_stamp (openwrt_dns)
-│   ├── Play 37: openwrt             [openwrt-mesh]       include_role: openwrt_configure/mesh.yml
-│   ├── Play 38: router_nodes        [openwrt-mesh]       deploy_stamp (openwrt_mesh)
-│   ├── Play 39: router_nodes        [openwrt-syslog]     reconstruct openwrt group
-│   ├── Play 40: openwrt             [openwrt-syslog]     include_role: openwrt_configure/syslog.yml
-│   ├── Play 41: router_nodes        [openwrt-syslog]     deploy_stamp (openwrt_syslog)
-│   ├── Play 42: router_nodes        [openwrt-pihole-dns] reconstruct openwrt group
-│   ├── Play 43: openwrt             [openwrt-pihole-dns] include_role: openwrt_configure/pihole_dns.yml
-│   └── Play 44: router_nodes        [openwrt-pihole-dns] deploy_stamp (openwrt_pihole_dns)
+│   ├── gaming_nodes        [gaming]        gaming_lxc, deploy_stamp
+│   ├── gaming_nodes        [gaming]        gaming_lxc_configure
+│   ├── openwrt             [openwrt-security]   include_role: openwrt_configure/security.yml
+│   ├── router_nodes        [openwrt-security]   deploy_stamp (openwrt_security)
+│   ├── openwrt             [openwrt-vlans]      include_role: openwrt_configure/vlans.yml
+│   ├── router_nodes        [openwrt-vlans]      deploy_stamp (openwrt_vlans)
+│   ├── openwrt             [openwrt-dns]        include_role: openwrt_configure/dns.yml
+│   ├── router_nodes        [openwrt-dns]        deploy_stamp (openwrt_dns)
+│   ├── openwrt             [openwrt-mesh]       include_role: openwrt_configure/mesh.yml
+│   ├── router_nodes        [openwrt-mesh]       deploy_stamp (openwrt_mesh)
+│   ├── router_nodes        [openwrt-syslog]     reconstruct openwrt group
+│   ├── openwrt             [openwrt-syslog]     include_role: openwrt_configure/syslog.yml
+│   ├── router_nodes        [openwrt-syslog]     deploy_stamp (openwrt_syslog)
+│   ├── router_nodes        [openwrt-pihole-dns] reconstruct openwrt group
+│   ├── openwrt             [openwrt-pihole-dns] include_role: openwrt_configure/pihole_dns.yml
+│   └── router_nodes        [openwrt-pihole-dns] deploy_stamp (openwrt_pihole_dns)
 │
-└── Play 45: proxmox:!lan_hosts      [cleanup]    Remove bootstrap IP
+└── proxmox:!lan_hosts      [cleanup]    Remove bootstrap IP
 ```
 
 The phased approach ensures LAN hosts (behind the OpenWrt router) are only
-contacted after the router is provisioned and the LAN bridge exists. Service
-plays in Phase 3 use flavor groups that span all hosts (e.g., `vpn_nodes`
-includes `home`, `mesh1`, `ai`, and `mesh2`), so Ansible runs tasks on all
-4 hosts in parallel within each play.
+contacted after the router is provisioned and the LAN bridge exists. Phase 3
+uses an event-driven model: all containers are provisioned first (3a), then a
+fleet readiness gate (3b) waits for callhome heartbeats confirming each
+container is healthy before running configuration plays (3c). This allows
+containers to boot in parallel rather than waiting for each one sequentially,
+reducing total deployment time. Service plays use flavor groups that span all
+hosts (e.g., `vpn_nodes` includes `home`, `mesh1`, `ai`, and `mesh2`), so
+Ansible runs tasks on all 4 hosts in parallel within each play.
 
 Future integration plays (added by downstream projects when implemented):
 - `openwrt-monitoring` — added by monitoring project

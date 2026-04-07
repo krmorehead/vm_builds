@@ -1,0 +1,39 @@
+---
+# Circuit breaker: hard-fail if any previously-healthy container's
+# heartbeat has gone stale.  Distinguishes three states:
+#   - healthy: heartbeat within max_age — good
+#   - stale: was seen before but heartbeat expired — FAIL
+#   - never_seen: no record yet — still provisioning, OK
+#
+# Required variables:
+#   gate_services         — list of service names to check
+#
+# Optional variables:
+#   gate_max_age_seconds  — staleness threshold (default: 120)
+#
+# Must run on: localhost (queries the callhome API)
+
+- name: Check for stale heartbeats (circuit breaker)
+  ansible.builtin.uri:
+    url: >-
+      {{ callhome_server }}/api/fleet/stale?services={{
+        gate_services | join(',')
+      }}&max_age_seconds={{ gate_max_age_seconds | default(120) }}
+    return_content: true
+    status_code: [200, 409]
+  register: _stale_result
+  when: callhome_server | default('') | length > 0
+
+- name: "CIRCUIT BREAKER: fail on stale heartbeats"
+  ansible.builtin.fail:
+    msg: >-
+      HEARTBEAT CIRCUIT BREAKER TRIPPED — previously-healthy services
+      have stopped heartbeating. This means a container or its host
+      went down mid-run. Stale services:
+      {{ _stale_result.json.stale | map(attribute='service') | list | join(', ') }}
+      (last seen: {{ _stale_result.json.stale
+        | map(attribute='last_seen') | list | join(', ') }}).
+      Investigate immediately — do NOT continue with a degraded fleet.
+  when:
+    - callhome_server | default('') | length > 0
+    - _stale_result.json.has_stale | default(false) | bool

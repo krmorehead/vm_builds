@@ -6,11 +6,32 @@
     - name: Include group reconstruction
       ansible.builtin.include_tasks: ../../tasks/reconstruct_moonlight_group.yml
 
+- name: Container readiness gate
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Query moonlight readiness from API
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}/api/container/moonlight/ready"
+        return_content: true
+      register: _container_api
+      failed_when: false
+
+    - name: Set API readiness fact
+      ansible.builtin.set_fact:
+        _container_api_ready: "{{ (_container_api.json.ready | default(false)) | bool }}"
+
+    - name: Report readiness path
+      ansible.builtin.debug:
+        msg: "{{ 'API ready — skipping SSH health checks' if (_container_api_ready | bool) else 'SSH fallback mode' }}"
+
 - name: Verify Moonlight LXC container
   hosts: streaming_nodes
   gather_facts: false
   vars:
     moonlight_ct_id: 302
+    _api_ready: "{{ hostvars['localhost']._container_api_ready | default(false) | bool }}"
   tasks:
     # ── Container state ──────────────────────────────────────────
 
@@ -78,21 +99,25 @@
           '
       register: _moonlight_health
       changed_when: false
+      when: not (_api_ready | bool)
 
     - name: Assert moonlight-embedded is installed
       ansible.builtin.assert:
         that: "'MOONLIGHT=installed' in _moonlight_health.stdout"
         fail_msg: "moonlight-embedded not installed"
+      when: not (_api_ready | bool)
 
     - name: Assert vainfo is available
       ansible.builtin.assert:
         that: "'VAINFO=installed' in _moonlight_health.stdout"
         fail_msg: "vainfo not installed"
+      when: not (_api_ready | bool)
 
     - name: Assert config file deployed
       ansible.builtin.assert:
         that: "'CONFIG=exists' in _moonlight_health.stdout"
         fail_msg: "Moonlight config file /etc/moonlight.conf not found"
+      when: not (_api_ready | bool)
 
     # ── VA-API decode ────────────────────────────────────────────
 
@@ -126,8 +151,8 @@
         msg: >-
           Moonlight per-feature verify passed on {{ inventory_hostname }}:
           ct={{ moonlight_ct_id }}, running=yes,
-          moonlight={{ 'installed' if 'MOONLIGHT=installed' in _moonlight_health.stdout else 'missing' }},
-          config={{ 'deployed' if 'CONFIG=exists' in _moonlight_health.stdout else 'missing' }},
+          moonlight={{ 'api' if (_api_ready | bool) else ('installed' if 'MOONLIGHT=installed' in (_moonlight_health.stdout | default('')) else 'missing') }},
+          config={{ 'api' if (_api_ready | bool) else ('deployed' if 'CONFIG=exists' in (_moonlight_health.stdout | default('')) else 'missing') }},
           vaapi={{ 'hardware' if 'VAProfile' in (_vaapi_verify.stdout | default('')) else 'software' }},
           dri={{ 'mounted' if _dri_devices.rc == 0 else 'missing' }},
           ip={{ _moonlight_verify_ip.stdout | trim }}

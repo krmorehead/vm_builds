@@ -58,7 +58,19 @@
 
 # ── Post-restart health check ────────────────────────────────────
 
-- name: Wait for netdata to be active after config change
+- name: Wait for netdata readiness via API
+  ansible.builtin.uri:
+    url: "{{ callhome_server }}/api/container/netdata/ready"
+    return_content: true
+  register: _netdata_api_check
+  delegate_to: localhost
+  retries: 10
+  delay: 3
+  until: (_netdata_api_check.json.ready | default(false)) | bool
+  failed_when: false
+  when: callhome_server | default('') | length > 0
+
+- name: Wait for netdata to be active after config change (SSH fallback)
   ansible.builtin.command:
     cmd: systemctl is-active netdata
   register: _netdata_status
@@ -66,9 +78,11 @@
   retries: 10
   delay: 3
   until: _netdata_status.stdout | trim == 'active'
+  when: callhome_server | default('') | length == 0 or not (_netdata_api_check.json.ready | default(false)) | bool
 
 - name: Report netdata status
   ansible.builtin.debug:
     msg: >-
-      Netdata service: {{ _netdata_status.stdout | trim }},
+      Netdata service: {{ 'ready (via API)' if (_netdata_api_check.json.ready | default(false)) | bool
+        else (_netdata_status.stdout | default('unknown') | trim) }},
       streaming={{ 'enabled to ' + netdata_parent_ip if netdata_parent_ip | length > 0 else 'disabled (local dashboard only)' }}

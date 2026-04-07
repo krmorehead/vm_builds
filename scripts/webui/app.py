@@ -23,7 +23,7 @@ from scripts.webui import data, manager
 from scripts.webui.data import PROJECT_ROOT
 from scripts.webui.pages import (
     bridge, containers, dashboard, deploy, environment, hosts, hub, images,
-    launch, mesh, nodes, router, services, viewer,
+    launch, mesh, nodes, router, services, timeline, viewer,
 )
 
 
@@ -93,6 +93,7 @@ def register_pages() -> None:
     mesh.register()
     router.register()
     launch.register()
+    timeline.register()
     viewer.register()
 
 
@@ -247,6 +248,27 @@ def register_api() -> None:
         result = data.check_fleet_readiness(state_dir, expected)
         return JSONResponse(result)
 
+    async def _api_fleet_stale(request: StarletteRequest) -> JSONResponse:
+        """Circuit breaker: detect services whose heartbeat went stale."""
+        services_param = request.query_params.get("services", "")
+        if not services_param:
+            return JSONResponse(
+                {"error": "Missing 'services' query parameter"},
+                status_code=400,
+            )
+        expected = [s.strip() for s in services_param.split(",") if s.strip()]
+        try:
+            max_age = int(request.query_params.get("max_age_seconds", "120"))
+        except (ValueError, TypeError):
+            return JSONResponse(
+                {"error": "max_age_seconds must be an integer"},
+                status_code=400,
+            )
+        state_dir = get_state_dir()
+        result = data.check_fleet_staleness(state_dir, expected, max_age)
+        status_code = 409 if result["has_stale"] else 200
+        return JSONResponse(result, status_code=status_code)
+
     async def _api_fleet_health(request: StarletteRequest) -> JSONResponse:
         state_dir = get_state_dir()
         nodes_list = data.load_node_registry(state_dir)
@@ -273,14 +295,85 @@ def register_api() -> None:
         result = data.check_container_ready(state_dir, container_id)
         return JSONResponse(result)
 
+    async def _api_events(request: StarletteRequest):
+        """SSE stream of fleet events (check-ins, readiness transitions)."""
+        from starlette.responses import StreamingResponse
+
+        queue = data.event_bus.subscribe()
+
+        async def _event_generator():
+            try:
+                while True:
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                        yield f"event: {event.get('type', 'message')}\ndata: {_json.dumps(event)}\n\n"
+                    except asyncio.TimeoutError:
+                        yield ": keepalive\n\n"
+            except asyncio.CancelledError:
+                pass
+            finally:
+                data.event_bus.unsubscribe(queue)
+
+        return StreamingResponse(
+            _event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    async def _api_timeline_start(request: StarletteRequest) -> JSONResponse:
+        tl = data.start_timeline()
+        return JSONResponse({"status": "started", "start_time": tl.start_time})
+
+    async def _api_timeline_stop(request: StarletteRequest) -> JSONResponse:
+        state_dir = get_state_dir()
+        tl = data.stop_timeline()
+        if tl:
+            data.save_timeline(state_dir, tl)
+            return JSONResponse({
+                "status": "stopped",
+                "duration": tl.duration,
+                "services": len(tl.services),
+            })
+        return JSONResponse({"status": "no_active_timeline"})
+
+    async def _api_timeline_current(request: StarletteRequest) -> JSONResponse:
+        tl = data.get_active_timeline()
+        if not tl:
+            return JSONResponse({"active": False})
+        import time as _time
+        services = {}
+        for sid, svc in tl.services.items():
+            entry: dict = {"service_id": sid}
+            if svc.first_checkin is not None:
+                entry["checkin_offset"] = round(svc.first_checkin - tl.start_time, 2)
+            if svc.ready_at is not None:
+                entry["ready_offset"] = round(svc.ready_at - tl.start_time, 2)
+            services[sid] = entry
+        return JSONResponse({
+            "active": True,
+            "elapsed": round(_time.monotonic() - tl.start_time, 2),
+            "services": services,
+        })
+
+    import asyncio as _asyncio  # noqa: E402 — used by SSE endpoint
+
     app.routes.insert(0, Route("/api/checkin", _api_checkin, methods=["POST"]))
     app.routes.insert(0, Route("/api/nodes", _api_nodes, methods=["GET"]))
     app.routes.insert(0, Route("/api/fleet/ready", _api_fleet_ready, methods=["GET"]))
+    app.routes.insert(0, Route("/api/fleet/stale", _api_fleet_stale, methods=["GET"]))
     app.routes.insert(0, Route("/api/fleet/health", _api_fleet_health, methods=["GET"]))
     app.routes.insert(0, Route(
         "/api/container/{container_id}/ready",
         _api_container_ready, methods=["GET"],
     ))
+    app.routes.insert(0, Route("/api/events", _api_events, methods=["GET"]))
+    app.routes.insert(0, Route("/api/timeline/start", _api_timeline_start, methods=["POST"]))
+    app.routes.insert(0, Route("/api/timeline/stop", _api_timeline_stop, methods=["POST"]))
+    app.routes.insert(0, Route("/api/timeline/current", _api_timeline_current, methods=["GET"]))
 
     manager.register_api(app)
 
