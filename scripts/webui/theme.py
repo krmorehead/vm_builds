@@ -205,7 +205,7 @@ def nav_sidebar(active: str = "") -> None:
         f"{BG_SIDEBAR_INNER} 100%); "
         f"border-right: 1px solid {ACCENT_DIM};"
     )
-    with ui.left_drawer(value=True).style(
+    with ui.left_drawer(value=True).props("breakpoint=0").style(
         f"{sidebar_bg} width: {SIDEBAR_WIDTH}"
     ):
         ui.label("vm_builds").classes("text-lg font-medium text-center py-4").style(

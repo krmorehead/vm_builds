@@ -264,3 +264,59 @@ class TestHubCardRouting:
         async with hub_ctx(tmp_path, urls=urls) as user:
             await user.open("/hub")
             await user.should_not_see("Not available")
+
+
+# ── Multi-host config differentiation ────────────────────────────────
+
+
+class TestHubMultiHostConfig:
+    """Verify that different host configs produce different tile states.
+
+    From manual testing Phase 4: swapping config.json between home
+    (Jellyfin/Pi-hole enabled) and ai (Gaming/WireGuard enabled)
+    correctly changes which tiles show active vs disabled badges.
+    """
+
+    async def test_home_enables_jellyfin_ai_disables(self, tmp_path):
+        """Jellyfin enabled on home, disabled on ai."""
+        home_urls = {"JELLYFIN_URL": "http://10.10.10.15:8096"}
+        async with hub_ctx(tmp_path, urls=home_urls) as user:
+            await user.open("/hub")
+            await user.should_see("Media Server")
+
+        ai_urls: dict[str, str] = {}
+        async with hub_ctx(tmp_path, urls=ai_urls) as user:
+            await user.open("/hub")
+            await user.should_not_see("Media Server")
+
+    async def test_ai_enables_gaming_home_disables(self, tmp_path):
+        """Gaming enabled on ai, disabled on home."""
+        ai_urls = {"GAMING_URL": "https://10.10.10.18:47990"}
+        async with hub_ctx(tmp_path, urls=ai_urls) as user:
+            await user.open("/hub")
+            await user.should_see("Game Server")
+
+        home_urls: dict[str, str] = {}
+        async with hub_ctx(tmp_path, urls=home_urls) as user:
+            await user.open("/hub")
+            await user.should_not_see("Game Server")
+
+    async def test_wireguard_toggle_between_hosts(self, tmp_path):
+        """WireGuard shows different badges based on URL config."""
+        ai_urls = {"WIREGUARD_URL": "http://10.10.10.5:51821"}
+        async with hub_ctx(tmp_path, urls=ai_urls) as user:
+            await user.open("/hub")
+            await user.should_see("WireGuard")
+
+        home_urls: dict[str, str] = {}
+        async with hub_ctx(tmp_path, urls=home_urls) as user:
+            await user.open("/hub")
+            await user.should_see("Not available")
+
+    async def test_netdata_enabled_on_both(self, tmp_path):
+        """Netdata enabled on both home and ai (different IPs, same result)."""
+        for netdata_ip in ["10.10.10.21", "10.10.10.22"]:
+            urls = {"NETDATA_URL": f"http://{netdata_ip}:19999"}
+            async with hub_ctx(tmp_path, urls=urls) as user:
+                await user.open("/hub")
+                await user.should_see("Metrics")

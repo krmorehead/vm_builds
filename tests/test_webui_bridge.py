@@ -417,3 +417,61 @@ class TestKioskNavigationFlows:
                 )
                 await user.should_see(label)
                 await user.should_see(f"Launch {label}")
+
+
+# ── Launch state transition tests ────────────────────────────────────
+
+
+class TestLaunchStateTransitions:
+    """Verify launch page button behavior (from manual testing Phase 3c)."""
+
+    async def test_launch_button_present_when_vmid_set(self, tmp_path):
+        async with launch_ctx(tmp_path) as user:
+            await user.open("/launch?vmid=302&title=Moonlight&url_key=MOONLIGHT_URL")
+            await user.should_see("Launch Moonlight")
+
+    async def test_launch_button_absent_when_no_vmid(self, tmp_path):
+        """Without VMID, no launch button should appear."""
+        async with launch_ctx(tmp_path) as user:
+            await user.open("/launch")
+            await user.should_not_see("Launch")
+
+    async def test_unknown_url_key_uses_fallback_icon(self, tmp_path):
+        """Unknown url_key should still render with a fallback rocket icon."""
+        async with launch_ctx(tmp_path) as user:
+            await user.open("/launch?vmid=999&title=Unknown&url_key=NONEXISTENT")
+            await user.should_see("Unknown")
+            await user.should_see("Launch Unknown")
+
+    async def test_launch_page_url_decodes_title(self, tmp_path):
+        """URL-encoded titles should render decoded."""
+        async with launch_ctx(tmp_path) as user:
+            await user.open("/launch?vmid=400&title=Desktop%20VM&url_key=DESKTOP_URL")
+            await user.should_see("Desktop VM")
+            await user.should_see("Launch Desktop VM")
+
+
+# ── Viewer bar structure tests ───────────────────────────────────────
+
+
+class TestViewerBarStructure:
+    """Verify viewer page bar elements (from manual testing Phase 3d)."""
+
+    async def test_viewer_with_url_has_open_button(self, tmp_path):
+        """When URL is set, 'open in new' button should be present."""
+        async with viewer_ctx(tmp_path) as user:
+            await user.open("/view?url=http://example.com&title=Test")
+            await user.should_see("Test")
+
+    async def test_viewer_without_url_no_open_button(self, tmp_path):
+        """When no URL, the 'open in new' button should NOT be present."""
+        async with viewer_ctx(tmp_path) as user:
+            await user.open("/view")
+            await user.should_see("No URL configured")
+            await user.should_see("Back to Hub")
+
+    async def test_viewer_preserves_special_chars_in_title(self, tmp_path):
+        """Titles with special characters should render safely."""
+        async with viewer_ctx(tmp_path) as user:
+            await user.open("/view?url=http://example.com&title=Pi-hole%20Admin")
+            await user.should_see("Pi-hole Admin")

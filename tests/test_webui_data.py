@@ -2167,3 +2167,18 @@ class TestThemeConstants:
         assert ".action-btn" in theme.GLOBAL_STYLES
         assert ".outline-btn" in theme.GLOBAL_STYLES
         assert ".subtle-btn" in theme.GLOBAL_STYLES
+
+
+class TestThemeSidebarBreakpoint:
+    """Verify the left drawer breakpoint fix (Finding 1 from manual testing).
+
+    The breakpoint=0 prop forces the sidebar to always push content
+    instead of overlaying it on smaller viewports.
+    """
+
+    def test_nav_sidebar_source_has_breakpoint_zero(self):
+        """nav_sidebar() must set breakpoint=0 on the left_drawer."""
+        import inspect
+        from scripts.webui import theme
+        source = inspect.getsource(theme.nav_sidebar)
+        assert 'breakpoint=0' in source or "breakpoint=0" in source
