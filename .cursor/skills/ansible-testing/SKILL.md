@@ -825,6 +825,20 @@ verify. Apply these rules to avoid wasting time:
 - Previous savings: batching eliminated ~43 individual SSH calls in the
   default verify, saving ~60-80 seconds across 4 hosts.
 
+### Verify phase: fleet API as primary, SSH as fallback
+- For container liveness checks (service running, health status), use the
+  fleet readiness API (`/api/fleet/ready`, `/api/container/{id}/ready`) as
+  the primary path. Fall back to batched `pct exec` only when the API is
+  unavailable.
+- The `_fleet_api_ready` fact gates the dual path: when True, `uri` calls
+  to the API; when False, `pct exec` SSH fallback.
+- New services added to verify MUST follow this dual-path pattern. See the
+  `manager-api-pattern` skill for the full pattern.
+- Batched `pct exec` (above) is the optimization for the **fallback path**
+  and for configure-phase tasks. It is NOT the primary verify approach.
+- SSH-only operations (hypervisor config, L3 integration, QEMU GA, OpenWrt
+  deep checks) remain unchanged — the fleet API does not replace these.
+
 ### Verify phase: merge plays with same hosts target
 - When two verify plays target the same `hosts:` group with the same
   `gather_facts:` setting, merge them into one play. Each play has startup

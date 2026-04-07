@@ -44,11 +44,15 @@ fi
 declare -A HOST_MAC=(
     [home]="8c:16:45:d1:87:a6"
     [mesh2]="00:23:24:5b:83:76"
+    [bridge-1]="6c:4b:90:96:7d:1b"
+    [bridge-2]="6c:4b:90:96:80:2a"
 )
 
 declare -A HOST_IP=(
     [home]="192.168.86.201"
     [mesh2]="192.168.86.211"
+    [bridge-1]="192.168.86.230"
+    [bridge-2]="192.168.86.231"
 )
 
 # LAN hosts need WoL sent from the primary host, not the controller.

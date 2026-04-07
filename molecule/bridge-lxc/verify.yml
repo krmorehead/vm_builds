@@ -1,0 +1,171 @@
+---
+- name: Verify WiFi Bridge LXC
+  hosts: bridge_nodes
+  gather_facts: false
+  tasks:
+    # ── Container status ──────────────────────────────────────────
+    - name: Check bridge container is running
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct status {{ bridge_ct_id }} | grep -c running
+        executable: /bin/bash
+      register: _bridge_running
+      changed_when: false
+      failed_when: (_bridge_running.stdout | trim | int) == 0
+
+    - name: Get bridge container config
+      ansible.builtin.command:
+        cmd: pct config {{ bridge_ct_id }}
+      register: _bridge_config
+      changed_when: false
+
+    - name: Assert container memory
+      ansible.builtin.assert:
+        that: "'memory: 512' in _bridge_config.stdout"
+        fail_msg: "Bridge container memory not 512MB"
+
+    - name: Assert container cores
+      ansible.builtin.assert:
+        that: "'cores: 2' in _bridge_config.stdout"
+        fail_msg: "Bridge container cores not 2"
+
+    - name: Assert container onboot
+      ansible.builtin.assert:
+        that: "'onboot: 1' in _bridge_config.stdout"
+        fail_msg: "Bridge container onboot not enabled"
+
+    # ── Hookscript deployed ───────────────────────────────────────
+    - name: Check hookscript exists
+      ansible.builtin.stat:
+        path: "/var/lib/vz/snippets/bridge-wifi-phy-{{ bridge_ct_id }}.sh"
+      register: _hookscript_stat
+
+    - name: Assert hookscript deployed
+      ansible.builtin.assert:
+        that: _hookscript_stat.stat.exists
+        fail_msg: "Bridge WiFi PHY hookscript not deployed"
+
+    # ── WiFi PHY inside container ─────────────────────────────────
+    - name: Check WiFi PHY inside container
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ bridge_ct_id }} -- iw phy 2>/dev/null | grep -c '^Wiphy '
+        executable: /bin/bash
+      register: _ct_phy_count
+      changed_when: false
+      failed_when: (_ct_phy_count.stdout | trim | int) == 0
+
+    # ── WiFi setup script and mode ────────────────────────────────
+    - name: Check wifi_setup.sh and mode via status
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ bridge_ct_id }} -- /bin/sh -c '
+          echo "WIFI_SETUP=$(test -x /usr/sbin/wifi_setup.sh && echo yes || echo no)";
+          /usr/sbin/wifi_setup.sh status 2>/dev/null
+          '
+      register: _wifi_status
+      changed_when: false
+
+    - name: Assert wifi_setup.sh is available
+      ansible.builtin.assert:
+        that: "'WIFI_SETUP=yes' in _wifi_status.stdout"
+        fail_msg: "wifi_setup.sh not found in bridge container — must be baked into image"
+
+    - name: Assert WiFi mode matches host wifi_role
+      ansible.builtin.assert:
+        that:
+          - _wifi_status.stdout | regex_search('MODE=' + wifi_role) is not none
+        fail_msg: >-
+          WiFi mode mismatch: expected {{ wifi_role }},
+          got {{ _wifi_status.stdout | regex_search('MODE=(.+)', '\1') | default(['unknown']) | first }}
+
+    # ── WiFi interface active (AP or STA) ─────────────────────────
+    - name: Check WiFi interface exists
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ bridge_ct_id }} -- iw dev 2>/dev/null \
+            | grep -cE 'type (AP|managed)'
+        executable: /bin/bash
+      register: _wifi_iface
+      changed_when: false
+      failed_when: (_wifi_iface.stdout | trim | int) == 0
+
+    - name: Check SSID is bridge-dedicated
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ bridge_ct_id }} -- uci get wireless.wds0.ssid 2>/dev/null
+        executable: /bin/bash
+      register: _ssid_check
+      changed_when: false
+      failed_when: "'bridge-dedicated' not in _ssid_check.stdout"
+
+    # ── br-lan bridge members ─────────────────────────────────────
+    - name: Check br-lan has eth0
+      ansible.builtin.shell:
+        cmd: |
+          pct exec {{ bridge_ct_id }} -- brctl show br-lan 2>/dev/null \
+            | grep -c eth0
+        executable: /bin/bash
+      register: _brlan_eth0
+      changed_when: false
+      failed_when: (_brlan_eth0.stdout | trim | int) == 0
+
+    # ── STP enabled ───────────────────────────────────────────────
+    - name: Check STP enabled on br-lan
+      ansible.builtin.shell:
+        cmd: |
+          pct exec {{ bridge_ct_id }} -- \
+            uci get network.lan.stp 2>/dev/null
+        executable: /bin/bash
+      register: _stp_check
+      changed_when: false
+      failed_when: "'1' not in _stp_check.stdout"
+
+    # ── Batman-adv tooling (dormant, but must be present) ──────────
+    - name: Check batman-adv tooling in container
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ bridge_ct_id }} -- /bin/sh -c '
+          echo "BATCTL=$(command -v batctl >/dev/null 2>&1 && echo yes || echo no)";
+          echo "TRIGGER=$(test -x /usr/sbin/batman_trigger.sh && echo yes || echo no)";
+          echo "KEY=$(test -f /etc/batman_key && echo yes || echo no)";
+          echo "BAT_STATUS=$(/usr/sbin/batman_trigger.sh status 2>/dev/null | head -1)"
+          '
+      register: _batman_check
+      changed_when: false
+
+    - name: Assert batctl is available
+      ansible.builtin.assert:
+        that: "'BATCTL=yes' in _batman_check.stdout"
+        fail_msg: "batctl not found in bridge container — image may be missing kmod-batman-adv"
+
+    - name: Assert batman_trigger.sh is executable
+      ansible.builtin.assert:
+        that: "'TRIGGER=yes' in _batman_check.stdout"
+        fail_msg: "batman_trigger.sh not found or not executable in bridge container"
+
+    - name: Assert batman HMAC key is deployed
+      ansible.builtin.assert:
+        that: "'KEY=yes' in _batman_check.stdout"
+        fail_msg: "HMAC key (/etc/batman_key) not deployed — MESH_KEY may not be set"
+      when: lookup('env', 'MESH_KEY') | length > 0
+
+    - name: Assert batman is inactive by default
+      ansible.builtin.assert:
+        that: "'BAT_STATUS=BATMAN=inactive' in _batman_check.stdout"
+        fail_msg: "batman-adv should be inactive by default, got: {{ _batman_check.stdout }}"
+
+    # ── Report ────────────────────────────────────────────────────
+    - name: Report bridge status
+      ansible.builtin.debug:
+        msg: >-
+          Bridge container on {{ inventory_hostname }}:
+          WiFi role={{ wifi_role | default('unknown') }},
+          mode={{ _wifi_status.stdout | regex_search('MODE=(.+)', '\1') | default(['unknown']) | first }},
+          PHYs={{ _ct_phy_count.stdout | trim }},
+          WiFi ifaces={{ _wifi_iface.stdout | trim }},
+          batman=dormant

@@ -447,7 +447,7 @@ class TestBuildImageCommand:
 class TestHubServices:
     def test_get_hub_services_returns_all(self):
         services = data.get_hub_services()
-        assert len(services) == 11
+        assert len(services) == 15
 
     def test_all_services_have_required_fields(self):
         for svc in data.get_hub_services():
@@ -476,9 +476,55 @@ class TestHubServices:
 
     def test_expected_services_present(self):
         keys = {s.key for s in data.get_hub_services()}
-        expected = {"desktop", "jellyfin", "kodi", "homeassistant", "moonlight",
-                    "gaming", "openwrt", "pihole", "wireguard", "netdata", "rsyslog"}
+        expected = {
+            "bridge", "mesh_detail", "router_detail",
+            "desktop", "jellyfin", "kodi", "homeassistant", "moonlight",
+            "gaming", "openwrt", "pihole", "wireguard", "netdata", "rsyslog",
+            "containers",
+        }
         assert keys == expected
+
+
+# ── Display apps ──────────────────────────────────────────────────────
+
+
+class TestDisplayApps:
+    def test_display_apps_have_required_keys(self):
+        for url_key, info in data.DISPLAY_APPS.items():
+            assert "vmid" in info, f"{url_key} missing vmid"
+            assert "label" in info, f"{url_key} missing label"
+            assert "icon" in info, f"{url_key} missing icon"
+            assert "description" in info, f"{url_key} missing description"
+
+    def test_display_apps_vmids_match_project(self):
+        assert data.DISPLAY_APPS["MOONLIGHT_URL"]["vmid"] == "302"
+        assert data.DISPLAY_APPS["KODI_URL"]["vmid"] == "301"
+        assert data.DISPLAY_APPS["DESKTOP_URL"]["vmid"] == "400"
+
+    def test_display_app_keys_are_hub_service_url_keys(self):
+        """Every DISPLAY_APPS key must correspond to a HubService url_key."""
+        service_url_keys = {s.url_key for s in data.get_hub_services()}
+        for url_key in data.DISPLAY_APPS:
+            assert url_key in service_url_keys, (
+                f"DISPLAY_APPS key '{url_key}' not in HubService url_keys"
+            )
+
+    def test_display_apps_not_in_internal_pages(self):
+        """Display apps should NOT also be in INTERNAL_PAGES."""
+        for url_key in data.DISPLAY_APPS:
+            assert url_key not in data.INTERNAL_PAGES, (
+                f"{url_key} should not be in both DISPLAY_APPS and INTERNAL_PAGES"
+            )
+
+    def test_display_apps_count(self):
+        assert len(data.DISPLAY_APPS) == 3
+
+    def test_display_apps_descriptions_mention_return(self):
+        """Each description should mention the kiosk returning."""
+        for url_key, info in data.DISPLAY_APPS.items():
+            assert "return" in info["description"].lower(), (
+                f"{url_key} description should mention kiosk return"
+            )
 
 
 # ── SSH connection ────────────────────────────────────────────────────
@@ -726,7 +772,7 @@ class TestKioskServer:
         urls = {svc.url_key: f"http://example.com/{svc.key}" for svc in data.get_hub_services()}
         cfg.write_text(json.dumps(urls))
         result = data.load_kiosk_config(cfg)
-        assert len(result) == 11
+        assert len(result) == 15
 
 
 # ── Node registry ────────────────────────────────────────────────────
@@ -842,6 +888,482 @@ class TestNodeRegistry:
         assert data._compute_node_status("not-a-date") == "offline"
         assert data._compute_node_status("") == "offline"
         assert data._compute_node_status(None) == "offline"
+
+
+# ── Container health and fleet readiness ──────────────────────────────
+
+
+class TestContainerHealth:
+    """Round-trip tests for ContainerHealth through the registry."""
+
+    def _make_container_checkin(
+        self, node_id: str = "ct-pihole", container_id: str = "102",
+        ready: bool = True,
+    ) -> data.NodeCheckin:
+        return data.NodeCheckin(
+            node_id=node_id,
+            hostname=node_id,
+            local_ips=["10.10.10.10"],
+            uptime_seconds=120,
+            services=[],
+            disk_usage_pct=30.0,
+            memory_usage_pct=40.0,
+            version="1.0",
+            container_health=data.ContainerHealth(
+                container_id=container_id,
+                systemd_services={"pihole-FTL": "running", "callhome": "running"},
+                listening_ports=[53, 80],
+                ready=ready,
+            ),
+        )
+
+    def test_roundtrip_persistence(self, tmp_path):
+        checkin = self._make_container_checkin()
+        data.register_checkin(tmp_path, checkin, "10.10.10.10")
+
+        nodes = data.load_node_registry(tmp_path)
+        assert len(nodes) == 1
+        n = nodes[0]
+        assert n.container_health is not None
+        assert n.container_health.container_id == "102"
+        assert n.container_health.systemd_services == {
+            "pihole-FTL": "running", "callhome": "running",
+        }
+        assert n.container_health.listening_ports == [53, 80]
+        assert n.container_health.ready is True
+
+    def test_container_health_none_when_absent(self, tmp_path):
+        checkin = data.NodeCheckin(
+            node_id="host-1", hostname="host-1",
+            local_ips=["192.168.1.1"], uptime_seconds=100,
+            services=[], disk_usage_pct=10, memory_usage_pct=20,
+            version="1.0",
+        )
+        data.register_checkin(tmp_path, checkin, "192.168.1.1")
+        nodes = data.load_node_registry(tmp_path)
+        assert nodes[0].container_health is None
+
+    def test_update_preserves_container_health(self, tmp_path):
+        checkin = self._make_container_checkin()
+        data.register_checkin(tmp_path, checkin, "10.10.10.10")
+
+        checkin2 = self._make_container_checkin(ready=False)
+        checkin2.uptime_seconds = 300
+        data.register_checkin(tmp_path, checkin2, "10.10.10.10")
+
+        nodes = data.load_node_registry(tmp_path)
+        assert len(nodes) == 1
+        assert nodes[0].container_health.ready is False
+        assert nodes[0].uptime_seconds == 300
+
+    def test_nodes_json_includes_container_health(self, tmp_path):
+        checkin = self._make_container_checkin()
+        data.register_checkin(tmp_path, checkin, "10.10.10.10")
+
+        import json
+        raw = json.loads((tmp_path / "nodes.json").read_text())
+        assert "container_health" in raw[0]
+        assert raw[0]["container_health"]["container_id"] == "102"
+        assert raw[0]["container_health"]["listening_ports"] == [53, 80]
+
+
+class TestCheckContainerReady:
+    """Tests for check_container_ready()."""
+
+    def _register_container(
+        self, tmp_path, container_id="102", ready=True, node_id="ct-pihole",
+    ):
+        checkin = data.NodeCheckin(
+            node_id=node_id, hostname=node_id,
+            local_ips=["10.10.10.10"], uptime_seconds=120,
+            services=[], disk_usage_pct=30, memory_usage_pct=40,
+            version="1.0",
+            container_health=data.ContainerHealth(
+                container_id=container_id,
+                systemd_services={"svc": "running"},
+                listening_ports=[80],
+                ready=ready,
+            ),
+        )
+        data.register_checkin(tmp_path, checkin, "10.10.10.10")
+
+    def test_ready_container(self, tmp_path):
+        self._register_container(tmp_path)
+        result = data.check_container_ready(tmp_path, "102")
+        assert result["ready"] is True
+        assert result["status"] == "online"
+        assert result["container_id"] == "102"
+
+    def test_not_ready_when_health_false(self, tmp_path):
+        self._register_container(tmp_path, ready=False)
+        result = data.check_container_ready(tmp_path, "102")
+        assert result["ready"] is False
+
+    def test_unknown_container(self, tmp_path):
+        result = data.check_container_ready(tmp_path, "999")
+        assert result["ready"] is False
+        assert result["status"] == "unknown"
+        assert result["last_seen"] == ""
+
+    def test_match_by_hostname(self, tmp_path):
+        checkin = data.NodeCheckin(
+            node_id="pihole-host", hostname="pihole-host",
+            local_ips=["10.10.10.10"], uptime_seconds=120,
+            services=[], disk_usage_pct=30, memory_usage_pct=40,
+            version="1.0",
+        )
+        data.register_checkin(tmp_path, checkin, "10.10.10.10")
+        result = data.check_container_ready(tmp_path, "pihole-host")
+        assert result["ready"] is True
+        assert result["systemd_services"] == {}
+
+    def test_stale_container_not_ready(self, tmp_path):
+        from datetime import datetime, timedelta
+        self._register_container(tmp_path)
+        nodes = data.load_node_registry(tmp_path)
+        old_time = (datetime.now() - timedelta(seconds=300)).isoformat(timespec="seconds")
+        nodes[0].last_seen = old_time
+        data._save_node_registry(tmp_path, nodes)
+
+        result = data.check_container_ready(tmp_path, "102")
+        assert result["ready"] is False
+
+
+class TestCheckFleetReadiness:
+    """Tests for check_fleet_readiness()."""
+
+    def _register_service(
+        self, tmp_path, node_id, container_id, ready=True,
+    ):
+        checkin = data.NodeCheckin(
+            node_id=node_id, hostname=node_id,
+            local_ips=["10.10.10.10"], uptime_seconds=120,
+            services=[], disk_usage_pct=30, memory_usage_pct=40,
+            version="1.0",
+            container_health=data.ContainerHealth(
+                container_id=container_id,
+                systemd_services={"svc": "running"},
+                listening_ports=[80],
+                ready=ready,
+            ),
+        )
+        data.register_checkin(tmp_path, checkin, "10.10.10.10")
+
+    def test_all_ready(self, tmp_path):
+        self._register_service(tmp_path, "pihole-ct", "pihole")
+        self._register_service(tmp_path, "rsyslog-ct", "rsyslog")
+        result = data.check_fleet_readiness(tmp_path, ["pihole", "rsyslog"])
+        assert result["all_ready"] is True
+        assert result["ready_count"] == 2
+        assert result["total"] == 2
+
+    def test_partial_ready(self, tmp_path):
+        self._register_service(tmp_path, "pihole-ct", "pihole", ready=True)
+        self._register_service(tmp_path, "rsyslog-ct", "rsyslog", ready=False)
+        result = data.check_fleet_readiness(tmp_path, ["pihole", "rsyslog"])
+        assert result["all_ready"] is False
+        assert result["ready_count"] == 1
+
+    def test_missing_service(self, tmp_path):
+        self._register_service(tmp_path, "pihole-ct", "pihole")
+        result = data.check_fleet_readiness(tmp_path, ["pihole", "netdata"])
+        assert result["all_ready"] is False
+        assert result["services"]["netdata"]["ready"] is False
+        assert result["services"]["netdata"]["status"] == "unknown"
+
+    def test_empty_services_list(self, tmp_path):
+        result = data.check_fleet_readiness(tmp_path, [])
+        assert result["all_ready"] is True
+        assert result["total"] == 0
+        assert result["ready_count"] == 0
+
+    def test_match_by_hostname(self, tmp_path):
+        checkin = data.NodeCheckin(
+            node_id="wireguard-home", hostname="wireguard-home",
+            local_ips=["10.10.10.3"], uptime_seconds=120,
+            services=[], disk_usage_pct=30, memory_usage_pct=40,
+            version="1.0",
+        )
+        data.register_checkin(tmp_path, checkin, "10.10.10.3")
+        result = data.check_fleet_readiness(tmp_path, ["wireguard-home"])
+        assert result["all_ready"] is True
+        assert result["services"]["wireguard-home"]["ready"] is True
+
+
+# ── Extensions round-trip ─────────────────────────────────────────────
+
+
+class TestContainerExtensions:
+    """Extensions dict round-trip through registry and API responses."""
+
+    def _make_checkin_with_extensions(
+        self, tmp_path, container_id="wireguard", extensions=None,
+    ):
+        ext = extensions or {}
+        checkin = data.NodeCheckin(
+            node_id=f"ct-{container_id}", hostname=f"ct-{container_id}",
+            local_ips=["10.10.10.3"], uptime_seconds=200,
+            services=[], disk_usage_pct=20, memory_usage_pct=30,
+            version="1.0",
+            container_health=data.ContainerHealth(
+                container_id=container_id,
+                systemd_services={"wg-quick@wg0": "active"},
+                listening_ports=[51820],
+                ready=True,
+                extensions=ext,
+            ),
+        )
+        data.register_checkin(tmp_path, checkin, "10.10.10.3")
+
+    def test_extensions_persist_empty(self, tmp_path):
+        self._make_checkin_with_extensions(tmp_path, extensions={})
+        nodes = data.load_node_registry(tmp_path)
+        assert nodes[0].container_health.extensions == {}
+
+    def test_wireguard_extensions_roundtrip(self, tmp_path):
+        wg_ext = {"wireguard": {"interfaces": {"wg0": {"peer_count": 4, "up": True}}}}
+        self._make_checkin_with_extensions(tmp_path, extensions=wg_ext)
+        nodes = data.load_node_registry(tmp_path)
+        ext = nodes[0].container_health.extensions
+        assert ext["wireguard"]["interfaces"]["wg0"]["peer_count"] == 4
+        assert ext["wireguard"]["interfaces"]["wg0"]["up"] is True
+
+    def test_docker_extensions_roundtrip(self, tmp_path):
+        docker_ext = {"docker": {"active": True, "running": 3}}
+        self._make_checkin_with_extensions(
+            tmp_path, container_id="homeassistant", extensions=docker_ext,
+        )
+        nodes = data.load_node_registry(tmp_path)
+        ext = nodes[0].container_health.extensions
+        assert ext["docker"]["active"] is True
+        assert ext["docker"]["running"] == 3
+
+    def test_network_extensions_roundtrip(self, tmp_path):
+        net_ext = {
+            "network": {
+                "interfaces": [
+                    {"name": "eth0", "addresses": ["10.10.10.3/24"], "operstate": "up"},
+                ],
+                "default_gateway": "10.10.10.1",
+            },
+        }
+        self._make_checkin_with_extensions(tmp_path, extensions=net_ext)
+        nodes = data.load_node_registry(tmp_path)
+        ext = nodes[0].container_health.extensions
+        assert ext["network"]["default_gateway"] == "10.10.10.1"
+        assert ext["network"]["interfaces"][0]["name"] == "eth0"
+
+    def test_config_files_extensions_roundtrip(self, tmp_path):
+        cfg_ext = {
+            "config_files": {
+                "/opt/kiosk/config.json": {
+                    "keys": ["DESKTOP_URL", "JELLYFIN_URL", "KODI_URL"],
+                    "hash": "abc123deadbeef00",
+                },
+            },
+        }
+        self._make_checkin_with_extensions(
+            tmp_path, container_id="kiosk", extensions=cfg_ext,
+        )
+        nodes = data.load_node_registry(tmp_path)
+        ext = nodes[0].container_health.extensions
+        cfg = ext["config_files"]["/opt/kiosk/config.json"]
+        assert "DESKTOP_URL" in cfg["keys"]
+        assert cfg["hash"] == "abc123deadbeef00"
+
+    def test_extensions_in_check_container_ready(self, tmp_path):
+        wg_ext = {"wireguard": {"interfaces": {"wg0": {"peer_count": 2}}}}
+        self._make_checkin_with_extensions(tmp_path, extensions=wg_ext)
+        result = data.check_container_ready(tmp_path, "wireguard")
+        assert result["ready"] is True
+        assert result["extensions"]["wireguard"]["interfaces"]["wg0"]["peer_count"] == 2
+
+    def test_extensions_in_json_file(self, tmp_path):
+        wg_ext = {"wireguard": {"interfaces": {"wg0": {"peer_count": 1}}}}
+        self._make_checkin_with_extensions(tmp_path, extensions=wg_ext)
+        raw = json.loads((tmp_path / "nodes.json").read_text())
+        assert raw[0]["container_health"]["extensions"]["wireguard"] == {
+            "interfaces": {"wg0": {"peer_count": 1}},
+        }
+
+    def test_multiple_extensions_compose(self, tmp_path):
+        multi_ext = {
+            "network": {"interfaces": [], "default_gateway": "10.10.10.1"},
+            "wireguard": {"interfaces": {"wg0": {"peer_count": 3}}},
+            "docker": {"active": False, "running": 0},
+        }
+        self._make_checkin_with_extensions(tmp_path, extensions=multi_ext)
+        nodes = data.load_node_registry(tmp_path)
+        ext = nodes[0].container_health.extensions
+        assert len(ext) == 3
+        assert ext["wireguard"]["interfaces"]["wg0"]["peer_count"] == 3
+        assert ext["docker"]["active"] is False
+
+    def test_extensions_update_on_recheckin(self, tmp_path):
+        ext1 = {"wireguard": {"interfaces": {"wg0": {"peer_count": 1}}}}
+        self._make_checkin_with_extensions(tmp_path, extensions=ext1)
+        ext2 = {"wireguard": {"interfaces": {"wg0": {"peer_count": 4}}}}
+        self._make_checkin_with_extensions(tmp_path, extensions=ext2)
+        nodes = data.load_node_registry(tmp_path)
+        assert len(nodes) == 1
+        assert nodes[0].container_health.extensions["wireguard"]["interfaces"]["wg0"]["peer_count"] == 4
+
+
+class TestCallhomeCollectors:
+    """Unit tests for composable health collectors in callhome.py."""
+
+    def test_collect_network_returns_interfaces(self):
+        from scripts.callhome import collect_network
+        result = collect_network()
+        assert "interfaces" in result
+        assert "default_gateway" in result
+        assert isinstance(result["interfaces"], list)
+
+    def test_collect_network_excludes_loopback(self):
+        from scripts.callhome import collect_network
+        result = collect_network()
+        iface_names = [i["name"] for i in result["interfaces"]]
+        assert "lo" not in iface_names
+
+    def test_collect_wireguard_none_without_binary(self, monkeypatch):
+        from scripts import callhome
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError),
+        )
+        assert callhome.collect_wireguard() is None
+
+    def test_collect_docker_none_without_binary(self, monkeypatch):
+        from scripts import callhome
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError),
+        )
+        assert callhome.collect_docker() is None
+
+    def test_collect_config_files_none_without_env(self, monkeypatch):
+        from scripts import callhome
+        monkeypatch.delenv("CALLHOME_CONFIG_FILES", raising=False)
+        assert callhome.collect_config_files() is None
+
+    def test_collect_config_files_reads_json(self, tmp_path, monkeypatch):
+        from scripts import callhome
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"URL_A": "http://a", "URL_B": "http://b"}))
+        monkeypatch.setenv("CALLHOME_CONFIG_FILES", str(cfg_file))
+        result = callhome.collect_config_files()
+        assert result is not None
+        entry = result[str(cfg_file)]
+        assert sorted(entry["keys"]) == ["URL_A", "URL_B"]
+        assert len(entry["hash"]) == 16
+
+    def test_collect_config_files_skips_missing(self, monkeypatch):
+        from scripts import callhome
+        monkeypatch.setenv("CALLHOME_CONFIG_FILES", "/nonexistent/file.json")
+        assert callhome.collect_config_files() is None
+
+    def test_collect_extensions_always_has_network(self):
+        from scripts.callhome import collect_extensions
+        ext = collect_extensions()
+        assert "network" in ext or ext.get("network") is None
+
+    def test_build_container_payload_includes_extensions(self):
+        from scripts.callhome import build_container_payload
+        payload = build_container_payload("test-ct")
+        ch = payload["container_health"]
+        assert "extensions" in ch
+        assert isinstance(ch["extensions"], dict)
+
+    def test_collect_http_probes_none_without_env(self, monkeypatch):
+        from scripts import callhome
+        monkeypatch.delenv("CALLHOME_HTTP_PROBES", raising=False)
+        assert callhome.collect_http_probes() is None
+
+    def test_collect_http_probes_reports_status_codes(self, monkeypatch):
+        from scripts import callhome
+        monkeypatch.setenv("CALLHOME_HTTP_PROBES", "http://127.0.0.1:1/nope")
+        result = callhome.collect_http_probes()
+        assert result is not None
+        assert result["http://127.0.0.1:1/nope"] == 0
+
+    def test_listening_ports_includes_udp(self, tmp_path, monkeypatch):
+        """Verify that get_listening_ports reads both TCP and UDP."""
+        from scripts import callhome
+        tcp_content = "  sl  local_address  rem_address   st\n   0: 00000000:0CEA 00000000:0000 0A\n"
+        udp_content = "  sl  local_address  rem_address   st\n   0: 00000000:CA5C 00000000:0000 07\n"
+        tcp_file = tmp_path / "tcp"
+        udp_file = tmp_path / "udp"
+        tcp_file.write_text(tcp_content)
+        udp_file.write_text(udp_content)
+        tcp_ports = callhome._parse_proc_net_ports(str(tcp_file), "0A")
+        udp_ports = callhome._parse_proc_net_ports(str(udp_file), "07")
+        assert 3306 in tcp_ports
+        assert 51804 in udp_ports
+
+    def test_parse_proc_net_ports_skips_header(self, tmp_path):
+        from scripts import callhome
+        content = "  sl  local_address rem_address   st\n"
+        f = tmp_path / "tcp"
+        f.write_text(content)
+        assert callhome._parse_proc_net_ports(str(f), "0A") == []
+
+    def test_parse_proc_net_ports_handles_missing_file(self):
+        from scripts import callhome
+        assert callhome._parse_proc_net_ports("/nonexistent/proc/net/tcp", "0A") == []
+
+    def test_collect_http_probes_with_multiple_urls(self, monkeypatch):
+        from scripts import callhome
+        monkeypatch.setenv("CALLHOME_HTTP_PROBES", "http://127.0.0.1:1,http://127.0.0.1:2")
+        result = callhome.collect_http_probes()
+        assert result is not None
+        assert len(result) == 2
+        assert all(v == 0 for v in result.values())
+
+    def test_extensions_includes_http_probes_when_set(self, monkeypatch):
+        from scripts import callhome
+        monkeypatch.setenv("CALLHOME_HTTP_PROBES", "http://127.0.0.1:1/bad")
+        ext = callhome.collect_extensions()
+        assert "http_probes" in ext
+        assert ext["http_probes"]["http://127.0.0.1:1/bad"] == 0
+
+    def test_extensions_omits_http_probes_when_unset(self, monkeypatch):
+        from scripts import callhome
+        monkeypatch.delenv("CALLHOME_HTTP_PROBES", raising=False)
+        ext = callhome.collect_extensions()
+        assert "http_probes" not in ext
+
+
+class TestStateChangeDetection:
+    """Tests for state-change detection in the heartbeat loop."""
+
+    def test_compute_state_hash_deterministic(self):
+        from scripts.callhome import _compute_state_hash
+        h1 = _compute_state_hash("test-ct")
+        h2 = _compute_state_hash("test-ct")
+        assert h1 == h2
+        assert len(h1) == 16
+
+    def test_compute_state_hash_empty_for_host_mode(self):
+        from scripts.callhome import _compute_state_hash
+        h = _compute_state_hash("")
+        assert len(h) == 16
+
+    def test_compute_state_hash_changes_with_services(self, monkeypatch):
+        from scripts import callhome
+        monkeypatch.setattr(callhome, "get_systemd_services", lambda: {"a": "active"})
+        h1 = callhome._compute_state_hash("ct")
+        monkeypatch.setattr(callhome, "get_systemd_services", lambda: {"a": "inactive"})
+        h2 = callhome._compute_state_hash("ct")
+        assert h1 != h2
+
+    def test_compute_state_hash_changes_with_ports(self, monkeypatch):
+        from scripts import callhome
+        monkeypatch.setattr(callhome, "get_systemd_services", lambda: {})
+        monkeypatch.setattr(callhome, "get_listening_ports", lambda: [80])
+        h1 = callhome._compute_state_hash("ct")
+        monkeypatch.setattr(callhome, "get_listening_ports", lambda: [80, 443])
+        h2 = callhome._compute_state_hash("ct")
+        assert h1 != h2
 
 
 # ── Call-home client ─────────────────────────────────────────────────

@@ -1,4 +1,32 @@
 ---
+# ── Load WiFi kernel modules (unconditional, all hosts) ───────
+# Ensure WiFi drivers are loaded BEFORE scanning for interfaces.
+# Fresh hosts without prior vfio-pci bindings may have no WiFi
+# driver loaded, causing interface detection to find nothing.
+
+- name: Load common WiFi kernel modules
+  ansible.builtin.shell:
+    cmd: |
+      for mod in iwlwifi ath9k ath10k_pci mt76 mt7921e rtw88_pci rtw89_pci; do
+        modprobe "$mod" 2>/dev/null || true
+      done
+      sleep 2
+    executable: /bin/bash
+  changed_when: false
+
+# ── Detect WiFi PCI controllers ──────────────────────────────
+# Check for WiFi hardware via lspci before interface scan.
+# Used for firmware verification if interfaces don't appear.
+
+- name: Detect WiFi PCI controllers via lspci
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      lspci -nn 2>/dev/null | grep -i 'Network controller' || true
+    executable: /bin/bash
+  register: _wifi_pci_controllers
+  changed_when: false
+
 # ── Detect WiFi PCIe devices ──────────────────────────────────
 
 - name: Find network interfaces with wireless capability
@@ -12,6 +40,105 @@
   register: wifi_ifaces_raw
   changed_when: false
   failed_when: false
+
+# ── Early PHY check ──────────────────────────────────────────
+# If PHYs already exist, firmware is loaded — skip firmware install.
+
+- name: Count WiFi PHYs before firmware check
+  ansible.builtin.shell:
+    cmd: ls -1d /sys/class/ieee80211/phy* 2>/dev/null | wc -l
+  register: _early_phy_count
+  changed_when: false
+
+# ── Firmware verification and auto-install ────────────────────
+# If lspci shows a WiFi controller but no PHYs appeared,
+# firmware is likely missing. Install and reload for Intel WiFi.
+
+- name: Check if firmware-iwlwifi is installed
+  ansible.builtin.shell:
+    cmd: dpkg -l firmware-iwlwifi 2>/dev/null | grep -c '^ii' || echo 0
+  register: _fw_iwlwifi_installed
+  changed_when: false
+  when:
+    - (_early_phy_count.stdout | default('0') | trim | int) == 0
+    - (wifi_ifaces_raw.stdout_lines | default([])) | length == 0
+    - _wifi_pci_controllers.stdout is search('Intel')
+
+- name: Check DNS resolution before firmware install
+  ansible.builtin.command:
+    cmd: getent hosts deb.debian.org
+  register: _fw_dns_check
+  changed_when: false
+  failed_when: false
+  when:
+    - (_early_phy_count.stdout | default('0') | trim | int) == 0
+    - (wifi_ifaces_raw.stdout_lines | default([])) | length == 0
+    - _wifi_pci_controllers.stdout is search('Intel')
+    - (_fw_iwlwifi_installed.stdout | default('0') | trim | int) == 0
+
+- name: Fix DNS to use gateway if external DNS is unreachable
+  ansible.builtin.copy:
+    dest: /etc/resolv.conf
+    mode: "0644"
+    content: |
+      nameserver {{ ansible_default_ipv4.gateway | default('8.8.8.8') }}
+      nameserver 8.8.8.8
+      nameserver 1.1.1.1
+  when:
+    - (_early_phy_count.stdout | default('0') | trim | int) == 0
+    - (wifi_ifaces_raw.stdout_lines | default([])) | length == 0
+    - _wifi_pci_controllers.stdout is search('Intel')
+    - (_fw_iwlwifi_installed.stdout | default('0') | trim | int) == 0
+    - _fw_dns_check.rc | default(0) != 0
+
+- name: Install firmware-iwlwifi for Intel WiFi
+  ansible.builtin.apt:
+    name: firmware-iwlwifi
+    state: present
+    update_cache: true
+    cache_valid_time: 86400
+  when:
+    - (_early_phy_count.stdout | default('0') | trim | int) == 0
+    - (wifi_ifaces_raw.stdout_lines | default([])) | length == 0
+    - _wifi_pci_controllers.stdout is search('Intel')
+    - (_fw_iwlwifi_installed.stdout | default('0') | trim | int) == 0
+
+- name: Install iw tool for WiFi PHY management
+  ansible.builtin.apt:
+    name: iw
+    state: present
+    cache_valid_time: 86400
+  when:
+    - (_wifi_pci_controllers.stdout_lines | default([])) | length > 0
+
+- name: Reload iwlwifi module after firmware install
+  ansible.builtin.shell:
+    cmd: |
+      modprobe -r iwlmvm iwlwifi 2>/dev/null || true
+      modprobe iwlwifi 2>/dev/null || true
+      sleep 3
+    executable: /bin/bash
+  changed_when: true
+  when:
+    - (_early_phy_count.stdout | default('0') | trim | int) == 0
+    - (wifi_ifaces_raw.stdout_lines | default([])) | length == 0
+    - _wifi_pci_controllers.stdout is search('Intel')
+    - (_fw_iwlwifi_installed.stdout | default('0') | trim | int) == 0
+
+- name: Re-detect WiFi interfaces after firmware install
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      for iface in /sys/class/net/*/wireless; do
+        [ -e "$iface" ] && basename "$(dirname "$iface")"
+      done
+    executable: /bin/bash
+  register: wifi_ifaces_raw
+  changed_when: false
+  failed_when: false
+  when:
+    - (wifi_ifaces_raw.stdout_lines | default([])) | length == 0
+    - _wifi_pci_controllers.stdout is search('Intel')
 
 - name: Set WiFi interface list
   ansible.builtin.set_fact:
@@ -114,16 +241,6 @@
           for dev in /sys/bus/pci/drivers/vfio-pci/0000:*; do
             [ -e "$dev" ] && echo "$(basename $dev)" > /sys/bus/pci/drivers/vfio-pci/unbind 2>/dev/null || true
           done
-        executable: /bin/bash
-      changed_when: true
-
-    - name: Reload common WiFi kernel modules
-      ansible.builtin.shell:
-        cmd: |
-          for mod in iwlwifi ath9k ath10k_pci mt76 mt7921e rtw88_pci rtw89_pci; do
-            modprobe "$mod" 2>/dev/null || true
-          done
-          sleep 2
         executable: /bin/bash
       changed_when: true
 
@@ -382,9 +499,35 @@
     - wifi_pci_devices | length > 0
     - "'router_nodes' in group_names"
 
-# ── Export WiFi fact (all hosts) ──────────────────────────────
+# ── WiFi PHY verification ─────────────────────────────────────
+# Count PHY devices in /sys/class/ieee80211/ to confirm the
+# full WiFi stack is functional (driver + firmware + hardware).
+
+- name: Count WiFi PHY devices
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      ls /sys/class/ieee80211/ 2>/dev/null | grep -c '^phy' || echo 0
+    executable: /bin/bash
+  register: _wifi_phy_count_raw
+  changed_when: false
+
+- name: Fail if WiFi PCI device detected but no PHY created
+  ansible.builtin.fail:
+    msg: >-
+      WiFi PCI device found ({{ _wifi_pci_controllers.stdout | trim }})
+      but no PHY appeared in /sys/class/ieee80211/ on {{ inventory_hostname }}.
+      Check dmesg | grep iwlwifi for firmware load errors.
+      Install firmware: apt install firmware-iwlwifi
+  when:
+    - (_wifi_pci_controllers.stdout_lines | default([])) | length > 0
+    - (_wifi_phy_count_raw.stdout | default('0') | trim | int) == 0
+    - wifi_pci_devices | length > 0
+
+# ── Export WiFi facts (all hosts) ─────────────────────────────
 
 - name: Export WiFi PCI devices as cacheable fact
   ansible.builtin.set_fact:
     wifi_pci_devices: "{{ wifi_pci_devices }}"
+    wifi_phy_count: "{{ _wifi_phy_count_raw.stdout | default('0') | trim | int }}"
     cacheable: true

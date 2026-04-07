@@ -149,7 +149,7 @@ All configuration is done with `ansible.builtin.raw` since OpenWrt has no Python
 **Phase 2 (packages + final LAN IP):**
 
 7. Switches opkg feeds to HTTP (BusyBox `wget` lacks SSL), installs WiFi driver packages, loads kernel modules.
-8. If WiFi radios are detected: removes default `wpad`, installs `wpad-mesh-openssl`, configures 802.11s mesh interfaces with WPA3-SAE.
+8. If WiFi radios are detected: creates hidden WDS AP interfaces for mesh satellite backhaul with WPA3-SAE.
 9. Applies the auto-selected LAN IP and DHCP settings.
 10. Commits and does a final detached network restart.
 
@@ -164,8 +164,8 @@ All configuration is done with `ansible.builtin.raw` since OpenWrt has no Python
 | `openwrt_dhcp_start` | `100` | DHCP range start offset |
 | `openwrt_dhcp_limit` | `150` | DHCP pool size |
 | `openwrt_dhcp_leasetime` | `12h` | DHCP lease duration |
-| `openwrt_mesh_enabled` | `true` | Enable 802.11s mesh |
-| `openwrt_mesh_id` | `vm-builds-mesh` | Mesh network SSID |
+| `openwrt_mesh_enabled` | `true` | Enable WDS WiFi backhaul |
+| `openwrt_mesh_ssid` | `vm-builds-backhaul` | WDS backhaul SSID (hidden) |
 | `openwrt_mesh_key` | From `MESH_KEY` env | WPA3-SAE passphrase |
 | `openwrt_mesh_channel` | `auto` | WiFi channel |
 | `openwrt_mesh_encryption` | `sae` | Encryption method |

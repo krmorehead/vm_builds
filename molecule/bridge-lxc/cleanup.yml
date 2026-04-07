@@ -1,0 +1,50 @@
+---
+- name: Clean up WiFi Bridge containers
+  hosts: bridge_nodes
+  gather_facts: false
+  ignore_unreachable: true
+  tasks:
+    - name: Probe host connectivity
+      ansible.builtin.ping:
+      register: _host_probe
+
+    - name: End cleanup for unreachable hosts
+      ansible.builtin.meta: end_host
+      when: _host_probe.unreachable | default(false)
+
+    - name: Check if bridge container exists
+      ansible.builtin.command:
+        cmd: pct status {{ bridge_ct_id }}
+      register: _bridge_status
+      changed_when: false
+      failed_when: false
+
+    - name: Stop bridge container
+      ansible.builtin.command:
+        cmd: pct stop {{ bridge_ct_id }}
+      when:
+        - _bridge_status.rc == 0
+        - "'running' in (_bridge_status.stdout | default(''))"
+      changed_when: true
+      failed_when: false
+
+    - name: Destroy bridge container
+      ansible.builtin.command:
+        cmd: pct destroy {{ bridge_ct_id }} --purge
+      when: _bridge_status.rc == 0
+      changed_when: true
+      failed_when: false
+
+    - name: Remove bridge hookscript
+      ansible.builtin.file:
+        path: "/var/lib/vz/snippets/bridge-wifi-phy-{{ bridge_ct_id }}.sh"
+        state: absent
+
+    - name: Remove host-side manager wrapper scripts
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /usr/local/bin/wifi_setup.sh
+        - /usr/local/bin/batman_trigger.sh
+      failed_when: false

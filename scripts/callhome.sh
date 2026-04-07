@@ -30,8 +30,9 @@ if [ -z "$CURRENT_IP" ]; then
 fi
 [ -z "$CURRENT_IP" ] && exit 1
 
-# Compare against last sent IP — skip if unchanged
-if [ -f "$LAST_IP_FILE" ]; then
+# In container mode, always heartbeat (service state may have changed).
+# In host mode, skip if IP hasn't changed since last check-in.
+if [ -z "$CALLHOME_CONTAINER" ] && [ -f "$LAST_IP_FILE" ]; then
     LAST_IP=$(cat "$LAST_IP_FILE" 2>/dev/null)
     [ "$CURRENT_IP" = "$LAST_IP" ] && exit 0
 fi
@@ -53,7 +54,82 @@ else
     MEM_PCT=0
 fi
 
-PAYLOAD="{\"node_id\":\"$NODE_ID\",\"hostname\":\"$HOSTNAME\",\"local_ips\":[\"$CURRENT_IP\"],\"uptime_seconds\":$UPTIME,\"services\":[],\"disk_usage_pct\":$DISK_PCT,\"memory_usage_pct\":$MEM_PCT,\"version\":\"\"}"
+# Container mode: include init.d service health when CALLHOME_CONTAINER is set
+CONTAINER_HEALTH=""
+if [ -n "$CALLHOME_CONTAINER" ]; then
+    CONTAINER_ID="${CALLHOME_CONTAINER:-$HOSTNAME}"
+    SVC_JSON=""
+    if [ -d /etc/init.d ]; then
+        for svc in /etc/init.d/*; do
+            sname=$(basename "$svc")
+            case "$sname" in boot|rcS|rc.common) continue;; esac
+            if "$svc" enabled 2>/dev/null; then
+                if "$svc" running 2>/dev/null; then
+                    state="running"
+                else
+                    state="stopped"
+                fi
+                if [ -n "$SVC_JSON" ]; then SVC_JSON="$SVC_JSON,"; fi
+                SVC_JSON="$SVC_JSON\"$sname\":\"$state\""
+            fi
+        done
+    fi
+
+    # Collect listening TCP (state 0A) and UDP (state 07) ports
+    # Uses printf %d for hex conversion — portable across BusyBox/gawk
+    PORTS_JSON=""
+    _collect_ports() {
+        local file="$1" state="$2"
+        [ -f "$file" ] || return
+        awk -v st="$state" '$4==st{split($2,a,":");print a[2]}' "$file" 2>/dev/null
+    }
+    PORTS_RAW=$( { _collect_ports /proc/net/tcp 0A; _collect_ports /proc/net/udp 07; } \
+        | while read -r hex; do printf '%d\n' "0x$hex" 2>/dev/null; done \
+        | sort -un )
+    PORTS_JSON=$(echo "$PORTS_RAW" | awk 'NF{if(NR>1)printf ",";printf "%s",$0}')
+    unset -f _collect_ports
+
+    # Composable extensions: wifi radios, network interfaces
+    EXT_JSON=""
+    if [ -d /sys/class/ieee80211 ]; then
+        PHY_COUNT=0
+        for _p in /sys/class/ieee80211/phy*; do
+            [ -d "$_p" ] && PHY_COUNT=$((PHY_COUNT + 1))
+        done
+        if [ "$PHY_COUNT" -gt 0 ]; then
+            EXT_JSON="\"wifi\":{\"phy_count\":$PHY_COUNT}"
+        fi
+    fi
+
+    # Network interfaces (non-lo)
+    NET_JSON=""
+    for iface_path in /sys/class/net/*; do
+        iface=$(basename "$iface_path")
+        [ "$iface" = "lo" ] && continue
+        operstate="unknown"
+        [ -f "$iface_path/operstate" ] && operstate=$(cat "$iface_path/operstate" 2>/dev/null)
+        mac=""
+        [ -f "$iface_path/address" ] && mac=$(cat "$iface_path/address" 2>/dev/null)
+        addrs=$(ip -4 -o addr show "$iface" 2>/dev/null | awk '{print $4}' | head -1)
+        entry="{\"name\":\"$iface\",\"operstate\":\"$operstate\",\"mac\":\"$mac\""
+        [ -n "$addrs" ] && entry="$entry,\"addresses\":[\"$addrs\"]" || entry="$entry,\"addresses\":[]"
+        entry="$entry}"
+        [ -n "$NET_JSON" ] && NET_JSON="$NET_JSON,"
+        NET_JSON="$NET_JSON$entry"
+    done
+    if [ -n "$NET_JSON" ]; then
+        GW=$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}')
+        NET_EXT="\"network\":{\"interfaces\":[$NET_JSON],\"default_gateway\":\"${GW:-}\"}"
+        [ -n "$EXT_JSON" ] && EXT_JSON="$EXT_JSON,$NET_EXT" || EXT_JSON="$NET_EXT"
+    fi
+
+    EXT_BLOCK=""
+    [ -n "$EXT_JSON" ] && EXT_BLOCK=",\"extensions\":{$EXT_JSON}" || EXT_BLOCK=",\"extensions\":{}"
+
+    CONTAINER_HEALTH=",\"container_health\":{\"container_id\":\"$CONTAINER_ID\",\"systemd_services\":{$SVC_JSON},\"listening_ports\":[$PORTS_JSON],\"ready\":true$EXT_BLOCK}"
+fi
+
+PAYLOAD="{\"node_id\":\"$NODE_ID\",\"hostname\":\"$HOSTNAME\",\"local_ips\":[\"$CURRENT_IP\"],\"uptime_seconds\":$UPTIME,\"services\":[],\"disk_usage_pct\":$DISK_PCT,\"memory_usage_pct\":$MEM_PCT,\"version\":\"\"$CONTAINER_HEALTH}"
 
 URL="$CALLHOME_SERVER/api/checkin"
 OK=0

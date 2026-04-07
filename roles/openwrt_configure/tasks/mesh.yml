@@ -52,12 +52,15 @@
   when: _wifi_present | bool
   changed_when: true
 
-# ── Mesh peer monitoring ────────────────────────────────────────
+# ── WDS peer monitoring ─────────────────────────────────────────
 
-- name: Add mesh peer monitoring cron job
+- name: Add WDS peer monitoring cron job
   ansible.builtin.raw: |
-    if ! crontab -l 2>/dev/null | grep -q 'mesh_peer'; then
-      (crontab -l 2>/dev/null; echo '*/5 * * * * count=$(iw dev 2>/dev/null | grep -c "mesh point"); logger -t mesh_peer "peer_count=$count"') | crontab -
+    if ! crontab -l 2>/dev/null | grep -q 'wds_peer'; then
+      cmd='*/5 * * * * count=$(iw dev 2>/dev/null'
+      cmd="$cmd | grep -cE \"type (AP|managed)\");"
+      cmd="$cmd logger -t wds_peer \"iface_count=\$count\""
+      (crontab -l 2>/dev/null; echo "$cmd") | crontab -
     fi
   changed_when: true
   when: _wifi_present | bool

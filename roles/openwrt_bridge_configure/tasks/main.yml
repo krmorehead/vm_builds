@@ -1,0 +1,24 @@
+---
+# OpenWrt WiFi bridge configuration using WDS (AP/STA with 4addr).
+#
+# wifi_role is read from the parent Proxmox host's hostvars, not
+# forwarded via add_host. This avoids Ansible's add_host run-once
+# semantics that silently drop per-host variables on multi-host plays.
+#
+# wifi_role (set in host_vars of the Proxmox host):
+#   "ap"  — runs an AP interface with wds=1
+#   "sta" — connects as a WDS station (4addr mode)
+#
+# Delegates all WiFi setup to the shared configure_wifi_wds.yml
+# task file via wifi_setup.sh (baked into the image).
+
+- name: Configure WDS WiFi link
+  ansible.builtin.include_tasks: "{{ project_root }}/tasks/configure_wifi_wds.yml"
+  vars:
+    _wds_ssid: "{{ openwrt_bridge_ssid }}"
+    _wds_key: "{{ openwrt_bridge_key }}"
+    _wds_encryption: "{{ openwrt_bridge_encryption }}"
+    _wds_wifi_role: "{{ hostvars[inventory_hostname | regex_replace('^openwrt-bridge-', '')].wifi_role | default('ap') }}"
+    _wds_country: "{{ openwrt_bridge_country }}"
+    _wds_channel: "{{ openwrt_bridge_channel }}"
+    _wds_mesh_key: "{{ lookup('env', 'MESH_KEY') | default('', true) }}"

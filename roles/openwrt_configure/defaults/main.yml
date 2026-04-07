@@ -36,7 +36,7 @@ _netmask_cidr_map:
   "255.255.255.252": "30"
 
 openwrt_mesh_enabled: true
-openwrt_mesh_id: "vm-builds-mesh"
+openwrt_mesh_ssid: "vm-builds-backhaul"
 openwrt_mesh_key: "{{ lookup('env', 'MESH_KEY') | default('changeme', true) }}"
 openwrt_mesh_channel: auto
 openwrt_mesh_encryption: sae

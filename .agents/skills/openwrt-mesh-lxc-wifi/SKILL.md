@@ -7,10 +7,10 @@ description: OpenWrt Mesh LXC container WiFi PHY management and namespace handli
 
 ## Container Setup Requirements
 
-1. Mesh satellite nodes (`wifi_nodes:!router_nodes`) run OpenWrt in a **privileged LXC container** instead of a VM. This allows WiFi management via 802.11s mesh without requiring PCIe passthrough (IOMMU/VT-d).
+1. Mesh satellite nodes (`wifi_nodes:!router_nodes`) run OpenWrt in a **privileged LXC container** instead of a VM. This allows WiFi management via WDS AP/STA without requiring PCIe passthrough (IOMMU/VT-d).
 
 2. Key differences from VM pattern:
-   - No routing — mesh containers are NOT routers. They run 802.11s only
+   - No routing — mesh containers are NOT routers. They run WDS STA only
    - Uses OpenWrt rootfs tarball (`openwrt-*-rootfs.tar.gz`), not VM disk image
    - Must be privileged (`unprivileged: false`) for PHY namespace move
    - Must set `--ostype unmanaged` because Proxmox cannot auto-detect OpenWrt

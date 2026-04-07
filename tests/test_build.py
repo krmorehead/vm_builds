@@ -315,6 +315,24 @@ class TestInfrastructureHealth:
             "mesh2 supports WoL: ./scripts/wol.sh mesh2"
         )
 
+    def test_bridge1_host_reachable(self, env):
+        """bridge-1 (BRIDGE_1_HOST) must always be reachable."""
+        ip = env.get("BRIDGE_1_HOST", "")
+        assert ip, "BRIDGE_1_HOST not set in test.env"
+        assert build.probe_host(ip), (
+            f"bridge-1 ({ip}) is UNREACHABLE. Check power/network. "
+            "bridge-1 supports WoL: ./scripts/wol.sh bridge-1"
+        )
+
+    def test_bridge2_host_reachable(self, env):
+        """bridge-2 (BRIDGE_2_HOST) must always be reachable."""
+        ip = env.get("BRIDGE_2_HOST", "")
+        assert ip, "BRIDGE_2_HOST not set in test.env"
+        assert build.probe_host(ip), (
+            f"bridge-2 ({ip}) is UNREACHABLE. Check power/network. "
+            "bridge-2 supports WoL: ./scripts/wol.sh bridge-2"
+        )
+
     def test_resolve_returns_primary(self, env):
         """resolve_proxmox_host must return PRIMARY_HOST when it's up."""
         result = build.resolve_proxmox_host(env)
@@ -325,12 +343,17 @@ class TestInfrastructureHealth:
         )
 
     def test_state_file_valid_if_exists(self):
-        """If .state/addresses.json exists, it must contain valid data."""
+        """If .state/addresses.json exists, it must contain valid data.
+
+        The state file is created during successful Ansible runs. When it
+        doesn't exist, the test passes — that just means no run has
+        completed yet. When it does exist, validate the schema.
+        """
         import json
 
         state_file = build.STATE_DIR / "addresses.json"
         if not state_file.exists():
-            pytest.skip("No state file yet — first successful run creates it")
+            return
         data = json.loads(state_file.read_text())
         assert "ips" in data, "State file missing 'ips' key"
         assert isinstance(data["ips"], list), "'ips' must be a list"
@@ -499,6 +522,7 @@ class TestMain:
         monkeypatch.setattr(build, "PROJECT_ROOT", tmp_path)
         monkeypatch.setattr(build, "probe_host", lambda *a, **kw: True)
         monkeypatch.setattr(build, "find_ansible_playbook", lambda: "/usr/bin/ansible-playbook")
+        monkeypatch.setattr(build, "start_api_server", lambda *a, **kw: None)
         playbooks_dir = tmp_path / "playbooks"
         playbooks_dir.mkdir()
         (playbooks_dir / "site.yml").write_text("---\n")
@@ -519,3 +543,203 @@ class TestMain:
         assert build.main(["--env", ".env"]) == 0
         assert captured_cmd[0] == "/usr/bin/ansible-playbook"
         assert str(playbooks_dir / "site.yml") in captured_cmd[1]
+
+
+# ── API lifecycle ─────────────────────────────────────────────────────
+
+
+class TestGetControllerIp:
+    def test_returns_ip_string(self):
+        ip = build.get_controller_ip()
+        assert isinstance(ip, str)
+        assert len(ip) > 0
+
+    def test_fallback_on_error(self, monkeypatch):
+        def broken_socket(*a, **kw):
+            raise OSError("no route")
+
+        monkeypatch.setattr("socket.socket", broken_socket)
+        assert build.get_controller_ip() == "127.0.0.1"
+
+
+class TestStopApiServer:
+    def test_noop_for_none(self):
+        build.stop_api_server(None)
+
+    def test_noop_for_exited_process(self):
+        class FakeProc:
+            def poll(self):
+                return 0
+        build.stop_api_server(FakeProc())
+
+    def test_terminates_running_process(self):
+        terminated = []
+        waited = []
+
+        class FakeProc:
+            def poll(self):
+                return None
+
+            def terminate(self):
+                terminated.append(True)
+
+            def wait(self, timeout=None):
+                waited.append(timeout)
+
+        proc = FakeProc()
+        build.stop_api_server(proc)
+        assert len(terminated) == 1
+        assert len(waited) == 1
+
+    def test_kills_on_timeout(self):
+        import subprocess as _sp
+        killed = []
+
+        class FakeProc:
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                if not killed:
+                    raise _sp.TimeoutExpired("cmd", timeout)
+
+            def kill(self):
+                killed.append(True)
+
+        proc = FakeProc()
+        build.stop_api_server(proc)
+        assert len(killed) == 1
+
+
+class TestStartApiServer:
+    def test_returns_none_on_early_exit(self, tmp_path, monkeypatch):
+        env_file = tmp_path / "test.env"
+        env_file.write_text("CALLHOME_SERVER=http://test\n")
+
+        class FakeProc:
+            def poll(self):
+                return 1
+            returncode = 1
+
+        monkeypatch.setattr(
+            "subprocess.Popen",
+            lambda *a, **kw: FakeProc(),
+        )
+        monkeypatch.setattr(build, "PROJECT_ROOT", tmp_path)
+        (tmp_path / ".state").mkdir()
+
+        result = build.start_api_server(env_file)
+        assert result is None
+
+    def test_returns_proc_on_success(self, tmp_path, monkeypatch):
+        env_file = tmp_path / "test.env"
+        env_file.write_text("CALLHOME_SERVER=http://test\n")
+
+        class FakeProc:
+            def poll(self):
+                return None
+
+        monkeypatch.setattr(
+            "subprocess.Popen",
+            lambda *a, **kw: FakeProc(),
+        )
+        monkeypatch.setattr(build, "PROJECT_ROOT", tmp_path)
+        (tmp_path / ".state").mkdir()
+
+        def fake_connect(addr, timeout=None):
+            class FakeConn:
+                def __enter__(self):
+                    return self
+                def __exit__(self, *a):
+                    pass
+            return FakeConn()
+
+        monkeypatch.setattr("socket.create_connection", fake_connect)
+        monkeypatch.setattr("time.sleep", lambda x: None)
+
+        result = build.start_api_server(env_file)
+        assert result is not None
+
+
+class TestNoApiFlag:
+    def test_no_api_skips_server(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(build, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(build, "probe_host", lambda *a, **kw: True)
+        monkeypatch.setattr(build, "find_ansible_playbook", lambda: "/usr/bin/ansible-playbook")
+        playbooks_dir = tmp_path / "playbooks"
+        playbooks_dir.mkdir()
+        (playbooks_dir / "site.yml").write_text("---\n")
+        env_file = tmp_path / ".env"
+        env_file.write_text("HOME_API_TOKEN=x\nPRIMARY_HOST=1.2.3.4\nMESH_KEY=k\n")
+
+        start_called = []
+        monkeypatch.setattr(
+            build, "start_api_server",
+            lambda *a, **kw: start_called.append(1) or None,
+        )
+
+        class FakeResult:
+            returncode = 0
+        monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeResult())
+
+        build.main(["--env", ".env", "--no-api"])
+        assert len(start_called) == 0
+
+    def test_default_starts_api(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(build, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(build, "probe_host", lambda *a, **kw: True)
+        monkeypatch.setattr(build, "find_ansible_playbook", lambda: "/usr/bin/ansible-playbook")
+        playbooks_dir = tmp_path / "playbooks"
+        playbooks_dir.mkdir()
+        (playbooks_dir / "site.yml").write_text("---\n")
+        env_file = tmp_path / ".env"
+        env_file.write_text("HOME_API_TOKEN=x\nPRIMARY_HOST=1.2.3.4\nMESH_KEY=k\n")
+
+        start_called = []
+        monkeypatch.setattr(
+            build, "start_api_server",
+            lambda *a, **kw: start_called.append(1) or None,
+        )
+
+        class FakeResult:
+            returncode = 0
+        monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeResult())
+
+        build.main(["--env", ".env"])
+        assert len(start_called) == 1
+
+    def test_callhome_server_state_file(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(build, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(build, "probe_host", lambda *a, **kw: True)
+        monkeypatch.setattr(build, "find_ansible_playbook", lambda: "/usr/bin/ansible-playbook")
+        playbooks_dir = tmp_path / "playbooks"
+        playbooks_dir.mkdir()
+        (playbooks_dir / "site.yml").write_text("---\n")
+        env_file = tmp_path / ".env"
+        env_file.write_text("HOME_API_TOKEN=x\nPRIMARY_HOST=1.2.3.4\nMESH_KEY=k\n")
+
+        class FakeProc:
+            def poll(self):
+                return None
+            def terminate(self):
+                pass
+            def wait(self, timeout=None):
+                pass
+
+        monkeypatch.setattr(
+            build, "start_api_server",
+            lambda *a, **kw: FakeProc(),
+        )
+
+        class FakeResult:
+            returncode = 0
+
+        monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeResult())
+        build.main(["--env", ".env"])
+
+        state_file = tmp_path / ".state" / "callhome_url"
+        assert state_file.exists()
+        assert state_file.read_text().startswith("http://")

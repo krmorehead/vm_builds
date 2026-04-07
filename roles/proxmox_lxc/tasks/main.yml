@@ -202,6 +202,38 @@
   changed_when: false
   when: lxc_ct_ostype != 'unmanaged'
 
+# ── Configure callhome agent (immediate heartbeat) ─────────────
+# Push the latest callhome.py from the controller, write
+# CALLHOME_SERVER to /etc/default/callhome, and restart the service
+# so heartbeats begin flowing as soon as the container is up.
+# The agent skeleton was baked into the image by inject_callhome_agent()
+# in build-images.sh. Containers without /opt/callhome are skipped.
+
+- name: Push latest callhome agent into container
+  ansible.builtin.copy:
+    src: "{{ project_root }}/scripts/callhome.py"
+    dest: "/tmp/callhome_agent.py"
+    mode: "0755"
+  when: callhome_server | default('') | length > 0
+
+- name: Install callhome agent and configure heartbeat
+  ansible.builtin.shell:
+    cmd: |
+      if ! pct exec {{ lxc_ct_id }} -- test -d /opt/callhome; then
+        exit 0
+      fi
+      pct push {{ lxc_ct_id }} /tmp/callhome_agent.py /opt/callhome/callhome.py
+      pct exec {{ lxc_ct_id }} -- chmod +x /opt/callhome/callhome.py
+      pct exec {{ lxc_ct_id }} -- bash -c \
+        'printf "CALLHOME_SERVER=%s\nCALLHOME_PUBLIC_KEY=%s\n" \
+        "{{ callhome_server }}" "{{ callhome_public_key }}" \
+        > /etc/default/callhome; \
+        systemctl restart callhome.service 2>/dev/null || true'
+    executable: /bin/bash
+  changed_when: true
+  failed_when: false
+  when: callhome_server | default('') | length > 0
+
 # ── Ensure clean apt baseline ────────────────────────────────────
 # Proxmox standard templates may ship with broken kernel metapackages
 # (e.g., linux-image-rt-amd64 with missing dependencies). Kernel

@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -75,6 +75,10 @@ ENV_TEMPLATE: list[EnvVar] = [
     EnvVar("CALLHOME_SERVER", "Management server URL for fleet call-home", False, "http://localhost:8080", False),
     EnvVar("CALLHOME_PRIVATE_KEY", "Server-side secret for validating call-home tokens", False, "", True),
     EnvVar("CALLHOME_PUBLIC_KEY", "Token distributed to nodes for call-home auth", False, "", True),
+    EnvVar("BRIDGE_1_HOST", "IP of the first WiFi bridge node", False, "192.168.86.230", False),
+    EnvVar("BRIDGE_2_HOST", "IP of the second WiFi bridge node", False, "192.168.86.231", False),
+    EnvVar("BRIDGE_1_API_TOKEN", "Proxmox API token for bridge-1 node", False, "", True),
+    EnvVar("BRIDGE_2_API_TOKEN", "Proxmox API token for bridge-2 node", False, "", True),
 ]
 
 
@@ -139,6 +143,8 @@ _HOST_MAP = {
     "PRIMARY_HOST": "home",
     "AI_HOST": "ai",
     "MESH_2_HOST": "mesh2",
+    "BRIDGE_1_HOST": "bridge-1",
+    "BRIDGE_2_HOST": "bridge-2",
 }
 
 
@@ -229,11 +235,11 @@ class ServiceTag:
 
 
 SERVICE_TAGS: list[ServiceTag] = [
-    ServiceTag("backup", "Back up host config and VMs", "Network", ["home", "mesh1", "ai", "mesh2"]),
-    ServiceTag("infra", "Bridges, PCI passthrough, iGPU", "Network", ["home", "mesh1", "ai", "mesh2"]),
+    ServiceTag("backup", "Back up host config and VMs", "Network", ["home", "mesh1", "ai", "mesh2", "bridge-1", "bridge-2"]),
+    ServiceTag("infra", "Bridges, PCI passthrough, iGPU", "Network", ["home", "mesh1", "ai", "mesh2", "bridge-1", "bridge-2"]),
     ServiceTag("openwrt", "OpenWrt router VM", "Network", ["home"]),
     ServiceTag("lan-satellite", "Bootstrap LAN hosts", "Network", ["home", "mesh1"]),
-    ServiceTag("cleanup", "Remove temp bootstrap networking", "Network", ["home", "mesh1", "ai", "mesh2"]),
+    ServiceTag("cleanup", "Remove temp bootstrap networking", "Network", ["home", "mesh1", "ai", "mesh2", "bridge-1", "bridge-2"]),
     ServiceTag("pihole", "Pi-hole DNS", "DNS & VPN", ["home"]),
     ServiceTag("wireguard", "WireGuard VPN", "DNS & VPN", ["home", "mesh1", "ai", "mesh2"]),
     ServiceTag("monitoring", "rsyslog + Netdata", "Monitoring", ["home"]),
@@ -241,8 +247,9 @@ SERVICE_TAGS: list[ServiceTag] = [
     ServiceTag("media", "Jellyfin + Kodi", "Media", ["home"]),
     ServiceTag("moonlight", "Moonlight streaming client", "Media", ["mesh1"]),
     ServiceTag("desktop", "Debian desktop VM", "Desktop", ["home"]),
-    ServiceTag("kiosk", "Custom UX kiosk", "Desktop", ["home"]),
+    ServiceTag("kiosk", "Custom UX kiosk", "Desktop", ["home", "mesh1", "ai", "mesh2"]),
     ServiceTag("mesh-wifi", "Mesh WiFi LXC", "WiFi", ["mesh1", "mesh2"]),
+    ServiceTag("bridge", "Dedicated WiFi Bridge", "Network", ["bridge-1", "bridge-2"]),
     ServiceTag("gaming", "Gaming LXC (opt-in)", "Gaming", ["ai"], is_opt_in=True),
 ]
 
@@ -483,6 +490,9 @@ class HubService:
 
 
 HUB_SERVICES: list[HubService] = [
+    HubService("bridge", "\U0001f4e1", "WiFi Bridge", "Dedicated WDS bridge link status, signal and throughput.", "Bridge", "Infrastructure", "BRIDGE_PAGE"),
+    HubService("mesh_detail", "\U0001f4f6", "Mesh WiFi", "Mesh network topology, peer status and signal quality.", "Mesh", "Infrastructure", "MESH_PAGE"),
+    HubService("router_detail", "\U0001f5a7", "Router Detail", "Router interfaces, DHCP, firewall and system metrics.", "Router", "Infrastructure", "ROUTER_PAGE"),
     HubService("desktop", "\U0001f5a5", "Desktop", "Full Debian KDE desktop \u2014 launch via Proxmox or remote control.", "Desktop VM", "Desktop & Media", "DESKTOP_URL"),
     HubService("jellyfin", "\U0001f3ac", "Jellyfin", "Stream movies, shows and music from your media library.", "Media Server", "Desktop & Media", "JELLYFIN_URL"),
     HubService("kodi", "\U0001f3a6", "Kodi", "Media center with full-screen playback and remote control.", "Media Player", "Desktop & Media", "KODI_URL"),
@@ -494,12 +504,85 @@ HUB_SERVICES: list[HubService] = [
     HubService("wireguard", "\U0001f510", "WireGuard", "VPN tunnel status and peer configuration.", "VPN", "Settings & Network", "WIREGUARD_URL"),
     HubService("netdata", "\U0001f4c8", "Netdata", "Real-time system metrics \u2014 CPU, memory, disk and network.", "Metrics", "Monitoring", "NETDATA_URL"),
     HubService("rsyslog", "\U0001f4dc", "Logs", "Centralized syslog collector \u2014 system and service logs.", "Logging", "Monitoring", "RSYSLOG_URL"),
+    HubService("containers", "\U0001f4e6", "Containers & VMs", "Manage LXC containers and QEMU VMs \u2014 start, stop and restart.", "Management", "System", "CONTAINERS_PAGE"),
 ]
+
+INTERNAL_PAGES: dict[str, str] = {
+    "BRIDGE_PAGE": "/bridge",
+    "MESH_PAGE": "/mesh",
+    "ROUTER_PAGE": "/router",
+    "CONTAINERS_PAGE": "/containers",
+}
+
+DISPLAY_APPS: dict[str, dict] = {
+    "MOONLIGHT_URL": {
+        "vmid": "302",
+        "label": "Moonlight",
+        "icon": "\U0001f3ae",
+        "description": (
+            "Starting Moonlight takes over this display for game streaming. "
+            "The kiosk will automatically return when the stream ends."
+        ),
+    },
+    "KODI_URL": {
+        "vmid": "301",
+        "label": "Kodi",
+        "icon": "\U0001f3a6",
+        "description": (
+            "Starting Kodi takes over this display for media playback. "
+            "The kiosk will automatically return when Kodi exits."
+        ),
+    },
+    "DESKTOP_URL": {
+        "vmid": "400",
+        "label": "Desktop",
+        "icon": "\U0001f5a5",
+        "description": (
+            "Starting the desktop VM takes over this display. "
+            "The kiosk will automatically return when the VM stops."
+        ),
+    },
+}
 
 
 def get_hub_services() -> list[HubService]:
     """Return the list of kiosk Home Hub service definitions."""
     return list(HUB_SERVICES)
+
+
+# ── Infrastructure node definitions ──────────────────────────────────
+
+
+def get_bridge_nodes() -> list[dict]:
+    """Return bridge node definitions for the bridge detail page."""
+    return [
+        {"node_id": "bridge-1", "label": "Bridge 1", "default_role": "ap"},
+        {"node_id": "bridge-2", "label": "Bridge 2", "default_role": "sta"},
+    ]
+
+
+def get_mesh_nodes() -> tuple[str, list[str]]:
+    """Return (ap_node_id, sta_node_ids) for the mesh detail page."""
+    return "home", ["mesh1", "mesh2"]
+
+
+def get_all_wifi_nodes() -> list[dict]:
+    """Return all WiFi-capable nodes with their default roles.
+
+    Unified view for the manager to know which nodes can be
+    mode-switched and what their default role is.
+    """
+    mesh_ap, mesh_stas = get_mesh_nodes()
+    return [
+        {"node_id": mesh_ap, "label": "Router (home)", "default_role": "ap", "type": "mesh"},
+        *[{"node_id": s, "label": s, "default_role": "sta", "type": "mesh"} for s in mesh_stas],
+        *[{**n, "type": "bridge"} for n in get_bridge_nodes()],
+    ]
+
+
+def get_router_node() -> str:
+    """Return the router node ID."""
+    return "home"
 
 
 KIOSK_CONFIG_PATH = Path("/opt/kiosk/config.json")
@@ -562,6 +645,24 @@ NODE_STALE_SECONDS = 3600
 
 
 @dataclass
+class ContainerHealth:
+    """Health snapshot pushed by a container's callhome agent.
+
+    Core fields (systemd_services, listening_ports, ready) are always present.
+    Service-specific data lives in extensions — a flat dict of collector name
+    to arbitrary dict payload. Each collector (network, wireguard, docker, etc.)
+    is independently composable; the API passes extensions through without
+    needing to understand their schema.
+    """
+
+    container_id: str
+    systemd_services: dict[str, str]
+    listening_ports: list[int]
+    ready: bool
+    extensions: dict[str, dict] = field(default_factory=dict)
+
+
+@dataclass
 class NodeCheckin:
     """Payload sent by a node during a call-home heartbeat."""
 
@@ -573,6 +674,7 @@ class NodeCheckin:
     disk_usage_pct: float
     memory_usage_pct: float
     version: str
+    container_health: ContainerHealth | None = None
 
 
 @dataclass
@@ -591,6 +693,7 @@ class RegisteredNode:
     memory_usage_pct: float
     version: str
     status: str = "offline"
+    container_health: ContainerHealth | None = None
 
 
 def format_uptime(seconds: float) -> str:
@@ -611,7 +714,7 @@ def format_node_status(status: str) -> str:
         return "\u25cf Online"
     if status == "stale":
         return "\u25cb Stale"
-    return "\u25cf Offline"
+    return "\u25cb Offline"
 
 
 def fleet_summary(nodes: list[RegisteredNode]) -> tuple[str, str]:
@@ -661,6 +764,16 @@ def load_node_registry(state_dir: Path) -> list[RegisteredNode]:
         raw = json.loads(registry_file.read_text())
         nodes = []
         for r in raw:
+            ch_raw = r.get("container_health")
+            ch = None
+            if ch_raw and isinstance(ch_raw, dict):
+                ch = ContainerHealth(
+                    container_id=ch_raw.get("container_id", ""),
+                    systemd_services=ch_raw.get("systemd_services", {}),
+                    listening_ports=ch_raw.get("listening_ports", []),
+                    ready=ch_raw.get("ready", False),
+                    extensions=ch_raw.get("extensions", {}),
+                )
             node = RegisteredNode(
                 node_id=r["node_id"],
                 hostname=r["hostname"],
@@ -673,6 +786,7 @@ def load_node_registry(state_dir: Path) -> list[RegisteredNode]:
                 disk_usage_pct=r.get("disk_usage_pct", 0),
                 memory_usage_pct=r.get("memory_usage_pct", 0),
                 version=r.get("version", ""),
+                container_health=ch,
             )
             node.status = _compute_node_status(node.last_seen)
             nodes.append(node)
@@ -685,8 +799,9 @@ def _save_node_registry(state_dir: Path, nodes: list[RegisteredNode]) -> None:
     """Write node registry to JSON and a plain-text IP map."""
     state_dir.mkdir(parents=True, exist_ok=True)
     registry_file = state_dir / "nodes.json"
-    raw = [
-        {
+    raw = []
+    for n in nodes:
+        entry: dict = {
             "node_id": n.node_id,
             "hostname": n.hostname,
             "last_ip": n.last_ip,
@@ -699,8 +814,15 @@ def _save_node_registry(state_dir: Path, nodes: list[RegisteredNode]) -> None:
             "memory_usage_pct": n.memory_usage_pct,
             "version": n.version,
         }
-        for n in nodes
-    ]
+        if n.container_health:
+            entry["container_health"] = {
+                "container_id": n.container_health.container_id,
+                "systemd_services": n.container_health.systemd_services,
+                "listening_ports": n.container_health.listening_ports,
+                "ready": n.container_health.ready,
+                "extensions": n.container_health.extensions,
+            }
+        raw.append(entry)
     registry_file.write_text(json.dumps(raw, indent=2) + "\n")
     _write_fleet_ips(state_dir, nodes)
 
@@ -731,6 +853,7 @@ def register_checkin(state_dir: Path, checkin: NodeCheckin, remote_ip: str) -> R
         existing.disk_usage_pct = checkin.disk_usage_pct
         existing.memory_usage_pct = checkin.memory_usage_pct
         existing.version = checkin.version
+        existing.container_health = checkin.container_health
         existing.status = "online"
         _save_node_registry(state_dir, nodes)
         _append_metric_snapshot(state_dir, checkin)
@@ -748,12 +871,118 @@ def register_checkin(state_dir: Path, checkin: NodeCheckin, remote_ip: str) -> R
         disk_usage_pct=checkin.disk_usage_pct,
         memory_usage_pct=checkin.memory_usage_pct,
         version=checkin.version,
+        container_health=checkin.container_health,
         status="online",
     )
     nodes.append(new_node)
     _save_node_registry(state_dir, nodes)
     _append_metric_snapshot(state_dir, checkin)
     return new_node
+
+
+# ── Fleet readiness ───────────────────────────────────────────────────
+
+
+CONTAINER_READY_SECONDS = 120
+
+
+def _is_recently_seen(last_seen: str, max_age: int = CONTAINER_READY_SECONDS) -> bool:
+    """True if last_seen is within max_age seconds of now."""
+    if not last_seen:
+        return False
+    try:
+        seen_dt = datetime.fromisoformat(last_seen)
+        return (datetime.now() - seen_dt).total_seconds() < max_age
+    except (ValueError, TypeError):
+        return False
+
+
+def check_container_ready(state_dir: Path, container_id: str) -> dict:
+    """Check if a container has heartbeated recently.
+
+    A container is ready when:
+      - It was seen within CONTAINER_READY_SECONDS
+      - Its container_health.ready flag is True (if container_health present)
+    """
+    nodes = load_node_registry(state_dir)
+    for n in nodes:
+        if n.container_health and n.container_health.container_id == container_id:
+            recent = _is_recently_seen(n.last_seen)
+            return {
+                "container_id": container_id,
+                "ready": recent and n.container_health.ready,
+                "status": n.status,
+                "last_seen": n.last_seen,
+                "systemd_services": n.container_health.systemd_services,
+                "listening_ports": n.container_health.listening_ports,
+                "extensions": n.container_health.extensions,
+            }
+        if container_id in (n.hostname, n.node_id):
+            recent = _is_recently_seen(n.last_seen)
+            return {
+                "container_id": container_id,
+                "ready": recent,
+                "status": n.status,
+                "last_seen": n.last_seen,
+                "systemd_services": {},
+                "listening_ports": [],
+            }
+    return {
+        "container_id": container_id,
+        "ready": False,
+        "status": "unknown",
+        "last_seen": "",
+        "systemd_services": {},
+        "listening_ports": [],
+    }
+
+
+def check_fleet_readiness(
+    state_dir: Path, expected_services: list[str],
+) -> dict:
+    """Check readiness of multiple services at once.
+
+    Matches expected service names against container_health.container_id,
+    hostname, or node_id in the registry.
+    """
+    nodes = load_node_registry(state_dir)
+    results: dict[str, dict] = {}
+    for svc in expected_services:
+        found = False
+        for n in nodes:
+            match_id = svc in (n.hostname, n.node_id)
+            match_container = (
+                n.container_health is not None
+                and n.container_health.container_id == svc
+            )
+            if match_id or match_container:
+                recent = _is_recently_seen(n.last_seen)
+                is_ready = recent
+                if n.container_health:
+                    is_ready = recent and n.container_health.ready
+                results[svc] = {
+                    "ready": is_ready,
+                    "status": n.status,
+                    "last_seen": n.last_seen,
+                    "node_id": n.node_id,
+                }
+                found = True
+                break
+        if not found:
+            results[svc] = {
+                "ready": False,
+                "status": "unknown",
+                "last_seen": "",
+                "node_id": "",
+            }
+
+    all_ready = all(r["ready"] for r in results.values())
+    return {
+        "all_ready": all_ready,
+        "total": len(expected_services),
+        "ready_count": sum(1 for r in results.values() if r["ready"]),
+        "services": results,
+    }
 
 
 # ── Metric history ───────────────────────────────────────────────────

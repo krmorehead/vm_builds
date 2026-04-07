@@ -153,6 +153,30 @@ When working with LXC containers, load these skills IMMEDIATELY:
 
 44. Previous bug: WireGuard configure play ran 4 containers in parallel (wireguard-home, wireguard-mesh1, wireguard-ai, wireguard-mesh2). Tasks like `wg genkey | wg pubkey` opened 4+ SSH connections through `home`'s SSH server simultaneously. Two connections dropped with "Connection reset by peer (104)" and "Broken pipe". Fix: added `serial: 2` to the WireGuard configure play.
 
+## pct_remote Intermittent Hangs
+
+55. The `community.proxmox.proxmox_pct_remote` connection plugin uses paramiko for SSH, which can hang indefinitely during connection setup — even with `serial: 1`. Adding `timeout = 60` to `ansible.cfg` and `host_key_auto_add = True` under `[paramiko_connection]` does NOT prevent the hang.
+
+56. When a configure play only checks service health (no container-internal configuration), BYPASS `pct_remote` entirely. Target the Proxmox HOST group and use `ansible.builtin.command` with `pct exec` directly:
+
+    ```yaml
+    - name: Configure Netdata
+      hosts: monitoring_nodes
+      gather_facts: false
+      tasks:
+        - name: Check netdata service health
+          ansible.builtin.command:
+            cmd: pct exec {{ netdata_ct_id }} -- systemctl is-active netdata
+          register: _check
+          changed_when: false
+          failed_when: false
+          retries: 10
+          delay: 3
+          until: _check.stdout | trim == 'active'
+    ```
+
+57. Previous bug: `Configure Netdata` play targeted `netdata` dynamic group with `pct_remote`. Hung intermittently on `Detect netdata config directory` task (0% CPU, blocked on paramiko SSH handshake). Adding `serial: 1` and paramiko config changes did not fix it. Fix: rewrote to target `monitoring_nodes` directly using `pct exec`.
+
 ## Device Passthrough in LXC Containers
 
 45. For device passthrough (`/dev/dri`, `/dev/snd`, `/dev/input`) to LXC containers, use `lxc.mount.entry` directives directly in the container config file (`/etc/pve/lxc/<CTID>.conf`), NOT Proxmox's `-mp` mount option. The `-mp` pre-start hook rejects device directories in unprivileged containers (exit code 32).

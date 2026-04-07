@@ -1,0 +1,8 @@
+---
+openwrt_bridge_ssid: "bridge-dedicated"
+openwrt_bridge_key: "{{ lookup('env', 'MESH_KEY') | default('changeme', true) }}"
+openwrt_bridge_encryption: sae
+openwrt_bridge_preferred_band: "5g"
+openwrt_bridge_htmode: "HE80"
+openwrt_bridge_channel: auto
+openwrt_bridge_country: "US"

@@ -1,0 +1,43 @@
+---
+- name: Verify OpenWrt WDS on AX210 hardware
+  hosts: wifi_nodes
+  gather_facts: false
+  tasks:
+    - name: Check mesh container is running
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct status {{ meshwifi_ct_id }} | grep -c running
+        executable: /bin/bash
+      register: _mesh_running
+      changed_when: false
+      failed_when: (_mesh_running.stdout | trim | int) == 0
+
+    - name: Check WiFi PHY inside container
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ meshwifi_ct_id }} -- iw phy 2>/dev/null \
+            | grep -c '^Wiphy '
+        executable: /bin/bash
+      register: _ct_phy_count
+      changed_when: false
+      failed_when: (_ct_phy_count.stdout | trim | int) == 0
+
+    - name: Check WDS interface exists (AP or STA)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ meshwifi_ct_id }} -- iw dev 2>/dev/null \
+            | grep -cE 'type (AP|managed)'
+        executable: /bin/bash
+      register: _wds_iface
+      changed_when: false
+      failed_when: (_wds_iface.stdout | trim | int) == 0
+
+    - name: Report AX210 WDS status
+      ansible.builtin.debug:
+        msg: >-
+          AX210 WDS container on {{ inventory_hostname }}:
+          PHYs={{ _ct_phy_count.stdout | trim }},
+          WDS interfaces={{ _wds_iface.stdout | trim }}

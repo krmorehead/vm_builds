@@ -2,14 +2,21 @@
 
 Renders a responsive grid of service cards. Each card links to a service
 URL when available, or shows as disabled when the URL is empty.
+External services route through /view?url=... so the kiosk always has
+a "Back to Hub" button (Chromium --kiosk has no navigation controls).
 """
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from nicegui import ui
 
 from scripts.webui import theme
-from scripts.webui.data import HubService, get_hub_services, load_kiosk_config
+from scripts.webui.data import (
+    DISPLAY_APPS, INTERNAL_PAGES, HubService, get_hub_services,
+    load_kiosk_config,
+)
 
 
 def render_hub(urls: dict[str, str] | None = None) -> None:
@@ -37,34 +44,62 @@ def render_hub(urls: dict[str, str] | None = None) -> None:
 
 
 def _render_card(svc: HubService, url: str) -> None:
-    """Render a single service card."""
-    available = bool(url)
+    """Render a single service card.
+
+    Infrastructure cards (url_key in INTERNAL_PAGES) navigate internally
+    and are always enabled. External service cards link out when a URL
+    is configured, otherwise show as disabled.
+    """
+    internal_path = INTERNAL_PAGES.get(svc.url_key)
+
     base_style = (
         "border-radius: 10px; padding: 1rem 1.25rem; "
         "display: flex; align-items: center; gap: 1rem; "
         "text-decoration: none; min-height: 72px; "
     )
+    enabled_style = (
+        f"background: {theme.BG_CARD}; border: 1px solid {theme.BORDER}; "
+        f"{base_style}"
+        "cursor: pointer; transition: all 0.25s ease;"
+    )
 
-    if available:
-        style = (
-            f"background: {theme.BG_CARD}; border: 1px solid {theme.BORDER}; "
-            f"{base_style}"
-            "cursor: pointer; transition: all 0.25s ease;"
+    display_app = DISPLAY_APPS.get(svc.url_key)
+
+    if internal_path:
+        with ui.element("div").style(enabled_style).classes(
+            "hub-card w-full"
+        ).on("click", lambda p=internal_path: ui.navigate.to(p)):
+            _card_content(svc, available=True)
+    elif display_app:
+        launch_url = (
+            f"/launch?vmid={display_app['vmid']}"
+            f"&title={quote(svc.title, safe='')}"
+            f"&url_key={quote(svc.url_key, safe='')}"
         )
-        with ui.link(target=url).style(style).classes("hub-card w-full"):
+        with ui.element("div").style(enabled_style).classes(
+            "hub-card w-full"
+        ).on("click", lambda v=launch_url: ui.navigate.to(v)):
+            _card_content(svc, available=True, badge_label="Launch")
+    elif url:
+        viewer_url = f"/view?url={quote(url, safe='')}&title={quote(svc.title, safe='')}"
+        with ui.element("div").style(enabled_style).classes(
+            "hub-card w-full"
+        ).on("click", lambda v=viewer_url: ui.navigate.to(v)):
             _card_content(svc, available=True)
     else:
-        style = (
+        disabled_style = (
             f"background: {theme.BG_CARD_DISABLED}; "
             f"border: 1px solid {theme.BORDER_DISABLED}; "
             f"{base_style}"
             "opacity: 0.4; pointer-events: none;"
         )
-        with ui.element("div").style(style).classes("w-full"):
+        with ui.element("div").style(disabled_style).classes("w-full"):
             _card_content(svc, available=False)
 
 
-def _card_content(svc: HubService, available: bool) -> None:
+def _card_content(
+    svc: HubService, available: bool, badge_label: str = "",
+) -> None:
     """Render the inner content of a service card."""
     ui.label(svc.icon).classes("text-2xl flex-shrink-0").style("width: 40px; text-align: center;")
 
@@ -76,10 +111,12 @@ def _card_content(svc: HubService, available: bool) -> None:
             f"color: {theme.TEXT_SECONDARY if available else theme.TEXT_DISABLED}"
         )
 
-    if available:
-        ui.badge(svc.tag).classes("flex-shrink-0 text-xs").props("outline color=blue")
-    else:
+    if not available:
         ui.badge("Not available").classes("flex-shrink-0 text-xs").props("outline color=grey")
+    elif badge_label:
+        ui.badge(badge_label).classes("flex-shrink-0 text-xs").props("outline color=green")
+    else:
+        ui.badge(svc.tag).classes("flex-shrink-0 text-xs").props("outline color=blue")
 
 
 def register() -> None:

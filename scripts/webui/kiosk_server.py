@@ -1,7 +1,12 @@
-"""Minimal NiceGUI server for the kiosk Home Hub.
+"""Kiosk server — per-host manager and Home Hub UI.
 
-Runs inside the kiosk LXC container, serving only the /hub page.
-Reads service URLs from /opt/kiosk/config.json.
+Runs inside the kiosk LXC container on every Proxmox host. Serves the
+Home Hub dashboard and infrastructure detail pages (bridge, mesh, router).
+Also acts as the host's local manager: collects metrics from sibling
+containers via SSH, accepts heartbeat subscriptions, and handles batman
+trigger API calls.
+
+Reads service URLs, node IPs, and MESH_KEY from /opt/kiosk/config.json.
 
 Usage:
     python3 /opt/kiosk/webui/kiosk_server.py [--port 8080]
@@ -13,20 +18,39 @@ import argparse
 import os
 import secrets
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
-from nicegui import ui
+from nicegui import app, ui
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR.parent.parent) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR.parent.parent))
 
+from scripts.webui import manager  # noqa: E402
 from scripts.webui.data import load_kiosk_config  # noqa: E402
 
 
+def _build_node_resolver(config: dict) -> Callable[[str], str | None]:
+    """Build a node IP resolver from config.json NODE_IPS."""
+    node_ips = config.get("NODE_IPS", {})
+
+    def resolver(node_id: str) -> str | None:
+        return node_ips.get(node_id)
+
+    return resolver
+
+
 def create_app(config_path: Path | None = None) -> None:
-    """Register the hub page with pre-loaded URLs."""
+    """Register pages, init manager, mount API endpoints."""
     urls = load_kiosk_config(config_path)
+
+    app.storage.general["management_server"] = urls.get("MANAGEMENT_SERVER", "")
+    app.storage.general["mesh_key"] = urls.get("MESH_KEY", "")
+    app.storage.general["host_ip"] = urls.get("HOST_IP", "")
+
+    manager.init(_build_node_resolver(urls))
+    manager.register_api(app)
 
     from scripts.webui import theme
     from scripts.webui.pages.hub import render_hub
@@ -38,20 +62,63 @@ def create_app(config_path: Path | None = None) -> None:
         ui.add_head_html(theme.HOVER_CARD_STYLES)
         render_hub(urls=urls)
 
+    # Kiosk-specific page wrappers use kiosk_page_shell() instead of
+    # page_shell() so the slim home-button bar appears instead of the
+    # full sidebar (which has Dashboard / Deploy / Services links that
+    # don't exist on the kiosk server).
+    from scripts.webui.pages.bridge import _bridge_content
+    from scripts.webui.pages.containers import _render_containers
+    from scripts.webui.pages.mesh import _mesh_content
+    from scripts.webui.pages.router import _router_content
+
+    @ui.page("/bridge")
+    def kiosk_bridge() -> None:
+        with theme.kiosk_page_shell("bridge"):
+            ui.add_head_html(theme.HOVER_CARD_STYLES)
+            _bridge_content()
+
+    @ui.page("/mesh")
+    def kiosk_mesh() -> None:
+        with theme.kiosk_page_shell("mesh"):
+            ui.add_head_html(theme.HOVER_CARD_STYLES)
+            _mesh_content()
+
+    @ui.page("/router")
+    def kiosk_router() -> None:
+        with theme.kiosk_page_shell("router"):
+            ui.add_head_html(theme.HOVER_CARD_STYLES)
+            _router_content()
+
+    @ui.page("/containers")
+    async def kiosk_containers() -> None:
+        with theme.kiosk_page_shell("containers"):
+            ui.add_head_html(theme.HOVER_CARD_STYLES)
+            await _render_containers()
+
+    from scripts.webui.pages import launch, viewer
+    launch.register()
+    viewer.register()
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Kiosk Home Hub server")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--config", type=str, default=None)
+    parser.add_argument(
+        "--host", default="0.0.0.0",
+        help="Bind address (default: 0.0.0.0 for API access from other hosts)",
+    )
     args = parser.parse_args()
 
     config_path = Path(args.config) if args.config else None
     create_app(config_path=config_path)
 
+    app.on_startup(manager.start_poller)
+
     storage_secret = os.environ.get("WEBUI_STORAGE_SECRET") or secrets.token_hex(32)
     ui.run(
         title="Home Hub",
-        host="127.0.0.1",
+        host=args.host,
         port=args.port,
         dark=True,
         reload=False,

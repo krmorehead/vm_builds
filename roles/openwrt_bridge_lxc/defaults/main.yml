@@ -1,0 +1,10 @@
+---
+openwrt_bridge_ct_hostname: openwrt-bridge
+openwrt_bridge_ct_memory: 512
+openwrt_bridge_ct_cores: 2
+openwrt_bridge_ct_disk: "1"
+
+openwrt_bridge_ct_onboot: true
+openwrt_bridge_ct_startup_order: 2
+openwrt_bridge_ct_features:
+  - "nesting=1"

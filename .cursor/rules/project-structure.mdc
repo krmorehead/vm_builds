@@ -6,7 +6,7 @@ alwaysApply: true
 # vm_builds Project Context
 
 ## What this project is
-An Ansible project that automates VM and LXC container provisioning on Proxmox VE. Deploys 14 services across 4 nodes — OpenWrt router, WireGuard VPN, Pi-hole DNS, monitoring (rsyslog + Netdata), Home Assistant, media (Jellyfin + Kodi + Moonlight), Desktop VM, Gaming LXC, Mesh WiFi, and Kiosk — with an interactive NiceGUI Web UI for environment management, deployment, fleet monitoring, and a kiosk Home Hub.
+An Ansible project that automates VM and LXC container provisioning on Proxmox VE. Deploys 15 services across 6 nodes — OpenWrt router, WireGuard VPN, Pi-hole DNS, monitoring (rsyslog + Netdata), Home Assistant, media (Jellyfin + Kodi + Moonlight), Desktop VM, Gaming LXC, Mesh WiFi, Dedicated WiFi Bridge, and Kiosk — with an interactive NiceGUI Web UI for environment management, deployment, fleet monitoring, and a kiosk Home Hub.
 
 ## Design principles
 
@@ -52,6 +52,39 @@ contributors who know the standard pattern, and create maintenance burden
 that compounds with every service we add. The community has already solved
 most of these problems. Our job is to compose their solutions, not reinvent
 them.
+
+### Manager-first for runtime operations
+Three strict tiers — no shortcuts between layers:
+
+1. **Super Manager** (NiceGUI Web UI pages) — ONLY talks to the Manager
+   via HTTP on `localhost:8080`. NEVER SSHes, NEVER runs shell commands,
+   NEVER imports `heartbeat._ssh_exec`.
+2. **Manager** (`manager.py` REST endpoints) — receives HTTP from the
+   super manager, executes operations via container-side scripts over SSH.
+   Hypervisor ops (`pct`/`qm`) go to the Proxmox host. Heartbeat
+   collectors use container scripts when available.
+3. **Container-side scripts** (baked into image at `/usr/sbin/`) — self-
+   contained tools that detect hardware, apply config, and report status.
+   Called identically by Ansible (initial deploy) and Manager (runtime).
+   Output uses `KEY=value` format for programmatic parsing.
+
+Ansible handles initial provisioning and configuration. The Manager API
+handles everything after: status queries, mode switching, service toggling,
+and fleet health monitoring.
+
+- NEVER let UI pages SSH to containers. All operations go through the
+  Manager API via HTTP.
+- NEVER embed inline shell logic (`uci set`, `iw`, `wifi down/up`) in
+  Manager endpoints. Put it in a container-side script, bake it into the
+  image, and call the script.
+- NEVER add a container-side operation without a matching Manager API
+  endpoint. The UI must be able to trigger it via HTTP.
+- Container-side scripts (`wifi_setup.sh`, `batman_trigger.sh`) live in
+  the image at `/usr/sbin/`, use `KEY=value` output, and are idempotent.
+- Verify playbooks use the fleet readiness API as the primary path for
+  container liveness, with SSH fallback when the API is unavailable.
+- When adding a new runtime-configurable feature: create the container-side
+  script first, then the Manager API endpoint, then the UI integration.
 
 ## Architecture pattern: two-role per service
 Every service type has exactly two roles:
@@ -112,15 +145,18 @@ Phase 3: Services (flavor groups span both primary + LAN hosts)
   Play 23: openwrt_mesh_lxc (wifi_nodes:!router_nodes) tag: mesh-wifi
            deploy_stamp: openwrt_mesh_lxc
   Play 24: openwrt_mesh_configure (openwrt_mesh) tag: mesh-wifi
-  Play 25: desktop_vm (desktop_nodes)      tag: desktop
+  Play 25: openwrt_bridge_lxc (bridge_nodes) tag: bridge
+           deploy_stamp: openwrt_bridge_lxc
+  Play 26: openwrt_bridge_configure (openwrt_bridge) tag: bridge
+  Play 27: desktop_vm (desktop_nodes)      tag: desktop
            deploy_stamp: desktop_vm
-  Play 26: desktop_configure (desktop)     tag: desktop
-  Play 27: kiosk_lxc (desktop_nodes)       tag: kiosk
+  Play 28: desktop_configure (desktop)     tag: desktop
+  Play 29: kiosk_lxc (desktop_nodes)       tag: kiosk
            deploy_stamp: kiosk_lxc
-  Play 28: kiosk_configure (desktop_nodes) tag: kiosk
-  Play 29: gaming_lxc (gaming_nodes)       tag: gaming, never
+  Play 30: kiosk_configure (desktop_nodes) tag: kiosk
+  Play 31: gaming_lxc (gaming_nodes)       tag: gaming, never
            deploy_stamp: gaming_lxc
-  Play 30: gaming_lxc_configure (gaming_nodes) tag: gaming, never
+  Play 32: gaming_lxc_configure (gaming_nodes) tag: gaming, never
 
 Per-feature plays (opt-in via --tags, tagged with [never])
 Bootstrap cleanup (proxmox:!lan_hosts)    tag: cleanup
@@ -145,9 +181,9 @@ Extract reconstruction into `tasks/reconstruct_<type>_group.yml`.
 ISP Router (192.168.86.x supernet)
   |
 Switch
-  |            |                  |
-Home          AI Node          Mesh2
-(primary)     192.168.86.220   192.168.86.211
+  |            |                  |            |            |
+Home          AI Node          Mesh2       Bridge-1     Bridge-2
+(primary)     192.168.86.220   192.168.86.211  .230        .231
   |
   |-- OpenWrt VM (10.10.10.1)
   |     |
@@ -156,7 +192,7 @@ Home          AI Node          Mesh2
   |     Mesh1 (10.10.10.210)
 ```
 
-- **home**, **ai**, **mesh2**: directly reachable on the supernet (no proxy)
+- **home**, **ai**, **mesh2**, **bridge-1**, **bridge-2**: directly reachable on the supernet (no proxy)
 - **mesh1**: behind home's OpenWrt, reachable via ProxyCommand through home
 
 ## Device flavors (inventory groups)
@@ -166,13 +202,14 @@ Service-specific provision plays target flavor groups.
 - `router_nodes` — OpenWrt router VM (home only)
 - `vpn_nodes` — WireGuard VPN (home, mesh1, ai, mesh2 — all 4 nodes)
 - `dns_nodes` — Pi-hole
-- `wifi_nodes` — Mesh WiFi Controller (router_nodes on primary); OpenWrt Mesh LXC on wifi_nodes:!router_nodes (mesh1, mesh2)
+- `wifi_nodes` — WDS WiFi backhaul (router creates hidden WDS AP; OpenWrt Mesh LXC on wifi_nodes:!router_nodes runs WDS STA)
 - `monitoring_nodes` — Netdata, rsyslog
 - `service_nodes` — Home Assistant
 - `media_nodes` — Jellyfin, Kodi (home only — media server and player)
 - `streaming_nodes` — Moonlight streaming client (mesh1 — MUST be on a different host than Sunshine server)
 - `desktop_nodes` — Desktop VM, UX Kiosk
 - `gaming_nodes` — Gaming LXC with GPU render device sharing (ai only; uses Fedora + Sunshine + dsda-doom)
+- `bridge_nodes` — Dedicated WiFi Bridge LXC (bridge-1, bridge-2 — transparent L2 WDS AP/STA link)
 - `lan_hosts` — Satellite Proxmox nodes behind the OpenWrt router (accessed via ProxyCommand; mesh1 only)
 A host can belong to multiple flavor groups.
 
@@ -183,7 +220,7 @@ contains the project version, last run timestamp, and per-play history.
 Bump `project_version` in `group_vars/all.yml` when cutting a release.
 
 ## VMID allocation
-- 100-199: Network (100 OpenWrt, 101 WireGuard, 102 Pi-hole, 103 Mesh WiFi)
+- 100-199: Network (100 OpenWrt, 101 WireGuard, 102 Pi-hole, 103 Mesh WiFi, 104 WiFi Bridge)
 - 200-299: Services (200 Home Assistant)
 - 300-399: Media (300 Jellyfin, 301 Kodi, 302 Moonlight)
 - 400-499: Desktop (400 Desktop VM, 401 Kiosk)
@@ -199,7 +236,8 @@ All VMIDs defined in `group_vars/all.yml`.
 - **Additional host IPs**: `AI_HOST`, `MESH_2_HOST` in `.env`/`test.env` for directly reachable nodes.
 - **Optional env vars**: `.env` file → `lookup('env', 'VAR_NAME') | default('', true)` in role `defaults/main.yml` (e.g., `WAN_MAC`)
 - **Generated secrets and dynamic config**: Auto-generated during runs → written to `{{ env_generated_path }}` on the controller via `blockinfile`. Resolves to `test.env.generated` under Molecule, `.env.generated` in production. Includes auto-generated keys (WireGuard) and dynamic runtime config (LAN_GATEWAY, LAN_CIDR). See `secret-generation` rule.
-- **Shared VM params**: `group_vars/all.yml` (VMID, image path, storage, `project_root`, `env_generated_path`)
+- **Callhome server URL**: Written to `.state/callhome_url` by `build.py` (production) or `prepare.yml` (test). Read by `callhome_server` in `group_vars/all.yml` via `lookup('file')`. Hard-fails if missing. NEVER set via env var or hardcode in `.env`/`test.env`.
+- **Shared VM params**: `group_vars/all.yml` (VMID, image path, storage, `project_root`, `env_generated_path`, `callhome_server`)
 - **Proxmox connection**: `group_vars/proxmox.yml` (API auth, SSH settings)
 - **Per-host overrides**: `host_vars/<hostname>.yml` (IP, reboot policy)
 - **LAN host SSH**: `group_vars/lan_hosts.yml` (ProxyCommand through primary host with keepalives on both hops)
@@ -209,7 +247,7 @@ All VMIDs defined in `group_vars/all.yml`.
 ## Key files
 | File | Purpose |
 |------|---------|
-| `build.py` | Single entry point: env validation, host probing, playbook runner |
+| `build.py` | Single entry point: env validation, host probing, API server lifecycle, playbook runner |
 | `setup.sh` | Bootstrap .venv + pip + ansible-galaxy |
 | `run.sh` | Convenience wrapper — delegates to `build.py` |
 | `cleanup.sh` | Restore / full-restore / clean / rollback — delegates to `build.py` |
@@ -219,6 +257,8 @@ All VMIDs defined in `group_vars/all.yml`.
 | `test.env.generated` | Auto-generated secrets during test runs (gitignored) |
 | `.env.generated` | Auto-generated secrets during production runs (gitignored) |
 | `.state/addresses.json` | Cached host IPs for cross-run discovery (gitignored) |
+| `.state/callhome_url` | API server URL written by build.py/prepare.yml, read by Ansible (gitignored) |
+| `.state/test_api.pid` | API server PID for molecule cleanup (gitignored) |
 | `tasks/reconstruct_openwrt_group.yml` | Reusable dynamic group reconstruction for per-feature scenarios and rollback |
 | `tasks/reconstruct_wireguard_group.yml` | Reusable dynamic group reconstruction for WireGuard |
 | `tasks/reconstruct_pihole_group.yml` | Reusable dynamic group reconstruction for Pi-hole |
@@ -230,13 +270,15 @@ All VMIDs defined in `group_vars/all.yml`.
 | `tasks/reconstruct_moonlight_group.yml` | Reusable dynamic group reconstruction for Moonlight |
 | `tasks/reconstruct_desktop_group.yml` | Reusable dynamic group reconstruction for Desktop VM |
 | `tasks/reconstruct_gaming_group.yml` | Reusable dynamic group reconstruction for Gaming LXC |
+| `tasks/reconstruct_bridge_group.yml` | Reusable dynamic group reconstruction for WiFi Bridge |
+| `tasks/configure_wifi_wds.yml` | Shared WDS WiFi configuration for OpenWrt LXC containers (used by mesh + bridge) |
 | `tasks/reconstruct_lxc_group.yml` | Shared LXC group reconstruction (called by per-service wrappers) |
 | `tasks/lxc_device_passthrough.yml` | Shared device passthrough (DRI/ALSA/input bind mounts + cgroups) |
-| `tasks/verify_lxc_template.yml` | Shared pre-flight template existence check (9 LXC roles) |
+| `tasks/verify_lxc_template.yml` | Shared pre-flight template existence check (10 LXC roles) |
 | `tasks/lxc_lan_network.yml` | Shared LAN-only container IP computation (5 LXC roles) |
 | `tasks/bootstrap_lan_host.yml` | Reusable bootstrap for LAN hosts (DHCP lease + API token) |
 | `tasks/cleanup_lan_host.yml` | Reusable per-LAN-host cleanup (SSH from primary host) |
-| `molecule/default/` | Full integration tests (home, mesh1, ai, mesh2 — 4-node) |
+| `molecule/default/` | Full integration tests (home, mesh1, ai, mesh2, bridge-1, bridge-2 — 6-node) |
 | `molecule/default/cleanup_lan_host.yml` | Per-LAN-host cleanup tasks for test scenarios |
 | `molecule/openwrt-*/` | Per-feature scenarios (security, vlans, dns, mesh) |
 | `molecule/wireguard-lxc/` | Per-feature scenario for WireGuard VPN container |
@@ -254,13 +296,98 @@ All VMIDs defined in `group_vars/all.yml`.
 | `molecule/proxmox-lxc/` | Per-feature scenario for shared LXC provisioning helper |
 | `molecule/sunshine-vm/` | Per-feature scenario for Sunshine Gaming VM with iGPU passthrough (legacy) |
 | `molecule/gaming-lxc/` | Per-feature scenario for Gaming LXC with GPU render device sharing |
+| `molecule/bridge-lxc/` | Per-feature scenario for Dedicated WiFi Bridge LXC containers |
+| `molecule/mesh-ax210/` | Cross-hardware scenario for mesh on AX210 WiFi 6E hardware |
 | `molecule/openwrt-syslog/` | Per-feature scenario for OpenWrt syslog forwarding to rsyslog |
 | `molecule/mesh1-infra/` | Lightweight infra-only on mesh1 (quick iteration) |
 | `wol.sh` | Wake-on-LAN utility: wake hosts by alias or MAC. Proxied WoL for LAN hosts via PRIMARY_HOST |
 | `scripts/webui.sh` | Interactive Web UI launcher (wraps scripts/webui/app.py) |
 | `scripts/webui/` | NiceGUI-based interactive build menu and kiosk hub (data.py, app.py, pages/) |
-| `scripts/callhome.py` | Call-home client for fleet nodes (Python, stdlib-only). Cron-driven IP change detection + system metrics |
+| `scripts/callhome.py` | Call-home client for fleet nodes (Python, stdlib-only). Container + host mode heartbeats with systemd/port health |
 | `scripts/callhome.sh` | Call-home client for BusyBox/OpenWrt nodes (shell, curl/wget). Lightweight alternative to callhome.py |
+| `scripts/image-builder/files-mesh-lxc/usr/sbin/wifi_setup.sh` | Container-side WiFi WDS setup script. configure/switch-mode/status subcommands. Baked into mesh LXC image, callable by Ansible and manager API |
+| `scripts/image-builder/files-mesh-lxc/usr/sbin/batman_trigger.sh` | Container-side batman-adv enable/disable/status script. HMAC-authenticated mutations. Baked into mesh LXC image |
+
+## Event-driven fleet monitoring (callhome architecture)
+The project uses an inverted data flow: containers heartbeat their health
+to a central management API, replacing SSH polling for readiness checks.
+
+### Base state
+The central management API (`app.py --headless`) starts BEFORE Ansible
+provisioning begins. Both `build.py` (production) and molecule's
+`prepare.yml` (test) launch it as a background subprocess on port 8088
+and write the URL to `.state/callhome_url`. Ansible reads this file via
+the `callhome_server` variable in `group_vars/all.yml` — hard-fails if
+missing. This is base infrastructure — all containers depend on it for
+health reporting.
+
+### Container callhome agents
+Every Debian-based LXC image has a callhome agent baked in during
+`build-images.sh` via `inject_callhome_agent()`. The agent runs as a
+systemd service (`callhome.service`) in container mode (`--container`),
+reporting `systemd_services`, `listening_ports`, `ready`, and composable
+`extensions`. OpenWrt LXC containers use `callhome.sh` (BusyBox-compatible).
+
+### Composable extensions
+Heartbeat payloads include an `extensions` dict — service-specific data
+collected by independent, composable collectors. Each collector checks if
+its prerequisites exist (binary, config file) and is omitted if not:
+
+- `network` — interfaces, MACs, IPs, default gateway (stdlib: sysfs + /proc)
+- `wireguard` — interface names, peer counts, up/down state (`wg show`)
+- `docker` — daemon active, running container count (`docker info`)
+- `config_files` — JSON config key lists and content hashes (env: `CALLHOME_CONFIG_FILES`)
+- `wifi` — PHY count from `/sys/class/ieee80211/` (callhome.sh only)
+
+Extensions pass through the API transparently — the server stores and
+returns them without needing to understand their schema. To add a new
+collector, implement it in `callhome.py:collect_<name>()`, add it to
+`collect_extensions()`, and query it via `/api/container/{id}/ready`.
+
+### Configuration flow
+1. `build.py` or `prepare.yml` starts the API server and writes `.state/callhome_url`
+2. Each service's provision+configure plays deploy the container
+3. The "Configure callhome on LXC containers" play in `site.yml` writes
+   `callhome_server`, `callhome_public_key`, and service-specific env vars
+   (e.g., `CALLHOME_CONFIG_FILES` for kiosk) to `/etc/default/callhome`
+   inside each running container and restarts the callhome service
+4. Containers begin heartbeating to the API within seconds
+5. In container mode, heartbeats are sent every interval (no IP-change gate)
+
+### Verify phase: fleet readiness gate + per-service API queries
+`molecule/default/verify.yml` includes a "Fleet readiness gate" play that
+queries `/api/fleet/ready?services=...` before running per-service checks.
+When the API confirms all services are ready:
+- `_fleet_api_ready` fact is set on localhost
+- Per-service `pct exec` health checks are SKIPPED (heartbeat already
+  confirms service liveness, ports, systemd state)
+- Per-service API queries (`/api/container/{id}/ready`) retrieve extensions:
+  - WireGuard peer count from `extensions.wireguard`
+  - HA Docker status from `extensions.docker`
+  - Kiosk config keys from `extensions.config_files`
+  - Gaming Sunshine status from `systemd_services`
+- `pct config` deployment validation and cross-service integration tests
+  still run (the API doesn't cover hypervisor-side config or L3 connectivity)
+
+### What remains SSH-only
+These categories CANNOT be replaced by heartbeats:
+- Hypervisor config (`pct config`, `qm config`) — Proxmox host-side
+- Cross-service integration (send log, check DNS) — proves L3 connectivity
+- Host infrastructure (IOMMU, PVE API, hookscripts) — host access required
+- QEMU Guest Agent ping — VM channel, not LXC heartbeat
+
+### API endpoints
+- `POST /api/checkin` — receive heartbeats (with extensions) from callhome agents
+- `GET /api/nodes` — list all nodes with container_health and extensions
+- `GET /api/fleet/ready?services=a,b,c` — aggregate readiness check
+- `GET /api/fleet/health` — fleet health summary
+- `GET /api/container/{id}/ready` — individual container readiness + extensions
+
+### Service name matching
+Fleet readiness matches services by container hostname, node_id, or
+`container_health.container_id`. Container hostnames are set by the
+`<type>_ct_hostname` default (e.g., `pihole`, `rsyslog`, `kiosk`) and
+must match the names in the fleet readiness query.
 
 ## Adding a new LXC service — checklist
 1. **Build the image first.** Add the service's image build to `build-images.sh` (or create a new build script). All packages baked in. Define the image path in `group_vars/all.yml`.

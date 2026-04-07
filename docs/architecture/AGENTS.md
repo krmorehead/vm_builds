@@ -117,12 +117,14 @@ Run once per host before any service roles:
 - Play 22: `wireguard_configure` (wireguard) — tag: `wireguard`
 - Play 23: `openwrt_mesh_lxc` (wifi_nodes:!router_nodes) — tag: `mesh-wifi`, deploy_stamp: `openwrt_mesh_lxc`
 - Play 24: `openwrt_mesh_configure` (openwrt_mesh) — tag: `mesh-wifi`
-- Play 25: `desktop_vm` (desktop_nodes) — tag: `desktop`, deploy_stamp: `desktop_vm`
-- Play 26: `desktop_configure` (desktop) — tag: `desktop`
-- Play 27: `kiosk_lxc` (desktop_nodes) — tag: `kiosk`, deploy_stamp: `kiosk_lxc`
-- Play 28: `kiosk_configure` (desktop_nodes) — tag: `kiosk`
-- Play 29: `gaming_lxc` (gaming_nodes) — tag: `gaming`, `never`, deploy_stamp: `gaming_lxc`
-- Play 30: `gaming_lxc_configure` (gaming_nodes) — tag: `gaming`, `never`
+- Play 25: `openwrt_bridge_lxc` (bridge_nodes) — tag: `bridge`, deploy_stamp: `openwrt_bridge_lxc`
+- Play 26: `openwrt_bridge_configure` (openwrt_bridge) — tag: `bridge`
+- Play 27: `desktop_vm` (desktop_nodes) — tag: `desktop`, deploy_stamp: `desktop_vm`
+- Play 28: `desktop_configure` (desktop) — tag: `desktop`
+- Play 29: `kiosk_lxc` (desktop_nodes) — tag: `kiosk`, deploy_stamp: `kiosk_lxc`
+- Play 30: `kiosk_configure` (desktop_nodes) — tag: `kiosk`
+- Play 31: `gaming_lxc` (gaming_nodes) — tag: `gaming`, `never`, deploy_stamp: `gaming_lxc`
+- Play 32: `gaming_lxc_configure` (gaming_nodes) — tag: `gaming`, `never`
 
 ## Network Topology
 
@@ -130,9 +132,9 @@ Run once per host before any service roles:
 ISP Router (192.168.86.x supernet)
   |
 Switch
-  |            |                  |
-Home          AI Node          Mesh2
-(primary)     192.168.86.220   192.168.86.211
+  |            |                  |            |            |
+Home          AI Node          Mesh2       Bridge-1     Bridge-2
+(primary)     192.168.86.220   192.168.86.211  .230        .231
   |
   |-- OpenWrt VM (10.10.10.1)
   |     |
@@ -142,7 +144,7 @@ Home          AI Node          Mesh2
 ```
 
 **Network Rules:**
-- **home**, **ai**, **mesh2**: directly reachable on the supernet (no ProxyJump)
+- **home**, **ai**, **mesh2**, **bridge-1**, **bridge-2**: directly reachable on the supernet (no ProxyJump)
 - **mesh1**: behind home's OpenWrt, reachable via ProxyJump through home
 
 ## Device Flavors (Inventory Groups)

@@ -25,6 +25,20 @@ Each `pct_remote` task opens a new SSH connection and takes 15-60 seconds. MINIM
 
 Example: Moving a systemd override from configure role (3 tasks via pct_remote) to the image saved 38% of per-feature test time.
 
+## Fleet API Eliminates Most Verify SSH Overhead
+
+The fleet readiness API (`/api/fleet/ready`, `/api/container/{id}/ready`)
+replaces most `pct exec` liveness checks in verify with a single HTTP call.
+When the fleet API is available (`_fleet_api_ready`), container health is
+queried via `uri` instead of individual `pct exec` SSH connections.
+
+SSH batching (below) remains relevant for:
+- The **fallback path** when the fleet API is unavailable
+- **Configure-phase** tasks (pct_remote is the only option during deploy)
+- **Hypervisor checks** (pct config, qm config) that the fleet API doesn't cover
+
+See the `manager-api-pattern` skill for the full dual-path pattern.
+
 ## Verify Phase Optimization
 
 **Consolidate pct config reads:**
@@ -95,6 +109,33 @@ ALWAYS add `serial: 2` to configure plays that target 4+ `pct_remote` containers
 ```
 
 Previous bug: WireGuard configure ran 4 containers in parallel. Two containers (wireguard-home, wireguard-mesh1) both routed SSH through `home`'s sshd. The rapid connection churn caused "Connection reset by peer (104)" on both. Fix: `serial: 2` processes containers in batches, halving simultaneous SSH load.
+
+## Bypass pct_remote for Health-Only Configure Plays
+
+When a configure play ONLY checks service health (no container-internal
+configuration changes), bypass `pct_remote` entirely by targeting the Proxmox
+HOST group and using `ansible.builtin.command` with `pct exec`. This eliminates
+paramiko SSH hangs that `serial` and timeout settings cannot prevent:
+
+```yaml
+- name: Configure Netdata
+  hosts: monitoring_nodes
+  gather_facts: false
+  tasks:
+    - name: Check service health
+      ansible.builtin.command:
+        cmd: pct exec {{ netdata_ct_id }} -- systemctl is-active netdata
+      changed_when: false
+      failed_when: false
+      retries: 10
+      delay: 3
+      until: _check.stdout | trim == 'active'
+```
+
+Previous bug: `Configure Netdata` play with `pct_remote` hung indefinitely on
+paramiko SSH handshake — even with `serial: 1`, `timeout = 60`, and
+`host_key_auto_add = True`. 0% CPU indicated IO block. Fix: target host group
+directly with `pct exec`, bypassing paramiko entirely.
 
 ## Play Merging
 

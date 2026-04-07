@@ -16,6 +16,13 @@ env_generated_path: >-
      if lookup('env', 'MOLECULE_PROJECT_DIRECTORY') | length > 0
      else '.env.generated' }}
 
+# ── Callhome fleet management ─────────────────────────────────────
+# Sole source of truth: .state/callhome_url written by build.py (production)
+# or molecule prepare.yml (test). Hard-fails if the file is missing.
+callhome_server: "{{ lookup('file', project_root + '/.state/callhome_url') }}"
+callhome_public_key: "{{ lookup('env', 'CALLHOME_PUBLIC_KEY') }}"
+callhome_private_key: "{{ lookup('env', 'CALLHOME_PRIVATE_KEY') }}"
+
 # ── Storage ───────────────────────────────────────────────────────
 proxmox_storage: local-lvm
 
@@ -52,6 +59,7 @@ rsyslog_ct_ip_offset: 12
 netdata_lxc_template: netdata-debian-12-amd64.tar.zst
 netdata_lxc_template_path: images/netdata-debian-12-amd64.tar.zst
 netdata_ct_ip_offset: 21
+bridge_ct_ip_offset: 27
 
 # ── Home Assistant LXC ──────────────────────────────────────────
 # Custom image built by build-images.sh: Debian 12 + Docker CE pre-installed
@@ -123,6 +131,7 @@ wireguard_lxc_template_path: images/wireguard-debian-12-amd64.tar.zst
 wireguard_ct_id: 101
 pihole_ct_id: 102
 meshwifi_ct_id: 103
+bridge_ct_id: 104
 
 # ── Service Tier (200-299) ───────────────────────────────────────
 homeassistant_ct_id: 200
@@ -169,6 +178,7 @@ proxmox_startup_order:
   102: 3     # Pi-hole — needs network
   500: 3     # Netdata — parallel with Pi-hole (same tier)
   501: 3     # rsyslog — parallel with Pi-hole (same tier)
+  104: 2     # WiFi Bridge — parallel with VPN (after network)
   103: 4     # Mesh WiFi Controller — after DNS/monitoring
   200: 5     # Home Assistant — after infrastructure
   300: 5     # Jellyfin — parallel with HA (same tier)

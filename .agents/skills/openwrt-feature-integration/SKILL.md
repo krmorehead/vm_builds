@@ -15,7 +15,7 @@ roles/openwrt_configure/tasks/
 ├── security.yml      # M1: SSH hardening, banIP
 ├── vlans.yml         # M2: VLAN segmentation
 ├── dns.yml           # M3: Encrypted DNS (https-dns-proxy)
-└── mesh.yml          # M4: 802.11s mesh + Dawn steering
+└── mesh.yml          # M4: WDS WiFi backhaul + Dawn steering
 ```
 
 ## Dual Play Pattern

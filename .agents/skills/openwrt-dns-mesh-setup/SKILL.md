@@ -1,6 +1,6 @@
 ---
 name: openwrt-dns-mesh-setup
-description: OpenWrt encrypted DNS and mesh configuration patterns. Use when setting up https-dns-proxy, configuring 802.11s mesh networks, or implementing DNS encryption on OpenWrt.
+description: OpenWrt encrypted DNS and mesh configuration patterns. Use when setting up https-dns-proxy, configuring WDS WiFi backhaul, or implementing DNS encryption on OpenWrt.
 ---
 
 # OpenWrt DNS and Mesh Setup Rules
@@ -16,7 +16,7 @@ description: OpenWrt encrypted DNS and mesh configuration patterns. Use when set
 
 ## Mesh Networking Setup
 
-3. Mesh satellite nodes use 802.11s mesh for wireless connectivity without requiring PCIe passthrough.
+3. Mesh satellite nodes use WDS AP/STA for wireless backhaul without requiring PCIe passthrough.
 
 4. The `iw` package must be pre-installed in custom image for namespace-aware WiFi detection via netlink.
 

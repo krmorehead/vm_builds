@@ -93,6 +93,9 @@ MESH_PACKAGES=(
     kmod-ath9k
     kmod-ath10k-ct
     ath10k-firmware-qca988x-ct
+    # batman-adv mesh routing (dormant until configured)
+    kmod-batman-adv
+    batctl-tiny
     # Remove packages that conflict or are unnecessary in LXC
     -wpad-basic-openssl
     -wpad-basic-wolfssl
@@ -140,6 +143,54 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 remote_cmd() {
     # shellcheck disable=SC2086
     ssh $SSH_OPTS "root@${PROXMOX_HOST}" "$@"
+}
+
+# Inject the callhome heartbeat agent into a Debian-based build container.
+# Called by each build_*_lxc() function after package installation.
+inject_callhome_agent() {
+    local vmid="$1"
+    log "Injecting callhome agent into container ${vmid}..."
+
+    # Copy callhome.py to the Proxmox host, then push into the container
+    local callhome_src="${SCRIPT_DIR}/callhome.py"
+    if [[ ! -f "$callhome_src" ]]; then
+        log "WARNING: callhome.py not found at ${callhome_src}, skipping agent injection"
+        return
+    fi
+
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS "$callhome_src" "root@${PROXMOX_HOST}:/tmp/callhome.py"
+    remote_cmd "pct exec ${vmid} -- mkdir -p /opt/callhome"
+    remote_cmd "pct push ${vmid} /tmp/callhome.py /opt/callhome/callhome.py"
+    remote_cmd "rm -f /tmp/callhome.py"
+    remote_cmd "pct exec ${vmid} -- chmod +x /opt/callhome/callhome.py"
+
+    # Create /etc/default/callhome with placeholder (populated by configure role)
+    remote_cmd "pct exec ${vmid} -- bash -c 'cat > /etc/default/callhome << \"CONF_EOF\"
+# Populated by Ansible configure role at deploy time
+CALLHOME_SERVER=
+CALLHOME_PUBLIC_KEY=
+CONF_EOF'"
+
+    # Create systemd service unit
+    remote_cmd "pct exec ${vmid} -- bash -c 'cat > /etc/systemd/system/callhome.service << \"UNIT_EOF\"
+[Unit]
+Description=Call-home heartbeat agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/callhome/callhome.py --container --interval 60 --interval-startup 5
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+UNIT_EOF'"
+
+    remote_cmd "pct exec ${vmid} -- systemctl enable callhome.service 2>/dev/null || true"
+    log "Callhome agent injected."
 }
 
 # Shared cleanup for any LXC build container
@@ -202,7 +253,7 @@ build_mesh_lxc() {
     fi
 
     local rootfs
-    rootfs=$(find "${ib_dir}/bin" -name '*rootfs.tar.gz' -print -quit 2>/dev/null)
+    rootfs=$(find "${ib_dir}/bin" -name '*mesh-lxc*rootfs.tar.gz' -print -quit 2>/dev/null)
     if [[ -z "$rootfs" ]]; then
         die "Mesh LXC rootfs not found in Image Builder output"
     fi
@@ -353,6 +404,8 @@ TOML_EOF
         apt-get clean
         rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
     '"
+
+    inject_callhome_agent "${vmid}"
 
     log "Stopping build container..."
     remote_cmd "pct stop ${vmid}"
@@ -520,6 +573,8 @@ ROTATE_EOF
     '"
     remote_cmd "pct exec ${vmid} -- /usr/sbin/rsyslogd -N1"
     log "rsyslog smoke test passed."
+
+    inject_callhome_agent "${vmid}"
 
     log "Stopping build container..."
     remote_cmd "pct stop ${vmid}"
@@ -689,6 +744,8 @@ JELLYFIN_EOF
         ls -la /usr/share/jellyfin/web/
     '"
     log "Jellyfin smoke test passed."
+
+    inject_callhome_agent "${vmid}"
 
     log "Stopping build container..."
     remote_cmd "pct stop ${vmid}"
@@ -872,6 +929,8 @@ OVERRIDE_EOF
         curl -s -o /dev/null -w \"%{http_code}\" http://127.0.0.1:19999 || echo \"no-dashboard\"
     '"
     log "Netdata smoke test completed."
+
+    inject_callhome_agent "${vmid}"
 
     log "Stopping build container..."
     remote_cmd "pct stop ${vmid}"
@@ -1077,6 +1136,8 @@ SETTINGS_EOF
     '"
     log "Kodi smoke test passed."
 
+    inject_callhome_agent "${vmid}"
+
     log "Stopping build container..."
     remote_cmd "pct stop ${vmid}"
     sleep 2
@@ -1151,7 +1212,7 @@ build_kiosk_lxc() {
         --hostname kiosk-build \
         --memory 1024 \
         --cores 2 \
-        --rootfs local-lvm:2 \
+        --rootfs local-lvm:4 \
         --net0 name=eth0,bridge=${mgmt_bridge},ip=dhcp \
         --nameserver 8.8.8.8 \
         --unprivileged 1 \
@@ -1194,7 +1255,8 @@ build_kiosk_lxc() {
             cage \
             chromium \
             fonts-noto \
-            fonts-noto-color-emoji
+            fonts-noto-color-emoji \
+            openssh-client
 
         # VA-API drivers for both Intel and AMD iGPU
         apt-get install -y --no-install-recommends \
@@ -1211,8 +1273,18 @@ build_kiosk_lxc() {
         mkdir -p /opt/kiosk/webui/pages
         chown -R kiosk:kiosk /opt/kiosk
 
-        # Pre-configure kiosk-web systemd service (NiceGUI Home Hub server)
-        cat > /etc/systemd/system/kiosk-web.service << \"WEB_EOF\"
+        apt-get clean 2>/dev/null || true
+        rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    '"
+
+    # Write systemd units and helper script via separate pct push calls
+    # to avoid nested single-quote issues inside bash -c
+    log "Installing systemd services..."
+
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    cat > "${tmpdir}/kiosk-web.service" << 'WEB_EOF'
 [Unit]
 Description=Kiosk Home Hub Web Server (NiceGUI)
 After=network-online.target
@@ -1231,8 +1303,17 @@ RestartSec=3
 WantedBy=multi-user.target
 WEB_EOF
 
-        # Pre-configure kiosk-display systemd service
-        cat > /etc/systemd/system/kiosk-display.service << \"SERVICE_EOF\"
+    cat > "${tmpdir}/wait-for-hub.sh" << 'WAIT_EOF'
+#!/bin/bash
+for i in $(seq 1 15); do
+    curl -sf http://127.0.0.1:8080/ >/dev/null 2>&1 && exit 0
+    sleep 1
+done
+echo "Hub server not ready"
+exit 1
+WAIT_EOF
+
+    cat > "${tmpdir}/kiosk-display.service" << 'DISPLAY_EOF'
 [Unit]
 Description=Kiosk Dashboard (Cage + Chromium)
 After=systemd-user-sessions.service kiosk-web.service
@@ -1246,10 +1327,10 @@ Type=simple
 Environment=WLR_LIBINPUT_NO_DEVICES=1
 Environment=XDG_RUNTIME_DIR=/run/user/0
 ExecStartPre=/bin/mkdir -p /run/user/0
-ExecStartPre=/bin/bash -c 'for i in $(seq 1 15); do curl -sf http://127.0.0.1:8080/ >/dev/null 2>&1 && exit 0; sleep 1; done; echo "Hub server not ready"; exit 1'
+ExecStartPre=/opt/kiosk/wait-for-hub.sh
 ExecStart=/usr/bin/cage -- /usr/bin/chromium --kiosk --no-sandbox --ozone-platform=wayland --disable-gpu-compositing --noerrdialogs --disable-infobars --no-first-run --disable-translate --disable-features=TranslateUI --start-fullscreen http://127.0.0.1:8080/hub
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=3
 StandardInput=tty
 TTYPath=/dev/tty7
 TTYReset=yes
@@ -1257,26 +1338,37 @@ TTYVHangup=yes
 
 [Install]
 WantedBy=multi-user.target
-SERVICE_EOF
+DISPLAY_EOF
 
-        systemctl daemon-reload
+    # Push files into the container
+    for f in kiosk-web.service kiosk-display.service; do
+        # shellcheck disable=SC2086
+        scp $SSH_OPTS "${tmpdir}/${f}" "root@${PROXMOX_HOST}:/tmp/${f}"
+        remote_cmd "pct push ${vmid} /tmp/${f} /etc/systemd/system/${f} && rm -f /tmp/${f}"
+    done
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS "${tmpdir}/wait-for-hub.sh" "root@${PROXMOX_HOST}:/tmp/wait-for-hub.sh"
+    remote_cmd "pct push ${vmid} /tmp/wait-for-hub.sh /opt/kiosk/wait-for-hub.sh && rm -f /tmp/wait-for-hub.sh"
+    remote_cmd "pct exec ${vmid} -- chmod +x /opt/kiosk/wait-for-hub.sh"
+    remote_cmd "pct exec ${vmid} -- systemctl daemon-reload"
 
-        apt-get clean 2>/dev/null || true
-        rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-    '"
+    rm -rf "${tmpdir}"
 
     log "Verifying Kiosk installation..."
     remote_cmd "pct exec ${vmid} -- bash -c '
         dpkg -l cage | grep -c ^ii || { echo FAIL: cage not installed; exit 1; }
         dpkg -l chromium | grep -c ^ii || { echo FAIL: chromium not installed; exit 1; }
-        python3 -c "import nicegui" || { echo FAIL: nicegui not installed; exit 1; }
+        python3 -c \"import nicegui\" || { echo FAIL: nicegui not installed; exit 1; }
         test -f /etc/systemd/system/kiosk-display.service || { echo FAIL: display service missing; exit 1; }
         test -f /etc/systemd/system/kiosk-web.service || { echo FAIL: web service missing; exit 1; }
+        test -x /opt/kiosk/wait-for-hub.sh || { echo FAIL: wait-for-hub script missing; exit 1; }
         id kiosk || { echo FAIL: kiosk user missing; exit 1; }
         test -d /opt/kiosk/webui || { echo FAIL: kiosk webui dir missing; exit 1; }
         echo ALL CHECKS PASSED
     '"
     log "Kiosk smoke test passed."
+
+    inject_callhome_agent "${vmid}"
 
     log "Stopping build container..."
     remote_cmd "pct stop ${vmid}"
@@ -1447,6 +1539,8 @@ build_moonlight_lxc() {
     '"
     log "Moonlight smoke test passed."
 
+    inject_callhome_agent "${vmid}"
+
     log "Stopping build container..."
     remote_cmd "pct stop ${vmid}"
     sleep 2
@@ -1582,6 +1676,8 @@ SYSCTL_EOF
         dpkg -l iptables-persistent | grep -q ^ii && echo iptables-persistent-ok
     '"
     log "WireGuard smoke test passed."
+
+    inject_callhome_agent "${vmid}"
 
     log "Stopping build container..."
     remote_cmd "pct stop ${vmid}"
@@ -1749,6 +1845,8 @@ DOCKER_EOF
         docker compose version
     '"
     log "Docker installation verified."
+
+    inject_callhome_agent "${vmid}"
 
     log "Stopping build container..."
     remote_cmd "pct stop ${vmid}"
@@ -2011,6 +2109,8 @@ PEOF
         systemctl enable xorg-virtual.service 2>/dev/null || true
         systemctl enable sunshine.service 2>/dev/null || true
     '"
+
+    inject_callhome_agent "${vmid}"
 
     log "Cleaning up package caches..."
     remote_cmd "pct exec ${vmid} -- bash -c '

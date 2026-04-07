@@ -8,6 +8,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Dedicated WiFi Bridge** -- `openwrt_bridge_lxc` and `openwrt_bridge_configure`
+  roles deploy transparent L2 WDS bridge containers (VMID 104) on two standalone
+  Proxmox mini-PCs (`bridge-1`, `bridge-2`). Uses WiFi 6E (Intel AX210) with
+  5 GHz HE80 and WPA3-SAE encryption on a hidden SSID (`bridge-dedicated`).
+  WDS mode (AP + STA with 4-address) because AX210 firmware does not support
+  802.11s mesh. Per-host `wifi_role` (ap/sta) in host_vars. Reuses the
+  existing OpenWrt mesh LXC template. WiFi PHY namespace move with hookscript
+  persistence. `bridge-2` uses auto-detected USB NIC for ethernet backhaul.
+  STP enabled on `br-lan` for loop prevention. Per-feature molecule scenario
+  (`bridge-lxc`) and cross-hardware
+  validation scenario (`mesh-ax210`). Rollback tag (`bridge-rollback`).
+  `bridge_nodes` inventory group with `BRIDGE_1_HOST`, `BRIDGE_2_HOST` env vars.
+- **Unified WDS WiFi protocol** -- Replaced 802.11s mesh (silently broken on
+  all fleet hardware) with WDS AP/STA as the single WiFi protocol across router
+  VM, mesh LXC satellites, and bridge LXC containers. Router creates hidden WDS
+  AP (`vm-builds-backhaul`), mesh satellites connect as WDS STAs. Shared
+  `tasks/configure_wifi_wds.yml` eliminates ~70% code duplication between
+  `openwrt_mesh_configure` and `openwrt_bridge_configure`. Per-host `wifi_role`
+  (ap/sta) in host_vars unifies the former `bridge_wifi_role`. No image rebuild
+  required (`wpad-mesh-openssl` supports WDS).
+- **WiFi infrastructure hardening** -- `proxmox_pci_passthrough` now includes
+  unconditional WiFi kernel module loading, Intel firmware verification and
+  installation, and `wifi_phy_count` fact export. Ensures WiFi PHYs are available
+  regardless of whether PCI passthrough is needed.
 - **Interactive Web UI** -- `scripts/webui.sh` launches a NiceGUI-based web
   interface for managing the entire vm_builds project interactively:
   - Environment editor with validation, inline editing, and save

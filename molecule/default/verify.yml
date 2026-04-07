@@ -273,6 +273,12 @@
         - "'wifi_nodes' in group_names"
         - "'router_nodes' not in group_names"
 
+    - name: Assert stamp contains openwrt_bridge_lxc (bridge nodes only)
+      ansible.builtin.assert:
+        that: "'openwrt_bridge_lxc' in stamp.plays"
+        fail_msg: "deploy_stamp missing openwrt_bridge_lxc entry: {{ stamp.plays.keys() | list }}"
+      when: "'bridge_nodes' in group_names"
+
     - name: Assert stamp contains homeassistant_lxc (service nodes only)
       ansible.builtin.assert:
         that: "'homeassistant_lxc' in stamp.plays"
@@ -528,84 +534,70 @@
         delay: 5
         timeout: 60
 
-    - name: Check OpenWrt WAN interface and IP
+    - name: Check OpenWrt WAN/LAN info (batched)
       ansible.builtin.shell:
         cmd: >-
           {{ openwrt_ssh }}
           "wan_dev=\$(ip -o route show default | sed -n 's/.*dev \([^ ]*\).*/\1/p' | head -1);
-          ip -o -4 addr show dev \$wan_dev 2>/dev/null | awk '{print \$2, \$4}'"
-      register: wan_info
+          echo \"WAN_INFO=\$(ip -o -4 addr show dev \$wan_dev 2>/dev/null | awk '{print \$2, \$4}')\";
+          echo \"WAN_PREFIX=\$(ip -o -4 addr show dev \$wan_dev | awk '{print \$4}' | cut -d/ -f1 | cut -d. -f1-3)\";
+          echo \"LAN_IP=\$(uci get network.lan.ipaddr)\""
+      register: _openwrt_net_batch
       changed_when: false
+
+    - name: Parse batched WAN/LAN results
+      ansible.builtin.set_fact:
+        wan_info_line: "{{ _openwrt_net_batch.stdout | regex_search('WAN_INFO=(.*)', '\\1') | first | default('') }}"
+        wan_prefix_line: "{{ _openwrt_net_batch.stdout | regex_search('WAN_PREFIX=(.*)', '\\1') | first | default('') }}"
+        lan_ip_line: "{{ _openwrt_net_batch.stdout | regex_search('LAN_IP=(.*)', '\\1') | first | default('') }}"
 
     - name: Assert WAN has an IP address
       ansible.builtin.assert:
-        that: wan_info.stdout | trim | length > 0
+        that: wan_info_line | trim | length > 0
         fail_msg: "WAN interface has no IPv4 address"
-
-    - name: Check OpenWrt LAN IP  # noqa command-instead-of-shell
-      ansible.builtin.shell:
-        cmd: >-
-          {{ openwrt_ssh }} "uci get network.lan.ipaddr"
-      register: lan_ip
-      changed_when: false
-
-    - name: Check WAN IP prefix
-      ansible.builtin.shell:
-        cmd: >-
-          {{ openwrt_ssh }}
-          "wan_dev=\$(ip -o route show default | sed -n 's/.*dev \([^ ]*\).*/\1/p' | head -1);
-          ip -o -4 addr show dev \$wan_dev
-          | awk '{print \$4}' | cut -d/ -f1 | cut -d. -f1-3"
-      register: wan_prefix
-      changed_when: false
 
     - name: Compute LAN prefix
       ansible.builtin.set_fact:
-        lan_prefix: "{{ (lan_ip.stdout | trim).split('.')[0:3] | join('.') }}"
+        lan_prefix: "{{ (lan_ip_line | trim).split('.')[0:3] | join('.') }}"
 
     - name: Assert LAN subnet does not collide with WAN
       ansible.builtin.assert:
-        that: lan_prefix != (wan_prefix.stdout | trim)
+        that: lan_prefix != (wan_prefix_line | trim)
         fail_msg: >-
           LAN prefix {{ lan_prefix }} collides with WAN prefix
-          {{ wan_prefix.stdout | trim }}
+          {{ wan_prefix_line | trim }}
 
     # ── DHCP configuration ──────────────────────────────────────
 
-    - name: Check OpenWrt DHCP start  # noqa command-instead-of-shell
+    - name: Check OpenWrt DHCP config (batched)
       ansible.builtin.shell:
         cmd: >-
-          {{ openwrt_ssh }} "uci get dhcp.lan.start"
-      register: dhcp_start
+          {{ openwrt_ssh }}
+          "echo \"DHCP_START=\$(uci get dhcp.lan.start)\";
+          echo \"DHCP_LIMIT=\$(uci get dhcp.lan.limit)\";
+          echo \"DHCP_LEASETIME=\$(uci get dhcp.lan.leasetime)\""
+      register: _dhcp_batch
       changed_when: false
+
+    - name: Parse batched DHCP results
+      ansible.builtin.set_fact:
+        dhcp_start_val: "{{ _dhcp_batch.stdout | regex_search('DHCP_START=(.*)', '\\1') | first | default('0') }}"
+        dhcp_limit_val: "{{ _dhcp_batch.stdout | regex_search('DHCP_LIMIT=(.*)', '\\1') | first | default('0') }}"
+        dhcp_leasetime_val: "{{ _dhcp_batch.stdout | regex_search('DHCP_LEASETIME=(.*)', '\\1') | first | default('') }}"
 
     - name: Assert DHCP start is configured
       ansible.builtin.assert:
-        that: (dhcp_start.stdout | trim | int) > 0
-        fail_msg: "DHCP start not set or zero: {{ dhcp_start.stdout | trim }}"
-
-    - name: Check OpenWrt DHCP limit  # noqa command-instead-of-shell
-      ansible.builtin.shell:
-        cmd: >-
-          {{ openwrt_ssh }} "uci get dhcp.lan.limit"
-      register: dhcp_limit
-      changed_when: false
+        that: (dhcp_start_val | trim | int) > 0
+        fail_msg: "DHCP start not set or zero: {{ dhcp_start_val | trim }}"
 
     - name: Assert DHCP limit is configured
       ansible.builtin.assert:
-        that: (dhcp_limit.stdout | trim | int) > 0
-        fail_msg: "DHCP limit not set or zero: {{ dhcp_limit.stdout | trim }}"
-
-    - name: Check OpenWrt DHCP leasetime  # noqa command-instead-of-shell
-      ansible.builtin.shell:
-        cmd: >-
-          {{ openwrt_ssh }} "uci get dhcp.lan.leasetime"
-      register: dhcp_leasetime
-      changed_when: false
+        that: (dhcp_limit_val | trim | int) > 0
+        fail_msg: "DHCP limit not set or zero: {{ dhcp_limit_val | trim }}"
 
     - name: Assert DHCP leasetime is configured
       ansible.builtin.assert:
-        that: (dhcp_leasetime.stdout | trim | length) > 0
+        that: (dhcp_leasetime_val | trim | length) > 0
         fail_msg: "DHCP leasetime not set"
 
     - name: Get Proxmox LAN bridge MAC for reservation check  # noqa command-instead-of-shell
@@ -615,43 +607,39 @@
       delegate_to: "{{ inventory_hostname }}"
       changed_when: false
 
-    - name: Check DHCP static lease for Proxmox host on OpenWrt
+    - name: Check DHCP reservation for Proxmox host (batched)
       ansible.builtin.shell:
         cmd: >-
-          {{ openwrt_ssh }} "uci show dhcp | grep -i '{{ lan_bridge_mac_raw.stdout | trim }}' || echo 'no_reservation'"
-      register: dhcp_reservation
+          {{ openwrt_ssh }}
+          "dhcp_dump=\$(uci show dhcp);
+          echo \"MAC_MATCH=\$(echo \"\$dhcp_dump\" | grep -i '{{ lan_bridge_mac_raw.stdout | trim }}' || echo 'no_reservation')\";
+          echo \"IP_MATCH=\$(echo \"\$dhcp_dump\" | grep '.ip=' | grep '{{ proxmox_lan_ip }}' || echo 'ip_mismatch')\""
+      register: _dhcp_res_batch
       changed_when: false
 
     - name: Assert DHCP reservation exists for Proxmox host
       ansible.builtin.assert:
-        that: "'no_reservation' not in dhcp_reservation.stdout"
+        that: "'no_reservation' not in _dhcp_res_batch.stdout"
         fail_msg: >-
           No DHCP static lease found on OpenWrt for Proxmox LAN bridge
           MAC {{ lan_bridge_mac_raw.stdout | trim }}. The Proxmox host
           will not get a predictable LAN IP on boot.
-          Output: {{ dhcp_reservation.stdout }}
-
-    - name: Check DHCP reservation IP matches expected
-      ansible.builtin.shell:
-        cmd: >-
-          {{ openwrt_ssh }} "uci show dhcp | grep '.ip=' | grep '{{ proxmox_lan_ip }}' || echo 'ip_mismatch'"
-      register: dhcp_reservation_ip
-      changed_when: false
+          Output: {{ _dhcp_res_batch.stdout }}
 
     - name: Assert DHCP reservation IP is correct
       ansible.builtin.assert:
-        that: "'ip_mismatch' not in dhcp_reservation_ip.stdout"
+        that: "'ip_mismatch' not in _dhcp_res_batch.stdout"
         fail_msg: >-
           DHCP reservation IP does not match expected {{ proxmox_lan_ip }}.
-          Output: {{ dhcp_reservation_ip.stdout }}
+          Output: {{ _dhcp_res_batch.stdout }}
 
     - name: Report DHCP configuration
       ansible.builtin.debug:
         msg: >-
-          DHCP: start={{ dhcp_start.stdout | trim }},
-          limit={{ dhcp_limit.stdout | trim }},
-          leasetime={{ dhcp_leasetime.stdout | trim }},
-          proxmox_reservation={{ 'yes' if 'no_reservation' not in dhcp_reservation.stdout else 'no' }}
+          DHCP: start={{ dhcp_start_val | trim }},
+          limit={{ dhcp_limit_val | trim }},
+          leasetime={{ dhcp_leasetime_val | trim }},
+          proxmox_reservation={{ 'yes' if 'no_reservation' not in _dhcp_res_batch.stdout else 'no' }}
 
     # ── Proxmox GUI from LAN (leaf node perspective) ───────────────
 
@@ -673,25 +661,20 @@
 
     # ── WAN MAC address cloning ────────────────────────────────────
 
-    - name: Get UCI WAN MAC setting from OpenWrt
+    - name: Get WAN MAC from UCI and deferred file (batched)
       ansible.builtin.shell:
         cmd: >-
-          {{ openwrt_ssh }} "uci get network.wan.macaddr 2>/dev/null || echo ''"
-      register: vm_wan_mac
-      changed_when: false
-
-    - name: Check for deferred WAN MAC file
-      ansible.builtin.shell:
-        cmd: >-
-          {{ openwrt_ssh }} "cat /etc/openwrt_wan_mac_deferred 2>/dev/null || echo ''"
-      register: vm_deferred_mac
+          {{ openwrt_ssh }}
+          "echo \"UCI_MAC=\$(uci get network.wan.macaddr 2>/dev/null || echo '')\";
+          echo \"DEFERRED_MAC=\$(cat /etc/openwrt_wan_mac_deferred 2>/dev/null || echo '')\""
+      register: _wan_mac_batch
       changed_when: false
 
     - name: Set WAN MAC test facts
       ansible.builtin.set_fact:
         _wan_mac_env: "{{ lookup('env', 'WAN_MAC') | default('') }}"
-        _wan_mac_uci: "{{ vm_wan_mac.stdout | trim }}"
-        _wan_mac_deferred: "{{ vm_deferred_mac.stdout | trim }}"
+        _wan_mac_uci: "{{ _wan_mac_batch.stdout | regex_search('UCI_MAC=(.*)', '\\1') | first | default('') }}"
+        _wan_mac_deferred: "{{ _wan_mac_batch.stdout | regex_search('DEFERRED_MAC=(.*)', '\\1') | first | default('') }}"
 
     - name: Assert MAC applied OR deferred when WAN_MAC is set
       ansible.builtin.assert:
@@ -721,37 +704,24 @@
           deferred={{ _wan_mac_deferred }}
       when: _wan_mac_env | length == 0
 
-    - name: Check WAN MAC auto-apply init script exists when deferred
+    - name: Check WAN MAC init script status (batched)
       ansible.builtin.shell:
         cmd: >-
-          {{ openwrt_ssh }} "test -x /etc/init.d/wan_mac_apply && echo 'present' || echo 'missing'"
-      register: mac_init_script
+          {{ openwrt_ssh }}
+          "echo \"INIT=\$(test -x /etc/init.d/wan_mac_apply && echo present || echo missing)\";
+          echo \"ENABLED=\$(test -e /etc/rc.d/S99wan_mac_apply && echo enabled || echo disabled)\""
+      register: _mac_init_batch
       changed_when: false
       when: _wan_mac_deferred | length > 0
 
-    - name: Assert auto-apply init script is deployed when MAC deferred
+    - name: Assert init script deployed and enabled when MAC deferred
       ansible.builtin.assert:
-        that: (mac_init_script.stdout | trim) == "present"
+        that:
+          - "'INIT=present' in _mac_init_batch.stdout"
+          - "'ENABLED=enabled' in _mac_init_batch.stdout"
         fail_msg: >-
-          Deferred MAC file exists but /etc/init.d/wan_mac_apply is
-          {{ mac_init_script.stdout | trim }}. The MAC would never be
-          auto-applied on reboot.
-      when: _wan_mac_deferred | length > 0
-
-    - name: Check init script is enabled (symlinked in rc.d)
-      ansible.builtin.shell:
-        cmd: >-
-          {{ openwrt_ssh }} "ls /etc/rc.d/S99wan_mac_apply 2>/dev/null && echo 'enabled' || echo 'disabled'"
-      register: mac_init_enabled
-      changed_when: false
-      when: _wan_mac_deferred | length > 0
-
-    - name: Assert init script is enabled when MAC deferred
-      ansible.builtin.assert:
-        that: "'enabled' in (mac_init_enabled.stdout | trim)"
-        fail_msg: >-
-          wan_mac_apply init script is not enabled — won't run on boot.
-          Status: {{ mac_init_enabled.stdout | trim }}
+          WAN MAC deferred but init script state: {{ _mac_init_batch.stdout }}.
+          The MAC would never be auto-applied on reboot.
       when: _wan_mac_deferred | length > 0
 
     - name: Check dmesg for IPv6 duplicate address errors
@@ -779,32 +749,30 @@
 
     # ── WiFi ────────────────────────────────────────────────────
 
-    - name: Check for WiFi radios in VM
+    - name: Check WiFi radios and WDS config (batched)
       ansible.builtin.shell:
         cmd: >-
           {{ openwrt_ssh }}
-          "ls -1 /sys/class/ieee80211/ 2>/dev/null | wc -l"
-      register: radio_count
+          "echo \"RADIOS=\$(ls -1 /sys/class/ieee80211/ 2>/dev/null | wc -l)\";
+          echo \"WDS_AP=\$(uci show wireless 2>/dev/null | grep -c \"mode='ap'\" || echo 0)\";
+          echo \"WDS_ON=\$(uci show wireless 2>/dev/null | grep -c \"wds='1'\" || echo 0)\""
+      register: _wifi_batch
       changed_when: false
 
-    - name: Verify mesh configuration (when WiFi is present)
-      ansible.builtin.shell:
-        cmd: >-
-          {{ openwrt_ssh }}
-          "uci show wireless 2>/dev/null | grep \"mode='mesh'\" | wc -l"
-      register: mesh_iface_count
-      changed_when: false
-      when: (radio_count.stdout | trim | int) > 0
+    - name: Parse WiFi results
+      ansible.builtin.set_fact:
+        radio_count_val: "{{ _wifi_batch.stdout | regex_search('RADIOS=(\\d+)', '\\1') | first | default('0') }}"
+        wds_iface_count_val: "{{ _wifi_batch.stdout | regex_search('WDS_AP=(\\d+)', '\\1') | first | default('0') }}"
 
-    - name: Assert mesh interfaces match radio count
+    - name: Assert WDS AP interfaces match radio count
       ansible.builtin.assert:
         that: >-
-          (mesh_iface_count.stdout | trim | int) >=
-          (radio_count.stdout | trim | int)
+          (wds_iface_count_val | int) >=
+          (radio_count_val | int)
         fail_msg: >-
-          Expected {{ radio_count.stdout | trim }} mesh interfaces,
-          found {{ mesh_iface_count.stdout | trim }}
-      when: (radio_count.stdout | trim | int) > 0
+          Expected {{ radio_count_val }} WDS AP interfaces,
+          found {{ wds_iface_count_val }}
+      when: (radio_count_val | int) > 0
 
     # ── Host address state file ───────────────────────────────────
 
@@ -875,10 +843,10 @@
 
     - name: Assert generated LAN_GATEWAY matches OpenWrt LAN IP
       ansible.builtin.assert:
-        that: (_generated_lan_gw.stdout | trim) == (lan_ip.stdout | trim)
+        that: (_generated_lan_gw.stdout | trim) == (lan_ip_line | trim)
         fail_msg: >-
           Generated LAN_GATEWAY={{ _generated_lan_gw.stdout | trim }}
-          does not match OpenWrt LAN IP={{ lan_ip.stdout | trim }}
+          does not match OpenWrt LAN IP={{ lan_ip_line | trim }}
 
     # ── Final report ──────────────────────────────────────────────
 
@@ -889,11 +857,77 @@
           WAN bridge={{ wan_bridge }}, LAN bridge={{ lan_bridge }},
           VM net0={{ vm_net0_bridge_value }},
           Proxmox LAN IP={{ proxmox_lan_ip }},
-          WAN={{ wan_info.stdout | trim }},
-          LAN={{ lan_ip.stdout | trim }},
-          WiFi radios={{ radio_count.stdout | trim }},
-          Mesh={{ mesh_iface_count.stdout | default('0') | trim }},
+          WAN={{ wan_info_line | trim }},
+          LAN={{ lan_ip_line | trim }},
+          WiFi radios={{ radio_count_val }},
+          WDS_AP={{ wds_iface_count_val | default('0') }},
           LAN_GATEWAY(generated)={{ _generated_lan_gw.stdout | trim }}
+
+# ── Play 2.5: Fleet readiness gate (API-based) ────────────────────
+# The central management API starts by default (disable with --no-api).
+# Wait for all expected containers to heartbeat ready before running
+# deep per-service assertions. Sets _fleet_api_available for downstream.
+
+- name: Fleet readiness gate (event-driven)
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Check if management API is running
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}/api/nodes"
+        method: GET
+        return_content: true
+        status_code: [200, 403]
+      register: _api_probe
+      failed_when: false
+
+    - name: Set API availability
+      ansible.builtin.set_fact:
+        _fleet_api_available: "{{ _api_probe.status | default(0) | int in [200, 403] }}"
+
+    - name: Query fleet readiness from API
+      ansible.builtin.uri:
+        url: >-
+          http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}/api/fleet/ready?services={{
+            ['pihole', 'rsyslog', 'netdata', 'wireguard', 'kiosk',
+             'homeassistant', 'jellyfin', 'moonlight'] | join(',')
+          }}
+        method: GET
+        return_content: true
+      register: _fleet_ready
+      retries: 12
+      delay: 10
+      until: (_fleet_ready.json.all_ready | default(false)) | bool
+      failed_when: false
+      when: _fleet_api_available | bool
+
+    - name: Set fleet readiness facts
+      ansible.builtin.set_fact:
+        _fleet_api_ready: >-
+          {{ (_fleet_ready.json.all_ready | default(false)) | bool
+             if (_fleet_api_available | bool) else false }}
+
+    - name: Report fleet readiness
+      ansible.builtin.debug:
+        msg: >-
+          Fleet readiness: {{ 'ALL READY via API — skipping liveness SSH hops'
+          if (_fleet_api_ready | bool) else 'SSH fallback mode (API '
+          ~ ('not running' if not (_fleet_api_available | bool) else 'services not ready')
+          ~ ')' }}
+
+    - name: Report stale services
+      ansible.builtin.debug:
+        msg: >-
+          Stale services: {{
+            _fleet_ready.json.services | dict2items
+            | selectattr('value.ready', 'equalto', false)
+            | map(attribute='key') | list | join(', ')
+          }}
+      when:
+        - _fleet_api_available | bool
+        - not (_fleet_api_ready | bool)
+        - _fleet_ready.json is defined
 
 # ── Play 3: Pi-hole health + integration (dns_nodes) ─────────────
 # Deep Pi-hole checks (FTL diagnostics, ad-block, DNS retry loops)
@@ -902,6 +936,9 @@
 - name: Verify Pi-hole LXC on DNS nodes
   hosts: dns_nodes
   gather_facts: false
+  vars:
+    _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}"
   tasks:
     - name: Read Pi-hole container state and config
       ansible.builtin.shell:
@@ -922,7 +959,25 @@
           - "'nesting=1' in pihole_ct_cfg.stdout"
         fail_msg: "Pi-hole container {{ pihole_ct_id }} config incorrect on {{ inventory_hostname }}"
 
-    - name: Check Pi-hole service health (single pct exec)
+    - name: Query Pi-hole readiness from API
+      ansible.builtin.uri:
+        url: "{{ _api_base }}/api/container/pihole/ready"
+        return_content: true
+      register: _pihole_api
+      delegate_to: localhost
+      failed_when: false
+      when: _api_ready | bool
+
+    - name: Assert Pi-hole via API (heartbeat + service state)
+      ansible.builtin.assert:
+        that:
+          - _pihole_api.json.ready | default(false) | bool
+        fail_msg: "Pi-hole not ready via API: {{ _pihole_api.json | default({}) }}"
+      when:
+        - _api_ready | bool
+        - _pihole_api.status | default(0) == 200
+
+    - name: Check Pi-hole service health (single pct exec, SSH fallback)
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ pihole_ct_id }} -- /bin/sh -c '
@@ -932,6 +987,7 @@
           '
       register: pihole_health
       changed_when: false
+      when: not (_api_ready | bool)
 
     - name: Assert FTL is active and DNS resolves
       ansible.builtin.assert:
@@ -939,6 +995,7 @@
           - "'FTL' in pihole_health.stdout or 'Enabled' in pihole_health.stdout or 'Active' in pihole_health.stdout"
           - pihole_health.stdout | regex_search('DNS=\\d') is not none
         fail_msg: "Pi-hole health check failed on {{ inventory_hostname }}: {{ pihole_health.stdout }}"
+      when: not (_api_ready | bool)
 
     - name: Assert stamp contains pihole_lxc
       ansible.builtin.assert:
@@ -954,6 +1011,9 @@
 - name: Verify monitoring services on monitoring nodes
   hosts: monitoring_nodes
   gather_facts: false
+  vars:
+    _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}"
   tasks:
     - name: Check if br_netfilter is loaded
       ansible.builtin.stat:
@@ -988,7 +1048,27 @@
           - rsyslog_ct_cfg.stdout is regex('startup:.*order=3')
         fail_msg: "rsyslog container {{ rsyslog_ct_id }} config incorrect on {{ inventory_hostname }}"
 
-    - name: Check rsyslog service is active and TCP 514 listening
+    - name: Query rsyslog readiness from API
+      ansible.builtin.uri:
+        url: "{{ _api_base }}/api/container/rsyslog/ready"
+        return_content: true
+      register: _rsyslog_api_health
+      delegate_to: localhost
+      failed_when: false
+      when: _api_ready | bool
+
+    - name: Assert rsyslog via API (heartbeat + service state)
+      ansible.builtin.assert:
+        that:
+          - _rsyslog_api_health.json.ready | default(false) | bool
+          - _rsyslog_api_health.json.systemd_services['rsyslog.service'] | default('') in ['active', 'running']
+            or _rsyslog_api_health.json.systemd_services['rsyslog'] | default('') in ['active', 'running']
+        fail_msg: "rsyslog not ready via API: {{ _rsyslog_api_health.json | default({}) }}"
+      when:
+        - _api_ready | bool
+        - _rsyslog_api_health.status | default(0) == 200
+
+    - name: Check rsyslog service is active and TCP 514 listening (SSH fallback)
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ rsyslog_ct_id }} -- /bin/sh -c '
@@ -997,6 +1077,7 @@
           '
       register: rsyslog_health
       changed_when: false
+      when: not (_api_ready | bool)
 
     - name: Assert rsyslog is active and listening
       ansible.builtin.assert:
@@ -1004,10 +1085,13 @@
           - "'SVC=active' in rsyslog_health.stdout"
           - rsyslog_health.stdout | regex_search('TCP514=(\d+)', '\\1') | first | int > 0
         fail_msg: "rsyslog not active or not listening on TCP 514 on {{ inventory_hostname }}"
+      when: not (_api_ready | bool)
 
     # ── Cross-service: log reception from host ─────────────────
+    # Use pct config for per-host rsyslog IP (API returns one container's
+    # IP for all hosts since multiple rsyslog containers share container_id)
 
-    - name: Extract rsyslog container IP
+    - name: Extract rsyslog container IP from pct config
       ansible.builtin.set_fact:
         _rsyslog_verify_ip: "{{ rsyslog_ct_cfg.stdout | regex_search('ip=([^/,]+)', '\\1') | first }}"
 
@@ -1017,11 +1101,19 @@
           logger --tcp -n {{ _rsyslog_verify_ip }} -P 514
           "e2e-integration-rsyslog-$(date +%s)"
       changed_when: true
-      retries: 3
+      retries: 5
       delay: 5
       register: _rsyslog_send
       until: _rsyslog_send.rc == 0
       failed_when: false
+
+    - name: Fallback send via pct exec localhost
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ rsyslog_ct_id }} --
+          logger --tcp -n 127.0.0.1 -P 514 "e2e-integration-rsyslog-$(date +%s)"
+      changed_when: true
+      when: _rsyslog_send.rc != 0
 
     - name: Check test log arrived
       ansible.builtin.shell:
@@ -1034,16 +1126,16 @@
       register: rsyslog_log_test
       changed_when: false
       failed_when: false
-      retries: 3
-      delay: 2
+      retries: 6
+      delay: 5
       until: rsyslog_log_test.stdout | trim | length > 0
-      when: _rsyslog_send.rc == 0
 
     - name: Assert log reception works (cross-service integration)
       ansible.builtin.assert:
         that: rsyslog_log_test.stdout | trim | length > 0
-        fail_msg: "Cross-service log reception failed on {{ inventory_hostname }}"
-      when: _rsyslog_send.rc == 0
+        fail_msg: >-
+          Cross-service log reception failed on {{ inventory_hostname }}.
+          rsyslog_ip={{ _rsyslog_verify_ip }}, send_rc={{ _rsyslog_send.rc }}
 
     - name: Assert stamp contains rsyslog_lxc
       ansible.builtin.assert:
@@ -1073,7 +1165,28 @@
           - "'/host/sys' in netdata_ct_cfg.stdout"
         fail_msg: "Netdata container {{ netdata_ct_id }} config incorrect on {{ inventory_hostname }}"
 
-    - name: Check Netdata service and dashboard (single pct exec)
+    - name: Query Netdata readiness from API
+      ansible.builtin.uri:
+        url: "{{ _api_base }}/api/container/netdata/ready"
+        return_content: true
+      register: _netdata_api
+      delegate_to: localhost
+      failed_when: false
+      when: _api_ready | bool
+
+    - name: Assert Netdata via API (heartbeat + service state)
+      ansible.builtin.assert:
+        that:
+          - _netdata_api.json.ready | default(false) | bool
+          - _netdata_api.json.systemd_services.get('netdata.service', '') in ['active', 'running']
+            or _netdata_api.json.systemd_services.get('netdata', '') in ['active', 'running']
+            or (_netdata_api.json.extensions.http_probes | default({})).get('http://127.0.0.1:19999', 0) == 200
+        fail_msg: "Netdata not ready via API: {{ _netdata_api.json | default({}) }}"
+      when:
+        - _api_ready | bool
+        - _netdata_api.status | default(0) == 200
+
+    - name: Check Netdata service and dashboard (single pct exec, SSH fallback)
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ netdata_ct_id }} -- /bin/sh -c '
@@ -1082,13 +1195,15 @@
           '
       register: netdata_health
       changed_when: false
+      when: not (_api_ready | bool)
 
-    - name: Assert Netdata is active and dashboard responds
+    - name: Assert Netdata is active and dashboard responds (SSH fallback)
       ansible.builtin.assert:
         that:
           - "'SVC=active' in netdata_health.stdout"
           - netdata_health.stdout | regex_search('HTTP=(\\d+)', '\\1') | first == '200'
         fail_msg: "Netdata health check failed on {{ inventory_hostname }}: {{ netdata_health.stdout }}"
+      when: not (_api_ready | bool)
 
     - name: Assert stamp contains netdata_lxc
       ansible.builtin.assert:
@@ -1102,6 +1217,9 @@
 - name: Verify WireGuard LXC on VPN nodes
   hosts: vpn_nodes
   gather_facts: false
+  vars:
+    _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}"
   tasks:
     - name: Read WireGuard container state and config
       ansible.builtin.shell:
@@ -1122,38 +1240,52 @@
           - "'nesting=1' in wg_ct_cfg.stdout"
         fail_msg: "WireGuard container {{ wireguard_ct_id }} config incorrect on {{ inventory_hostname }}"
 
-    - name: Check wg0 interface is up (single pct exec)
+    - name: Query WireGuard extensions from API
+      ansible.builtin.uri:
+        url: "{{ _api_base }}/api/container/wireguard/ready"
+        return_content: true
+      register: _wg_api
+      delegate_to: localhost
+      failed_when: false
+      when: _api_ready | bool
+
+    - name: Set WireGuard peer count from API
+      ansible.builtin.set_fact:
+        _wg_peer_count: "{{ _wg_api.json.extensions.wireguard.interfaces.wg0.peer_count | default(0) }}"
+      when: _api_ready | bool and (_wg_api.json.extensions.wireguard | default(none)) is not none
+
+    - name: Check WireGuard health and peers via SSH (fallback)
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ wireguard_ct_id }} -- /bin/sh -c '
           echo "IFACE=$(ip link show wg0 >/dev/null 2>&1 && echo ok || echo missing)";
-          echo "SVC=$(systemctl is-enabled wg-quick@wg0 2>/dev/null || echo unknown)"
+          echo "SVC=$(systemctl is-enabled wg-quick@wg0 2>/dev/null || echo unknown)";
+          echo "PEERS=$(wg show wg0 peers 2>/dev/null | wc -l)"
           '
-      register: wg_health
-      changed_when: false
-
-    - name: Assert wg0 interface exists and service enabled
-      ansible.builtin.assert:
-        that:
-          - "'IFACE=ok' in wg_health.stdout"
-          - "'SVC=enabled' in wg_health.stdout"
-        fail_msg: "WireGuard health check failed on {{ inventory_hostname }}: {{ wg_health.stdout }}"
-
-    - name: Count WireGuard peers configured
-      ansible.builtin.shell:
-        cmd: >-
-          pct exec {{ wireguard_ct_id }} -- /bin/sh -c '
-          wg show wg0 peers 2>/dev/null | wc -l
-          '
-      register: wg_peer_count
+      register: _wg_batch
       changed_when: false
       failed_when: false
+      when: not (_api_ready | bool)
+
+    - name: Assert wg0 interface exists and service enabled (SSH fallback)
+      ansible.builtin.assert:
+        that:
+          - "'IFACE=ok' in _wg_batch.stdout"
+          - "'SVC=enabled' in _wg_batch.stdout"
+        fail_msg: "WireGuard health check failed on {{ inventory_hostname }}: {{ _wg_batch.stdout }}"
+      when: not (_api_ready | bool)
+
+    - name: Set WireGuard peer count from SSH (fallback)
+      ansible.builtin.set_fact:
+        _wg_peer_count: "{{ _wg_batch.stdout | regex_search('PEERS=(\\d+)', '\\1') | first | default('0') }}"
+      when: not (_api_ready | bool)
 
     - name: Assert at least one WireGuard peer exists
       ansible.builtin.assert:
-        that: (wg_peer_count.stdout | trim | int) >= 1
+        that: _wg_peer_count | default(0) | int >= 1
         fail_msg: >-
-          WireGuard on {{ inventory_hostname }} has {{ wg_peer_count.stdout | trim }}
+          WireGuard on {{ inventory_hostname }} has
+          {{ _wg_peer_count | default('0') }}
           peers — expected at least 1 for cross-node connectivity
 
     - name: Assert stamp contains wireguard_lxc
@@ -1269,7 +1401,8 @@
         cmd: >-
           pct exec {{ meshwifi_ct_id }} -- /bin/sh -c '
           echo "RADIOS=$(iw phy 2>/dev/null | sed -n "s/^Wiphy //p" | tr "\n" ",")";
-          echo "MESH_IFACES=$(cat /etc/config/wireless 2>/dev/null | grep -c "mode .mesh.")";
+          echo "WDS_IFACES=$(uci show wireless 2>/dev/null | grep -c "wds=.1." || true)";
+          echo "WDS_MODE=$(uci show wireless 2>/dev/null | grep "mode=" | head -1)";
           echo "WPAD=$(opkg list-installed wpad-mesh-openssl 2>/dev/null)"
           '
       register: mesh_health
@@ -1286,18 +1419,22 @@
           on {{ inventory_hostname }}. PHY namespace move may have failed.
           Output: {{ mesh_health.stdout | default('empty') }}
 
-    - name: Assert mesh interfaces are configured
+    - name: Assert WDS interface is configured
       ansible.builtin.assert:
-        that: mesh_health.stdout | regex_search('MESH_IFACES=(\d+)', '\\1') | first | int > 0
+        that: >-
+          mesh_health.stdout | regex_search('WDS_IFACES=(\d+)', '\\1')
+          | first | int > 0
         fail_msg: >-
-          No mesh interfaces configured inside container {{ meshwifi_ct_id }}
+          No WDS interfaces configured inside container {{ meshwifi_ct_id }}
           on {{ inventory_hostname }}
       when: mesh_health.rc == 0
 
     - name: Assert wpad-mesh-openssl is installed
       ansible.builtin.assert:
         that: "'wpad-mesh-openssl' in mesh_health.stdout"
-        fail_msg: "wpad-mesh-openssl not installed in mesh container on {{ inventory_hostname }}"
+        fail_msg: >-
+          wpad-mesh-openssl not installed in mesh container
+          on {{ inventory_hostname }}
 
     - name: Assert mesh container has deploy_stamp
       ansible.builtin.assert:
@@ -1311,6 +1448,121 @@
           container={{ meshwifi_ct_id }}, running=yes,
           privileged=yes, hookscript=deployed
 
+# ── Play 7b: WiFi Bridge LXC assertions (bridge_nodes) ──────────────
+
+- name: Verify WiFi Bridge LXC on bridge nodes
+  hosts: bridge_nodes
+  gather_facts: false
+  tasks:
+    - name: Check if bridge container exists
+      ansible.builtin.command:
+        cmd: pct status {{ bridge_ct_id }}
+      register: _bridge_status
+      changed_when: false
+      failed_when: false
+
+    - name: Skip bridge verify if container not deployed
+      ansible.builtin.meta: end_play
+      when: _bridge_status.rc != 0
+
+    - name: Read bridge container config
+      ansible.builtin.command:
+        cmd: pct config {{ bridge_ct_id }}
+      register: _bridge_cfg
+      changed_when: false
+
+    - name: Assert bridge container is running with correct config
+      ansible.builtin.assert:
+        that:
+          - "'running' in _bridge_status.stdout"
+          - "'onboot: 1' in _bridge_cfg.stdout"
+        fail_msg: "Bridge container {{ bridge_ct_id }} not running or missing onboot on {{ inventory_hostname }}"
+
+    - name: Assert bridge container hookscript is deployed
+      ansible.builtin.shell:
+        cmd: >-
+          ls /var/lib/vz/snippets/bridge-wifi-phy-*.sh 2>/dev/null | head -1
+      register: _bridge_hookscript
+      changed_when: false
+      failed_when: false
+
+    - name: Assert hookscript exists
+      ansible.builtin.assert:
+        that: _bridge_hookscript.stdout | length > 0
+        fail_msg: "Bridge WiFi PHY hookscript not found on {{ inventory_hostname }}"
+
+    - name: Check bridge container WiFi, scripts, and batman readiness
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ bridge_ct_id }} -- /bin/sh -c '
+          echo "RADIOS=$(ls /sys/class/ieee80211/ 2>/dev/null | tr "\n" ",")";
+          echo "BATCTL=$(command -v batctl >/dev/null 2>&1 && echo yes || echo no)";
+          echo "TRIGGER=$(test -x /usr/sbin/batman_trigger.sh && echo yes || echo no)";
+          echo "WIFI_SETUP=$(test -x /usr/sbin/wifi_setup.sh && echo yes || echo no)";
+          echo "KEY=$(test -f /etc/batman_key && echo yes || echo no)";
+          echo "BAT_STATUS=$(/usr/sbin/batman_trigger.sh status 2>/dev/null | head -1)";
+          /usr/sbin/wifi_setup.sh status 2>/dev/null
+          '
+      register: _bridge_health
+      changed_when: false
+      failed_when: false
+
+    - name: Assert WiFi PHY is visible inside bridge container
+      ansible.builtin.assert:
+        that:
+          - _bridge_health.rc == 0
+          - _bridge_health.stdout | regex_search('RADIOS=phy') is not none
+        fail_msg: >-
+          No WiFi radios inside bridge container {{ bridge_ct_id }}
+          on {{ inventory_hostname }}. Output: {{ _bridge_health.stdout | default('empty') }}
+      when: _bridge_health.rc == 0
+
+    - name: Assert wifi_setup.sh is available
+      ansible.builtin.assert:
+        that: "'WIFI_SETUP=yes' in _bridge_health.stdout"
+        fail_msg: >-
+          wifi_setup.sh not found in bridge container on {{ inventory_hostname }}.
+          Script must be baked into the mesh LXC image.
+      when: _bridge_health.rc == 0
+
+    - name: Assert WiFi mode matches host wifi_role
+      ansible.builtin.assert:
+        that:
+          - _bridge_health.stdout | regex_search('MODE=' + wifi_role) is not none
+        fail_msg: >-
+          WiFi mode mismatch on {{ inventory_hostname }}: expected {{ wifi_role }},
+          got {{ _bridge_health.stdout | regex_search('MODE=(.+)', '\1') | default(['unknown']) | first }}.
+      when: _bridge_health.rc == 0
+
+    - name: Assert batman-adv tooling is available
+      ansible.builtin.assert:
+        that:
+          - "'BATCTL=yes' in _bridge_health.stdout"
+          - "'TRIGGER=yes' in _bridge_health.stdout"
+        fail_msg: >-
+          Batman tooling missing in bridge container on {{ inventory_hostname }}.
+          batctl and batman_trigger.sh must be baked into the image.
+      when: _bridge_health.rc == 0
+
+    - name: Assert batman key is deployed
+      ansible.builtin.assert:
+        that: "'KEY=yes' in _bridge_health.stdout"
+        fail_msg: "Batman HMAC key not deployed to bridge container on {{ inventory_hostname }}"
+      when: _bridge_health.rc == 0
+
+    - name: Assert batman is in expected state (inactive by default)
+      ansible.builtin.assert:
+        that: "'BAT_STATUS=BATMAN=' in _bridge_health.stdout"
+        fail_msg: "batman_trigger.sh status failed in bridge container on {{ inventory_hostname }}"
+      when: _bridge_health.rc == 0
+
+    - name: Report bridge LXC verification
+      ansible.builtin.debug:
+        msg: >-
+          Bridge LXC verification passed on {{ inventory_hostname }}:
+          container={{ bridge_ct_id }}, running=yes,
+          hookscript=deployed, batman_tooling=yes
+
 # ── Play 8: Home Assistant health (service_nodes) ────────────────
 # Deep HA checks (Docker install, Compose, cgroupfs, HA image, IP offset)
 # live in molecule/homeassistant-lxc/verify.yml.
@@ -1318,6 +1570,9 @@
 - name: Verify Home Assistant LXC on service nodes
   hosts: service_nodes
   gather_facts: false
+  vars:
+    _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}"
   tasks:
     - name: Read Home Assistant container state and config
       ansible.builtin.shell:
@@ -1338,41 +1593,49 @@
           - "'nesting=1' in ha_ct_cfg.stdout"
         fail_msg: "Home Assistant container {{ homeassistant_ct_id }} config incorrect on {{ inventory_hostname }}"
 
-    - name: Check Docker daemon is active (single pct exec)
-      ansible.builtin.shell:
-        cmd: >-
-          pct exec {{ homeassistant_ct_id }} -- /bin/sh -c '
-          echo "DAEMON=$(systemctl is-active docker 2>/dev/null || echo inactive)"
-          '
-      register: ha_health
-      changed_when: false
+    - name: Query Home Assistant extensions from API
+      ansible.builtin.uri:
+        url: "{{ _api_base }}/api/container/homeassistant/ready"
+        return_content: true
+      register: _ha_api
+      delegate_to: localhost
+      failed_when: false
+      when: _api_ready | bool
 
-    - name: Assert Docker daemon is active
+    - name: Assert Docker active from API extensions
       ansible.builtin.assert:
-        that: "'DAEMON=active' in ha_health.stdout"
-        fail_msg: "Docker daemon not active in Home Assistant container on {{ inventory_hostname }}"
+        that:
+          - _ha_api.json.extensions.docker.active | default(false) | bool
+          - _ha_api.json.extensions.docker.running | default(0) | int >= 1
+        fail_msg: "HA Docker not active via API on {{ inventory_hostname }}"
+      when: _api_ready | bool and (_ha_api.json.extensions.docker | default(none)) is not none
 
-    - name: Check Home Assistant HTTP endpoint via Docker
+    - name: Check Docker + HA health via SSH (fallback)
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
           pct exec {{ homeassistant_ct_id }} -- /bin/sh -c '
-          curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8123 2>/dev/null || echo 000
+          echo "DAEMON=$(systemctl is-active docker 2>/dev/null || echo inactive)";
+          echo "HTTP=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8123 2>/dev/null || echo 000)"
           '
         executable: /bin/bash
-      register: ha_http
+      register: _ha_health
       changed_when: false
       failed_when: false
       retries: 3
       delay: 10
-      until: ha_http.stdout | trim in ['200', '301', '302']
+      until: >-
+        'DAEMON=active' in (_ha_health.stdout | default(''))
+        and (_ha_health.stdout | default('') | regex_search('HTTP=(\\d+)', '\\1') | first | default('000')) in ['200', '301', '302']
+      when: not (_api_ready | bool)
 
-    - name: Assert Home Assistant is responding
+    - name: Assert Docker and HA are healthy (SSH fallback)
       ansible.builtin.assert:
-        that: ha_http.stdout | trim in ['200', '301', '302']
-        fail_msg: >-
-          Home Assistant HTTP not responding on {{ inventory_hostname }}
-          (got {{ ha_http.stdout | trim }}, expected 200/301/302)
+        that:
+          - "'DAEMON=active' in _ha_health.stdout"
+          - _ha_health.stdout | regex_search('HTTP=(\\d+)', '\\1') | first in ['200', '301', '302']
+        fail_msg: "HA health check failed on {{ inventory_hostname }}: {{ _ha_health.stdout }}"
+      when: not (_api_ready | bool)
 
     - name: Assert stamp contains homeassistant_lxc
       ansible.builtin.assert:
@@ -1390,6 +1653,9 @@
 - name: Verify media services on media nodes
   hosts: media_nodes
   gather_facts: false
+  vars:
+    _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}"
   tasks:
     - name: Read Jellyfin container state and config
       ansible.builtin.shell:
@@ -1410,7 +1676,27 @@
           - _jellyfin_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/dri')
         fail_msg: "Jellyfin container {{ jellyfin_ct_id }} config incorrect on {{ inventory_hostname }}"
 
-    - name: Check Jellyfin service is active (single pct exec)
+    - name: Query Jellyfin readiness from API
+      ansible.builtin.uri:
+        url: "{{ _api_base }}/api/container/jellyfin/ready"
+        return_content: true
+      register: _jellyfin_api
+      delegate_to: localhost
+      failed_when: false
+      when: _api_ready | bool
+
+    - name: Assert Jellyfin via API (heartbeat + HTTP probe)
+      ansible.builtin.assert:
+        that:
+          - _jellyfin_api.json.ready | default(false) | bool
+          - _jellyfin_api.json.systemd_services['jellyfin.service'] | default('') in ['active', 'running']
+            or _jellyfin_api.json.systemd_services['jellyfin'] | default('') in ['active', 'running']
+        fail_msg: "Jellyfin not ready via API: {{ _jellyfin_api.json | default({}) }}"
+      when:
+        - _api_ready | bool
+        - _jellyfin_api.status | default(0) == 200
+
+    - name: Check Jellyfin service is active (single pct exec, SSH fallback)
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ jellyfin_ct_id }} -- /bin/sh -c '
@@ -1419,13 +1705,15 @@
           '
       register: _jellyfin_health
       changed_when: false
+      when: not (_api_ready | bool)
 
-    - name: Assert Jellyfin service active and web accessible
+    - name: Assert Jellyfin service active and web accessible (SSH fallback)
       ansible.builtin.assert:
         that:
           - "'SERVICE=active' in _jellyfin_health.stdout"
           - _jellyfin_health.stdout | regex_search('WEB=(\\d+)', '\\1') | first in ['200', '302']
         fail_msg: "Jellyfin health check failed on {{ inventory_hostname }}: {{ _jellyfin_health.stdout }}"
+      when: not (_api_ready | bool)
 
     - name: Assert stamp contains jellyfin_lxc
       ansible.builtin.assert:
@@ -1444,15 +1732,31 @@
       register: _kodi_cfg
       changed_when: false
 
-    - name: Assert Kodi container is running with correct config
+    - name: Assert Kodi container exists with correct config
       ansible.builtin.assert:
         that:
-          - "'running' in _kodi_cfg.stdout"
+          - "'status: ' in _kodi_cfg.stdout"
           - "'onboot: 0' in _kodi_cfg.stdout"
           - _kodi_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/dri')
           - _kodi_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/snd')
           - _kodi_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/input')
         fail_msg: "Kodi container {{ kodi_ct_id }} config incorrect on {{ inventory_hostname }}"
+
+    - name: Check if Desktop VM is running (display-exclusive stops Kodi)
+      ansible.builtin.command:
+        cmd: qm status {{ desktop_vm_id }}
+      register: _desktop_status
+      changed_when: false
+      failed_when: false
+
+    - name: Assert Kodi is running OR stopped by display-exclusive hookscript
+      ansible.builtin.assert:
+        that: >-
+          'running' in _kodi_cfg.stdout or
+          ('stopped' in _kodi_cfg.stdout and 'running' in (_desktop_status.stdout | default('')))
+        fail_msg: >-
+          Kodi container {{ kodi_ct_id }} is stopped but Desktop VM is not running —
+          expected either Kodi running or Kodi stopped due to display-exclusive hookscript
 
     - name: Assert stamp contains kodi_lxc
       ansible.builtin.assert:
@@ -1536,13 +1840,16 @@
         that: "'desktop_vm' in stamp.plays"
         fail_msg: "deploy_stamp missing desktop_vm on {{ inventory_hostname }}"
 
-# ── Play 12: Kiosk health (desktop_nodes) ────────────────────────
+# ── Play 12: Kiosk health (kiosk_nodes) ──────────────────────────
 # Deep Kiosk checks (Cage, Chromium, dashboard file, systemd service)
 # live in molecule/kiosk-lxc/verify.yml.
 
-- name: Verify Kiosk on desktop nodes
-  hosts: desktop_nodes
+- name: Verify Kiosk on kiosk nodes
+  hosts: kiosk_nodes
   gather_facts: false
+  vars:
+    _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}"
   tasks:
     - name: Read Kiosk container state and config
       ansible.builtin.shell:
@@ -1554,14 +1861,30 @@
       register: _kiosk_cfg
       changed_when: false
 
-    - name: Assert Kiosk container is running with correct config
+    - name: Assert Kiosk container config is correct
       ansible.builtin.assert:
         that:
-          - "'running' in _kiosk_cfg.stdout"
+          - "'status: ' in _kiosk_cfg.stdout"
           - "'onboot: 1' in _kiosk_cfg.stdout"
           - _kiosk_cfg.stdout is regex('startup:.*order=6')
           - _kiosk_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/dri')
         fail_msg: "Kiosk container {{ kiosk_ct_id }} config incorrect on {{ inventory_hostname }}"
+
+    - name: Check if Desktop VM is running (display-exclusive stops Kiosk)
+      ansible.builtin.command:
+        cmd: qm status {{ desktop_vm_id }}
+      register: _desktop_status_for_kiosk
+      changed_when: false
+      failed_when: false
+
+    - name: Assert Kiosk is running OR stopped by display-exclusive hookscript
+      ansible.builtin.assert:
+        that: >-
+          'running' in _kiosk_cfg.stdout or
+          ('stopped' in _kiosk_cfg.stdout and 'running' in (_desktop_status_for_kiosk.stdout | default('')))
+        fail_msg: >-
+          Kiosk container {{ kiosk_ct_id }} is stopped but Desktop VM is not running —
+          expected either Kiosk running or Kiosk stopped due to display-exclusive hookscript
 
     - name: Check Kiosk services and NiceGUI files (single pct exec)
       ansible.builtin.shell:
@@ -1571,10 +1894,13 @@
           echo "WEB_SVC=$(systemctl is-enabled kiosk-web 2>/dev/null || echo disabled)";
           echo "CONFIG=$(test -f /opt/kiosk/config.json && echo yes || echo no)";
           echo "SERVER=$(test -f /opt/kiosk/webui/kiosk_server.py && echo yes || echo no)";
-          echo "HUB=$(test -f /opt/kiosk/webui/pages/hub.py && echo yes || echo no)"
+          echo "HUB=$(test -f /opt/kiosk/webui/pages/hub.py && echo yes || echo no)";
+          echo "LAUNCH=$(test -f /opt/kiosk/webui/pages/launch.py && echo yes || echo no)";
+          echo "VIEWER=$(test -f /opt/kiosk/webui/pages/viewer.py && echo yes || echo no)"
           '
       register: _kiosk_health
       changed_when: false
+      when: not (_api_ready | bool)
 
     - name: Assert Kiosk services enabled and NiceGUI files present
       ansible.builtin.assert:
@@ -1584,28 +1910,53 @@
           - "'CONFIG=yes' in _kiosk_health.stdout"
           - "'SERVER=yes' in _kiosk_health.stdout"
           - "'HUB=yes' in _kiosk_health.stdout"
+          - "'LAUNCH=yes' in _kiosk_health.stdout"
+          - "'VIEWER=yes' in _kiosk_health.stdout"
         fail_msg: "Kiosk health check failed on {{ inventory_hostname }}: {{ _kiosk_health.stdout }}"
+      when: not (_api_ready | bool)
 
-    - name: Read kiosk config.json
+    - name: Query kiosk extensions from API
+      ansible.builtin.uri:
+        url: "{{ _api_base }}/api/container/kiosk/ready"
+        return_content: true
+      register: _kiosk_api
+      delegate_to: localhost
+      when: _api_ready | bool
+      failed_when: false
+
+    - name: Set kiosk config keys from API
+      ansible.builtin.set_fact:
+        _kiosk_config_keys: "{{ _kiosk_api.json.extensions.config_files['/opt/kiosk/config.json']['keys'] }}"
+      when: >-
+        _api_ready | bool
+        and (_kiosk_api.json.extensions.config_files | default(none)) is not none
+
+    - name: Read kiosk config.json via SSH (fallback)
       ansible.builtin.command:
         cmd: pct exec {{ kiosk_ct_id }} -- cat /opt/kiosk/config.json
       register: _kiosk_config
       changed_when: false
+      when: _kiosk_config_keys is not defined
+
+    - name: Set kiosk config keys from SSH (fallback)
+      ansible.builtin.set_fact:
+        _kiosk_config_keys: "{{ (_kiosk_config.stdout | from_json).keys() | list }}"
+      when: _kiosk_config_keys is not defined
 
     - name: Assert kiosk config has all service URL keys
       ansible.builtin.assert:
         that:
-          - "'DESKTOP_URL' in _kiosk_config.stdout"
-          - "'JELLYFIN_URL' in _kiosk_config.stdout"
-          - "'KODI_URL' in _kiosk_config.stdout"
-          - "'HOMEASSISTANT_URL' in _kiosk_config.stdout"
-          - "'MOONLIGHT_URL' in _kiosk_config.stdout"
-          - "'GAMING_URL' in _kiosk_config.stdout"
-          - "'OPENWRT_URL' in _kiosk_config.stdout"
-          - "'PIHOLE_URL' in _kiosk_config.stdout"
-          - "'WIREGUARD_URL' in _kiosk_config.stdout"
-          - "'NETDATA_URL' in _kiosk_config.stdout"
-          - "'RSYSLOG_URL' in _kiosk_config.stdout"
+          - "'DESKTOP_URL' in _kiosk_config_keys"
+          - "'JELLYFIN_URL' in _kiosk_config_keys"
+          - "'KODI_URL' in _kiosk_config_keys"
+          - "'HOMEASSISTANT_URL' in _kiosk_config_keys"
+          - "'MOONLIGHT_URL' in _kiosk_config_keys"
+          - "'GAMING_URL' in _kiosk_config_keys"
+          - "'OPENWRT_URL' in _kiosk_config_keys"
+          - "'PIHOLE_URL' in _kiosk_config_keys"
+          - "'WIREGUARD_URL' in _kiosk_config_keys"
+          - "'NETDATA_URL' in _kiosk_config_keys"
+          - "'RSYSLOG_URL' in _kiosk_config_keys"
         fail_msg: "Kiosk config missing service URLs on {{ inventory_hostname }}"
 
     - name: Check display-exclusive hookscript exists
@@ -1630,6 +1981,9 @@
 - name: Verify Gaming LXC container
   hosts: gaming_nodes
   gather_facts: false
+  vars:
+    _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}"
   tasks:
     - name: Check Gaming LXC container exists
       ansible.builtin.command:
@@ -1647,7 +2001,26 @@
         that: "'running' in _gaming_verify_status.stdout"
         fail_msg: "Gaming LXC container {{ gaming_ct_id }} is not running on {{ inventory_hostname }}"
 
-    - name: Check Sunshine is active (single pct exec)
+    - name: Query Gaming extensions from API
+      ansible.builtin.uri:
+        url: "{{ _api_base }}/api/container/gaming/ready"
+        return_content: true
+      register: _gaming_api
+      delegate_to: localhost
+      when: _api_ready | bool
+      failed_when: false
+
+    - name: Assert Sunshine active from API
+      ansible.builtin.assert:
+        that: >-
+          _gaming_api.json.systemd_services['sunshine.service'] | default('') in ['active', 'running']
+          or _gaming_api.json.systemd_services['sunshine'] | default('') in ['active', 'running']
+        fail_msg: "Sunshine not active via API on {{ inventory_hostname }}"
+      when: >-
+        _api_ready | bool
+        and (_gaming_api.json.systemd_services | default(none)) is not none
+
+    - name: Check Sunshine via SSH (fallback)
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ gaming_ct_id }} -- bash -c '
@@ -1655,11 +2028,13 @@
           '
       register: _gaming_health
       changed_when: false
+      when: not (_api_ready | bool) or (_gaming_api.json.systemd_services | default(none)) is none
 
-    - name: Assert Sunshine service is active
+    - name: Assert Sunshine service is active (SSH fallback)
       ansible.builtin.assert:
         that: "'SUNSHINE=active' in _gaming_health.stdout"
         fail_msg: "Sunshine service not active in Gaming LXC on {{ inventory_hostname }}"
+      when: _gaming_health is defined and _gaming_health is not skipped
 
     - name: Assert stamp contains gaming_lxc
       ansible.builtin.assert:

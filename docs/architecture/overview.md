@@ -44,7 +44,8 @@ Proxmox Host (Debian)
 │   └── OpenWrt Router         VM   VMID 100   cores=2  RAM=512MB     auto-start priority 1
 │       ├── WireGuard VPN Client   LXC  VMID 101   cores=1  RAM=128MB     auto-start priority 2
 │       ├── Pi-hole                LXC  VMID 102   cores=1  RAM=256MB     auto-start priority 3
-│       └── Mesh WiFi Controller   LXC  VMID 103   cores=1  RAM=512MB     auto-start priority 4
+│       ├── Mesh WiFi Controller   LXC  VMID 103   cores=1  RAM=512MB     auto-start priority 4
+│       └── Dedicated WiFi Bridge  LXC  VMID 104   cores=2  RAM=512MB     auto-start priority 2
 │
 ├── Observability Tier
 │   ├── Netdata Agent          LXC  VMID 500   cores=1  RAM=128MB     auto-start priority 3
@@ -120,12 +121,12 @@ Build Profiles
 │
 ├── Mesh Node 2 (mesh2 — directly reachable, 192.168.86.211)
 │   ├── vpn_nodes          → WireGuard
-│   └── wifi_nodes         → OpenWrt Mesh LXC (WiFi PHY namespace move)
+│   └── wifi_nodes         → OpenWrt Mesh LXC (WDS STA, WiFi PHY namespace move)
 │
 ├── LAN Satellite (mesh1 — via ProxyJump through home, requires OpenWrt running)
 │   ├── lan_hosts          → ProxyJump SSH config (group_vars/lan_hosts.yml)
 │   ├── vpn_nodes          → WireGuard (same service as primary host)
-│   └── wifi_nodes         → OpenWrt Mesh LXC (WiFi PHY namespace move)
+│   └── wifi_nodes         → OpenWrt Mesh LXC (WDS STA, WiFi PHY namespace move)
 │
 ├── Minimal Router
 │   ├── router_nodes       → OpenWrt
@@ -133,9 +134,12 @@ Build Profiles
 │   ├── dns_nodes          → Pi-hole
 │   └── monitoring_nodes   → Netdata, rsyslog
 │
-└── Gaming Rig
-    ├── gaming_nodes       → Gaming LXC (Sunshine streaming)
-    └── monitoring_nodes   → Netdata, rsyslog
+├── Gaming Rig
+│   ├── gaming_nodes       → Gaming LXC (Sunshine streaming)
+│   └── monitoring_nodes   → Netdata, rsyslog
+│
+└── Dedicated WiFi Bridge (bridge-1, bridge-2 — directly reachable)
+    └── bridge_nodes       → WiFi Bridge LXC (transparent L2 WDS AP/STA link)
 ```
 
 ---
@@ -160,7 +164,7 @@ Boot Sequence (Home Entertainment Box)
 │   └── Netdata (VMID 500)                    Monitoring
 │
 ├── Priority 4 ── WiFi Management
-│   └── Mesh WiFi Controller (VMID 103)       Needs OpenWrt mesh established first
+│   └── Mesh WiFi Controller (VMID 103)       Needs OpenWrt WDS AP established first
 │
 ├── Priority 5 ── Application Services        Start simultaneously
 │   ├── Home Assistant (VMID 200)             Home automation
@@ -250,7 +254,7 @@ PCI Device Handling (separate roles)
 │   │          unbind from host driver and bind to vfio-pci only on router_nodes
 │   │          (non-router hosts keep the host WiFi driver for PHY namespace move)
 │   ├── Exports: wifi_pci_devices (all hosts with WiFi)
-│   └── Consumer: openwrt_vm (WiFi passthrough); openwrt_mesh_lxc (WiFi PHY list)
+│   └── Consumer: openwrt_vm (WiFi passthrough); openwrt_mesh_lxc, openwrt_bridge_lxc (WiFi PHY list)
 │
 └── proxmox_igpu
     ├── Purpose: iGPU detection, driver/VA-API setup, fact export for containers and VMs
@@ -275,9 +279,9 @@ PCI Device Handling (separate roles)
 ISP Router (192.168.86.x supernet)
   |
 Switch
-  |            |                  |
-Home          AI Node          Mesh2
-(primary)     192.168.86.220   192.168.86.211
+  |            |                  |            |            |
+Home          AI Node          Mesh2       Bridge-1     Bridge-2
+(primary)     192.168.86.220   192.168.86.211  .230        .231
 192.168.86.201
   |
   |-- OpenWrt VM (10.10.10.1)
@@ -287,10 +291,11 @@ Home          AI Node          Mesh2
   |     Mesh1 (10.10.10.210)
 ```
 
-- **home**, **ai**, **mesh2**: directly reachable on the supernet (no ProxyJump)
+- **home**, **ai**, **mesh2**, **bridge-1**, **bridge-2**: directly reachable on the supernet (no ProxyJump)
 - **mesh1**: behind home's OpenWrt, reachable via ProxyJump through home
-- All 4 nodes run shared infrastructure (backup, bridges, PCI, iGPU)
-- All 4 nodes are in `vpn_nodes` — WireGuard containers deploy on all 4
+- All 6 nodes run shared infrastructure (backup, bridges, PCI, iGPU)
+- 4 original nodes are in `vpn_nodes` — WireGuard containers deploy on all 4
+- bridge-1 and bridge-2 are in `bridge_nodes` — WiFi Bridge containers deploy on both
 
 ### Logical Layout
 
@@ -303,18 +308,24 @@ Internet
         │
         ├── Proxmox Host "mesh2" (192.168.86.211, directly reachable)
         │   ├── WireGuard VPN (VMID 101)
-        │   └── OpenWrt Mesh LXC (VMID 103, WiFi PHY namespace move)
+        │   └── OpenWrt Mesh LXC (VMID 103, WDS STA, WiFi PHY namespace move)
+        │
+        ├── Proxmox Host "bridge-1" (192.168.86.230, directly reachable)
+        │   └── WiFi Bridge LXC (VMID 104, WiFi PHY namespace move, L2 bridge)
+        │
+        ├── Proxmox Host "bridge-2" (192.168.86.231, directly reachable)
+        │   └── WiFi Bridge LXC (VMID 104, WiFi PHY namespace move, L2 bridge, USB NIC backhaul)
         │
         └── OpenWrt VM on "home" (VMID 100)
             ├── eth0 ← auto-detected WAN bridge (bridge with default route)
             ├── eth1..N ← remaining bridges (LAN)
-            ├── wlan0 ← PCIe passthrough (802.11s mesh)
+            ├── wlan0 ← PCIe passthrough (WDS AP for mesh backhaul)
             │
             └── LAN Network (all other services connect here)
                 ├── Proxmox Host "home" (LAN management IP on LAN bridge, 10.10.10.2)
                 ├── Proxmox Host "mesh1" (LAN node, 10.10.10.210, via ProxyJump)
                 │   ├── SSH: controller → home (.201) → mesh1 (.210 via LAN bridge)
-                │   └── OpenWrt Mesh LXC (VMID 103, WiFi PHY namespace move)
+                │   └── OpenWrt Mesh LXC (VMID 103, WDS STA, WiFi PHY namespace move)
                 │
                 ├── WireGuard VPN (VMID 101, on home and mesh1)
                 │   └── wg0 tunnel → home server
@@ -399,12 +410,13 @@ The project supports two WiFi strategies, selected by group membership:
 
 **PCIe passthrough** (router nodes): The WiFi PCI device is unbound from the host
 driver and bound to `vfio-pci`. The OpenWrt VM gets exclusive access. This is the
-full router build with WAN/LAN routing, DHCP, firewall, and mesh root.
+full router build with WAN/LAN routing, DHCP, firewall, and WDS AP for mesh backhaul.
 
-**PHY namespace move** (mesh satellite nodes): The host WiFi driver stays loaded.
-After the OpenWrt LXC container starts, the WiFi PHY is moved into the container's
-network namespace via `iw phy <phy> set netns <pid>`. The container sees the radio
-and configures 802.11s mesh interfaces via UCI. No routing — mesh peer only.
+**PHY namespace move** (mesh/bridge satellite nodes): The host WiFi driver stays
+loaded. After the OpenWrt LXC container starts, the WiFi PHY is moved into the
+container's network namespace via `iw phy <phy> set netns <pid>`. The container
+sees the radio and configures WDS AP or STA interfaces via UCI. Both mesh satellites
+and bridge containers use the shared `tasks/configure_wifi_wds.yml` for WDS setup.
 
 A Proxmox hookscript (`/var/lib/vz/snippets/mesh-wifi-phy-<CT_ID>.sh`) re-does the
 PHY move after container restart, ensuring persistence across host reboots.
@@ -465,28 +477,30 @@ site.yml (current — phased for multi-node)
 │   ├── Play 22: wireguard           [wireguard]     wireguard_configure
 │   ├── Play 23: wifi_nodes:!router_nodes [mesh-wifi] openwrt_mesh_lxc, deploy_stamp
 │   ├── Play 24: openwrt_mesh        [mesh-wifi]     openwrt_mesh_configure
-│   ├── Play 25: desktop_nodes       [desktop]       desktop_vm, deploy_stamp
-│   └── Play 26: desktop             [desktop]       desktop_configure
+│   ├── Play 25: bridge_nodes        [bridge]        openwrt_bridge_lxc, deploy_stamp
+│   ├── Play 26: openwrt_bridge      [bridge]        openwrt_bridge_configure
+│   ├── Play 27: desktop_nodes       [desktop]       desktop_vm, deploy_stamp
+│   └── Play 28: desktop             [desktop]       desktop_configure
 │
 ├── Per-feature plays (opt-in via --tags <name>, tagged with [never]):
-│   ├── Play 27: gaming_nodes        [gaming]        gaming_lxc, deploy_stamp
-│   ├── Play 28: gaming_nodes        [gaming]        gaming_lxc_configure
-│   ├── Play 29: openwrt             [openwrt-security]   include_role: openwrt_configure/security.yml
-│   ├── Play 30: router_nodes        [openwrt-security]   deploy_stamp (openwrt_security)
-│   ├── Play 31: openwrt             [openwrt-vlans]      include_role: openwrt_configure/vlans.yml
-│   ├── Play 32: router_nodes        [openwrt-vlans]      deploy_stamp (openwrt_vlans)
-│   ├── Play 33: openwrt             [openwrt-dns]        include_role: openwrt_configure/dns.yml
-│   ├── Play 34: router_nodes        [openwrt-dns]        deploy_stamp (openwrt_dns)
-│   ├── Play 35: openwrt             [openwrt-mesh]       include_role: openwrt_configure/mesh.yml
-│   ├── Play 36: router_nodes        [openwrt-mesh]       deploy_stamp (openwrt_mesh)
-│   ├── Play 37: router_nodes        [openwrt-syslog]     reconstruct openwrt group
-│   ├── Play 38: openwrt             [openwrt-syslog]     include_role: openwrt_configure/syslog.yml
-│   ├── Play 39: router_nodes        [openwrt-syslog]     deploy_stamp (openwrt_syslog)
-│   ├── Play 40: router_nodes        [openwrt-pihole-dns] reconstruct openwrt group
-│   ├── Play 41: openwrt             [openwrt-pihole-dns] include_role: openwrt_configure/pihole_dns.yml
-│   └── Play 42: router_nodes        [openwrt-pihole-dns] deploy_stamp (openwrt_pihole_dns)
+│   ├── Play 29: gaming_nodes        [gaming]        gaming_lxc, deploy_stamp
+│   ├── Play 30: gaming_nodes        [gaming]        gaming_lxc_configure
+│   ├── Play 31: openwrt             [openwrt-security]   include_role: openwrt_configure/security.yml
+│   ├── Play 32: router_nodes        [openwrt-security]   deploy_stamp (openwrt_security)
+│   ├── Play 33: openwrt             [openwrt-vlans]      include_role: openwrt_configure/vlans.yml
+│   ├── Play 34: router_nodes        [openwrt-vlans]      deploy_stamp (openwrt_vlans)
+│   ├── Play 35: openwrt             [openwrt-dns]        include_role: openwrt_configure/dns.yml
+│   ├── Play 36: router_nodes        [openwrt-dns]        deploy_stamp (openwrt_dns)
+│   ├── Play 37: openwrt             [openwrt-mesh]       include_role: openwrt_configure/mesh.yml
+│   ├── Play 38: router_nodes        [openwrt-mesh]       deploy_stamp (openwrt_mesh)
+│   ├── Play 39: router_nodes        [openwrt-syslog]     reconstruct openwrt group
+│   ├── Play 40: openwrt             [openwrt-syslog]     include_role: openwrt_configure/syslog.yml
+│   ├── Play 41: router_nodes        [openwrt-syslog]     deploy_stamp (openwrt_syslog)
+│   ├── Play 42: router_nodes        [openwrt-pihole-dns] reconstruct openwrt group
+│   ├── Play 43: openwrt             [openwrt-pihole-dns] include_role: openwrt_configure/pihole_dns.yml
+│   └── Play 44: router_nodes        [openwrt-pihole-dns] deploy_stamp (openwrt_pihole_dns)
 │
-└── Play 43: proxmox:!lan_hosts      [cleanup]    Remove bootstrap IP
+└── Play 45: proxmox:!lan_hosts      [cleanup]    Remove bootstrap IP
 ```
 
 The phased approach ensures LAN hosts (behind the OpenWrt router) are only
@@ -621,7 +635,8 @@ Service Roles
 │   ├── openwrt_vm / openwrt_configure           VM   VMID 100   router_nodes   → openwrt
 │   ├── wireguard_lxc / wireguard_configure       LXC  VMID 101   vpn_nodes      → wireguard
 │   ├── pihole_lxc / pihole_configure             LXC  VMID 102   dns_nodes      → pihole      Exports: pihole_static_ip
-│   └── openwrt_mesh_lxc / openwrt_mesh_configure  LXC  VMID 103   wifi_nodes:!router_nodes → openwrt_mesh
+│   ├── openwrt_mesh_lxc / openwrt_mesh_configure  LXC  VMID 103   wifi_nodes:!router_nodes → openwrt_mesh
+│   └── openwrt_bridge_lxc / openwrt_bridge_configure  LXC  VMID 104   bridge_nodes → openwrt_bridge
 │
 ├── Observability Tier
 │   ├── netdata_lxc / netdata_configure           LXC  VMID 500   monitoring_nodes → netdata    Exports: netdata_static_ip
@@ -653,7 +668,8 @@ VMID Ranges
 │   ├── 100  OpenWrt Router
 │   ├── 101  WireGuard VPN
 │   ├── 102  Pi-hole
-│   └── 103  Mesh WiFi Controller
+│   ├── 103  Mesh WiFi Controller
+│   └── 104  Dedicated WiFi Bridge
 │
 ├── 200-299  Core Services
 │   └── 200  Home Assistant
@@ -736,7 +752,9 @@ vm_builds/
 │       ├── home.yml              Per-host overrides (primary node, direct SSH)
 │       ├── mesh1.yml             LAN node (10.10.10.210, ProxyJump via home)
 │       ├── ai.yml                AI node (192.168.86.220, direct SSH)
-│       └── mesh2.yml             Mesh node 2 (192.168.86.211, direct SSH)
+│       ├── mesh2.yml             Mesh node 2 (192.168.86.211, direct SSH)
+│       ├── bridge-1.yml          Bridge node 1 (192.168.86.230, direct SSH)
+│       └── bridge-2.yml          Bridge node 2 (192.168.86.231, direct SSH)
 │
 ├── playbooks/
 │   ├── site.yml                  Main orchestration playbook
@@ -759,7 +777,9 @@ vm_builds/
 │   │   ├── pihole_lxc/
 │   │   ├── pihole_configure/
 │   │   ├── openwrt_mesh_lxc/
-│   │   └── openwrt_mesh_configure/
+│   │   ├── openwrt_mesh_configure/
+│   │   ├── openwrt_bridge_lxc/
+│   │   └── openwrt_bridge_configure/
 │   │
 │   ├── Observability Tier
 │   │   ├── rsyslog_lxc/
@@ -794,6 +814,7 @@ vm_builds/
 ├── tasks/
 │   ├── reconstruct_desktop_group.yml     Reusable dynamic group reconstruction (Desktop)
 │   ├── reconstruct_gaming_group.yml      Reusable dynamic group reconstruction (Gaming)
+│   ├── reconstruct_bridge_group.yml     Reusable dynamic group reconstruction (WiFi Bridge)
 │   ├── reconstruct_homeassistant_group.yml  Reusable dynamic group reconstruction (Home Assistant)
 │   ├── reconstruct_jellyfin_group.yml    Reusable dynamic group reconstruction (Jellyfin)
 │   ├── reconstruct_kodi_group.yml        Reusable dynamic group reconstruction (Kodi)
@@ -814,11 +835,13 @@ vm_builds/
 │   ├── UNIT_TEST_PATTERN.md       Per-feature unit test reference doc
 │   ├── default/                   E2E integration tests (4-node, pre-built images required)
 │   ├── desktop-vm/                Per-feature: Debian Desktop VM with iGPU passthrough
+│   ├── bridge-lxc/                Per-feature: Dedicated WiFi Bridge LXC containers
 │   ├── gaming-lxc/                Per-feature: Gaming LXC with GPU render device sharing
 │   ├── homeassistant-lxc/         Per-feature: Home Assistant LXC container
 │   ├── jellyfin-lxc/              Per-feature: Jellyfin media server container
 │   ├── kiosk-lxc/                 Per-feature: Kiosk dashboard container
 │   ├── kodi-lxc/                  Per-feature: Kodi media player container
+│   ├── mesh-ax210/                Cross-hardware: mesh on AX210 WiFi 6E hardware
 │   ├── mesh1-infra/               Lightweight infra-only on mesh1 (quick iteration)
 │   ├── moonlight-lxc/             Per-feature: Moonlight streaming client container
 │   ├── netdata-lxc/               Per-feature: Netdata monitoring agent container

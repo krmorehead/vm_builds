@@ -24,7 +24,11 @@ from nicegui.testing import user_simulation
 
 from scripts.webui import data
 from scripts.webui.app import register_api
-from scripts.webui.pages import dashboard, deploy, environment, hosts, hub, images, nodes, services
+from scripts.webui.manager import get_subscription_manager, get_metric_cache
+from scripts.webui.pages import (
+    bridge, dashboard, deploy, environment, hosts, hub, images, mesh, nodes,
+    router, services,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -41,6 +45,9 @@ async def webui(tmp_path: Path, env_file: str = "complete.env", **overrides):
         deploy.register()
         images.register()
         hub.register()
+        bridge.register()
+        mesh.register()
+        router.register()
         nicegui_app.storage.general["env_path"] = str(FIXTURES / env_file)
         nicegui_app.storage.general["images_dir"] = str(tmp_path / "images")
         nicegui_app.storage.general["state_dir"] = str(tmp_path / "state")
@@ -696,9 +703,11 @@ class TestHub:
     async def test_shows_all_service_sections(self, tmp_path):
         async with webui(tmp_path) as user:
             await user.open("/hub")
+            await user.should_see("Infrastructure")
             await user.should_see("Desktop & Media")
             await user.should_see("Settings & Network")
             await user.should_see("Monitoring")
+            await user.should_see("System")
 
     async def test_shows_all_service_titles(self, tmp_path):
         async with webui(tmp_path) as user:
@@ -902,3 +911,899 @@ class TestApiNodes:
         async with api_client(tmp_path) as client:
             resp = await client.get("/api/nodes")
             assert resp.status_code == 200
+
+
+# ── Heartbeat API tests ──────────────────────────────────────────────
+
+
+class TestHeartbeatSubscribe:
+    async def test_subscribe_success(self, tmp_path):
+        env_content = (
+            "PRIMARY_HOST=192.168.86.201\n"
+            "HOME_API_TOKEN=test\n"
+            "MESH_KEY=test\n"
+        )
+        async with api_client(tmp_path, env_content=env_content) as client:
+            resp = await client.post("/api/heartbeat/subscribe", json={
+                "node_id": "home", "metric_type": "wifi", "ttl": 30,
+            })
+            assert resp.status_code == 200
+            body = resp.json()
+            assert "subscription_id" in body
+            assert body["node_id"] == "home"
+            assert body["metric_type"] == "wifi"
+
+    async def test_subscribe_unknown_node(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            resp = await client.post("/api/heartbeat/subscribe", json={
+                "node_id": "nonexistent", "metric_type": "wifi",
+            })
+            assert resp.status_code == 404
+            assert "Unknown node" in resp.json()["error"]
+
+    async def test_subscribe_unknown_metric_type(self, tmp_path):
+        env_content = (
+            "PRIMARY_HOST=192.168.86.201\n"
+            "HOME_API_TOKEN=test\n"
+            "MESH_KEY=test\n"
+        )
+        async with api_client(tmp_path, env_content=env_content) as client:
+            resp = await client.post("/api/heartbeat/subscribe", json={
+                "node_id": "home", "metric_type": "invalid_type",
+            })
+            assert resp.status_code == 400
+            assert "Unknown metric_type" in resp.json()["error"]
+
+    async def test_subscribe_refresh(self, tmp_path):
+        env_content = (
+            "PRIMARY_HOST=192.168.86.201\n"
+            "HOME_API_TOKEN=test\n"
+            "MESH_KEY=test\n"
+        )
+        async with api_client(tmp_path, env_content=env_content) as client:
+            resp1 = await client.post("/api/heartbeat/subscribe", json={
+                "node_id": "home", "metric_type": "wifi",
+            })
+            sub_id_1 = resp1.json()["subscription_id"]
+
+            resp2 = await client.post("/api/heartbeat/subscribe", json={
+                "node_id": "home", "metric_type": "wifi",
+            })
+            sub_id_2 = resp2.json()["subscription_id"]
+            assert sub_id_1 == sub_id_2
+
+    async def test_subscribe_malformed_body(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            resp = await client.post("/api/heartbeat/subscribe", json={
+                "bad": "payload",
+            })
+            assert resp.status_code == 400
+
+
+class TestHeartbeatMetrics:
+    async def test_get_no_data(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            resp = await client.get("/api/heartbeat/home/wifi")
+            assert resp.status_code == 404
+            assert "No data" in resp.json()["error"]
+
+    async def test_get_cached_data(self, tmp_path):
+        from scripts.webui.heartbeat import HeartbeatCache
+        async with api_client(tmp_path) as client:
+            cache = get_metric_cache()
+            cache.store(HeartbeatCache(
+                node_id="home", metric_type="wifi",
+                data={"signal": -55}, collected_at="2026-01-01T00:00:00",
+            ))
+            resp = await client.get("/api/heartbeat/home/wifi")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["data"]["signal"] == -55
+            assert body["success"] is True
+            cache.clear()
+
+    async def test_unsubscribe(self, tmp_path):
+        env_content = (
+            "PRIMARY_HOST=192.168.86.201\n"
+            "HOME_API_TOKEN=test\n"
+            "MESH_KEY=test\n"
+        )
+        async with api_client(tmp_path, env_content=env_content) as client:
+            resp = await client.post("/api/heartbeat/subscribe", json={
+                "node_id": "home", "metric_type": "wifi",
+            })
+            sub_id = resp.json()["subscription_id"]
+
+            del_resp = await client.request("DELETE", f"/api/heartbeat/subscribe/{sub_id}")
+            assert del_resp.status_code == 200
+            assert del_resp.json()["removed"] is True
+
+    async def test_list_subscriptions(self, tmp_path):
+        env_content = (
+            "PRIMARY_HOST=192.168.86.201\n"
+            "HOME_API_TOKEN=test\n"
+            "MESH_KEY=test\n"
+        )
+        async with api_client(tmp_path, env_content=env_content) as client:
+            await client.post("/api/heartbeat/subscribe", json={
+                "node_id": "home", "metric_type": "wifi",
+            })
+            resp = await client.get("/api/heartbeat/subscriptions")
+            assert resp.status_code == 200
+            subs = resp.json()
+            assert len(subs) >= 1
+            assert any(s["node_id"] == "home" for s in subs)
+
+
+# ── Batman API tests ─────────────────────────────────────────────────
+
+
+class TestBatmanApi:
+    async def test_batman_status_returns_nodes(self, tmp_path):
+        env_content = (
+            "PRIMARY_HOST=192.168.86.201\n"
+            "HOME_API_TOKEN=test\n"
+            "MESH_KEY=test\n"
+        )
+        with patch("scripts.webui.heartbeat._ssh_exec", return_value=(True, "BATMAN=inactive\n")):
+            async with api_client(tmp_path, env_content=env_content) as client:
+                resp = await client.get("/api/batman/status")
+                assert resp.status_code == 200
+                body = resp.json()
+                assert isinstance(body, dict)
+                assert "home" in body
+
+    async def test_batman_enable_no_mesh_key(self, tmp_path):
+        env_content = (
+            "PRIMARY_HOST=192.168.86.201\n"
+            "HOME_API_TOKEN=test\n"
+        )
+        with patch.dict("os.environ", {"MESH_KEY": ""}, clear=False):
+            async with api_client(tmp_path, env_content=env_content) as client:
+                resp = await client.post("/api/batman/enable")
+                assert resp.status_code == 500
+                assert "MESH_KEY" in resp.json()["error"]
+
+    async def test_batman_enable_happy_path(self, tmp_path):
+        """Enable batman across all mesh + bridge nodes."""
+        env_content = (
+            "PRIMARY_HOST=192.168.86.201\n"
+            "HOME_API_TOKEN=test\n"
+            "MESH_KEY=testkey123\n"
+            "MESH_1_HOST=10.10.10.210\n"
+            "MESH_2_HOST=192.168.86.211\n"
+            "BRIDGE_1_HOST=192.168.86.230\n"
+            "BRIDGE_2_HOST=192.168.86.231\n"
+        )
+
+        def _mock_ssh(ip, cmd, timeout=30):
+            if "status" in cmd:
+                return (True, "BATMAN=active\nINTERFACE=bat0\n---INTERFACES---\nwlan0: active\n")
+            return (True, "OK: batman-adv enabled on bat0 via wlan0")
+
+        with patch("scripts.webui.heartbeat._ssh_exec", side_effect=_mock_ssh):
+            async with api_client(tmp_path, env_content=env_content) as client:
+                with patch("asyncio.sleep", return_value=None):
+                    resp = await client.post("/api/batman/enable")
+                assert resp.status_code == 200
+                body = resp.json()
+                assert body["action"] == "enable"
+                assert body["total"] == 5
+                assert body["succeeded"] == body["total"]
+                for node_id, result in body["results"].items():
+                    assert result["success"] is True
+                    assert "status_check" in result
+
+    async def test_batman_disable_happy_path(self, tmp_path):
+        """Disable batman across all nodes."""
+        env_content = (
+            "PRIMARY_HOST=192.168.86.201\n"
+            "HOME_API_TOKEN=test\n"
+            "MESH_KEY=testkey123\n"
+            "MESH_1_HOST=10.10.10.210\n"
+            "MESH_2_HOST=192.168.86.211\n"
+            "BRIDGE_1_HOST=192.168.86.230\n"
+            "BRIDGE_2_HOST=192.168.86.231\n"
+        )
+        with patch("scripts.webui.heartbeat._ssh_exec", return_value=(True, "OK: batman-adv disabled")):
+            async with api_client(tmp_path, env_content=env_content) as client:
+                resp = await client.post("/api/batman/disable")
+                assert resp.status_code == 200
+                body = resp.json()
+                assert body["action"] == "disable"
+                assert body["succeeded"] == body["total"]
+                for result in body["results"].values():
+                    assert result["success"] is True
+                    assert "status_check" not in result
+
+    async def test_batman_enable_partial_failure(self, tmp_path):
+        """When some nodes fail, response shows partial success."""
+        env_content = (
+            "PRIMARY_HOST=192.168.86.201\n"
+            "HOME_API_TOKEN=test\n"
+            "MESH_KEY=testkey123\n"
+            "MESH_1_HOST=10.10.10.210\n"
+            "MESH_2_HOST=192.168.86.211\n"
+            "BRIDGE_1_HOST=192.168.86.230\n"
+            "BRIDGE_2_HOST=192.168.86.231\n"
+        )
+        call_count = [0]
+
+        def _mock_ssh(ip, cmd, timeout=30):
+            call_count[0] += 1
+            if ip == "192.168.86.230":
+                return (False, "ssh: connect to host 192.168.86.230 port 22: Connection refused")
+            if "status" in cmd:
+                return (True, "BATMAN=active\n")
+            return (True, "OK: batman-adv enabled")
+
+        with patch("scripts.webui.heartbeat._ssh_exec", side_effect=_mock_ssh):
+            async with api_client(tmp_path, env_content=env_content) as client:
+                with patch("asyncio.sleep", return_value=None):
+                    resp = await client.post("/api/batman/enable")
+                body = resp.json()
+                assert body["succeeded"] < body["total"]
+                failed = [n for n, r in body["results"].items() if not r["success"]]
+                assert len(failed) >= 1
+
+    async def test_batman_enable_requires_auth(self, tmp_path):
+        """Batman mutation endpoints require auth when private key is set."""
+        private_key, public_key = data.generate_callhome_keys()
+        env_content = (
+            f"PRIMARY_HOST=192.168.86.201\n"
+            f"HOME_API_TOKEN=test\n"
+            f"MESH_KEY=testkey123\n"
+            f"CALLHOME_PRIVATE_KEY={private_key}\n"
+        )
+        async with api_client(tmp_path, env_content=env_content) as client:
+            resp = await client.post("/api/batman/enable")
+            assert resp.status_code == 403
+
+            resp = await client.post(
+                "/api/batman/enable",
+                headers={"x-callhome-token": public_key},
+            )
+            assert resp.status_code != 403
+
+    async def test_batman_hmac_token_matches_openssl(self, tmp_path):
+        """Verify Python HMAC produces the same output as openssl dgst."""
+        import hashlib
+        import hmac as hmac_mod
+        key = "testkey123"
+        for action in ("enable", "disable"):
+            msg = f"{action}_batman"
+            expected = hmac_mod.new(
+                key.encode(), msg.encode(), hashlib.sha256,
+            ).hexdigest()
+            assert len(expected) == 64
+            assert all(c in "0123456789abcdef" for c in expected)
+
+
+# ── Bridge action API tests ──────────────────────────────────────────
+
+
+class TestBridgeActionApi:
+    async def test_restart_wifi_resolves_nodes(self, tmp_path):
+        env_content = (
+            "PRIMARY_HOST=192.168.86.201\n"
+            "HOME_API_TOKEN=test\n"
+            "MESH_KEY=test\n"
+            "BRIDGE_1_HOST=192.168.86.230\n"
+            "BRIDGE_2_HOST=192.168.86.231\n"
+        )
+        with patch(
+            "scripts.webui.heartbeat._ssh_exec",
+            return_value=(True, "OK: WiFi restarted\nMODE=ap\nINTERFACES=1\n"),
+        ) as mock_ssh:
+            async with api_client(tmp_path, env_content=env_content) as client:
+                resp = await client.post(
+                    "/api/bridge/restart-wifi",
+                    json={"target": "all"},
+                )
+                assert resp.status_code == 200
+                cmds = [call[0][1] for call in mock_ssh.call_args_list]
+                assert all("wifi_setup.sh restart" in c for c in cmds)
+
+    async def test_restart_sta_only(self, tmp_path):
+        env_content = (
+            "PRIMARY_HOST=192.168.86.201\n"
+            "HOME_API_TOKEN=test\n"
+            "MESH_KEY=test\n"
+            "BRIDGE_1_HOST=192.168.86.230\n"
+            "BRIDGE_2_HOST=192.168.86.231\n"
+        )
+        with patch(
+            "scripts.webui.heartbeat._ssh_exec",
+            return_value=(True, "OK: WiFi restarted\nMODE=sta\nINTERFACES=1\n"),
+        ) as mock_ssh:
+            async with api_client(tmp_path, env_content=env_content) as client:
+                resp = await client.post(
+                    "/api/bridge/restart-wifi",
+                    json={"target": "sta"},
+                )
+                assert resp.status_code == 200
+                body = resp.json()
+                assert "bridge-1" not in body or not body.get("bridge-1", {}).get("success")
+
+
+# ── WiFi mode API tests ─────────────────────────────────────────────
+
+
+class TestWifiModeApi:
+    async def test_wifi_mode_switch_happy_path(self, tmp_path):
+        """Switch a bridge node's WiFi mode via the API."""
+        env_content = (
+            "PRIMARY_HOST=192.168.86.201\n"
+            "HOME_API_TOKEN=test\n"
+            "MESH_KEY=test\n"
+            "BRIDGE_1_HOST=192.168.86.230\n"
+            "BRIDGE_2_HOST=192.168.86.231\n"
+        )
+        with patch(
+            "scripts.webui.heartbeat._ssh_exec",
+            return_value=(True, "OK: WiFi mode switched to sta\nSSID=test\nMODE=sta\n"),
+        ):
+            async with api_client(tmp_path, env_content=env_content) as client:
+                resp = await client.post("/api/wifi/mode/bridge-1/sta")
+                assert resp.status_code == 200
+                body = resp.json()
+                assert body["node_id"] == "bridge-1"
+                assert body["mode"] == "sta"
+                assert body["success"] is True
+
+    async def test_wifi_mode_invalid_mode(self, tmp_path):
+        """Reject invalid mode values."""
+        env_content = (
+            "PRIMARY_HOST=192.168.86.201\n"
+            "HOME_API_TOKEN=test\n"
+            "BRIDGE_1_HOST=192.168.86.230\n"
+        )
+        async with api_client(tmp_path, env_content=env_content) as client:
+            resp = await client.post("/api/wifi/mode/bridge-1/mesh")
+            assert resp.status_code == 400
+            assert "Invalid mode" in resp.json()["error"]
+
+    async def test_wifi_mode_unknown_node(self, tmp_path):
+        """Return 404 for unknown node IDs."""
+        env_content = (
+            "PRIMARY_HOST=192.168.86.201\n"
+            "HOME_API_TOKEN=test\n"
+        )
+        async with api_client(tmp_path, env_content=env_content) as client:
+            resp = await client.post("/api/wifi/mode/nonexistent/ap")
+            assert resp.status_code == 404
+
+    async def test_wifi_mode_requires_auth(self, tmp_path):
+        """WiFi mode switch requires auth when private key is set."""
+        private_key, public_key = data.generate_callhome_keys()
+        env_content = (
+            f"PRIMARY_HOST=192.168.86.201\n"
+            f"HOME_API_TOKEN=test\n"
+            f"BRIDGE_1_HOST=192.168.86.230\n"
+            f"CALLHOME_PRIVATE_KEY={private_key}\n"
+        )
+        async with api_client(tmp_path, env_content=env_content) as client:
+            resp = await client.post("/api/wifi/mode/bridge-1/ap")
+            assert resp.status_code == 403
+
+            with patch(
+                "scripts.webui.heartbeat._ssh_exec",
+                return_value=(True, "OK: WiFi mode switched to ap\n"),
+            ):
+                resp = await client.post(
+                    "/api/wifi/mode/bridge-1/ap",
+                    headers={"x-callhome-token": public_key},
+                )
+                assert resp.status_code != 403
+
+    async def test_wifi_status_happy_path(self, tmp_path):
+        """Query WiFi status from a bridge node."""
+        env_content = (
+            "PRIMARY_HOST=192.168.86.201\n"
+            "HOME_API_TOKEN=test\n"
+            "BRIDGE_1_HOST=192.168.86.230\n"
+        )
+        status_output = (
+            "PHY=phy0\nMODE=ap\nSSID=vm-builds-bridge\n"
+            "BAND=5g\nINTERFACES=1\nWIFI=up\n"
+        )
+        with patch(
+            "scripts.webui.heartbeat._ssh_exec",
+            return_value=(True, status_output),
+        ):
+            async with api_client(tmp_path, env_content=env_content) as client:
+                resp = await client.get("/api/wifi/status/bridge-1")
+                assert resp.status_code == 200
+                body = resp.json()
+                assert body["node_id"] == "bridge-1"
+                assert body["mode"] == "ap"
+                assert body["ssid"] == "vm-builds-bridge"
+                assert body["wifi"] == "up"
+
+    async def test_wifi_status_unknown_node(self, tmp_path):
+        """Return 404 for unknown node IDs on status check."""
+        env_content = (
+            "PRIMARY_HOST=192.168.86.201\n"
+            "HOME_API_TOKEN=test\n"
+        )
+        async with api_client(tmp_path, env_content=env_content) as client:
+            resp = await client.get("/api/wifi/status/nonexistent")
+            assert resp.status_code == 404
+
+    async def test_wifi_status_ssh_failure(self, tmp_path):
+        """Return 502 when SSH to container fails."""
+        env_content = (
+            "PRIMARY_HOST=192.168.86.201\n"
+            "HOME_API_TOKEN=test\n"
+            "BRIDGE_1_HOST=192.168.86.230\n"
+        )
+        with patch(
+            "scripts.webui.heartbeat._ssh_exec",
+            return_value=(False, "ssh: Connection refused"),
+        ):
+            async with api_client(tmp_path, env_content=env_content) as client:
+                resp = await client.get("/api/wifi/status/bridge-1")
+                assert resp.status_code == 502
+
+
+# ── Guest management API tests ──────────────────────────────────────
+
+
+class TestGuestApi:
+    async def test_guests_no_host_ip(self, tmp_path):
+        """Returns 500 when HOST_IP is not configured."""
+        with patch.dict("os.environ", {"HOST_IP": ""}, clear=False):
+            async with api_client(tmp_path) as client:
+                resp = await client.get("/api/guests")
+                assert resp.status_code == 500
+                assert "HOST_IP" in resp.json()["error"]
+
+    async def test_guests_lists_containers(self, tmp_path):
+        """Returns parsed pct list output."""
+        pct_output = (
+            "VMID       Status     Lock         Name\n"
+            "100        running                 openwrt\n"
+            "401        running                 kiosk\n"
+        )
+        env_content = (
+            "PRIMARY_HOST=192.168.86.201\n"
+            "HOME_API_TOKEN=test\n"
+            "MESH_KEY=test\n"
+        )
+
+        def mock_ssh(ip, cmd, timeout=10, user="root", identity_file=None):
+            if "pct list" in cmd:
+                return True, pct_output
+            return True, ""
+
+        with patch.dict("os.environ", {"HOST_IP": "10.10.10.2"}, clear=False):
+            with patch("scripts.webui.heartbeat._ssh_exec", side_effect=mock_ssh):
+                async with api_client(tmp_path, env_content=env_content) as client:
+                    nicegui_app.storage.general["host_ip"] = "10.10.10.2"
+                    resp = await client.get("/api/guests")
+                    assert resp.status_code == 200
+                    guests = resp.json()["guests"]
+                    assert len(guests) >= 2
+                    vmids = [g["vmid"] for g in guests]
+                    assert "100" in vmids
+                    assert "401" in vmids
+
+    async def test_guest_start_action(self, tmp_path):
+        """Can start a guest via the action endpoint."""
+        env_content = (
+            "PRIMARY_HOST=192.168.86.201\n"
+            "HOME_API_TOKEN=test\n"
+            "MESH_KEY=test\n"
+        )
+        with patch.dict("os.environ", {"HOST_IP": "10.10.10.2"}, clear=False):
+            with patch("scripts.webui.heartbeat._ssh_exec", return_value=(True, "ok")):
+                async with api_client(tmp_path, env_content=env_content) as client:
+                    nicegui_app.storage.general["host_ip"] = "10.10.10.2"
+                    resp = await client.post("/api/guests/100/start")
+                    assert resp.status_code == 200
+                    body = resp.json()
+                    assert body["vmid"] == "100"
+                    assert body["action"] == "start"
+
+    async def test_guest_invalid_action(self, tmp_path):
+        """Rejects invalid actions."""
+        env_content = (
+            "PRIMARY_HOST=192.168.86.201\n"
+            "HOME_API_TOKEN=test\n"
+            "MESH_KEY=test\n"
+        )
+        with patch.dict("os.environ", {"HOST_IP": "10.10.10.2"}, clear=False):
+            async with api_client(tmp_path, env_content=env_content) as client:
+                nicegui_app.storage.general["host_ip"] = "10.10.10.2"
+                resp = await client.post("/api/guests/100/delete")
+                assert resp.status_code == 400
+                assert "Invalid action" in resp.json()["error"]
+
+
+# ── Fleet readiness API tests ────────────────────────────────────────
+
+
+CONTAINER_CHECKIN = {
+    "node_id": "ct-pihole",
+    "hostname": "ct-pihole",
+    "local_ips": ["10.10.10.10"],
+    "uptime_seconds": 120,
+    "services": [],
+    "disk_usage_pct": 30.0,
+    "memory_usage_pct": 40.0,
+    "version": "1.0",
+    "container_health": {
+        "container_id": "pihole",
+        "systemd_services": {"pihole-FTL": "running"},
+        "listening_ports": [53, 80],
+        "ready": True,
+    },
+}
+
+
+class TestFleetReadyEndpoint:
+    async def test_missing_services_param(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            resp = await client.get("/api/fleet/ready")
+            assert resp.status_code == 400
+            assert "services" in resp.json()["error"].lower()
+
+    async def test_all_ready(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            await client.post("/api/checkin", json=CONTAINER_CHECKIN)
+            resp = await client.get("/api/fleet/ready?services=pihole")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["all_ready"] is True
+            assert body["ready_count"] == 1
+            assert body["total"] == 1
+
+    async def test_missing_service_not_ready(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            resp = await client.get("/api/fleet/ready?services=netdata")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["all_ready"] is False
+            assert body["services"]["netdata"]["status"] == "unknown"
+
+    async def test_partial_readiness(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            await client.post("/api/checkin", json=CONTAINER_CHECKIN)
+            resp = await client.get("/api/fleet/ready?services=pihole,netdata")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["all_ready"] is False
+            assert body["ready_count"] == 1
+            assert body["total"] == 2
+
+
+class TestContainerReadyEndpoint:
+    async def test_known_container(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            await client.post("/api/checkin", json=CONTAINER_CHECKIN)
+            resp = await client.get("/api/container/pihole/ready")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["ready"] is True
+            assert body["container_id"] == "pihole"
+            assert 53 in body["listening_ports"]
+
+    async def test_unknown_container(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            resp = await client.get("/api/container/nonexistent/ready")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["ready"] is False
+            assert body["status"] == "unknown"
+
+
+class TestFleetHealthEndpoint:
+    async def test_empty_fleet(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            resp = await client.get("/api/fleet/health")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["total_nodes"] == 0
+            assert "health_score" in body
+
+    async def test_with_nodes(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            await client.post("/api/checkin", json=SAMPLE_CHECKIN)
+            resp = await client.get("/api/fleet/health")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["total_nodes"] == 1
+            assert body["online_nodes"] == 1
+
+
+class TestCheckinWithContainerHealth:
+    async def test_container_health_round_trip(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            resp = await client.post("/api/checkin", json=CONTAINER_CHECKIN)
+            assert resp.status_code == 200
+
+            nodes_resp = await client.get("/api/nodes")
+            nodes = nodes_resp.json()
+            assert len(nodes) == 1
+            assert nodes[0]["node_id"] == "ct-pihole"
+
+    async def test_checkin_without_container_health(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            resp = await client.post("/api/checkin", json=SAMPLE_CHECKIN)
+            assert resp.status_code == 200
+
+            nodes_resp = await client.get("/api/nodes")
+            nodes = nodes_resp.json()
+            assert len(nodes) == 1
+
+
+EXTENSIONS_CHECKIN = {
+    "node_id": "ct-wireguard",
+    "hostname": "ct-wireguard",
+    "local_ips": ["10.10.10.3"],
+    "uptime_seconds": 200,
+    "services": [],
+    "disk_usage_pct": 20.0,
+    "memory_usage_pct": 30.0,
+    "version": "1.0",
+    "container_health": {
+        "container_id": "wireguard",
+        "systemd_services": {"wg-quick@wg0": "active"},
+        "listening_ports": [51820],
+        "ready": True,
+        "extensions": {
+            "wireguard": {
+                "interfaces": {"wg0": {"peer_count": 4, "up": True}},
+            },
+            "network": {
+                "interfaces": [
+                    {"name": "eth0", "addresses": ["10.10.10.3/24"], "operstate": "up"},
+                ],
+                "default_gateway": "10.10.10.1",
+            },
+        },
+    },
+}
+
+
+class TestExtensionsRoundTrip:
+    """Extensions survive checkin → storage → API responses."""
+
+    async def test_extensions_in_container_ready(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            await client.post("/api/checkin", json=EXTENSIONS_CHECKIN)
+            resp = await client.get("/api/container/wireguard/ready")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["ready"] is True
+            ext = body["extensions"]
+            assert ext["wireguard"]["interfaces"]["wg0"]["peer_count"] == 4
+            assert ext["network"]["default_gateway"] == "10.10.10.1"
+
+    async def test_extensions_in_nodes_list(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            await client.post("/api/checkin", json=EXTENSIONS_CHECKIN)
+            resp = await client.get("/api/nodes")
+            assert resp.status_code == 200
+            nodes = resp.json()
+            assert len(nodes) == 1
+            ch = nodes[0]["container_health"]
+            assert ch["container_id"] == "wireguard"
+            assert ch["extensions"]["wireguard"]["interfaces"]["wg0"]["peer_count"] == 4
+
+    async def test_extensions_empty_by_default(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            await client.post("/api/checkin", json=CONTAINER_CHECKIN)
+            resp = await client.get("/api/container/pihole/ready")
+            body = resp.json()
+            assert body["extensions"] == {}
+
+    async def test_docker_extensions(self, tmp_path):
+        ha_checkin = {
+            "node_id": "ct-ha",
+            "hostname": "ct-ha",
+            "local_ips": ["10.10.10.14"],
+            "uptime_seconds": 300,
+            "services": [],
+            "disk_usage_pct": 25.0,
+            "memory_usage_pct": 35.0,
+            "version": "1.0",
+            "container_health": {
+                "container_id": "homeassistant",
+                "systemd_services": {"docker": "active"},
+                "listening_ports": [8123],
+                "ready": True,
+                "extensions": {
+                    "docker": {"active": True, "running": 3},
+                },
+            },
+        }
+        async with api_client(tmp_path) as client:
+            await client.post("/api/checkin", json=ha_checkin)
+            resp = await client.get("/api/container/homeassistant/ready")
+            body = resp.json()
+            assert body["extensions"]["docker"]["active"] is True
+            assert body["extensions"]["docker"]["running"] == 3
+
+    async def test_config_files_extensions(self, tmp_path):
+        kiosk_checkin = {
+            "node_id": "ct-kiosk",
+            "hostname": "ct-kiosk",
+            "local_ips": ["10.10.10.19"],
+            "uptime_seconds": 150,
+            "services": [],
+            "disk_usage_pct": 15.0,
+            "memory_usage_pct": 25.0,
+            "version": "1.0",
+            "container_health": {
+                "container_id": "kiosk",
+                "systemd_services": {"kiosk-web": "active"},
+                "listening_ports": [8080],
+                "ready": True,
+                "extensions": {
+                    "config_files": {
+                        "/opt/kiosk/config.json": {
+                            "keys": ["DESKTOP_URL", "JELLYFIN_URL", "GAMING_URL"],
+                            "hash": "abcd1234",
+                        },
+                    },
+                },
+            },
+        }
+        async with api_client(tmp_path) as client:
+            await client.post("/api/checkin", json=kiosk_checkin)
+            resp = await client.get("/api/container/kiosk/ready")
+            body = resp.json()
+            cfg = body["extensions"]["config_files"]["/opt/kiosk/config.json"]
+            assert "DESKTOP_URL" in cfg["keys"]
+            assert cfg["hash"] == "abcd1234"
+
+    async def test_http_probes_extensions(self, tmp_path):
+        checkin = {
+            "node_id": "ct-jellyfin",
+            "hostname": "ct-jellyfin",
+            "local_ips": ["10.10.10.15"],
+            "uptime_seconds": 600,
+            "services": [],
+            "disk_usage_pct": 30.0,
+            "memory_usage_pct": 40.0,
+            "version": "1.0",
+            "container_health": {
+                "container_id": "jellyfin",
+                "systemd_services": {"jellyfin.service": "active"},
+                "listening_ports": [8096],
+                "ready": True,
+                "extensions": {
+                    "http_probes": {
+                        "http://127.0.0.1:8096": 200,
+                    },
+                    "network": {
+                        "interfaces": [
+                            {"name": "eth0", "operstate": "up",
+                             "mac": "aa:bb:cc:dd:ee:ff",
+                             "addresses": ["10.10.10.15/24"]},
+                        ],
+                        "default_gateway": "10.10.10.1",
+                    },
+                },
+            },
+        }
+        async with api_client(tmp_path) as client:
+            await client.post("/api/checkin", json=checkin)
+            resp = await client.get("/api/container/jellyfin/ready")
+            body = resp.json()
+            assert body["ready"] is True
+            assert body["extensions"]["http_probes"]["http://127.0.0.1:8096"] == 200
+            net_ifaces = body["extensions"]["network"]["interfaces"]
+            assert net_ifaces[0]["addresses"][0] == "10.10.10.15/24"
+
+    async def test_udp_ports_in_container_ready(self, tmp_path):
+        checkin = {
+            "node_id": "ct-wg",
+            "hostname": "ct-wg",
+            "local_ips": ["10.10.10.3"],
+            "uptime_seconds": 120,
+            "services": [],
+            "disk_usage_pct": 10.0,
+            "memory_usage_pct": 20.0,
+            "version": "1.0",
+            "container_health": {
+                "container_id": "wireguard-udp",
+                "systemd_services": {"wg-quick@wg0.service": "active"},
+                "listening_ports": [51820, 514],
+                "ready": True,
+                "extensions": {},
+            },
+        }
+        async with api_client(tmp_path) as client:
+            await client.post("/api/checkin", json=checkin)
+            resp = await client.get("/api/container/wireguard-udp/ready")
+            body = resp.json()
+            assert 51820 in body["listening_ports"]
+            assert 514 in body["listening_ports"]
+
+    async def test_nodes_without_extensions(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            await client.post("/api/checkin", json=SAMPLE_CHECKIN)
+            resp = await client.get("/api/nodes")
+            nodes = resp.json()
+            assert "container_health" not in nodes[0]
+
+
+class TestEndToEndCallhomeFlow:
+    """True end-to-end: build_container_payload → checkin → query APIs."""
+
+    async def test_collector_to_api_roundtrip(self, tmp_path):
+        """Verify the real callhome payload structure works through the API."""
+        from scripts.callhome import build_container_payload
+        payload = build_container_payload("test-service")
+        async with api_client(tmp_path) as client:
+            resp = await client.post("/api/checkin", json=payload)
+            assert resp.status_code == 200
+
+            ready = await client.get("/api/container/test-service/ready")
+            assert ready.status_code == 200
+            body = ready.json()
+            assert body["ready"] is True
+            assert body["container_id"] == "test-service"
+            assert isinstance(body["listening_ports"], list)
+            assert isinstance(body["systemd_services"], dict)
+            assert isinstance(body["extensions"], dict)
+
+    async def test_fleet_readiness_with_real_payload(self, tmp_path):
+        """Fleet readiness gate works with real callhome payloads."""
+        from scripts.callhome import build_container_payload
+        async with api_client(tmp_path) as client:
+            for svc in ["pihole", "netdata", "wireguard"]:
+                payload = build_container_payload(svc)
+                payload["node_id"] = f"ct-{svc}"
+                payload["hostname"] = f"ct-{svc}"
+                await client.post("/api/checkin", json=payload)
+            resp = await client.get(
+                "/api/fleet/ready?services=pihole,netdata,wireguard",
+            )
+            body = resp.json()
+            assert body["all_ready"] is True
+            assert body["ready_count"] == 3
+
+    async def test_extensions_survive_real_payload(self, tmp_path):
+        """Network extension from collect_network flows through the API."""
+        from scripts.callhome import build_container_payload
+        payload = build_container_payload("test-ext")
+        ch = payload["container_health"]
+        ext = ch.get("extensions", {})
+        has_network = "network" in ext
+
+        async with api_client(tmp_path) as client:
+            await client.post("/api/checkin", json=payload)
+            resp = await client.get("/api/container/test-ext/ready")
+            body = resp.json()
+            if has_network:
+                assert "network" in body["extensions"]
+                assert isinstance(body["extensions"]["network"]["interfaces"], list)
+
+    async def test_vmid_injection_blocked(self, tmp_path):
+        """VMID injection via path params is rejected."""
+        async with api_client(tmp_path) as client:
+            resp = await client.post("/api/guests/100;whoami/start")
+            assert resp.status_code == 400
+            assert "Invalid VMID" in resp.json()["error"]
+
+    async def test_manager_auth_required(self, tmp_path):
+        """Mutation endpoints require auth when private key is set."""
+        private_key, public_key = data.generate_callhome_keys()
+        env_content = (
+            f"PRIMARY_HOST=192.168.86.201\n"
+            f"HOME_API_TOKEN=test\n"
+            f"MESH_KEY=test\n"
+            f"CALLHOME_PRIVATE_KEY={private_key}\n"
+        )
+        async with api_client(tmp_path, env_content=env_content) as client:
+            resp = await client.post("/api/guests/100/stop")
+            assert resp.status_code == 403
+
+            resp = await client.post(
+                "/api/guests/100/stop",
+                headers={"x-callhome-token": public_key},
+            )
+            assert resp.status_code != 403

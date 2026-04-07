@@ -1,4 +1,17 @@
 ---
+# ── Check container is running (hookscript may have stopped it) ──
+
+- name: Check if Kiosk container is running
+  ansible.builtin.command:
+    cmd: pct status {{ kiosk_ct_id }}
+  register: _kiosk_status
+  changed_when: false
+  failed_when: false
+
+- name: Skip configure when container is stopped by display-exclusive hookscript
+  ansible.builtin.meta: end_host
+  when: "'running' not in (_kiosk_status.stdout | default(''))"
+
 # ── Verify Kiosk packages are available ──────────────────────────
 
 - name: Verify Cage compositor installed in container
@@ -10,11 +23,21 @@
 
 # ── Configure iGPU access ───────────────────────────────────────
 
+- name: Detect render group GID from host
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      stat -c '%g' /dev/dri/renderD* 2>/dev/null | head -1
+    executable: /bin/bash
+  register: _host_render_gid
+  changed_when: false
+  failed_when: _host_render_gid.rc != 0 or _host_render_gid.stdout | trim | length == 0
+
 - name: Create render group and add kiosk user to groups
   ansible.builtin.shell:
     cmd: |
       pct exec {{ kiosk_ct_id }} -- bash -c '
-        groupadd -g {{ igpu_render_gid }} render 2>/dev/null || true
+        groupadd -g {{ _host_render_gid.stdout | trim }} render 2>/dev/null || true
         usermod -a -G render,video kiosk 2>/dev/null || true
       '
     executable: /bin/bash
@@ -27,6 +50,37 @@
     _lan_gateway: >-
       {{ lookup('pipe', 'grep "^LAN_GATEWAY=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
          | default('10.10.10.1', true) | trim }}
+
+# ── Build node IP map for the per-host manager ──────────────────
+# Maps node_id -> IP so the kiosk manager can SSH to sibling
+# containers for metric collection. Uses static_ip facts exported
+# by provision roles plus the OpenWrt router gateway.
+
+- name: Build node IP map from topology facts
+  ansible.builtin.set_fact:
+    _kiosk_node_ips: >-
+      {{ _kiosk_node_ips | default({})
+         | combine({item.key: item.value})
+      }}
+  loop: "{{ _node_ip_entries | dict2items }}"
+  vars:
+    _node_ip_entries:
+      home: "{{ ansible_host | default('') }}"
+      openwrt: "{{ _lan_gateway | default('10.10.10.1') }}"
+      pihole: "{{ pihole_static_ip | default('') }}"
+      wireguard: "{{ wireguard_static_ip | default('') }}"
+      netdata: "{{ netdata_static_ip | default('') }}"
+      homeassistant: "{{ homeassistant_static_ip | default('') }}"
+      jellyfin: "{{ jellyfin_static_ip | default('') }}"
+      kodi: "{{ kodi_static_ip | default('') }}"
+      moonlight: "{{ moonlight_static_ip | default('') }}"
+      rsyslog: "{{ rsyslog_static_ip | default('') }}"
+      bridge-1: "{{ hostvars['bridge-1']['ansible_host'] | default('') if 'bridge-1' in hostvars else '' }}"
+      bridge-2: "{{ hostvars['bridge-2']['ansible_host'] | default('') if 'bridge-2' in hostvars else '' }}"
+      mesh1: "{{ hostvars['mesh1']['ansible_host'] | default('') if 'mesh1' in hostvars else '' }}"
+      mesh2: "{{ hostvars['mesh2']['ansible_host'] | default('') if 'mesh2' in hostvars else '' }}"
+      ai: "{{ hostvars['ai']['ansible_host'] | default('') if 'ai' in hostvars else '' }}"
+  when: item.value | length > 0
 
 # ── Build service URLs from topology facts ─────────────────────
 # Each URL resolves in priority order:
@@ -84,8 +138,27 @@
       RSYSLOG_URL: >-
         {{ kiosk_rsyslog_url if kiosk_rsyslog_url | length > 0
            else '' }}
+      MANAGEMENT_SERVER: >-
+        {{ kiosk_management_server if (kiosk_management_server | default('')) | length > 0
+           else ('http://' + ansible_host + ':8080')
+                if (ansible_host | default('')) | length > 0
+           else '' }}
+      CALLHOME_SERVER: "{{ callhome_server }}"
+      MESH_KEY: "{{ lookup('env', 'MESH_KEY') | default('', true) }}"
+      HOST_IP: "{{ ansible_host }}"
+      NODE_IPS: >-
+        {{ _kiosk_node_ips | default({}) }}
 
 # ── Deploy NiceGUI webui files and service URL config ─────────────
+
+- name: Create host temp directory for webui files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /tmp/kiosk_webui
+    - /tmp/kiosk_webui/pages
 
 - name: Copy webui source files to host temp directory
   ansible.builtin.copy:
@@ -93,12 +166,20 @@
     dest: "/tmp/kiosk_webui/{{ item.dest }}"
     mode: "0644"
   loop:
-    - { src: "{{ playbook_dir }}/../scripts/webui/__init__.py", dest: "__init__.py" }
-    - { src: "{{ playbook_dir }}/../scripts/webui/theme.py", dest: "theme.py" }
-    - { src: "{{ playbook_dir }}/../scripts/webui/data.py", dest: "data.py" }
-    - { src: "{{ playbook_dir }}/../scripts/webui/kiosk_server.py", dest: "kiosk_server.py" }
-    - { src: "{{ playbook_dir }}/../scripts/webui/pages/__init__.py", dest: "pages/__init__.py" }
-    - { src: "{{ playbook_dir }}/../scripts/webui/pages/hub.py", dest: "pages/hub.py" }
+    - { src: "{{ project_root }}/scripts/webui/__init__.py", dest: "__init__.py" }
+    - { src: "{{ project_root }}/scripts/webui/theme.py", dest: "theme.py" }
+    - { src: "{{ project_root }}/scripts/webui/data.py", dest: "data.py" }
+    - { src: "{{ project_root }}/scripts/webui/heartbeat.py", dest: "heartbeat.py" }
+    - { src: "{{ project_root }}/scripts/webui/manager.py", dest: "manager.py" }
+    - { src: "{{ project_root }}/scripts/webui/kiosk_server.py", dest: "kiosk_server.py" }
+    - { src: "{{ project_root }}/scripts/webui/pages/__init__.py", dest: "pages/__init__.py" }
+    - { src: "{{ project_root }}/scripts/webui/pages/hub.py", dest: "pages/hub.py" }
+    - { src: "{{ project_root }}/scripts/webui/pages/bridge.py", dest: "pages/bridge.py" }
+    - { src: "{{ project_root }}/scripts/webui/pages/mesh.py", dest: "pages/mesh.py" }
+    - { src: "{{ project_root }}/scripts/webui/pages/router.py", dest: "pages/router.py" }
+    - { src: "{{ project_root }}/scripts/webui/pages/viewer.py", dest: "pages/viewer.py" }
+    - { src: "{{ project_root }}/scripts/webui/pages/launch.py", dest: "pages/launch.py" }
+    - { src: "{{ project_root }}/scripts/webui/pages/containers.py", dest: "pages/containers.py" }
 
 - name: Ensure webui directories exist in container
   ansible.builtin.command:
@@ -113,9 +194,17 @@
     - { dest: "__init__.py" }
     - { dest: "theme.py" }
     - { dest: "data.py" }
+    - { dest: "heartbeat.py" }
+    - { dest: "manager.py" }
     - { dest: "kiosk_server.py" }
     - { dest: "pages/__init__.py" }
     - { dest: "pages/hub.py" }
+    - { dest: "pages/bridge.py" }
+    - { dest: "pages/mesh.py" }
+    - { dest: "pages/router.py" }
+    - { dest: "pages/viewer.py" }
+    - { dest: "pages/launch.py" }
+    - { dest: "pages/containers.py" }
 
 - name: Build service URL config JSON
   ansible.builtin.set_fact:
@@ -144,6 +233,38 @@
   loop:
     - /tmp/kiosk_webui
     - /tmp/kiosk_config.json
+
+# ── SSH key for host management ──────────────────────────────────
+# The kiosk manager needs SSH access to the Proxmox host to run
+# pct/qm commands for container/VM lifecycle management.
+
+- name: Generate SSH key inside kiosk container if absent
+  ansible.builtin.shell:
+    cmd: |
+      pct exec {{ kiosk_ct_id }} -- bash -c '
+        if [ ! -f /home/kiosk/.ssh/id_ed25519 ]; then
+          mkdir -p /home/kiosk/.ssh
+          ssh-keygen -t ed25519 -f /home/kiosk/.ssh/id_ed25519 -N "" -q
+          chown -R kiosk:kiosk /home/kiosk/.ssh
+          chmod 700 /home/kiosk/.ssh
+          chmod 600 /home/kiosk/.ssh/id_ed25519
+        fi
+      '
+    executable: /bin/bash
+  changed_when: true
+
+- name: Read kiosk public key from container
+  ansible.builtin.command:
+    cmd: pct exec {{ kiosk_ct_id }} -- cat /home/kiosk/.ssh/id_ed25519.pub
+  register: _kiosk_pubkey
+  changed_when: false
+
+- name: Authorize kiosk key on Proxmox host
+  ansible.posix.authorized_key:
+    user: root
+    key: "{{ _kiosk_pubkey.stdout }}"
+    comment: "kiosk-manager-{{ inventory_hostname }}"
+    state: present
 
 # ── Enable kiosk display service ─────────────────────────────────
 

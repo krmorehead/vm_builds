@@ -189,13 +189,16 @@ def nav_sidebar(active: str = "") -> None:
     """Render the left navigation sidebar with gradient background."""
     items = [
         ("Dashboard", "/", "dashboard"),
-        ("Environment", "/environment", "settings"),
-        ("Hosts", "/hosts", "dns"),
-        ("Nodes", "/nodes", "device_hub"),
-        ("Services", "/services", "widgets"),
-        ("Images", "/images", "inventory_2"),
-        ("Deploy", "/deploy", "rocket_launch"),
         ("Home Hub", "/hub", "tv"),
+        ("Bridge", "/bridge", "swap_horiz"),
+        ("Mesh", "/mesh", "hub"),
+        ("Router", "/router", "router"),
+        ("Services", "/services", "widgets"),
+        ("Deploy", "/deploy", "rocket_launch"),
+        ("Images", "/images", "inventory_2"),
+        ("Nodes", "/nodes", "device_hub"),
+        ("Hosts", "/hosts", "dns"),
+        ("Environment", "/environment", "settings"),
     ]
     sidebar_bg = (
         f"background: linear-gradient(90deg, {BG_SIDEBAR_OUTER} 0%, "
@@ -350,3 +353,233 @@ def stat_value(value: str, label: str) -> None:
         ui.label(label).classes("text-xs uppercase tracking-wider").style(
             f"color: {TEXT_SECONDARY}"
         )
+
+
+# ── Infrastructure components ────────────────────────────────────────
+
+_SIGNAL_COLORS = {
+    "excellent": COLOR_SUCCESS,
+    "good": "#4ade80",
+    "fair": COLOR_WARNING,
+    "weak": "#fb923c",
+    "poor": COLOR_ERROR,
+}
+
+
+def signal_color(quality: str) -> str:
+    """Return a hex color for a signal quality label."""
+    return _SIGNAL_COLORS.get(quality, TEXT_SECONDARY)
+
+
+def signal_gauge(dbm: int | None, size: str = "md") -> None:
+    """Render a signal strength gauge with dBm value and quality label."""
+    from scripts.webui.heartbeat import signal_percentage, signal_quality
+
+    if dbm is None:
+        with ui.column().classes("items-center gap-0"):
+            ui.icon("signal_wifi_off", size=size).style(f"color: {TEXT_DISABLED}")
+            ui.label("--").classes("text-xs font-mono").style(f"color: {TEXT_DISABLED}")
+        return
+
+    quality = signal_quality(dbm)
+    pct = signal_percentage(dbm)
+    color = signal_color(quality)
+
+    with ui.column().classes("items-center gap-0"):
+        ui.circular_progress(
+            value=pct / 100,
+            show_value=False,
+            size=size,
+        ).props(f'color="{color}" thickness=0.25')
+        ui.label(f"{dbm} dBm").classes("text-xs font-mono mt-1").style(
+            f"color: {color}"
+        )
+        ui.label(quality.capitalize()).classes("text-xs").style(
+            f"color: {TEXT_SECONDARY}"
+        )
+
+
+def link_status_banner(
+    connected: bool, role: str = "", uptime_seconds: int = 0,
+    signal_dbm: int | None = None,
+) -> None:
+    """Render a full-width status banner for bridge/mesh connections."""
+    from scripts.webui.data import format_uptime
+
+    if connected:
+        icon_name = "link"
+        status_label = "Connected"
+        border_color = COLOR_SUCCESS
+        text_color = COLOR_SUCCESS
+    else:
+        icon_name = "link_off"
+        status_label = "Disconnected"
+        border_color = COLOR_ERROR
+        text_color = COLOR_ERROR
+
+    with ui.card().classes("w-full").style(
+        f"border-left: 4px solid {border_color} !important"
+    ):
+        with ui.row().classes("w-full items-center justify-between flex-wrap gap-4"):
+            with ui.row().classes("items-center gap-3"):
+                ui.icon(icon_name, size="md").style(f"color: {text_color}")
+                with ui.column().classes("gap-0"):
+                    ui.label(status_label).classes("text-lg font-semibold").style(
+                        f"color: {text_color}"
+                    )
+                    if role:
+                        ui.label(f"Role: {role.upper()}").classes(
+                            "text-xs font-mono"
+                        ).style(f"color: {TEXT_SECONDARY}")
+
+            with ui.row().classes("items-center gap-6"):
+                if uptime_seconds > 0:
+                    with ui.column().classes("items-center gap-0"):
+                        ui.label(format_uptime(uptime_seconds)).classes(
+                            "text-sm font-mono"
+                        ).style(f"color: {TEXT_PRIMARY}")
+                        ui.label("Uptime").classes("text-xs").style(
+                            f"color: {TEXT_SECONDARY}"
+                        )
+                if signal_dbm is not None:
+                    signal_gauge(signal_dbm)
+
+
+def traffic_sparkline(
+    tx_data: list[float], rx_data: list[float], height: str = "h-24",
+) -> None:
+    """Render a dual-line traffic sparkline using echart."""
+    if len(tx_data) < 2 and len(rx_data) < 2:
+        ui.label("Collecting data...").classes("text-xs").style(
+            f"color: {TEXT_DISABLED}"
+        )
+        return
+
+    max_len = max(len(tx_data), len(rx_data))
+    ui.echart({
+        "grid": {"top": 10, "bottom": 10, "left": 40, "right": 10},
+        "xAxis": {
+            "type": "category", "show": False,
+            "data": list(range(max_len)),
+        },
+        "yAxis": {"type": "value", "show": True, "splitLine": {
+            "lineStyle": {"color": "rgba(20, 184, 166, 0.05)"},
+        }},
+        "series": [
+            {
+                "type": "line", "data": tx_data,
+                "smooth": True, "symbol": "none",
+                "lineStyle": {"width": 2, "color": ACCENT},
+                "areaStyle": {"color": "rgba(20, 184, 166, 0.1)"},
+                "name": "TX",
+            },
+            {
+                "type": "line", "data": rx_data,
+                "smooth": True, "symbol": "none",
+                "lineStyle": {"width": 2, "color": COLOR_INFO},
+                "areaStyle": {"color": "rgba(96, 165, 250, 0.1)"},
+                "name": "RX",
+            },
+        ],
+        "legend": {
+            "data": ["TX", "RX"], "bottom": 0,
+            "textStyle": {"color": TEXT_SECONDARY, "fontSize": 10},
+        },
+        "tooltip": {
+            "trigger": "axis",
+            "backgroundColor": "rgba(10, 22, 44, 0.9)",
+            "borderColor": ACCENT_DIM,
+            "textStyle": {"color": TEXT_PRIMARY, "fontSize": 11},
+        },
+    }).classes(f"w-full {height}")
+
+
+def metric_row(label: str, value: str, unit: str = "") -> None:
+    """Render a single metric display row: label ... value unit."""
+    display = f"{value} {unit}".strip() if unit else value
+    with ui.row().classes("w-full items-center justify-between py-1"):
+        ui.label(label).classes("text-sm").style(f"color: {TEXT_SECONDARY}")
+        ui.label(display).classes("text-sm font-mono").style(
+            f"color: {TEXT_PRIMARY}"
+        )
+
+
+def help_tooltip(text: str) -> None:
+    """Render a small info icon with a hover tooltip for laymen explanations."""
+    with ui.icon("help_outline", size="xs").style(
+        f"color: {TEXT_SECONDARY}; cursor: help; opacity: 0.7;"
+    ):
+        ui.tooltip(text).style(
+            f"background: rgba(10, 22, 44, 0.95); color: {TEXT_PRIMARY}; "
+            f"border: 1px solid {ACCENT_DIM}; border-radius: 8px; "
+            "max-width: 320px; font-size: 0.8rem; padding: 8px 12px; "
+            "line-height: 1.4;"
+        )
+
+
+def kiosk_nav_bar() -> None:
+    """Render a fixed top bar with Home button for kiosk-mode pages.
+
+    Replaces the full sidebar navigation (which contains links to
+    Dashboard, Deploy, etc. that don't exist on the kiosk server).
+    """
+    bar_style = (
+        f"position: fixed; top: 0; left: 0; right: 0; z-index: 9999; "
+        f"height: 44px; display: flex; align-items: center; "
+        f"padding: 0 16px; gap: 12px; "
+        f"background: {BG_CARD}; border-bottom: 1px solid {BORDER};"
+    )
+    with ui.element("div").style(bar_style):
+        ui.button(
+            icon="home", on_click=lambda: ui.navigate.to("/hub"),
+        ).props("flat dense round").style(f"color: {ACCENT}")
+        ui.label("Home Hub").classes("text-sm").style(f"color: {TEXT_SECONDARY}")
+        ui.space()
+        ui.button(
+            "Containers", icon="dns",
+            on_click=lambda: ui.navigate.to("/containers"),
+        ).props("flat dense").classes("text-xs").style(f"color: {TEXT_SECONDARY}")
+    ui.add_head_html("""<style>.kiosk-body-offset { padding-top: 52px !important; }</style>""")
+
+
+@contextmanager
+def kiosk_page_shell(page_name: str = "") -> Generator[ui.column, None, None]:
+    """Apply theme, render kiosk nav bar, and yield a centered content column.
+
+    Like page_shell() but uses a slim home bar instead of the full sidebar.
+    """
+    apply_theme()
+    kiosk_nav_bar()
+    with ui.column().classes("w-full max-w-5xl mx-auto p-6 gap-4 kiosk-body-offset") as col:
+        yield col
+
+
+def connection_indicator(status: str) -> None:
+    """Render an animated status indicator dot."""
+    if status == "connected":
+        color = COLOR_SUCCESS
+        animation = "animation: pulse-green 2s infinite;"
+    elif status == "pairing":
+        color = COLOR_WARNING
+        animation = "animation: pulse-yellow 1s infinite;"
+    else:
+        color = COLOR_ERROR
+        animation = ""
+
+    pulse_css = f"""
+    <style>
+    @keyframes pulse-green {{
+        0%, 100% {{ box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.6); }}
+        50% {{ box-shadow: 0 0 0 6px rgba(52, 211, 153, 0); }}
+    }}
+    @keyframes pulse-yellow {{
+        0%, 100% {{ box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.6); }}
+        50% {{ box-shadow: 0 0 0 6px rgba(251, 191, 36, 0); }}
+    }}
+    </style>
+    """
+    ui.add_head_html(pulse_css)
+    ui.element("div").style(
+        f"width: 10px; height: 10px; border-radius: 50%; "
+        f"background: {color}; {animation}"
+    )

@@ -41,6 +41,7 @@
       - "{{ wireguard_ct_id }}"
       - "{{ pihole_ct_id }}"
       - "{{ meshwifi_ct_id }}"
+      - "{{ bridge_ct_id }}"
       - "{{ netdata_ct_id }}"
       - "{{ rsyslog_ct_id }}"
       - "{{ homeassistant_ct_id }}"
@@ -198,10 +199,20 @@
       ansible.builtin.shell:
         cmd: |
           rm -f /var/lib/vz/snippets/mesh-wifi-phy-*.sh
+          rm -f /var/lib/vz/snippets/bridge-wifi-phy-*.sh
           rm -f /var/lib/vz/snippets/gpu-passthrough-hook.sh
           rm -f /var/lib/vz/snippets/display-exclusive.sh
         executable: /bin/bash
       changed_when: true
+      failed_when: false
+
+    - name: Remove host-side manager wrapper scripts
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /usr/local/bin/wifi_setup.sh
+        - /usr/local/bin/batman_trigger.sh
       failed_when: false
 
     - name: Re-enable enterprise repos if disabled
@@ -288,3 +299,66 @@
         - /tmp/desktop_tmp_key
         - /tmp/desktop_tmp_key.pub
       delegate_to: localhost
+
+# ── Play 3: Stop heartbeat API server ──────────────────────────
+
+- name: Stop heartbeat API server
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    _project_root: "{{ playbook_dir }}/../.."
+  tasks:
+    - name: Read API server PID
+      ansible.builtin.slurp:
+        src: "{{ _project_root }}/.state/test_api.pid"
+      register: _api_pid
+      failed_when: false
+
+    - name: Terminate API server
+      ansible.builtin.command:
+        cmd: "kill {{ (_api_pid.content | b64decode | trim) }}"
+      when: _api_pid is not failed and _api_pid.content is defined
+      failed_when: false
+      changed_when: true
+
+    - name: Read SSH tunnel PID
+      ansible.builtin.slurp:
+        src: "{{ _project_root }}/.state/tunnel.pid"
+      register: _tunnel_pid
+      failed_when: false
+
+    - name: Terminate SSH tunnel
+      ansible.builtin.command:
+        cmd: "kill {{ (_tunnel_pid.content | b64decode | trim) }}"
+      when: _tunnel_pid is not failed and _tunnel_pid.content is defined
+      failed_when: false
+      changed_when: true
+
+    - name: Read socat relay PID
+      ansible.builtin.slurp:
+        src: "{{ _project_root }}/.state/socat.pid"
+      register: _socat_pid
+      failed_when: false
+
+    - name: Terminate socat relay on Proxmox host
+      ansible.builtin.command:
+        cmd: >-
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+          root@{{ lookup('env', 'PRIMARY_HOST') }}
+          kill {{ (_socat_pid.content | b64decode | trim) }}
+      when: _socat_pid is not failed and _socat_pid.content is defined
+      failed_when: false
+      changed_when: true
+
+    - name: Remove API state files
+      ansible.builtin.file:
+        path: "{{ _project_root }}/.state/{{ item }}"
+        state: absent
+      loop:
+        - test_api.pid
+        - tunnel.pid
+        - socat.pid
+        - callhome_url
+        - nodes.json
+        - tunnel.log

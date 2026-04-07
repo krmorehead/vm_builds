@@ -1,13 +1,13 @@
 ---
 - name: Reconstruct kiosk dynamic group
-  hosts: desktop_nodes
+  hosts: kiosk_nodes
   gather_facts: false
   tasks:
     - name: Include group reconstruction
       ansible.builtin.include_tasks: ../../tasks/reconstruct_kiosk_group.yml
 
 - name: Verify Kiosk LXC container
-  hosts: desktop_nodes
+  hosts: kiosk_nodes
   gather_facts: false
   vars:
     kiosk_ct_id: 401
@@ -130,7 +130,68 @@
           - "'WIREGUARD_URL' in _kiosk_config.stdout"
           - "'NETDATA_URL' in _kiosk_config.stdout"
           - "'RSYSLOG_URL' in _kiosk_config.stdout"
-        fail_msg: "Kiosk config missing service URLs"
+          - "'HOST_IP' in _kiosk_config.stdout"
+          - "'NODE_IPS' in _kiosk_config.stdout"
+        fail_msg: "Kiosk config missing service URLs or HOST_IP"
+
+    # ── SSH key for host management ─────────────────────────────
+
+    - name: Verify SSH key exists in container
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ kiosk_ct_id }} -- /bin/sh -c '
+          echo "KEY=$(test -f /home/kiosk/.ssh/id_ed25519 && echo yes || echo no)";
+          echo "PUB=$(test -f /home/kiosk/.ssh/id_ed25519.pub && echo yes || echo no)"
+          '
+      register: _kiosk_ssh
+      changed_when: false
+
+    - name: Assert SSH key pair exists
+      ansible.builtin.assert:
+        that:
+          - "'KEY=yes' in _kiosk_ssh.stdout"
+          - "'PUB=yes' in _kiosk_ssh.stdout"
+        fail_msg: "Kiosk SSH key pair not generated"
+
+    - name: Verify kiosk pubkey authorized on host
+      ansible.builtin.command:
+        cmd: pct exec {{ kiosk_ct_id }} -- cat /home/kiosk/.ssh/id_ed25519.pub
+      register: _kiosk_pubkey
+      changed_when: false
+
+    - name: Check host authorized_keys contains kiosk key
+      ansible.builtin.shell:
+        cmd: grep -c "kiosk-manager" /root/.ssh/authorized_keys
+        executable: /bin/bash
+      register: _auth_check
+      changed_when: false
+      failed_when: _auth_check.rc > 1
+
+    - name: Assert kiosk key is authorized
+      ansible.builtin.assert:
+        that: _auth_check.stdout | int > 0
+        fail_msg: "Kiosk public key not in host authorized_keys"
+
+    # ── Additional webui files ──────────────────────────────────
+
+    - name: Verify webui pages deployed
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ kiosk_ct_id }} -- /bin/sh -c '
+          echo "VIEWER=$(test -f /opt/kiosk/webui/pages/viewer.py && echo yes || echo no)";
+          echo "LAUNCH=$(test -f /opt/kiosk/webui/pages/launch.py && echo yes || echo no)";
+          echo "CONTAINERS=$(test -f /opt/kiosk/webui/pages/containers.py && echo yes || echo no)"
+          '
+      register: _extra_pages
+      changed_when: false
+
+    - name: Assert new pages deployed
+      ansible.builtin.assert:
+        that:
+          - "'VIEWER=yes' in _extra_pages.stdout"
+          - "'LAUNCH=yes' in _extra_pages.stdout"
+          - "'CONTAINERS=yes' in _extra_pages.stdout"
+        fail_msg: "viewer.py, launch.py, or containers.py not deployed to kiosk"
 
     # ── Hookscript ──────────────────────────────────────────────
 
@@ -158,8 +219,8 @@
       ansible.builtin.assert:
         that:
           - "'KIOSK_ID={{ kiosk_ct_id }}' in (_hookscript_content.content | b64decode)"
-          - "'{{ kodi_ct_id }}' in (_hookscript_content.content | b64decode)"
-          - "'{{ desktop_vm_id }}' in (_hookscript_content.content | b64decode)"
+          - "'{{ kodi_ct_id | string }}' in (_hookscript_content.content | b64decode)"
+          - "'{{ desktop_vm_id | string }}' in (_hookscript_content.content | b64decode)"
         fail_msg: "Hookscript VMIDs don't match group_vars"
 
     # ── Report ──────────────────────────────────────────────────

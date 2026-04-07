@@ -1,0 +1,135 @@
+---
+# Shared WDS (AP/STA with 4-address mode) WiFi configuration for
+# OpenWrt LXC containers. Runs via pct_remote — all commands use raw
+# wrapped in `/bin/sh -c '...'` for pct_remote compatibility.
+#
+# Required caller variables:
+#   _wds_ssid          — SSID for the WDS link
+#   _wds_key           — WPA3-SAE passphrase
+#   _wds_encryption    — encryption type (default: sae)
+#   _wds_wifi_role     — "ap" or "sta"
+#   _wds_country       — regulatory domain (default: US)
+#   _wds_channel       — channel or "auto"
+#   _wds_mesh_key      — MESH_KEY for batman HMAC (optional)
+#
+# Band detection is automatic (wifi_setup.sh prefers 5GHz when available).
+#
+# WiFi kernel modules MUST be loaded on the HOST before the PHY
+# namespace move. Do NOT modprobe inside the container.
+#
+# All mode-specific logic lives in wifi_setup.sh (baked into the
+# image). This task file detects radios (with Ansible-level retries),
+# calls the script, verifies the result, and deploys batman keys.
+
+# ── Detect WiFi radios ───────────────────────────────────────────
+# Uses `iw phy` (netlink) instead of `/sys/class/ieee80211/` because
+# LXC containers bind-mount the host's sysfs, which doesn't reflect
+# network-namespace-aware entries.
+
+- name: Detect WiFi radios inside container
+  ansible.builtin.raw: >-
+    /bin/sh -c
+    'iw phy 2>/dev/null | grep -c "^Wiphy " || true'
+  register: _wds_radio_count
+  changed_when: false
+  retries: 10
+  delay: 3
+  until: (_wds_radio_count.stdout | default('0') | trim | int) > 0
+
+- name: Get WiFi radio names
+  ansible.builtin.raw: >-
+    /bin/sh -c
+    'iw phy 2>/dev/null | sed -n "s/^Wiphy //p"'
+  register: _wds_radios_raw
+  changed_when: false
+
+- name: Set WiFi radio list
+  ansible.builtin.set_fact:
+    _wds_radios: >-
+      {{ _wds_radios_raw.stdout_lines | default([])
+         | select('match', '^phy') | list }}
+
+- name: Fail if no WiFi radios visible in container
+  ansible.builtin.fail:
+    msg: >-
+      No WiFi radios found inside the container after retries.
+      The PHY namespace move may have failed. Check that
+      'iw phy set netns' succeeded in the provisioning role.
+  when: _wds_radios | length == 0
+
+# ── Configure WiFi via container-side script ─────────────────────
+# wifi_setup.sh handles: radio detection, mode validation, UCI config,
+# WDS interface creation, STP, commit, and restart — all in one call.
+# This replaces 25+ individual pct_remote raw tasks.
+
+- name: Set WDS wifi role fact
+  ansible.builtin.set_fact:
+    _wds_role: "{{ _wds_wifi_role | default('sta') }}"
+
+- name: Report WiFi setup parameters
+  ansible.builtin.debug:
+    msg: >-
+      WiFi setup: role={{ _wds_role }}, ssid={{ _wds_ssid }},
+      encryption={{ _wds_encryption | default('sae') }},
+      channel={{ _wds_channel | default('auto') }},
+      country={{ _wds_country | default('US') }}.
+
+- name: Run wifi_setup.sh configure
+  ansible.builtin.raw: >-
+    /bin/sh -c '/usr/sbin/wifi_setup.sh configure
+    --mode {{ _wds_role }}
+    --ssid "{{ _wds_ssid }}"
+    --key "{{ _wds_key }}"
+    --encryption {{ _wds_encryption | default("sae") }}
+    --channel {{ _wds_channel | default("auto") }}
+    --country {{ _wds_country | default("US") }}'
+  register: _wds_setup_result
+  changed_when: true
+  no_log: true
+  retries: 3
+  delay: 5
+  until: _wds_setup_result.rc == 0
+
+- name: Report wifi_setup.sh result
+  ansible.builtin.debug:
+    msg: "{{ _wds_setup_result.stdout | default('') | trim }}"
+
+- name: Fail if wifi_setup.sh exited with error
+  ansible.builtin.fail:
+    msg: >-
+      wifi_setup.sh configure failed:
+      {{ _wds_setup_result.stderr | default('') | trim }}
+      {{ _wds_setup_result.stdout | default('') | trim }}
+  when: _wds_setup_result.rc | default(0) | int != 0
+
+# ── Verify WiFi interface is up ──────────────────────────────────
+
+- name: Wait for WiFi interface to appear
+  ansible.builtin.raw: >-
+    /bin/sh -c
+    'iw dev 2>/dev/null | grep -cE "type (AP|managed)" || true'
+  register: _wds_iface_check
+  changed_when: false
+  retries: 10
+  delay: 5
+  until: (_wds_iface_check.stdout | default('0') | trim | int) > 0
+
+- name: Report WiFi interface status
+  ansible.builtin.debug:
+    msg: >-
+      WiFi interface check:
+      {{ _wds_iface_check.stdout | default('0') | trim }}
+      interface(s) detected. Role: {{ _wds_role }}.
+      SSID: {{ _wds_ssid }}.
+
+# ── Deploy batman trigger key ────────────────────────────────────
+# Pre-stages MESH_KEY for batman_trigger.sh HMAC verification.
+# Does NOT enable batman — just stores the key for future use.
+
+- name: Deploy MESH_KEY to /etc/batman_key
+  ansible.builtin.raw: >-
+    /bin/sh -c 'echo "{{ _wds_mesh_key }}" > /etc/batman_key &&
+    chmod 600 /etc/batman_key'
+  when: (_wds_mesh_key | default('')) | length > 0
+  changed_when: true
+  no_log: true

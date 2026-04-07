@@ -1,0 +1,31 @@
+---
+- name: Configure shared infrastructure on bridge hardware (as mesh nodes)
+  hosts: wifi_nodes
+  gather_facts: true
+  roles:
+    - proxmox_bridges
+    - proxmox_pci_passthrough
+    - proxmox_igpu
+
+- name: Provision OpenWrt Mesh LXC on AX210 hardware
+  hosts: wifi_nodes
+  gather_facts: false
+  roles:
+    - openwrt_mesh_lxc
+
+- name: Reconstruct mesh group for configure play
+  hosts: wifi_nodes
+  gather_facts: true
+  tasks:
+    - name: Reconstruct openwrt_mesh group
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_lxc_group.yml
+      vars:
+        reconstruct_service_name: Mesh WiFi
+        reconstruct_service_prefix: openwrt_mesh
+        reconstruct_ct_id: "{{ meshwifi_ct_id }}"
+
+- name: Configure OpenWrt Mesh on AX210
+  hosts: openwrt_mesh
+  gather_facts: false
+  roles:
+    - openwrt_mesh_configure

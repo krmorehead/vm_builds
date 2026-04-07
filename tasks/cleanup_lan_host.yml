@@ -40,8 +40,8 @@
         qm destroy \$vm --purge 2>/dev/null || true;
       done;
       for ct in {{ wireguard_ct_id }} {{ meshwifi_ct_id }}
-      {{ netdata_ct_id }} {{ rsyslog_ct_id }} {{ pihole_ct_id }}
-      {{ homeassistant_ct_id }} {{ jellyfin_ct_id }}
+      {{ bridge_ct_id }} {{ netdata_ct_id }} {{ rsyslog_ct_id }}
+      {{ pihole_ct_id }} {{ homeassistant_ct_id }} {{ jellyfin_ct_id }}
       {{ kodi_ct_id }} {{ moonlight_ct_id }} {{ kiosk_ct_id }}
       {{ gaming_ct_id }}; do
         pct status \$ct >/dev/null 2>&1 || continue;
@@ -71,8 +71,12 @@
 
 - name: Remove hookscripts on LAN host  # noqa command-instead-of-shell
   ansible.builtin.shell:
-    cmd: >-
-      {{ _cleanup_ssh }} "rm -f /var/lib/vz/snippets/mesh-wifi-phy-*.sh /var/lib/vz/snippets/gpu-passthrough-hook.sh /var/lib/vz/snippets/display-exclusive.sh"
+    cmd: |
+      {{ _cleanup_ssh }} "rm -f
+        /var/lib/vz/snippets/mesh-wifi-phy-*.sh
+        /var/lib/vz/snippets/bridge-wifi-phy-*.sh
+        /var/lib/vz/snippets/gpu-passthrough-hook.sh
+        /var/lib/vz/snippets/display-exclusive.sh"
   when: _host_reachable | bool
   changed_when: true
   failed_when: false

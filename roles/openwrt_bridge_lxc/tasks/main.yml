@@ -1,0 +1,274 @@
+---
+# ── Release WiFi PHY from stale containers ────────────────────────
+# If a bridge container from a previous run still holds the WiFi PHY
+# in its network namespace, stop it first so the PHY returns to
+# the host.
+
+- name: Check if bridge container exists from a previous run
+  ansible.builtin.command:
+    cmd: pct status {{ bridge_ct_id }}
+  register: _stale_bridge_ct
+  changed_when: false
+  failed_when: false
+
+- name: Stop stale bridge container to release WiFi PHY
+  ansible.builtin.command:
+    cmd: pct stop {{ bridge_ct_id }}
+  when:
+    - _stale_bridge_ct.rc == 0
+    - "'running' in (_stale_bridge_ct.stdout | default(''))"
+  changed_when: true
+
+- name: Destroy stale bridge container
+  ansible.builtin.command:
+    cmd: pct destroy {{ bridge_ct_id }} --purge
+  when: _stale_bridge_ct.rc == 0
+  changed_when: true
+  failed_when: false
+
+- name: Wait for WiFi PHY to return to host namespace
+  ansible.builtin.pause:
+    seconds: 3
+  when: _stale_bridge_ct.rc == 0
+
+# ── Verify WiFi hardware ─────────────────────────────────────────
+# proxmox_pci_passthrough already loads modules and exports
+# wifi_phy_count. Assert it here rather than re-loading.
+
+- name: Assert WiFi PHY is available (from proxmox_pci_passthrough)
+  ansible.builtin.assert:
+    that: (wifi_phy_count | default(0) | int) > 0
+    fail_msg: >-
+      No WiFi PHY on {{ inventory_hostname }}. proxmox_pci_passthrough
+      should have loaded drivers and exported wifi_phy_count > 0.
+      Check dmesg | grep iwlwifi for errors.
+
+# ── Detect WiFi PHY devices on host ──────────────────────────────
+
+- name: Detect WiFi PHY devices on host
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      ls /sys/class/ieee80211/ 2>/dev/null
+    executable: /bin/bash
+  register: _host_wifi_phys
+  changed_when: false
+  failed_when: false
+
+- name: Set WiFi PHY list
+  ansible.builtin.set_fact:
+    _wifi_phys: "{{ _host_wifi_phys.stdout_lines | default([]) | select('match', '^phy') | list }}"
+
+- name: Fail if no WiFi PHY found on bridge node
+  ansible.builtin.fail:
+    msg: >-
+      No WiFi PHY found on {{ inventory_hostname }} after loading drivers.
+      Bridge nodes require WiFi hardware for 802.11s dedicated link.
+      Run: lspci -k | grep -A2 'Network controller'
+  when: _wifi_phys | length == 0
+
+# ── Determine container network based on host topology ───────────
+# Bridge-1 (single NIC): container eth0 on proxmox_wan_bridge
+# Bridge-2 (multi-NIC): container eth0 on the USB NIC bridge
+
+- name: Detect USB NICs via sysfs
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      for iface in /sys/class/net/*/device; do
+        subsys=$(readlink -f "$iface/subsystem" 2>/dev/null)
+        if echo "$subsys" | grep -q 'bus/usb'; then
+          basename "$(dirname "$iface")"
+        fi
+      done
+    executable: /bin/bash
+  register: _usb_nics_raw
+  changed_when: false
+  failed_when: false
+
+- name: Set USB NIC list
+  ansible.builtin.set_fact:
+    _usb_nics: "{{ _usb_nics_raw.stdout_lines | default([]) }}"
+
+- name: Find management interface name
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      ip -o addr show | grep '{{ ansible_default_ipv4.address }}' | awk '{print $2}' | head -1
+    executable: /bin/bash
+  register: _mgmt_iface_raw
+  changed_when: false
+
+- name: Filter out management NIC from USB NIC list
+  ansible.builtin.set_fact:
+    _backhaul_usb_nics: >-
+      {{ _usb_nics | reject('equalto', _mgmt_iface_raw.stdout | trim) | list }}
+
+- name: Find Proxmox bridge for USB backhaul NIC
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      bridge_name=""
+      for br in $(ip -o link show type bridge | awk -F': ' '{print $2}'); do
+        if bridge link show dev {{ item }} master "$br" >/dev/null 2>&1; then
+          bridge_name="$br"
+          break
+        fi
+      done
+      if [ -z "$bridge_name" ]; then
+        conf=$(grep -l "{{ item }}" /etc/network/interfaces.d/*.conf 2>/dev/null \
+          | xargs grep -l 'bridge' 2>/dev/null | head -1)
+        if [ -n "$conf" ]; then
+          bridge_name=$(grep 'auto ' "$conf" | awk '{print $2}')
+        fi
+      fi
+      echo "$bridge_name"
+    executable: /bin/bash
+  loop: "{{ _backhaul_usb_nics }}"
+  register: _usb_bridge_raw
+  changed_when: false
+  when: _backhaul_usb_nics | length > 0
+
+- name: Set backhaul bridge
+  ansible.builtin.set_fact:
+    _backhaul_bridge: >-
+      {{ _usb_bridge_raw.results[0].stdout | default('') | trim
+         if _backhaul_usb_nics | length > 0 and _usb_bridge_raw.results | default([]) | length > 0
+         else '' }}
+
+- name: Select container bridge (USB backhaul or WAN)
+  ansible.builtin.set_fact:
+    _bridge_ct_bridge: >-
+      {{ _backhaul_bridge if _backhaul_bridge | length > 0
+         else proxmox_wan_bridge }}
+
+- name: Build bridge node host list
+  ansible.builtin.set_fact:
+    _bridge_hosts: "{{ groups['bridge_nodes'] | default([]) | sort }}"
+
+- name: Set container IP
+  ansible.builtin.set_fact:
+    _bridge_ct_ip: >-
+      {{ ansible_default_ipv4.network.split('.')[0:3] | join('.') }}.{{
+         bridge_ct_ip_offset + 200 + _bridge_hosts.index(inventory_hostname) }}
+    _bridge_ct_cidr: "{{ ansible_default_ipv4.prefix }}"
+    _bridge_ct_gateway: "{{ ansible_default_ipv4.gateway }}"
+
+- name: Report bridge container assignment
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: bridge LXC IP={{ _bridge_ct_ip }}/{{ _bridge_ct_cidr }}
+      gw={{ _bridge_ct_gateway }} bridge={{ _bridge_ct_bridge }}
+      ({{ 'USB backhaul' if _backhaul_bridge | length > 0 else 'WAN bridge' }})
+
+# ── Verify custom LXC image exists ────────────────────────────────
+
+- name: Check bridge LXC image exists
+  ansible.builtin.stat:
+    path: "{{ project_root }}/{{ openwrt_lxc_template_path }}"
+  register: _bridge_lxc_stat
+  delegate_to: localhost
+
+- name: Fail if bridge LXC image is missing
+  ansible.builtin.fail:
+    msg: >-
+      Custom mesh LXC image not found: {{ openwrt_lxc_template_path }}.
+      Bridge reuses the mesh image. Run ./build-images.sh --only mesh
+  when: not (_bridge_lxc_stat.stat.exists | default(false))
+
+# ── Provision LXC container ──────────────────────────────────────
+
+- name: Provision WiFi bridge LXC container
+  ansible.builtin.include_role:
+    name: proxmox_lxc
+  vars:
+    lxc_ct_id: "{{ bridge_ct_id }}"
+    lxc_ct_hostname: "{{ openwrt_bridge_ct_hostname }}"
+    lxc_ct_dynamic_group: openwrt_bridge
+    lxc_ct_memory: "{{ openwrt_bridge_ct_memory }}"
+    lxc_ct_cores: "{{ openwrt_bridge_ct_cores }}"
+    lxc_ct_disk: "{{ openwrt_bridge_ct_disk }}"
+    lxc_ct_onboot: "{{ openwrt_bridge_ct_onboot }}"
+    lxc_ct_startup_order: "{{ openwrt_bridge_ct_startup_order }}"
+    lxc_ct_features: "{{ openwrt_bridge_ct_features }}"
+    lxc_ct_unprivileged: false
+    lxc_ct_template: "{{ openwrt_lxc_template }}"
+    lxc_ct_template_path: "{{ openwrt_lxc_template_path }}"
+    lxc_ct_skip_debian_cleanup: true
+    lxc_ct_ostype: unmanaged
+    lxc_ct_bridge: "{{ _bridge_ct_bridge }}"
+    lxc_ct_ip: "{{ _bridge_ct_ip }}/{{ _bridge_ct_cidr }}"
+    lxc_ct_gateway: "{{ _bridge_ct_gateway }}"
+    lxc_ct_nameserver: "8.8.8.8"
+
+# ── Move WiFi PHY into container namespace ───────────────────────
+
+- name: Move WiFi PHY devices into container namespace
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pid=$(lxc-info -n {{ bridge_ct_id }} 2>/dev/null | awk '/^PID:/{print $2}')
+      if [ -z "$pid" ] || [ "$pid" = "-1" ]; then
+        echo "ERROR: cannot determine PID for container {{ bridge_ct_id }}" >&2
+        exit 1
+      fi
+      for phy in {{ _wifi_phys | join(' ') }}; do
+        iw phy "$phy" set netns "$pid"
+      done
+    executable: /bin/bash
+  changed_when: true
+
+# ── Deploy hookscript for PHY persistence across reboots ─────────
+
+- name: Ensure snippets directory exists
+  ansible.builtin.file:
+    path: /var/lib/vz/snippets
+    state: directory
+    mode: "0755"
+
+- name: Deploy bridge PHY hookscript
+  ansible.builtin.copy:
+    content: |
+      #!/bin/bash
+      # Proxmox hookscript: move WiFi PHYs into WiFi bridge container
+      # after it starts. Deployed by openwrt_bridge_lxc role.
+      CT_ID="$1"
+      PHASE="$2"
+
+      if [ "$PHASE" != "post-start" ]; then
+        exit 0
+      fi
+
+      sleep 2
+      pid=$(lxc-info -n "$CT_ID" 2>/dev/null | awk '/^PID:/{print $2}')
+      [ -z "$pid" ] || [ "$pid" = "-1" ] && exit 0
+      for phy in $(ls /sys/class/ieee80211/ 2>/dev/null); do
+        iw phy "$phy" set netns "$pid" 2>/dev/null || true
+      done
+    dest: "/var/lib/vz/snippets/bridge-wifi-phy-{{ bridge_ct_id }}.sh"
+    mode: "0755"
+
+- name: Attach hookscript to container
+  ansible.builtin.command:
+    cmd: "pct set {{ bridge_ct_id }} --hookscript local:snippets/bridge-wifi-phy-{{ bridge_ct_id }}.sh"
+  changed_when: true
+
+# ── Host-side wrapper scripts for manager API ──────────────────
+# The manager SSHes to the Proxmox host and calls these scripts.
+# They forward to the container-side scripts via pct exec.
+
+- name: Deploy host-side wifi_setup.sh wrapper
+  ansible.builtin.copy:
+    content: |
+      #!/bin/sh
+      exec pct exec {{ bridge_ct_id }} -- /usr/sbin/wifi_setup.sh "$@"
+    dest: /usr/local/bin/wifi_setup.sh
+    mode: "0755"
+
+- name: Deploy host-side batman_trigger.sh wrapper
+  ansible.builtin.copy:
+    content: |
+      #!/bin/sh
+      exec pct exec {{ bridge_ct_id }} -- /usr/sbin/batman_trigger.sh "$@"
+    dest: /usr/local/bin/batman_trigger.sh
+    mode: "0755"

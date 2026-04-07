@@ -6,8 +6,11 @@
 #
 # Required vars:
 #   reconstruct_service_name   — human-readable name (e.g. "Pi-hole")
-#   reconstruct_service_prefix — hostname prefix and group name (e.g. "pihole")
+#   reconstruct_service_prefix — group name (e.g. "pihole")
 #   reconstruct_ct_id          — container VMID (e.g. {{ pihole_ct_id }})
+# Optional vars:
+#   reconstruct_ct_hostname    — hostname prefix if different from group name
+#                                (e.g. "openwrt-bridge" when group is "openwrt_bridge")
 
 - name: "Verify container is running — {{ reconstruct_service_name }}"
   ansible.builtin.shell:
@@ -21,7 +24,7 @@
 
 - name: "Add containers to dynamic group — {{ reconstruct_service_name }}"
   ansible.builtin.add_host:
-    name: "{{ reconstruct_service_prefix }}-{{ item }}"
+    name: "{{ (reconstruct_ct_hostname | default(reconstruct_service_prefix)) }}-{{ item }}"
     groups: "{{ reconstruct_service_prefix }}"
     ansible_connection: community.proxmox.proxmox_pct_remote
     ansible_host: "{{ hostvars[item].ansible_host }}"
@@ -39,7 +42,7 @@
   ansible.builtin.debug:
     msg: >-
       Reconstructed {{ reconstruct_service_prefix }} group:
-      host={{ reconstruct_service_prefix }}-{{ inventory_hostname }},
+      host={{ (reconstruct_ct_hostname | default(reconstruct_service_prefix)) }}-{{ inventory_hostname }},
       proxmox_host={{ ansible_host }},
       vmid={{ reconstruct_ct_id }},
       connection=pct_remote

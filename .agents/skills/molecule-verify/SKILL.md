@@ -13,6 +13,10 @@ description: Molecule verify assertion patterns. completeness requirements, batc
 4. Batch independent `pct exec` calls with key=value output.
 5. NEVER use `failed_when: false` on client sends — let errors surface.
 6. Per-feature verify MUST reconstruct dynamic groups (separate invocation).
+7. Use the fleet readiness API as the **primary** path for container liveness;
+   `pct exec` is the **fallback** when the API is unavailable.
+8. New service verify blocks MUST follow the `_fleet_api_ready` dual-path
+   pattern. See the `manager-api-pattern` skill for details.
 
 ## Completeness requirements
 
@@ -310,6 +314,63 @@ NEVER use `regex_search` with capture groups to parse `pct exec` output in `set_
 
 Previous bug: Batched rsyslog/gaming verify tasks used `regex_search('MATCH=(\\S+)', '\\1') | first` to extract values from `pct exec` output. The regex returned `None` on all 4 nodes, crashing `set_fact` with `'NoneType' object has no attribute 'group'`. Replaced with string-contains checks.
 
+## Display-exclusive container assertions
+
+When containers share a display device (iGPU render node), a hookscript may stop
+one container when another starts (e.g., Kiosk stopped when Desktop VM starts).
+Assert container config separately from running state:
+
+```yaml
+- name: Assert container config is correct
+  ansible.builtin.assert:
+    that:
+      - "'onboot: 1' in _cfg.stdout"
+      - _cfg.stdout is regex('startup:.*order=6')
+
+- name: Check if competing VM is running
+  ansible.builtin.command:
+    cmd: qm status {{ desktop_vm_id }}
+  register: _desktop_status
+  changed_when: false
+  failed_when: false
+
+- name: Assert running OR stopped by hookscript
+  ansible.builtin.assert:
+    that: >-
+      'running' in _cfg.stdout or
+      ('stopped' in _cfg.stdout and 'running' in (_desktop_status.stdout | default('')))
+```
+
+Previous bug: Kodi and Kiosk assertions required 'running' state, but the
+display-exclusive hookscript correctly stopped them when the Desktop VM started.
+Fix: accept 'stopped' when the competing VM is running.
+
+## Multi-instance container IP from API
+
+When the same container type deploys to multiple hosts (e.g., rsyslog on 4 nodes),
+the fleet API returns a single IP (last check-in) for all instances sharing the
+same `container_id`. ALWAYS use `pct config` for per-host container IPs in verify:
+
+```yaml
+- name: Extract per-host container IP
+  ansible.builtin.set_fact:
+    _ct_ip: "{{ _ct_cfg.stdout | regex_search('ip=([^/,]+)', '\\1') | first }}"
+```
+
+Previous bug: rsyslog verify used API-returned IP for cross-service log tests.
+All 4 hosts got the same IP (10.10.10.14 — Home Assistant's IP), causing logger
+TCP to fail on 3 of 4 hosts. Fix: always use `pct config` for IP extraction.
+
+## systemd service state from callhome
+
+`callhome.py` uses `systemctl list-units` which reports state as `running` (not
+`active` from `systemctl is-active`). Assertions against API `systemd_services`
+data MUST accept both values:
+
+```yaml
+- _api.json.systemd_services.get('service', '') in ['active', 'running']
+```
+
 ## Common failures
 
 - 0 assertions ran → dynamic group empty (add reconstruction)
@@ -319,3 +380,4 @@ Previous bug: Batched rsyslog/gaming verify tasks used `regex_search('MATCH=(\\S
 - Per-feature scenario missing `router_nodes` group → LAN/WAN detection takes wrong path
 - Register result used as string → ALWAYS use `_var.stdout | trim`, not `_var` directly. Register results are dicts, not strings. Previous bug: `_jellyfin_verify_ip.split('.')` failed because `_jellyfin_verify_ip` was a register result (dict), not the stdout string.
 - `set -o pipefail` on non-pipeline commands → use `ansible.builtin.command` for single commands without pipes. Pipefail on non-pipeline commands adds noise and obscures the convention that pipefail signals a pipeline.
+- `config_files[path].keys()` returns a method, not a list → use `config_files[path]['keys']` to access the stored key list from callhome extensions.

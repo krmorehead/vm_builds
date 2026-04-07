@@ -1,0 +1,27 @@
+---
+- name: Cleanup OpenWrt Mesh LXC on AX210 hardware
+  hosts: wifi_nodes
+  gather_facts: true
+  tasks:
+    - name: Probe host connectivity
+      ansible.builtin.wait_for_connection:
+        timeout: 30
+
+    - name: Stop and destroy mesh container {{ meshwifi_ct_id }}
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          if pct status {{ meshwifi_ct_id }} 2>/dev/null | grep -q running; then
+            pct stop {{ meshwifi_ct_id }} && sleep 2
+          fi
+          if pct status {{ meshwifi_ct_id }} 2>/dev/null; then
+            pct destroy {{ meshwifi_ct_id }} --purge
+          fi
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Remove mesh hookscript
+      ansible.builtin.file:
+        path: "/var/lib/vz/snippets/mesh-wifi-phy-{{ meshwifi_ct_id }}.sh"
+        state: absent

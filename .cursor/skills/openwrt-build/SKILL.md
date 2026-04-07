@@ -127,7 +127,7 @@ roles/openwrt_configure/tasks/
 ├── security.yml      # M1: SSH hardening, banIP
 ├── vlans.yml         # M2: VLAN segmentation
 ├── dns.yml           # M3: Encrypted DNS (https-dns-proxy)
-└── mesh.yml          # M4: 802.11s mesh + Dawn steering
+└── mesh.yml          # M4: WDS WiFi backhaul + Dawn steering
 ```
 
 Each feature gets TWO plays in `site.yml`:
@@ -312,12 +312,12 @@ script self-cleans by removing the deferred file after applying the MAC.
 ## OpenWrt Mesh LXC (satellite nodes)
 
 Mesh satellite nodes (`wifi_nodes:!router_nodes`) run OpenWrt in a **privileged
-LXC container** instead of a VM. This allows WiFi management via 802.11s mesh
+LXC container** instead of a VM. This allows WiFi management via WDS AP/STA
 without requiring PCIe passthrough (IOMMU/VT-d). The container receives the
 host's WiFi PHY via `iw phy <phy> set netns <pid>` (network namespace move).
 
 Key differences from the VM pattern:
-- No routing — mesh containers are NOT routers. They run 802.11s only.
+- No routing — mesh containers are NOT routers. They run WDS STA only.
 - Uses the OpenWrt rootfs tarball (`openwrt-*-rootfs.tar.gz`), not the VM disk image.
 - Must be privileged (`unprivileged: false`) for the PHY namespace move.
 - Must set `--ostype unmanaged` because Proxmox cannot auto-detect OpenWrt.

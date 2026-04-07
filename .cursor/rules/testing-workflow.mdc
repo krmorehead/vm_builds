@@ -48,6 +48,24 @@ works, then implement the feature.
   tears down OpenWrt and makes mesh1 permanently unreachable.
 - NEVER consider a fix complete until `molecule test` passes end-to-end.
 
+## Heartbeat API server (callhome)
+
+The heartbeat API server starts automatically during molecule runs. The ONLY
+difference between test and production is the env file — the pipeline is
+identical.
+
+- **State file:** `.state/callhome_url` is the sole source of truth for the
+  API server URL. Both `build.py` (production) and `prepare.yml` (test)
+  write this file. Ansible reads it via `callhome_server` in group_vars.
+- **Hard-fail:** If `.state/callhome_url` is missing, Ansible fails immediately.
+  No fallbacks, no empty defaults.
+- **Lifecycle:** `prepare.yml` starts the headless API server and writes the
+  state file + PID. `cleanup.yml` stops the server and removes both files.
+- **Observability:** During molecule runs, query `http://localhost:8088/api/fleet/health`
+  or `http://localhost:8088/api/nodes` for real-time fleet status.
+- NEVER hardcode `CALLHOME_SERVER` in env files. The URL is detected
+  dynamically from the controller's routable IP.
+
 ## Service-specific cleanup
 
 Molecule cleanup destroys only known project VMs/containers by explicit VMID.

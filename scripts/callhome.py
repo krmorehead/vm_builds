@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Call-home client for vm_builds managed nodes.
+"""Call-home heartbeat agent for vm_builds managed nodes.
 
-Only contacts the server when the node's IP address changes.
-Saves the last-sent IP to /var/lib/callhome/last_ip so the check
-survives reboots. Designed to run from cron every minute.
+Two modes:
+  Host mode    — contacts the server when the node's IP changes (cron).
+  Container mode (--container) — heartbeats every --interval seconds
+      regardless of IP changes. Reports systemd services, listening
+      ports, and extension metrics (WiFi, WireGuard, Docker, etc.).
 
-Zero external dependencies — stdlib only.
+Baked into LXC images via build-images.sh inject_callhome_agent().
+Configured at deploy time by writing CALLHOME_SERVER to
+/etc/default/callhome. Zero external dependencies — stdlib only.
 
 Usage:
-    python3 callhome.py --once          # check once and exit
-    python3 callhome.py --interval 60   # poll loop (legacy)
-    python3 callhome.py --force         # ignore saved IP, always send
+    python3 callhome.py --once              # check once and exit
+    python3 callhome.py --container         # container heartbeat loop
+    python3 callhome.py --interval 60       # host poll loop
 
 Environment (or /etc/default/callhome):
     CALLHOME_SERVER      Management server URL
@@ -20,6 +24,7 @@ Environment (or /etc/default/callhome):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import socket
@@ -48,7 +53,8 @@ def _load_conf() -> None:
                     continue
                 if "=" in line:
                     key, _, val = line.partition("=")
-                    os.environ.setdefault(key.strip(), val.strip())
+                    val = val.strip().strip("'\"")
+                    os.environ.setdefault(key.strip(), val)
     except OSError:
         pass
 
@@ -180,6 +186,267 @@ def get_running_services() -> list[str]:
     return services
 
 
+# ── Container-mode health ─────────────────────────────────────────
+
+
+def get_systemd_services() -> dict[str, str]:
+    """Return a map of service_name -> active/inactive/failed for key units."""
+    result_map: dict[str, str] = {}
+    try:
+        result = subprocess.run(
+            ["systemctl", "list-units", "--type=service", "--all",
+             "--no-pager", "--no-legend"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().splitlines():
+                parts = line.split()
+                if len(parts) >= 4:
+                    unit = parts[0].removesuffix(".service")
+                    state = parts[3]
+                    result_map[unit] = state
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return result_map
+
+
+def _parse_proc_net_ports(path: str, listen_state: str = "0A") -> list[int]:
+    """Parse listening ports from /proc/net/tcp or /proc/net/udp.
+
+    TCP uses state 0A (LISTEN). UDP uses state 07 (CLOSE) which means
+    the socket is bound and ready to receive — UDP has no LISTEN state.
+    """
+    ports: list[int] = []
+    try:
+        with open(path) as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) < 4 or parts[0] == "sl":
+                    continue
+                if parts[3] == listen_state:
+                    hex_port = parts[1].split(":")[1]
+                    ports.append(int(hex_port, 16))
+    except OSError:
+        pass
+    return ports
+
+
+def get_listening_ports() -> list[int]:
+    """Read listening TCP and UDP ports from /proc/net/{tcp,udp}."""
+    tcp = _parse_proc_net_ports("/proc/net/tcp", "0A")
+    udp = _parse_proc_net_ports("/proc/net/udp", "07")
+    return sorted(set(tcp + udp))
+
+
+def collect_network() -> dict:
+    """Network interfaces and default gateway (stdlib-only)."""
+    interfaces = []
+    try:
+        for iface in sorted(os.listdir("/sys/class/net/")):
+            if iface == "lo":
+                continue
+            entry: dict = {"name": iface, "addresses": [], "operstate": "unknown"}
+            try:
+                with open(f"/sys/class/net/{iface}/operstate") as f:
+                    entry["operstate"] = f.read().strip()
+            except OSError:
+                pass
+            try:
+                with open(f"/sys/class/net/{iface}/address") as f:
+                    entry["mac"] = f.read().strip()
+            except OSError:
+                pass
+            interfaces.append(entry)
+    except OSError:
+        pass
+
+    # Parse IPs from ip command if available
+    try:
+        result = subprocess.run(
+            ["ip", "-o", "-4", "addr", "show"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().splitlines():
+                parts = line.split()
+                if len(parts) >= 4:
+                    iface_name = parts[1]
+                    addr_cidr = parts[3]
+                    for iface in interfaces:
+                        if iface["name"] == iface_name:
+                            iface["addresses"].append(addr_cidr)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    gateway = ""
+    try:
+        with open("/proc/net/route") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3 and parts[1] == "00000000":
+                    gw_hex = parts[2]
+                    gw_bytes = bytes.fromhex(gw_hex)
+                    gateway = f"{gw_bytes[3]}.{gw_bytes[2]}.{gw_bytes[1]}.{gw_bytes[0]}"
+                    break
+    except OSError:
+        pass
+
+    return {"interfaces": interfaces, "default_gateway": gateway}
+
+
+def collect_wireguard() -> dict | None:
+    """WireGuard interface status and peer count (None if wg not present)."""
+    try:
+        result = subprocess.run(
+            ["wg", "show", "all", "dump"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+    interfaces: dict[str, dict] = {}
+    for line in result.stdout.strip().splitlines():
+        cols = line.split("\t")
+        if len(cols) < 4:
+            continue
+        iface = cols[0]
+        if iface not in interfaces:
+            interfaces[iface] = {"peer_count": 0, "up": True}
+        else:
+            interfaces[iface]["peer_count"] += 1
+
+    if not interfaces:
+        return None
+    return {"interfaces": interfaces}
+
+
+def collect_docker() -> dict | None:
+    """Docker daemon status and running container count (None if no docker)."""
+    try:
+        result = subprocess.run(
+            ["docker", "info", "--format", "{{.ContainersRunning}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return {"active": False, "running": 0}
+        running = int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
+        return {"active": True, "running": running}
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+
+def collect_config_files() -> dict | None:
+    """Report keys and hash of allow-listed JSON config files.
+
+    Set CALLHOME_CONFIG_FILES=/path/one.json:/path/two.json to enable.
+    Each file's top-level keys and a content hash are reported so the
+    manager can verify config completeness without SSH.
+    """
+    paths_str = os.environ.get("CALLHOME_CONFIG_FILES", "")
+    if not paths_str:
+        return None
+    result: dict[str, dict] = {}
+    for path in paths_str.split(":"):
+        path = path.strip()
+        if not path or not os.path.isfile(path):
+            continue
+        try:
+            with open(path) as f:
+                raw = f.read()
+            data = json.loads(raw)
+            keys = sorted(data.keys()) if isinstance(data, dict) else []
+            content_hash = hashlib.sha256(raw.encode()).hexdigest()[:16]
+            result[path] = {"keys": keys, "hash": content_hash}
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
+    return result if result else None
+
+
+def collect_http_probes() -> dict | None:
+    """Probe local HTTP endpoints and report status codes.
+
+    Set CALLHOME_HTTP_PROBES=http://127.0.0.1:8096,http://127.0.0.1:19999
+    Each URL is probed with a 5-second timeout. Result maps URL to status
+    code (0 for connection refused/timeout).
+    """
+    probes_str = os.environ.get("CALLHOME_HTTP_PROBES", "")
+    if not probes_str:
+        return None
+    result: dict[str, int] = {}
+    for url in probes_str.split(","):
+        url = url.strip()
+        if not url:
+            continue
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                result[url] = resp.status
+        except urllib.error.HTTPError as e:
+            result[url] = e.code
+        except (urllib.error.URLError, OSError, TimeoutError):
+            result[url] = 0
+    return result if result else None
+
+
+def collect_extensions() -> dict[str, dict]:
+    """Run all available health collectors and return extensions dict.
+
+    Each collector is independent — if a collector's prerequisites aren't
+    present (no wg binary, no docker, no config files, no probe URLs),
+    it returns None and is omitted from the payload.
+    """
+    ext: dict[str, dict] = {}
+
+    net = collect_network()
+    if net.get("interfaces"):
+        ext["network"] = net
+
+    wg = collect_wireguard()
+    if wg is not None:
+        ext["wireguard"] = wg
+
+    docker = collect_docker()
+    if docker is not None:
+        ext["docker"] = docker
+
+    cfg = collect_config_files()
+    if cfg is not None:
+        ext["config_files"] = cfg
+
+    probes = collect_http_probes()
+    if probes is not None:
+        ext["http_probes"] = probes
+
+    return ext
+
+
+def build_container_payload(container_id: str = "") -> dict:
+    """Build a heartbeat payload for container mode."""
+    cid = container_id or socket.gethostname()
+    systemd_svcs = get_systemd_services()
+    ports = get_listening_ports()
+    extensions = collect_extensions()
+    return {
+        "node_id": socket.getfqdn(),
+        "hostname": socket.gethostname(),
+        "local_ips": get_local_ips(),
+        "uptime_seconds": get_uptime(),
+        "services": [],
+        "disk_usage_pct": get_disk_usage(),
+        "memory_usage_pct": get_memory_usage(),
+        "version": get_version(),
+        "container_health": {
+            "container_id": cid,
+            "systemd_services": systemd_svcs,
+            "listening_ports": ports,
+            "ready": True,
+            "extensions": extensions,
+        },
+    }
+
+
 def get_version() -> str:
     """Read project_version from inventory/group_vars/all.yml if available."""
     try:
@@ -231,16 +498,19 @@ def send_checkin(server_url: str, payload: dict, token: str = "") -> bool:
 
 def run_once(
     server_url: str, token: str, force: bool = False,
-    state_file: str = "",
+    state_file: str = "", container_id: str = "",
 ) -> bool:
     """Check IP, send if changed. Returns True if check-in was sent and succeeded."""
     sf = state_file or DEFAULT_STATE_FILE
-    if not force:
+    if not force and not container_id:
         changed, current_ip = ip_changed(sf)
         if not changed:
             return False
 
-    payload = build_payload()
+    payload = (
+        build_container_payload(container_id)
+        if container_id else build_payload()
+    )
     if send_checkin(server_url, payload, token=token):
         current_ip = get_primary_ip()
         if current_ip:
@@ -252,16 +522,71 @@ def run_once(
     return False
 
 
+def _compute_state_hash(container_id: str) -> str:
+    """Hash the current service + port state for change detection."""
+    svcs = get_systemd_services() if container_id else {}
+    ports = get_listening_ports() if container_id else []
+    raw = json.dumps({"s": svcs, "p": ports}, sort_keys=True)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
 def run_loop(
     server_url: str, token: str, interval: int,
     force: bool = False, state_file: str = "",
+    container_id: str = "", interval_startup: int = 0,
 ) -> None:
-    """Poll loop: check IP every interval, send only on change."""
+    """Periodic heartbeat loop with state-change detection.
+
+    In container mode, always sends (no IP-change gate).
+    With interval_startup, uses a faster rate for the first 60s.
+    Between heartbeats, polls service state every 5s. If a state change
+    is detected (service crashed, new port opened), sends immediately
+    instead of waiting for the next interval.
+    """
+    start = time.monotonic()
+    startup_window = 60.0
     first = True
+    last_state_hash = ""
+    state_poll_interval = 5
+
     while True:
-        run_once(server_url, token, force=(force and first), state_file=state_file)
-        first = False
-        time.sleep(interval)
+        try:
+            elapsed = time.monotonic() - start
+            is_startup = interval_startup > 0 and elapsed < startup_window
+            current_interval = interval_startup if is_startup else interval
+
+            run_once(
+                server_url, token,
+                force=(force and first) or bool(container_id),
+                state_file=state_file, container_id=container_id,
+            )
+            first = False
+
+            if container_id:
+                last_state_hash = _compute_state_hash(container_id)
+
+            slept = 0.0
+            while slept < current_interval:
+                chunk = min(state_poll_interval, current_interval - slept)
+                time.sleep(chunk)
+                slept += chunk
+
+                if container_id and slept < current_interval:
+                    try:
+                        current_hash = _compute_state_hash(container_id)
+                    except Exception:
+                        continue
+                    if current_hash != last_state_hash:
+                        print(
+                            "[callhome] state change detected, sending immediately",
+                            flush=True,
+                        )
+                        break
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            print(f"[callhome] loop error: {exc}", file=sys.stderr, flush=True)
+            time.sleep(interval)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -292,6 +617,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Send even if IP has not changed",
     )
+    parser.add_argument(
+        "--container",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ID",
+        help="Container mode: report systemd/port health instead of qm/pct. "
+             "Optional ID arg sets container_id (default: hostname).",
+    )
+    parser.add_argument(
+        "--interval-startup",
+        type=int,
+        default=0,
+        metavar="SECS",
+        help="Faster heartbeat interval for the first 60s after start (default: off)",
+    )
     return parser.parse_args(argv)
 
 
@@ -316,11 +657,19 @@ def main(argv: list[str] | None = None) -> None:
     if not token:
         print("[callhome] WARNING: no auth token set", file=sys.stderr)
 
+    is_container = args.container is not None
+    container_id = (args.container or socket.gethostname()) if is_container else ""
+    mode_label = f"container={container_id}" if is_container else "host"
+
     if args.once:
-        run_once(args.server, token, force=args.force)
+        run_once(args.server, token, force=args.force, container_id=container_id)
     else:
-        print(f"[callhome] polling every {args.interval}s", flush=True)
-        run_loop(args.server, token, args.interval, force=args.force)
+        print(f"[callhome] mode={mode_label} polling every {args.interval}s", flush=True)
+        run_loop(
+            args.server, token, args.interval,
+            force=args.force, container_id=container_id,
+            interval_startup=args.interval_startup,
+        )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,27 @@
+---
+- name: Configure shared infrastructure on bridge hosts
+  hosts: bridge_nodes
+  gather_facts: true
+  roles:
+    - proxmox_bridges
+    - proxmox_pci_passthrough
+    - proxmox_igpu
+
+- name: Provision WiFi Bridge LXC
+  hosts: bridge_nodes
+  gather_facts: false
+  roles:
+    - openwrt_bridge_lxc
+
+- name: Reconstruct bridge group for configure play
+  hosts: bridge_nodes
+  gather_facts: true
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: ../../tasks/reconstruct_bridge_group.yml
+
+- name: Configure WiFi Bridge
+  hosts: openwrt_bridge
+  gather_facts: false
+  roles:
+    - openwrt_bridge_configure

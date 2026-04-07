@@ -14,6 +14,7 @@ platforms:
     groups:
       - proxmox
       - desktop_nodes
+      - kiosk_nodes
 
 provisioner:
   name: ansible

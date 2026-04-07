@@ -1,6 +1,6 @@
 ---
 - name: Destroy Kiosk container and hookscript
-  hosts: desktop_nodes
+  hosts: kiosk_nodes
   gather_facts: false
   vars:
     kiosk_ct_id: 401

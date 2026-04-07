@@ -337,11 +337,11 @@ molecule test        # full pipeline: cleanup -> prepare -> converge -> verify
 | `openwrt_dhcp_start` | `100` | DHCP pool start offset |
 | `openwrt_dhcp_limit` | `150` | DHCP pool size |
 | `openwrt_dhcp_leasetime` | `12h` | DHCP lease duration |
-| `openwrt_mesh_enabled` | `true` | Enable 802.11s mesh on detected WiFi radios |
-| `openwrt_mesh_id` | `vm-builds-mesh` | Mesh network identifier (must match across nodes) |
-| `openwrt_mesh_key` | *(from MESH_KEY env)* | WPA3-SAE passphrase for mesh encryption |
+| `openwrt_mesh_enabled` | `true` | Enable WDS WiFi backhaul on detected radios |
+| `openwrt_mesh_ssid` | `vm-builds-backhaul` | Hidden SSID for WDS backhaul (must match across nodes) |
+| `openwrt_mesh_key` | *(from MESH_KEY env)* | WPA3-SAE passphrase for WDS encryption |
 | `openwrt_mesh_channel` | `auto` | WiFi channel (must match across mesh nodes) |
-| `openwrt_mesh_encryption` | `sae` | Mesh encryption mode |
+| `openwrt_mesh_encryption` | `sae` | WDS encryption mode |
 
 ---
 
@@ -578,15 +578,15 @@ rebooting Proxmox unannounced. Set it to `true` or reboot manually.
 If no WiFi hardware is detected, all passthrough tasks are skipped
 and the playbook continues without mesh networking.
 
-### 802.11s Mesh
+### WDS WiFi Backhaul
 
 When WiFi radios are detected inside the OpenWrt VM, the configure role
-replaces the default `wpad-basic` package with `wpad-mesh-openssl`,
-enables each radio, and creates a mesh point interface with the
-configured mesh ID and SAE encryption key. The mesh interface is bridged
-to the LAN network, so wired and wireless mesh clients share the same
-subnet. All mesh nodes must use the same `openwrt_mesh_id`,
-`openwrt_mesh_key`, and `openwrt_mesh_channel`.
+enables each radio and creates a hidden WDS AP interface for mesh
+satellite backhaul. Mesh satellite LXC containers connect as WDS STAs
+using `tasks/configure_wifi_wds.yml`. The WDS interface is bridged to the
+LAN network, providing transparent L2 connectivity. All nodes must use
+the same `openwrt_mesh_ssid`, `openwrt_mesh_key`, and
+`openwrt_mesh_channel`.
 
 ### LAN Subnet Auto-Selection
 

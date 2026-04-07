@@ -19,10 +19,11 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from nicegui import app, ui
 
-from scripts.webui import data
+from scripts.webui import data, manager
 from scripts.webui.data import PROJECT_ROOT
 from scripts.webui.pages import (
-    dashboard, deploy, environment, hosts, hub, images, nodes, services,
+    bridge, containers, dashboard, deploy, environment, hosts, hub, images,
+    launch, mesh, nodes, router, services, viewer,
 )
 
 
@@ -87,6 +88,41 @@ def register_pages() -> None:
     deploy.register()
     images.register()
     hub.register()
+    bridge.register()
+    containers.register()
+    mesh.register()
+    router.register()
+    launch.register()
+    viewer.register()
+
+
+# ── Manager integration ──────────────────────────────────────────────
+
+
+def _env_node_resolver(node_id: str) -> str | None:
+    """Resolve a node_id to an IP via the active .env / test.env file."""
+    env = load_active_env()
+    known = data.get_known_hosts(env)
+    for h in known:
+        if h.name == node_id:
+            return h.ip
+    return None
+
+
+def _validate_callhome_token(token: str) -> bool:
+    """Auth validator for manager mutation endpoints."""
+    private_key = _get_callhome_private_key()
+    if not private_key:
+        return True
+    return data.validate_callhome_token(token, private_key)
+
+
+def _init_manager() -> None:
+    """Initialize the shared manager with an env-based node resolver.
+
+    Safe to call multiple times (e.g., from main() and register_api() in tests).
+    """
+    manager.init(_env_node_resolver, auth_validator=_validate_callhome_token)
 
 
 def _get_callhome_private_key() -> str:
@@ -101,11 +137,13 @@ def _get_callhome_private_key() -> str:
 
 
 def register_api() -> None:
-    """Register FastAPI REST endpoints for the call-home system.
+    """Register REST endpoints (call-home + heartbeat via manager).
 
-    Uses Starlette route handlers directly because NiceGUI's decorator
-    wrappers interfere with FastAPI's Pydantic body parsing.
+    Ensures manager is initialized so heartbeat routes work even when
+    called from tests that bypass main().
     """
+    _init_manager()
+
     import json as _json
     from starlette.requests import Request as StarletteRequest
     from starlette.responses import JSONResponse
@@ -126,6 +164,16 @@ def register_api() -> None:
 
         try:
             body = await request.json()
+            ch_raw = body.get("container_health")
+            ch = None
+            if ch_raw and isinstance(ch_raw, dict):
+                ch = data.ContainerHealth(
+                    container_id=ch_raw.get("container_id", ""),
+                    systemd_services=ch_raw.get("systemd_services", {}),
+                    listening_ports=ch_raw.get("listening_ports", []),
+                    ready=ch_raw.get("ready", False),
+                    extensions=ch_raw.get("extensions", {}),
+                )
             checkin = data.NodeCheckin(
                 node_id=body["node_id"],
                 hostname=body["hostname"],
@@ -135,6 +183,7 @@ def register_api() -> None:
                 disk_usage_pct=body.get("disk_usage_pct", 0),
                 memory_usage_pct=body.get("memory_usage_pct", 0),
                 version=body.get("version", ""),
+                container_health=ch,
             )
         except (KeyError, TypeError, _json.JSONDecodeError) as exc:
             return JSONResponse(
@@ -161,8 +210,9 @@ def register_api() -> None:
 
         state_dir = get_state_dir()
         nodes_list = data.load_node_registry(state_dir)
-        return JSONResponse([
-            {
+        result = []
+        for n in nodes_list:
+            entry: dict = {
                 "node_id": n.node_id,
                 "hostname": n.hostname,
                 "last_ip": n.last_ip,
@@ -174,11 +224,65 @@ def register_api() -> None:
                 "memory_usage_pct": n.memory_usage_pct,
                 "version": n.version,
             }
-            for n in nodes_list
-        ])
+            if n.container_health:
+                entry["container_health"] = {
+                    "container_id": n.container_health.container_id,
+                    "ready": n.container_health.ready,
+                    "systemd_services": n.container_health.systemd_services,
+                    "listening_ports": n.container_health.listening_ports,
+                    "extensions": n.container_health.extensions,
+                }
+            result.append(entry)
+        return JSONResponse(result)
+
+    async def _api_fleet_ready(request: StarletteRequest) -> JSONResponse:
+        services_param = request.query_params.get("services", "")
+        if not services_param:
+            return JSONResponse(
+                {"error": "Missing 'services' query parameter"},
+                status_code=400,
+            )
+        expected = [s.strip() for s in services_param.split(",") if s.strip()]
+        state_dir = get_state_dir()
+        result = data.check_fleet_readiness(state_dir, expected)
+        return JSONResponse(result)
+
+    async def _api_fleet_health(request: StarletteRequest) -> JSONResponse:
+        state_dir = get_state_dir()
+        nodes_list = data.load_node_registry(state_dir)
+        health = data.compute_fleet_health(nodes_list)
+        return JSONResponse({
+            "total_nodes": health.total_nodes,
+            "online_nodes": health.online_nodes,
+            "stale_nodes": health.stale_nodes,
+            "offline_nodes": health.offline_nodes,
+            "total_services": health.total_services,
+            "avg_disk_pct": health.avg_disk_pct,
+            "avg_memory_pct": health.avg_memory_pct,
+            "health_score": health.health_score,
+        })
+
+    async def _api_container_ready(request: StarletteRequest) -> JSONResponse:
+        container_id = request.path_params.get("container_id", "")
+        if not container_id:
+            return JSONResponse(
+                {"error": "Missing container_id"},
+                status_code=400,
+            )
+        state_dir = get_state_dir()
+        result = data.check_container_ready(state_dir, container_id)
+        return JSONResponse(result)
 
     app.routes.insert(0, Route("/api/checkin", _api_checkin, methods=["POST"]))
     app.routes.insert(0, Route("/api/nodes", _api_nodes, methods=["GET"]))
+    app.routes.insert(0, Route("/api/fleet/ready", _api_fleet_ready, methods=["GET"]))
+    app.routes.insert(0, Route("/api/fleet/health", _api_fleet_health, methods=["GET"]))
+    app.routes.insert(0, Route(
+        "/api/container/{container_id}/ready",
+        _api_container_ready, methods=["GET"],
+    ))
+
+    manager.register_api(app)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -199,23 +303,37 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="127.0.0.1",
         help="Host to bind to (default: 127.0.0.1)",
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="API-only mode: bind 0.0.0.0, skip browser open, no UI pages",
+    )
     return parser.parse_args(argv)
+
+
+def _start_heartbeat_poller() -> None:
+    """Launch the shared manager's heartbeat background poller."""
+    manager.start_poller()
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     env_path = Path(args.env) if args.env else None
     configure(env_path=env_path)
-    register_pages()
+    _init_manager()
+    if not args.headless:
+        register_pages()
     register_api()
+    app.on_startup(_start_heartbeat_poller)
     storage_secret = os.environ.get("WEBUI_STORAGE_SECRET") or secrets.token_hex(32)
+    bind_host = "0.0.0.0" if args.headless else args.host
     ui.run(
         title="vm_builds",
-        host=args.host,
+        host=bind_host,
         port=args.port,
         dark=True,
         reload=False,
-        show=True,
+        show=not args.headless,
         storage_secret=storage_secret,
     )
 

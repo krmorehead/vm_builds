@@ -123,6 +123,9 @@ This tree organizes all skills by domain area to help agents quickly find releva
 - **lxc-container-patterns** — LXC container provisioning and configuration patterns
 - **windows-vm-patterns** — Windows 11 VM provisioning, iGPU PCI passthrough, QEMU Guest Agent, PowerShell configuration
 
+### **Fleet Management & Runtime Operations**
+- **manager-api-pattern** — Manager API vs SSH decision framework, container-side script pattern (wifi_setup.sh, batman_trigger.sh), subscription model, fleet readiness gate
+
 ### **Learning & Development**
 - **learn-from-mistakes** — Update skills and rules when encountering new issues to prevent recurrence
 - **opencode-rules-writing** — Skill writing patterns and LLM-optimized skills
@@ -216,6 +219,12 @@ pytest tests/ -v
 - ALWAYS run `set -a && source test.env && set +a` before ANY molecule commands
 - Test environment setup immediately: SSH connectivity, Ansible ping, variable export
 - Validate with: `ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST "echo test"` and `ansible home -m ping`
+
+**MANDATORY: Heartbeat API Server (callhome)**
+- `.state/callhome_url` is the SOLE source of truth for `callhome_server`. Both `build.py` (production) and `prepare.yml` (test) write this file. Ansible hard-fails if it is missing.
+- `prepare.yml` starts the headless API server automatically before converge. `cleanup.yml` stops it.
+- NEVER hardcode `CALLHOME_SERVER` in env files. The URL is detected dynamically.
+- During molecule runs, query `http://localhost:8088/api/fleet/health` for real-time fleet status.
 
 **MANDATORY: Testing Workflow**
 - Use `molecule converge + verify` for day-to-day iteration (preserves baseline)
@@ -332,6 +341,15 @@ For async patterns: @.agents/skills/async-job-patterns
 - Testing workflow: @.agents/skills/testing-workflow
 - Performance optimization: @.agents/skills/molecule-performance
 - Diagnostics patterns: @.agents/skills/openwrt-diagnostics
+
+**Runtime Operations & Fleet Management (3-tier hierarchy):**
+- Manager API pattern: @.agents/skills/manager-api-pattern
+- Tier 1 (Super Manager): UI pages → HTTP only → Manager API (NEVER SSH)
+- Tier 2 (Manager): REST endpoints → SSH → container-side scripts
+- Tier 3 (Container scripts): `wifi_setup.sh`, `batman_trigger.sh` (baked into image, self-contained)
+- Fleet readiness: `/api/fleet/ready` gate in verify.yml, `_fleet_api_ready` dual-path pattern
+- Ansible owns initial deploy; Manager owns runtime (status, mode switching, toggling)
+- NEVER embed inline shell in manager endpoints — use container-side scripts
 
 When working in specific directories or on particular tasks, load the relevant directory AGENTS.md or skill file for detailed guidance.
 

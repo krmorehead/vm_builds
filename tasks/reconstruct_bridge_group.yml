@@ -1,0 +1,21 @@
+---
+# Reconstruct the openwrt_bridge dynamic group.
+# Thin wrapper around the shared LXC group reconstruction.
+#
+# wifi_role is NOT forwarded here — the configure role reads it
+# directly from hostvars of the parent Proxmox host, avoiding
+# Ansible's add_host run-once semantics.
+#
+# Consumed by:
+#   - Per-feature molecule converge.yml (bridge-lxc scenario)
+#   - playbooks/cleanup.yml (rollback plays)
+#
+# Must run on a host in the bridge_nodes/proxmox group.
+
+- name: Reconstruct WiFi bridge dynamic group
+  ansible.builtin.include_tasks: reconstruct_lxc_group.yml
+  vars:
+    reconstruct_service_name: WiFi Bridge
+    reconstruct_service_prefix: openwrt_bridge
+    reconstruct_ct_hostname: openwrt-bridge
+    reconstruct_ct_id: "{{ bridge_ct_id }}"

@@ -21,6 +21,7 @@ platforms:
       - service_nodes
       - media_nodes
       - desktop_nodes
+      - kiosk_nodes
   - name: mesh1
     groups:
       - proxmox
@@ -29,18 +30,29 @@ platforms:
       - wifi_nodes
       - monitoring_nodes
       - streaming_nodes
+      - kiosk_nodes
   - name: ai
     groups:
       - proxmox
       - vpn_nodes
       - monitoring_nodes
       - gaming_nodes
+      - kiosk_nodes
   - name: mesh2
     groups:
       - proxmox
       - vpn_nodes
       - wifi_nodes
       - monitoring_nodes
+      - kiosk_nodes
+  - name: bridge-1
+    groups:
+      - proxmox
+      - bridge_nodes
+  - name: bridge-2
+    groups:
+      - proxmox
+      - bridge_nodes
 
 provisioner:
   name: ansible
@@ -57,9 +69,13 @@ provisioner:
     MESH1_API_TOKEN: ${MESH1_API_TOKEN}
     MESH2_API_TOKEN: ${MESH2_API_TOKEN}
     AI_API_TOKEN: ${AI_API_TOKEN}
+    BRIDGE_1_API_TOKEN: ${BRIDGE_1_API_TOKEN}
+    BRIDGE_2_API_TOKEN: ${BRIDGE_2_API_TOKEN}
     PRIMARY_HOST: ${PRIMARY_HOST}
     AI_HOST: ${AI_HOST}
     MESH_2_HOST: ${MESH_2_HOST}
+    BRIDGE_1_HOST: ${BRIDGE_1_HOST}
+    BRIDGE_2_HOST: ${BRIDGE_2_HOST}
     MESH_KEY: ${MESH_KEY}
     PIHOLE_WEB_PASSWORD: ${PIHOLE_WEB_PASSWORD}
     HA_ADMIN_PASSWORD: ${HA_ADMIN_PASSWORD}
@@ -75,6 +91,8 @@ provisioner:
     DESKTOP_SSH_PUBLIC_KEY: ${DESKTOP_SSH_PUBLIC_KEY}
     DESKTOP_AUTOLOGIN: ${DESKTOP_AUTOLOGIN}
     DESKTOP_DEFAULT_SESSION: ${DESKTOP_DEFAULT_SESSION}
+    CALLHOME_PUBLIC_KEY: ${CALLHOME_PUBLIC_KEY}
+    CALLHOME_PRIVATE_KEY: ${CALLHOME_PRIVATE_KEY}
   inventory:
     links:
       host_vars: ../../inventory/host_vars/

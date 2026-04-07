@@ -21,7 +21,7 @@ def _parse_wol_hosts() -> set[str]:
     """Extract host aliases from HOST_MAC and LAN_HOST_MAC in wol.sh."""
     content = WOL_SCRIPT.read_text()
     hosts = set()
-    for match in re.finditer(r'\[(\w+)\]="[0-9a-fA-F:]{17}"', content):
+    for match in re.finditer(r'\[([\w-]+)\]="[0-9a-fA-F:]{17}"', content):
         hosts.add(match.group(1))
     return hosts
 

@@ -146,6 +146,25 @@
       vars:
         deploy_stamp_play: infrastructure
 
+# ── Phase 2.5: Kiosk (early deploy for event-driven monitoring) ──
+
+- name: Provision Kiosk LXC
+  hosts: kiosk_nodes
+  gather_facts: false
+  tags: [kiosk]
+  roles:
+    - kiosk_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: kiosk_lxc
+
+- name: Configure Kiosk
+  hosts: kiosk_nodes
+  gather_facts: false
+  tags: [kiosk]
+  roles:
+    - kiosk_configure
+
 # ── Phase 3: Services (flavor groups span all hosts) ─────────────
 
 - name: Provision Pi-hole LXC
@@ -193,11 +212,25 @@
         deploy_stamp_play: netdata_lxc
 
 - name: Configure Netdata
-  hosts: netdata
+  hosts: monitoring_nodes
   gather_facts: false
   tags: [monitoring]
-  roles:
-    - netdata_configure
+  tasks:
+    - name: Check netdata service health inside container
+      ansible.builtin.command:
+        cmd: pct exec {{ netdata_ct_id }} -- systemctl is-active netdata
+      register: _netdata_check
+      changed_when: false
+      failed_when: false
+      retries: 10
+      delay: 3
+      until: _netdata_check.stdout | trim == 'active'
+
+    - name: Report netdata status
+      ansible.builtin.debug:
+        msg: >-
+          Netdata on {{ inventory_hostname }}: {{ _netdata_check.stdout | trim }},
+          streaming=disabled (local dashboard only)
 
 - name: Provision Home Assistant LXC
   hosts: service_nodes
@@ -302,6 +335,25 @@
   roles:
     - openwrt_mesh_configure
 
+- name: Provision WiFi Bridge LXC
+  hosts: bridge_nodes
+  gather_facts: false
+  tags: [bridge]
+  max_fail_percentage: 100
+  roles:
+    - openwrt_bridge_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: openwrt_bridge_lxc
+
+- name: Configure WiFi Bridge
+  hosts: openwrt_bridge
+  gather_facts: false
+  tags: [bridge]
+  max_fail_percentage: 100
+  roles:
+    - openwrt_bridge_configure
+
 - name: Provision Desktop VM
   hosts: desktop_nodes
   gather_facts: false
@@ -319,23 +371,6 @@
   roles:
     - desktop_configure
 
-- name: Provision Kiosk LXC
-  hosts: desktop_nodes
-  gather_facts: false
-  tags: [kiosk]
-  roles:
-    - kiosk_lxc
-    - role: deploy_stamp
-      vars:
-        deploy_stamp_play: kiosk_lxc
-
-- name: Configure Kiosk
-  hosts: desktop_nodes
-  gather_facts: false
-  tags: [kiosk]
-  roles:
-    - kiosk_configure
-
 - name: Provision Gaming LXC
   hosts: gaming_nodes
   gather_facts: true
@@ -352,6 +387,52 @@
   tags: [gaming, never]
   roles:
     - gaming_lxc_configure
+
+# ── Configure callhome agents on all LXC containers ──────────────
+
+- name: Configure callhome on LXC containers
+  hosts: proxmox
+  gather_facts: false
+  tags: [kiosk, pihole, monitoring, homeassistant, media, moonlight, wireguard, gaming]
+  tasks:
+    - name: Write callhome config to each running container
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          CALLHOME_SERVER="{{ callhome_server }}"
+          CALLHOME_KEY="{{ callhome_public_key }}"
+          for ctid in $(pct list 2>/dev/null | awk 'NR>1 && $2=="running" {print $1}'); do
+            pct exec "$ctid" -- bash -c "
+              [ -d /opt/callhome ] || exit 0
+              cat > /etc/default/callhome << EOF
+          CALLHOME_SERVER=$CALLHOME_SERVER
+          CALLHOME_PUBLIC_KEY=$CALLHOME_KEY
+          EOF
+              # Config file reporting for containers with known JSON configs
+              [ -f /opt/kiosk/config.json ] && echo 'CALLHOME_CONFIG_FILES=/opt/kiosk/config.json' >> /etc/default/callhome
+              # HTTP probe URLs for services with web UIs (self-check liveness)
+              PROBES=''
+              [ -x /usr/bin/jellyfin ] && PROBES='http://127.0.0.1:8096'
+              [ -f /usr/share/netdata/web/index.html ] && PROBES='http://127.0.0.1:19999'
+              [ -x /usr/bin/pihole-FTL ] && PROBES='http://127.0.0.1/admin/'
+              [ -x /usr/bin/sunshine ] && PROBES='https://127.0.0.1:47990'
+              command -v docker >/dev/null 2>&1 && [ -f /etc/homeassistant/docker-compose.yml ] && PROBES='http://127.0.0.1:8123'
+              [ -n \"\$PROBES\" ] && echo \"CALLHOME_HTTP_PROBES=\$PROBES\" >> /etc/default/callhome
+              systemctl restart callhome.service 2>/dev/null || true
+            " 2>/dev/null || true
+          done
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+# ── Kiosk config refresh (populate service URLs discovered above) ──
+
+- name: Refresh Kiosk Config
+  hosts: kiosk_nodes
+  gather_facts: false
+  tags: [kiosk]
+  roles:
+    - kiosk_configure
 
 # ── Per-feature plays (opt-in via tags + never) ─────────────────
 

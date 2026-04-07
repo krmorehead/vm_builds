@@ -187,7 +187,7 @@
   changed_when: true
   when: openwrt_mesh_enabled | bool
 
-# ── 802.11s Mesh networking ────────────────────────────────────
+# ── WDS AP for mesh satellite backhaul ────────────────────────
 
 - name: Detect WiFi radios
   ansible.builtin.raw: ls -1 /sys/class/ieee80211/ 2>/dev/null
@@ -223,17 +223,17 @@
     - wifi_radios | default([]) | length > 0
     - openwrt_mesh_channel != 'auto'
 
-- name: Create mesh interface for each radio
+- name: Create WDS AP interface for each radio
   ansible.builtin.raw: |
-    uci set wireless.mesh{{ idx }}=wifi-iface
-    uci set wireless.mesh{{ idx }}.device='radio{{ idx }}'
-    uci set wireless.mesh{{ idx }}.network='lan'
-    uci set wireless.mesh{{ idx }}.mode='mesh'
-    uci set wireless.mesh{{ idx }}.mesh_id='{{ openwrt_mesh_id }}'
-    uci set wireless.mesh{{ idx }}.encryption='{{ openwrt_mesh_encryption }}'
-    uci set wireless.mesh{{ idx }}.key='{{ openwrt_mesh_key }}'
-    uci set wireless.mesh{{ idx }}.mesh_fwding='1'
-    uci set wireless.mesh{{ idx }}.mesh_rssi_threshold='0'
+    uci set wireless.wds{{ idx }}=wifi-iface
+    uci set wireless.wds{{ idx }}.device='radio{{ idx }}'
+    uci set wireless.wds{{ idx }}.network='lan'
+    uci set wireless.wds{{ idx }}.mode='ap'
+    uci set wireless.wds{{ idx }}.ssid='{{ openwrt_mesh_ssid }}'
+    uci set wireless.wds{{ idx }}.encryption='{{ openwrt_mesh_encryption }}'
+    uci set wireless.wds{{ idx }}.key='{{ openwrt_mesh_key }}'
+    uci set wireless.wds{{ idx }}.wds='1'
+    uci set wireless.wds{{ idx }}.hidden='1'
   loop: "{{ wifi_radios | default([]) }}"
   loop_control:
     index_var: idx

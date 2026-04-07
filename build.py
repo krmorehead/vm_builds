@@ -64,6 +64,7 @@ Usage:
     python build.py --playbook cleanup --tags clean  # playbook + tag
     python build.py --env test.env                 # use test environment
     python build.py --limit home                   # target a specific host
+    python build.py --no-api                       # skip management API server
     python build.py --check                        # dry run (no changes)
     python build.py --check --diff                 # dry run with diffs
     python build.py -vvv                           # verbose output
@@ -71,17 +72,20 @@ Usage:
 """
 
 import argparse
+import atexit
 import json
 import os
 import shutil
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 VENV_DIR = PROJECT_ROOT / ".venv"
 DEFAULT_PLAYBOOK = "site.yml"
+API_PORT = 8088
 
 REQUIRED_ENV = [
     "HOME_API_TOKEN",
@@ -116,11 +120,11 @@ def validate_env(env: dict[str, str]) -> list[str]:
     return [var for var in REQUIRED_ENV if not env.get(var)]
 
 
-OPTIONAL_HOST_VARS = ["AI_HOST", "MESH_2_HOST"]
+OPTIONAL_HOST_VARS = ["AI_HOST", "MESH_2_HOST", "BRIDGE_1_HOST", "BRIDGE_2_HOST"]
 
 TOKEN_SUFFIX = "_API_TOKEN"
 
-KNOWN_HOSTS = ["HOME", "MESH1", "MESH2", "AI"]
+KNOWN_HOSTS = ["HOME", "MESH1", "MESH2", "AI", "BRIDGE_1", "BRIDGE_2"]
 
 
 def warn_multi_host(env: dict[str, str]) -> list[str]:
@@ -222,6 +226,76 @@ def find_ansible_playbook() -> str | None:
     return None
 
 
+def get_controller_ip() -> str:
+    """Detect the controller's primary IPv4 address (routable to the fleet)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except OSError:
+        return "127.0.0.1"
+
+
+def start_api_server(env_path: Path, port: int = API_PORT) -> subprocess.Popen | None:
+    """Start the central management API as a background subprocess.
+
+    Returns the Popen handle, or None if the server failed to start.
+    """
+    python = str(VENV_DIR / "bin" / "python3")
+    if not Path(python).exists():
+        python = sys.executable
+
+    app_module = str(PROJECT_ROOT / "scripts" / "webui" / "app.py")
+    cmd = [
+        python, app_module,
+        "--headless",
+        "--port", str(port),
+        "--env", str(env_path),
+    ]
+
+    log_file = PROJECT_ROOT / ".state" / "api_server.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_fh = open(log_file, "w")
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
+        cwd=str(PROJECT_ROOT),
+    )
+
+    for _ in range(20):
+        time.sleep(0.5)
+        if proc.poll() is not None:
+            print(f"WARNING: API server exited early (rc={proc.returncode})", file=sys.stderr)
+            log_fh.close()
+            return None
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                return proc
+        except (OSError, TimeoutError):
+            continue
+
+    print("WARNING: API server did not become ready in 10s", file=sys.stderr)
+    proc.terminate()
+    log_fh.close()
+    return None
+
+
+def stop_api_server(proc: subprocess.Popen | None) -> None:
+    """Gracefully shut down the API server subprocess."""
+    if proc is None or proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=3)
+
+
 def build_command(
     ansible_bin: str,
     playbook: str,
@@ -311,6 +385,11 @@ def main(argv: list[str] | None = None) -> int:
         default=0,
         help="Increase verbosity (-v, -vv, -vvv)",
     )
+    parser.add_argument(
+        "--no-api",
+        action="store_true",
+        help="Skip starting the central management API server",
+    )
 
     args, extra = parser.parse_known_args(argv)
 
@@ -397,7 +476,27 @@ def main(argv: list[str] | None = None) -> int:
     print()
 
     os.chdir(PROJECT_ROOT)
+
+    api_proc: subprocess.Popen | None = None
+    if not args.no_api:
+        controller_ip = get_controller_ip()
+        callhome_url = f"http://{controller_ip}:{API_PORT}"
+        print(f"API:      {callhome_url}")
+
+        api_proc = start_api_server(env_path, port=API_PORT)
+        if api_proc:
+            state_dir = PROJECT_ROOT / ".state"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            (state_dir / "callhome_url").write_text(callhome_url)
+            atexit.register(stop_api_server, api_proc)
+        else:
+            print("WARNING: Continuing without API server", file=sys.stderr)
+
+    print()
+
     result = subprocess.run(cmd, env={**os.environ, **env})
+
+    stop_api_server(api_proc)
     return result.returncode
 
 
