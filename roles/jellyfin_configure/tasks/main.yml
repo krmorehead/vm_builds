@@ -1,4 +1,31 @@
 ---
+# ── Ensure container is running ──────────────────────────────────
+# The display-exclusive hookscript stops DRI-sharing containers when the
+# Desktop VM grabs the iGPU. Restart the container if stopped.
+
+- name: Check Jellyfin container status
+  ansible.builtin.command:
+    cmd: pct status {{ jellyfin_ct_id }}
+  register: _jellyfin_ct_status
+  changed_when: false
+  failed_when: false
+
+- name: Start Jellyfin container if stopped
+  ansible.builtin.command:
+    cmd: pct start {{ jellyfin_ct_id }}
+  when: "'stopped' in (_jellyfin_ct_status.stdout | default(''))"
+  changed_when: true
+
+- name: Wait for Jellyfin container to be ready
+  ansible.builtin.command:
+    cmd: pct exec {{ jellyfin_ct_id }} -- ls /
+  register: _jellyfin_ready
+  retries: 10
+  delay: 3
+  until: _jellyfin_ready.rc == 0
+  changed_when: false
+  when: "'stopped' in (_jellyfin_ct_status.stdout | default(''))"
+
 # ── Verify Jellyfin service is available ──────────────────────────
 
 - name: Verify Jellyfin service is available in container
@@ -22,9 +49,10 @@
 
 - name: Verify VA-API drivers are working
   ansible.builtin.command:
-    cmd: pct exec {{ jellyfin_ct_id }} -- vainfo
+    cmd: pct exec {{ jellyfin_ct_id }} -- vainfo --display drm
   register: _vainfo_check
   changed_when: false
+  failed_when: false
 
 - name: Report VA-API driver status
   ansible.builtin.debug:

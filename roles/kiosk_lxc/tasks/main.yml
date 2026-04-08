@@ -6,12 +6,13 @@
     lxc_template_path: "{{ kiosk_ct_template_path }}"
     lxc_service_name: Kiosk
 
-# ── Determine container network ──────────────────────────────────
-- name: Compute Kiosk LAN network
-  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_lan_network.yml"
+# ── Determine container network based on host topology ──────────
+- name: Compute Kiosk container network
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_wan_or_lan_network.yml"
   vars:
-    lxc_net_service_name: kiosk
+    lxc_net_service_name: Kiosk
     lxc_net_ip_offset: "{{ kiosk_ct_ip_offset }}"
+    lxc_net_flavor_group: kiosk_nodes
 
 # ── Provision via shared proxmox_lxc role ────────────────────────
 
@@ -29,10 +30,10 @@
     lxc_ct_startup_order: 6
     lxc_ct_template: "{{ kiosk_ct_template }}"
     lxc_ct_template_path: "{{ kiosk_ct_template_path }}"
-    lxc_ct_ip: "{{ _lxc_ct_ip }}/{{ _lan_cidr }}"
-    lxc_ct_gateway: "{{ _lan_gateway }}"
-    lxc_ct_nameserver: "{{ _lan_gateway }}"
-    lxc_ct_bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
+    lxc_ct_ip: "{{ _lxc_net_ip }}/{{ _lxc_net_cidr }}"
+    lxc_ct_gateway: "{{ _lxc_net_gateway }}"
+    lxc_ct_nameserver: "{{ _lxc_net_nameserver }}"
+    lxc_ct_bridge: "{{ _lxc_net_bridge }}"
     lxc_ct_unprivileged: "{{ kiosk_ct_unprivileged }}"
     lxc_ct_features: "{{ kiosk_ct_features }}"
 
@@ -95,31 +96,7 @@
     dest: /var/lib/vz/snippets/display-exclusive.sh
     mode: "0755"
 
-- name: Attach display-exclusive hookscript to Kiosk
-  ansible.builtin.command:
-    cmd: pct set {{ kiosk_ct_id }} --hookscript local:snippets/display-exclusive.sh
-  changed_when: true
-
-- name: Attach hookscript to existing display containers
-  ansible.builtin.command:
-    cmd: pct set {{ item }} --hookscript local:snippets/display-exclusive.sh
-  loop:
-    - "{{ kodi_ct_id }}"
-    - "{{ moonlight_ct_id }}"
-  loop_control:
-    label: "CT {{ item }}"
-  register: _attach_ct
-  failed_when: false
-  changed_when: _attach_ct.rc == 0
-
-- name: Attach hookscript to existing display VMs
-  ansible.builtin.command:
-    cmd: qm set {{ desktop_vm_id }} --hookscript local:snippets/display-exclusive.sh
-  register: _attach_vm
-  failed_when: false
-  changed_when: _attach_vm.rc == 0
-
 - name: Export Kiosk static IP for downstream roles
   ansible.builtin.set_fact:
-    kiosk_static_ip: "{{ _lxc_ct_ip }}"
+    kiosk_static_ip: "{{ _lxc_net_ip }}"
     cacheable: true

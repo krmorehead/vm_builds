@@ -309,6 +309,19 @@
   vars:
     _project_root: "{{ playbook_dir }}/../.."
   tasks:
+    - name: Read watchdog PID
+      ansible.builtin.slurp:
+        src: "{{ _project_root }}/.state/watchdog.pid"
+      register: _watchdog_pid
+      failed_when: false
+
+    - name: Terminate heartbeat watchdog
+      ansible.builtin.command:
+        cmd: "kill {{ (_watchdog_pid.content | b64decode | trim) }}"
+      when: _watchdog_pid is not failed and _watchdog_pid.content is defined
+      failed_when: false
+      changed_when: true
+
     - name: Read API server PID
       ansible.builtin.slurp:
         src: "{{ _project_root }}/.state/test_api.pid"
@@ -359,6 +372,8 @@
         - test_api.pid
         - tunnel.pid
         - socat.pid
+        - watchdog.pid
+        - watchdog.log
         - callhome_url
         - nodes.json
         - tunnel.log

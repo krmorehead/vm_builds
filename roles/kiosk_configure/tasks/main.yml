@@ -1,16 +1,28 @@
 ---
-# ── Check container is running (hookscript may have stopped it) ──
+# ── Ensure container is running ──────────────────────────────────
 
-- name: Check if Kiosk container is running
+- name: Check Kiosk container status
   ansible.builtin.command:
     cmd: pct status {{ kiosk_ct_id }}
   register: _kiosk_status
   changed_when: false
   failed_when: false
 
-- name: Skip configure when container is stopped by display-exclusive hookscript
-  ansible.builtin.meta: end_host
-  when: "'running' not in (_kiosk_status.stdout | default(''))"
+- name: Start Kiosk container if stopped
+  ansible.builtin.command:
+    cmd: pct start {{ kiosk_ct_id }}
+  when: "'stopped' in (_kiosk_status.stdout | default(''))"
+  changed_when: true
+
+- name: Wait for Kiosk container to be ready
+  ansible.builtin.command:
+    cmd: pct exec {{ kiosk_ct_id }} -- ls /
+  register: _kiosk_ready
+  retries: 10
+  delay: 3
+  until: _kiosk_ready.rc == 0
+  changed_when: false
+  when: "'stopped' in (_kiosk_status.stdout | default(''))"
 
 # ── Verify Kiosk packages are available ──────────────────────────
 
@@ -31,13 +43,20 @@
     executable: /bin/bash
   register: _host_render_gid
   changed_when: false
-  failed_when: _host_render_gid.rc != 0 or _host_render_gid.stdout | trim | length == 0
+  failed_when: false
+
+- name: Set render GID (live device or cached fact)
+  ansible.builtin.set_fact:
+    _render_gid: >-
+      {{ _host_render_gid.stdout | trim
+         if (_host_render_gid.rc == 0 and _host_render_gid.stdout | trim | length > 0)
+         else (igpu_render_gid | default('993')) }}
 
 - name: Create render group and add kiosk user to groups
   ansible.builtin.shell:
     cmd: |
       pct exec {{ kiosk_ct_id }} -- bash -c '
-        groupadd -g {{ _host_render_gid.stdout | trim }} render 2>/dev/null || true
+        groupadd -g {{ _render_gid }} render 2>/dev/null || true
         usermod -a -G render,video kiosk 2>/dev/null || true
       '
     executable: /bin/bash
@@ -140,12 +159,12 @@
            else '' }}
       MANAGEMENT_SERVER: >-
         {{ kiosk_management_server if (kiosk_management_server | default('')) | length > 0
-           else ('http://' + ansible_host + ':9001')
-                if (ansible_host | default('')) | length > 0
-           else '' }}
+           else callhome_server }}
       CALLHOME_SERVER: "{{ callhome_server }}"
+      CALLHOME_PUBLIC_KEY: "{{ callhome_public_key }}"
       MESH_KEY: "{{ lookup('env', 'MESH_KEY') | default('', true) }}"
       HOST_IP: "{{ ansible_host }}"
+      HOST_NAME: "{{ inventory_hostname }}"
       NODE_IPS: >-
         {{ _kiosk_node_ips | default({}) }}
 
@@ -159,6 +178,12 @@
   loop:
     - /tmp/kiosk_webui
     - /tmp/kiosk_webui/pages
+
+- name: Copy build.py to host temp directory
+  ansible.builtin.copy:
+    src: "{{ project_root }}/build.py"
+    dest: /tmp/kiosk_build.py
+    mode: "0644"
 
 - name: Copy webui source files to host temp directory
   ansible.builtin.copy:
@@ -181,14 +206,25 @@
     - { src: "{{ project_root }}/scripts/webui/pages/launch.py", dest: "pages/launch.py" }
     - { src: "{{ project_root }}/scripts/webui/pages/containers.py", dest: "pages/containers.py" }
 
-- name: Ensure webui directories exist in container
+- name: Clean old layout and create project-mirrored directory structure
+  ansible.builtin.shell:
+    cmd: |
+      pct exec {{ kiosk_ct_id }} -- bash -c '
+        rm -rf /opt/kiosk/webui /opt/kiosk/scripts
+        mkdir -p /opt/kiosk/scripts/webui/pages
+        touch /opt/kiosk/scripts/__init__.py
+      '
+    executable: /bin/bash
+  changed_when: true
+
+- name: Push build.py into container
   ansible.builtin.command:
-    cmd: pct exec {{ kiosk_ct_id }} -- mkdir -p /opt/kiosk/webui/pages
+    cmd: pct push {{ kiosk_ct_id }} /tmp/kiosk_build.py /opt/kiosk/build.py
   changed_when: true
 
 - name: Push webui files into container
   ansible.builtin.command:
-    cmd: pct push {{ kiosk_ct_id }} /tmp/kiosk_webui/{{ item.dest }} /opt/kiosk/webui/{{ item.dest }}
+    cmd: pct push {{ kiosk_ct_id }} /tmp/kiosk_webui/{{ item.dest }} /opt/kiosk/scripts/webui/{{ item.dest }}
   changed_when: true
   loop:
     - { dest: "__init__.py" }
@@ -233,6 +269,7 @@
   loop:
     - /tmp/kiosk_webui
     - /tmp/kiosk_config.json
+    - /tmp/kiosk_build.py
 
 # ── SSH key for host management ──────────────────────────────────
 # The kiosk manager needs SSH access to the Proxmox host to run
@@ -266,15 +303,40 @@
     comment: "kiosk-manager-{{ inventory_hostname }}"
     state: present
 
-# ── Enable kiosk display service ─────────────────────────────────
-
-- name: Enable kiosk services
-  ansible.builtin.command:
-    cmd: pct exec {{ kiosk_ct_id }} -- systemctl enable {{ item }}
+# ── Patch systemd service to match deployed file layout ─────────
+- name: Update kiosk-web ExecStart to correct path and port
+  ansible.builtin.shell:
+    cmd: |
+      pct exec {{ kiosk_ct_id }} -- bash -c '
+        sed -i "s|^ExecStart=.*kiosk_server.py.*|ExecStart=/usr/bin/python3 /opt/kiosk/scripts/webui/kiosk_server.py --port {{ kiosk_manager_port }}|" \
+          /etc/systemd/system/kiosk-web.service
+        systemctl daemon-reload
+      '
+    executable: /bin/bash
   changed_when: true
-  loop:
-    - kiosk-web
-    - kiosk-display
+
+# ── Enable and restart kiosk services ───────────────────────────
+
+- name: Enable and restart kiosk-web (Manager API)
+  ansible.builtin.shell:
+    cmd: |
+      pct exec {{ kiosk_ct_id }} -- bash -c '
+        systemctl enable kiosk-web
+        systemctl restart kiosk-web
+      '
+    executable: /bin/bash
+  changed_when: true
+
+- name: Enable kiosk-display (headless-safe)
+  ansible.builtin.shell:
+    cmd: |
+      pct exec {{ kiosk_ct_id }} -- bash -c '
+        systemctl enable kiosk-display
+        systemctl start kiosk-display 2>/dev/null || true
+      '
+    executable: /bin/bash
+  changed_when: true
+  failed_when: false
 
 # ── Report completion ────────────────────────────────────────────
 

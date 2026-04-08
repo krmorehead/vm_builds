@@ -187,19 +187,8 @@ def page_header(title: str, subtitle: str = "") -> None:
 
 def nav_sidebar(active: str = "") -> None:
     """Render the left navigation sidebar with gradient background."""
-    items = [
-        ("Dashboard", "/", "dashboard"),
-        ("Home Hub", "/hub", "tv"),
-        ("Bridge", "/bridge", "swap_horiz"),
-        ("Mesh", "/mesh", "hub"),
-        ("Router", "/router", "router"),
-        ("Services", "/services", "widgets"),
-        ("Deploy", "/deploy", "rocket_launch"),
-        ("Images", "/images", "inventory_2"),
-        ("Nodes", "/nodes", "device_hub"),
-        ("Hosts", "/hosts", "dns"),
-        ("Environment", "/environment", "settings"),
-    ]
+    from scripts.webui.data import Labels, NAV_SECTIONS
+
     sidebar_bg = (
         f"background: linear-gradient(90deg, {BG_SIDEBAR_OUTER} 0%, "
         f"{BG_SIDEBAR_INNER} 100%); "
@@ -208,11 +197,11 @@ def nav_sidebar(active: str = "") -> None:
     with ui.left_drawer(value=True).props("breakpoint=0").style(
         f"{sidebar_bg} width: {SIDEBAR_WIDTH}"
     ):
-        ui.label("vm_builds").classes("text-lg font-medium text-center py-4").style(
+        ui.label(Labels.APP_TITLE).classes("text-lg font-medium text-center py-4").style(
             f"color: {TEXT_PRIMARY}"
         )
         ui.separator().style(f"background: {ACCENT_DIM}")
-        for label, path, icon in items:
+        for label, path, icon in NAV_SECTIONS:
             is_active = active == label.lower().replace(" ", "")
             color = ACCENT if is_active else TEXT_SECONDARY
             bg = ACCENT_DIM if is_active else "transparent"
@@ -335,13 +324,35 @@ def metric_bar(label: str, value: float, level: str) -> None:
         )
 
 
+def status_color(status: str) -> str:
+    """Return the semantic color hex for a host status string."""
+    if status == "online":
+        return COLOR_SUCCESS
+    if status in ("stale", "reachable"):
+        return COLOR_WARNING
+    if status in ("offline", "unreachable"):
+        return COLOR_ERROR
+    return TEXT_DISABLED
+
+
 def status_dot(status: str) -> ui.icon:
-    """Render a small colored status dot icon."""
+    """Render a small colored status dot icon.
+
+    Color semantics:
+    - online → green (healthy, heartbeat active)
+    - reachable → orange (SSH up, but no heartbeat)
+    - stale → orange (heartbeat was active, now stale)
+    - unreachable → red (SSH port 22 not responding)
+    - offline → red (heartbeat reports offline)
+    - unknown / anything else → grey (not probed yet)
+    """
     if status == "online":
         return ui.icon("circle", size="xs").style(f"color: {COLOR_SUCCESS}")
-    if status == "stale":
+    if status in ("stale", "reachable"):
         return ui.icon("radio_button_unchecked", size="xs").style(f"color: {COLOR_WARNING}")
-    return ui.icon("circle", size="xs").style(f"color: {COLOR_ERROR}")
+    if status in ("offline", "unreachable"):
+        return ui.icon("circle", size="xs").style(f"color: {COLOR_ERROR}")
+    return ui.icon("circle", size="xs").style(f"color: {TEXT_DISABLED}")
 
 
 def stat_value(value: str, label: str) -> None:
@@ -529,16 +540,19 @@ def kiosk_nav_bar() -> None:
         f"padding: 0 16px; gap: 12px; "
         f"background: {BG_CARD}; border-bottom: 1px solid {BORDER};"
     )
+    from scripts.webui.data import KIOSK_NAV_ITEMS, Labels, Routes
+
     with ui.element("div").style(bar_style):
         ui.button(
-            icon="home", on_click=lambda: ui.navigate.to("/hub"),
+            icon="home", on_click=lambda: ui.navigate.to(Routes.HUB),
         ).props("flat dense round").style(f"color: {ACCENT}")
-        ui.label("Home Hub").classes("text-sm").style(f"color: {TEXT_SECONDARY}")
+        ui.label(Labels.HOME_HUB).classes("text-sm").style(f"color: {TEXT_SECONDARY}")
         ui.space()
-        ui.button(
-            "Containers", icon="dns",
-            on_click=lambda: ui.navigate.to("/containers"),
-        ).props("flat dense").classes("text-xs").style(f"color: {TEXT_SECONDARY}")
+        for nav_label, nav_path, nav_icon in KIOSK_NAV_ITEMS:
+            ui.button(
+                nav_label, icon=nav_icon,
+                on_click=lambda p=nav_path: ui.navigate.to(p),
+            ).props("flat dense").classes("text-xs").style(f"color: {TEXT_SECONDARY}")
     ui.add_head_html("""<style>.kiosk-body-offset { padding-top: 52px !important; }</style>""")
 
 

@@ -63,6 +63,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **World-readable API key** -- `netdata_configure` stream.conf mode changed
   from `0644` to `0640` (root + netdata group only).
 
+### Changed
+
+- **Scalable UI test constants** -- Extracted `Routes`, `PageTitles`, `Labels`,
+  `ApiRoutes`, `NAV_SECTIONS`, and `KIOSK_NAV_ITEMS` into `scripts/webui/data.py`
+  as the single source of truth for all page routes, headings, button labels,
+  API paths, and navigation items. Page modules (`scripts/webui/pages/*.py`) and
+  `theme.py` now import these constants instead of hardcoding strings. All 4
+  UI test files refactored to import the same constants — changing a label or
+  route in one place propagates everywhere automatically.
+- **Color semantics audit** -- Stopped containers now show grey (`TEXT_SECONDARY`)
+  instead of red. Red reserved for errors/crashes only. Kiosk nav "Containers"
+  icon changed from `dns` (duplicate of Hosts) to `view_in_ar`.
+- **Exception handling** -- Narrowed bare `except Exception` to
+  `(httpx.HTTPError, OSError)` in `containers.py`, `launch.py`, `mesh.py`,
+  and `bridge.py` per design system Rule 6.
+
 ### Fixed
 
 - **build-images.sh VMID collision (Pass 2)** -- `SUNSHINE_BUILD_VMID`

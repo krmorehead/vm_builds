@@ -10,7 +10,7 @@ from __future__ import annotations
 from nicegui import ui
 
 from scripts.webui import theme
-from scripts.webui.data import get_bridge_nodes
+from scripts.webui.data import Labels, PageTitles, Routes, get_bridge_nodes
 from scripts.webui.heartbeat import signal_quality
 
 
@@ -29,7 +29,7 @@ def _bridge_content() -> None:
     cache = get_metric_cache()
     bridge_nodes = get_bridge_nodes()
 
-    theme.page_header("WiFi Bridge", "Dedicated WDS link monitoring")
+    theme.page_header(PageTitles.BRIDGE, "Dedicated WDS link monitoring")
     with ui.row().classes("items-center gap-1"):
         theme.help_tooltip(
             "WDS (Wireless Distribution System) creates a transparent Layer-2 bridge "
@@ -83,15 +83,15 @@ def _bridge_content() -> None:
 
     with ui.row().classes("gap-3 mt-4"):
         ui.button(
-            "Refresh Now", icon="refresh", on_click=_refresh,
+            Labels.REFRESH_NOW, icon="refresh", on_click=_refresh,
         ).classes("outline-btn")
         ui.button(
-            "Restart WiFi", icon="restart_alt",
+            Labels.RESTART_WIFI, icon="restart_alt",
             on_click=lambda: _bridge_action("all"),
         ).classes("outline-btn")
         with ui.element("span"):
             ui.button(
-                "Force Re-pair", icon="sync",
+                Labels.FORCE_REPAIR, icon="sync",
                 on_click=lambda: _bridge_action("sta"),
             ).classes("outline-btn")
             theme.help_tooltip(
@@ -99,7 +99,7 @@ def _bridge_content() -> None:
                 "with the AP. Useful when the link is stuck or signal is poor."
             )
         ui.button(
-            "Deploy Bridge", icon="rocket_launch",
+            Labels.DEPLOY_BRIDGE, icon="rocket_launch",
             on_click=lambda: _deploy_bridge(),
         ).classes("action-btn")
 
@@ -144,16 +144,7 @@ def _render_link_banner(node_data: dict) -> None:
             if signal_dbm is not None:
                 q = signal_quality(signal_dbm)
                 sig_text = f"{signal_dbm} dBm ({q})"
-                if signal_dbm > -50:
-                    sig_color = "#2dd4bf"
-                elif signal_dbm > -60:
-                    sig_color = "#4ade80"
-                elif signal_dbm > -70:
-                    sig_color = "#fbbf24"
-                elif signal_dbm > -80:
-                    sig_color = "#fb923c"
-                else:
-                    sig_color = "#ef4444"
+                sig_color = theme.signal_color(q)
 
             with ui.row().classes("items-center justify-center gap-4 py-3 w-full"):
                 with ui.column().classes("items-center gap-0"):
@@ -220,7 +211,7 @@ def _render_node_card(node: dict, cached) -> None:
                 if paired:
                     ui.badge("Paired", color="green").props("outline")
                 else:
-                    ui.badge("Unpaired", color="red").props("outline")
+                    ui.badge("Unpaired", color="orange").props("outline")
             else:
                 theme.connection_indicator("disconnected")
                 theme.card_title(label)
@@ -411,7 +402,7 @@ async def _bridge_action(target: str) -> None:
                 )
             else:
                 ui.notify(f"Restart failed: {resp.status_code}", type="negative")
-    except Exception as exc:
+    except (httpx.HTTPError, OSError) as exc:
         ui.notify(f"Restart failed: {exc}", type="negative")
 
 
@@ -419,4 +410,4 @@ def _deploy_bridge() -> None:
     """Navigate to the deploy page with the bridge tag pre-selected."""
     from nicegui import app as nicegui_app
     nicegui_app.storage.general["selected_tags"] = ["bridge"]
-    ui.navigate.to("/services")
+    ui.navigate.to(Routes.SERVICES)

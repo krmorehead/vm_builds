@@ -1270,7 +1270,7 @@ build_kiosk_lxc() {
 
         # Create kiosk system user for headless operation
         useradd -r -m -G video,render -s /bin/bash kiosk 2>/dev/null || true
-        mkdir -p /opt/kiosk/webui/pages
+        mkdir -p /opt/kiosk/scripts/webui/pages
         chown -R kiosk:kiosk /opt/kiosk
 
         apt-get clean 2>/dev/null || true
@@ -1295,7 +1295,7 @@ User=kiosk
 Group=kiosk
 Type=simple
 WorkingDirectory=/opt/kiosk
-ExecStart=/usr/bin/python3 /opt/kiosk/webui/kiosk_server.py --port 9001
+ExecStart=/usr/bin/python3 /opt/kiosk/scripts/webui/kiosk_server.py --port 9001
 Restart=always
 RestartSec=3
 
@@ -1363,7 +1363,7 @@ DISPLAY_EOF
         test -f /etc/systemd/system/kiosk-web.service || { echo FAIL: web service missing; exit 1; }
         test -x /opt/kiosk/wait-for-hub.sh || { echo FAIL: wait-for-hub script missing; exit 1; }
         id kiosk || { echo FAIL: kiosk user missing; exit 1; }
-        test -d /opt/kiosk/webui || { echo FAIL: kiosk webui dir missing; exit 1; }
+        test -d /opt/kiosk/scripts/webui || { echo FAIL: kiosk webui dir missing; exit 1; }
         echo ALL CHECKS PASSED
     '"
     log "Kiosk smoke test passed."

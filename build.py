@@ -88,7 +88,7 @@ from urllib.error import URLError
 PROJECT_ROOT = Path(__file__).resolve().parent
 VENV_DIR = PROJECT_ROOT / ".venv"
 DEFAULT_PLAYBOOK = "site.yml"
-API_PORT = 8088
+API_PORT = int(os.environ.get("WEBUI_PORT", "52500"))
 
 REQUIRED_ENV = [
     "HOME_API_TOKEN",

@@ -16,10 +16,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from nicegui import app as nicegui_app, ui
+from nicegui import app as nicegui_app
 from nicegui.testing import user_simulation
 
 from scripts.webui import data
+from scripts.webui.data import Labels, PageTitles, Routes
 from scripts.webui.pages import hub
 
 
@@ -42,18 +43,18 @@ async def hub_ctx(tmp_path: Path, urls: dict[str, str] | None = None):
 class TestHubRendering:
     async def test_hub_page_loads(self, tmp_path):
         async with hub_ctx(tmp_path) as user:
-            await user.open("/hub")
-            await user.should_see("Home Hub")
+            await user.open(Routes.HUB)
+            await user.should_see(PageTitles.HUB)
 
     async def test_shows_all_service_titles(self, tmp_path):
         async with hub_ctx(tmp_path) as user:
-            await user.open("/hub")
+            await user.open(Routes.HUB)
             for svc in data.get_hub_services():
                 await user.should_see(svc.title)
 
     async def test_shows_section_labels(self, tmp_path):
         async with hub_ctx(tmp_path) as user:
-            await user.open("/hub")
+            await user.open(Routes.HUB)
             await user.should_see("Infrastructure")
             await user.should_see("Desktop & Media")
             await user.should_see("Settings & Network")
@@ -62,12 +63,12 @@ class TestHubRendering:
 
     async def test_shows_footer(self, tmp_path):
         async with hub_ctx(tmp_path) as user:
-            await user.open("/hub")
+            await user.open(Routes.HUB)
             await user.should_see("Powered by Proxmox VE")
 
     async def test_shows_service_descriptions(self, tmp_path):
         async with hub_ctx(tmp_path) as user:
-            await user.open("/hub")
+            await user.open(Routes.HUB)
             await user.should_see("Stream movies, shows and music")
             await user.should_see("DNS ad-blocking")
 
@@ -78,7 +79,7 @@ class TestHubRendering:
             "NETDATA_URL": "http://10.10.10.21:19999",
         }
         async with hub_ctx(tmp_path, urls=urls) as user:
-            await user.open("/hub")
+            await user.open(Routes.HUB)
             await user.should_see("Media Server")
             await user.should_see("Network")
             await user.should_see("Metrics")
@@ -87,14 +88,14 @@ class TestHubRendering:
         """Cards with URLs should render as clickable elements."""
         urls = {"JELLYFIN_URL": "http://10.10.10.15:8096"}
         async with hub_ctx(tmp_path, urls=urls) as user:
-            await user.open("/hub")
+            await user.open(Routes.HUB)
             await user.should_see("Jellyfin")
             await user.should_see("Media Server")
 
     async def test_icons_render(self, tmp_path):
         """Each service card should show its emoji icon."""
         async with hub_ctx(tmp_path) as user:
-            await user.open("/hub")
+            await user.open(Routes.HUB)
             for svc in data.get_hub_services():
                 await user.should_see(svc.icon)
 
@@ -105,8 +106,8 @@ class TestHubRendering:
 class TestHubDisabledState:
     async def test_no_urls_shows_not_available(self, tmp_path):
         async with hub_ctx(tmp_path, urls={}) as user:
-            await user.open("/hub")
-            await user.should_see("Not available")
+            await user.open(Routes.HUB)
+            await user.should_see(Labels.NOT_AVAILABLE)
 
     async def test_some_urls_shows_mixed_state(self, tmp_path):
         urls = {
@@ -114,17 +115,17 @@ class TestHubDisabledState:
             "PIHOLE_URL": "http://10.10.10.10/admin",
         }
         async with hub_ctx(tmp_path, urls=urls) as user:
-            await user.open("/hub")
+            await user.open(Routes.HUB)
             await user.should_see("Media Server")
-            await user.should_see("Not available")
+            await user.should_see(Labels.NOT_AVAILABLE)
 
     async def test_all_urls_no_not_available(self, tmp_path):
         svcs = data.get_hub_services()
         urls = {svc.url_key: f"http://example.com/{svc.key}" for svc in svcs
                 if svc.url_key not in data.INTERNAL_PAGES}
         async with hub_ctx(tmp_path, urls=urls) as user:
-            await user.open("/hub")
-            await user.should_not_see("Not available")
+            await user.open(Routes.HUB)
+            await user.should_not_see(Labels.NOT_AVAILABLE)
 
 
 # ── Config loading ───────────────────────────────────────────────────
@@ -220,20 +221,20 @@ class TestHubCardRouting:
     async def test_display_app_shows_launch_badge(self, tmp_path):
         """Display apps (Moonlight, Kodi, Desktop) show a 'Launch' badge."""
         async with hub_ctx(tmp_path) as user:
-            await user.open("/hub")
+            await user.open(Routes.HUB)
             await user.should_see("Launch")
 
     async def test_web_app_with_url_shows_tag_badge(self, tmp_path):
         """Web apps with URLs show their service tag badge."""
         urls = {"JELLYFIN_URL": "http://10.10.10.15:8096"}
         async with hub_ctx(tmp_path, urls=urls) as user:
-            await user.open("/hub")
+            await user.open(Routes.HUB)
             await user.should_see("Media Server")
 
     async def test_internal_pages_always_enabled(self, tmp_path):
         """Internal pages (Bridge, Mesh, Router, Containers) are always enabled."""
         async with hub_ctx(tmp_path, urls={}) as user:
-            await user.open("/hub")
+            await user.open(Routes.HUB)
             for svc in data.get_hub_services():
                 if svc.url_key in data.INTERNAL_PAGES:
                     await user.should_see(svc.title)
@@ -241,7 +242,7 @@ class TestHubCardRouting:
     async def test_display_apps_always_enabled(self, tmp_path):
         """Display apps are always enabled (they launch containers, no URL needed)."""
         async with hub_ctx(tmp_path, urls={}) as user:
-            await user.open("/hub")
+            await user.open(Routes.HUB)
             for svc in data.get_hub_services():
                 if svc.url_key in data.DISPLAY_APPS:
                     await user.should_see(svc.title)
@@ -249,8 +250,8 @@ class TestHubCardRouting:
     async def test_web_apps_without_url_disabled(self, tmp_path):
         """Web apps without configured URLs show 'Not available'."""
         async with hub_ctx(tmp_path, urls={}) as user:
-            await user.open("/hub")
-            await user.should_see("Not available")
+            await user.open(Routes.HUB)
+            await user.should_see(Labels.NOT_AVAILABLE)
 
     async def test_all_services_render_with_full_config(self, tmp_path):
         """With all URLs set, every service card should render."""
@@ -262,8 +263,8 @@ class TestHubCardRouting:
             and svc.url_key not in data.DISPLAY_APPS
         }
         async with hub_ctx(tmp_path, urls=urls) as user:
-            await user.open("/hub")
-            await user.should_not_see("Not available")
+            await user.open(Routes.HUB)
+            await user.should_not_see(Labels.NOT_AVAILABLE)
 
 
 # ── Multi-host config differentiation ────────────────────────────────
@@ -281,42 +282,42 @@ class TestHubMultiHostConfig:
         """Jellyfin enabled on home, disabled on ai."""
         home_urls = {"JELLYFIN_URL": "http://10.10.10.15:8096"}
         async with hub_ctx(tmp_path, urls=home_urls) as user:
-            await user.open("/hub")
+            await user.open(Routes.HUB)
             await user.should_see("Media Server")
 
         ai_urls: dict[str, str] = {}
         async with hub_ctx(tmp_path, urls=ai_urls) as user:
-            await user.open("/hub")
+            await user.open(Routes.HUB)
             await user.should_not_see("Media Server")
 
     async def test_ai_enables_gaming_home_disables(self, tmp_path):
         """Gaming enabled on ai, disabled on home."""
         ai_urls = {"GAMING_URL": "https://10.10.10.18:47990"}
         async with hub_ctx(tmp_path, urls=ai_urls) as user:
-            await user.open("/hub")
+            await user.open(Routes.HUB)
             await user.should_see("Game Server")
 
         home_urls: dict[str, str] = {}
         async with hub_ctx(tmp_path, urls=home_urls) as user:
-            await user.open("/hub")
+            await user.open(Routes.HUB)
             await user.should_not_see("Game Server")
 
     async def test_wireguard_toggle_between_hosts(self, tmp_path):
         """WireGuard shows different badges based on URL config."""
         ai_urls = {"WIREGUARD_URL": "http://10.10.10.5:51821"}
         async with hub_ctx(tmp_path, urls=ai_urls) as user:
-            await user.open("/hub")
+            await user.open(Routes.HUB)
             await user.should_see("WireGuard")
 
         home_urls: dict[str, str] = {}
         async with hub_ctx(tmp_path, urls=home_urls) as user:
-            await user.open("/hub")
-            await user.should_see("Not available")
+            await user.open(Routes.HUB)
+            await user.should_see(Labels.NOT_AVAILABLE)
 
     async def test_netdata_enabled_on_both(self, tmp_path):
         """Netdata enabled on both home and ai (different IPs, same result)."""
         for netdata_ip in ["10.10.10.21", "10.10.10.22"]:
             urls = {"NETDATA_URL": f"http://{netdata_ip}:19999"}
             async with hub_ctx(tmp_path, urls=urls) as user:
-                await user.open("/hub")
+                await user.open(Routes.HUB)
                 await user.should_see("Metrics")

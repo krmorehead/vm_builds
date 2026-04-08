@@ -108,6 +108,52 @@
     - igpu_available | bool
     - _gpu_driver_check.rc != 0
 
+# ── Recover missing DRI devices ──────────────────────────────────
+# Prior passthrough (vfio-pci binding) or hookscript operations can
+# leave the iGPU without /dev/dri nodes even though the native driver
+# module is loaded. Recovery: unbind from any stale driver, clear
+# driver_override, PCI rescan, explicitly bind the native driver.
+# Safe: sysfs-only, no modprobe -r.
+
+- name: Check if DRI devices exist
+  ansible.builtin.stat:
+    path: /dev/dri/renderD128
+  register: _dri_pre_check
+  when: igpu_available | bool
+
+- name: Recover iGPU DRI devices
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      PCI_ADDR="0000:{{ igpu_pci_address }}"
+      CURRENT=$(readlink -f /sys/bus/pci/devices/$PCI_ADDR/driver 2>/dev/null | xargs basename 2>/dev/null)
+      # Unbind from whatever currently holds the device
+      if [ -n "$CURRENT" ] && [ -e "/sys/bus/pci/drivers/$CURRENT/unbind" ]; then
+        echo "$PCI_ADDR" > /sys/bus/pci/drivers/$CURRENT/unbind 2>/dev/null || true
+      fi
+      echo "" > /sys/bus/pci/devices/$PCI_ADDR/driver_override 2>/dev/null || true
+      echo 1 > /sys/bus/pci/rescan
+      sleep 1
+      # PCI rescan alone won't auto-bind when the module is already loaded
+      echo "$PCI_ADDR" > /sys/bus/pci/drivers/{{ _igpu_driver }}/bind 2>/dev/null || true
+      sleep 2
+      DRIVER=$(readlink -f /sys/bus/pci/devices/$PCI_ADDR/driver 2>/dev/null | xargs basename 2>/dev/null)
+      echo "DRIVER=$DRIVER"
+    executable: /bin/bash
+  register: _igpu_dri_recovery
+  changed_when: true
+  when:
+    - igpu_available | bool
+    - not (_dri_pre_check.stat.exists | default(false))
+
+- name: Wait for DRI devices after recovery
+  ansible.builtin.wait_for:
+    path: /dev/dri/renderD128
+    timeout: 15
+  when:
+    - igpu_available | bool
+    - not (_dri_pre_check.stat.exists | default(false))
+
 # ── Device node detection (dynamic, not hardcoded) ────────────────
 
 - name: Find render device
@@ -207,45 +253,6 @@
   when:
     - igpu_available | bool
     - _dns_check.rc != 0
-
-# ── Proxmox repo management (needed for vainfo install) ──────────
-
-- name: Disable PVE enterprise repo (requires subscription)
-  ansible.builtin.command:
-    cmd: mv /etc/apt/sources.list.d/pve-enterprise.sources /etc/apt/sources.list.d/pve-enterprise.sources.disabled
-  args:
-    removes: /etc/apt/sources.list.d/pve-enterprise.sources
-  when: igpu_available | bool
-
-- name: Disable Ceph enterprise repo (requires subscription)
-  ansible.builtin.command:
-    cmd: mv /etc/apt/sources.list.d/ceph.sources /etc/apt/sources.list.d/ceph.sources.disabled
-  args:
-    removes: /etc/apt/sources.list.d/ceph.sources
-  when: igpu_available | bool
-
-- name: Add Proxmox no-subscription repository
-  ansible.builtin.copy:
-    dest: /etc/apt/sources.list.d/pve-no-subscription.sources
-    mode: "0644"
-    content: |
-      Types: deb
-      URIs: http://download.proxmox.com/debian/pve
-      Suites: {{ ansible_facts['distribution_release'] }}
-      Components: pve-no-subscription
-      Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
-  when: igpu_available | bool
-
-- name: Verify enterprise repos are disabled
-  ansible.builtin.shell:
-    cmd: |
-      set -euo pipefail
-      ls /etc/apt/sources.list.d/pve-enterprise.sources 2>/dev/null && exit 1
-      ls /etc/apt/sources.list.d/ceph.sources 2>/dev/null && exit 1
-      ls /etc/apt/sources.list.d/pve-no-subscription.sources >/dev/null
-    executable: /bin/bash
-  changed_when: false
-  when: igpu_available | bool
 
 # ── Sync system clock before apt operations ───────────────────────
 # Clock skew causes GPG signature verification to fail ("Not live

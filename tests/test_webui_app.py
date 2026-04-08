@@ -6,7 +6,6 @@ Run with: pytest tests/test_webui_app.py -v
 """
 
 import asyncio
-import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -23,8 +22,9 @@ from nicegui import app as nicegui_app, ui
 from nicegui.testing import user_simulation
 
 from scripts.webui import data
+from scripts.webui.data import Labels, PageTitles, Routes
 from scripts.webui.app import register_api
-from scripts.webui.manager import get_subscription_manager, get_metric_cache
+from scripts.webui.manager import get_metric_cache
 from scripts.webui.pages import (
     bridge, dashboard, deploy, environment, hosts, hub, images, mesh, nodes,
     router, services,
@@ -62,7 +62,7 @@ async def webui(tmp_path: Path, env_file: str = "complete.env", **overrides):
 class TestDashboard:
     async def test_shows_host_summary(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/")
+            await user.open(Routes.DASHBOARD)
             await user.should_see("Hosts")
             await user.should_see("home")
 
@@ -73,12 +73,12 @@ class TestDashboard:
             (images_dir / pattern.replace("*", "test")).write_bytes(b"\x00" * 1024)
         async with webui(tmp_path) as user:
             nicegui_app.storage.general["images_dir"] = str(images_dir)
-            await user.open("/")
+            await user.open(Routes.DASHBOARD)
             await user.should_see("10/14 built")
 
     async def test_shows_no_deploys_initially(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/")
+            await user.open(Routes.DASHBOARD)
             await user.should_see("No deployments yet")
 
     async def test_shows_last_deploy(self, tmp_path):
@@ -91,40 +91,40 @@ class TestDashboard:
         data.save_deploy_record(state_dir, record)
         async with webui(tmp_path) as user:
             nicegui_app.storage.general["state_dir"] = str(state_dir)
-            await user.open("/")
+            await user.open(Routes.DASHBOARD)
             await user.should_see("success")
             await user.should_see("infra")
 
     async def test_full_deploy_navigates(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/")
-            user.find("Full Deploy").click()
-            await user.should_see("Service Selection")
+            await user.open(Routes.DASHBOARD)
+            user.find(Labels.FULL_DEPLOY).click()
+            await user.should_see(PageTitles.SERVICES)
 
     async def test_check_hosts_navigates(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/")
-            user.find("Check Hosts").click()
-            await user.should_see("Host Connectivity")
+            await user.open(Routes.DASHBOARD)
+            user.find(Labels.CHECK_HOSTS).click()
+            await user.should_see(PageTitles.HOSTS)
 
     async def test_build_images_navigates(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/")
-            user.find("Build Images").click()
-            await user.should_see("Image Management")
+            await user.open(Routes.DASHBOARD)
+            user.find(Labels.BUILD_IMAGES).click()
+            await user.should_see(PageTitles.IMAGES)
 
     async def test_env_banner_production(self, tmp_path):
         env_path = tmp_path / ".env"
         env_path.write_text("PRIMARY_HOST=1.2.3.4\nHOME_API_TOKEN=x\nMESH_KEY=y\n")
         async with webui(tmp_path, env_path=str(env_path)) as user:
-            await user.open("/")
+            await user.open(Routes.DASHBOARD)
             await user.should_see("PRODUCTION")
 
     async def test_env_banner_test(self, tmp_path):
         env_path = tmp_path / "test.env"
         env_path.write_text("PRIMARY_HOST=1.2.3.4\nHOME_API_TOKEN=x\nMESH_KEY=y\n")
         async with webui(tmp_path, env_path=str(env_path)) as user:
-            await user.open("/")
+            await user.open(Routes.DASHBOARD)
             await user.should_see("TEST")
 
 
@@ -134,8 +134,8 @@ class TestDashboard:
 class TestEnvironment:
     async def test_shows_table_with_variables(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/environment")
-            await user.should_see("Environment")
+            await user.open(Routes.ENVIRONMENT)
+            await user.should_see(PageTitles.ENVIRONMENT)
             with user:
                 tables = [e for e in ui.context.client.layout.descendants() if isinstance(e, ui.table)]
                 assert len(tables) == 1
@@ -145,39 +145,39 @@ class TestEnvironment:
 
     async def test_shows_status(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/environment")
+            await user.open(Routes.ENVIRONMENT)
             await user.should_see("All required variables present")
 
     async def test_missing_vars_flagged(self, tmp_path):
         async with webui(tmp_path, env_file="incomplete.env") as user:
-            await user.open("/environment")
+            await user.open(Routes.ENVIRONMENT)
             await user.should_see("Missing")
 
     async def test_no_file_prompts_create(self, tmp_path):
         async with webui(tmp_path, env_path=str(tmp_path / "nonexistent.env")) as user:
-            await user.open("/environment")
+            await user.open(Routes.ENVIRONMENT)
             await user.should_see("No env file found")
 
     async def test_create_writes_file(self, tmp_path):
         env_path = tmp_path / ".env"
         async with webui(tmp_path, env_path=str(env_path)) as user:
-            await user.open("/environment")
-            user.find("Create .env").click()
+            await user.open(Routes.ENVIRONMENT)
+            user.find(Labels.CREATE_ENV).click()
             assert env_path.exists()
             assert "PRIMARY_HOST=" in env_path.read_text()
 
     async def test_validate_button(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/environment")
-            user.find("Validate").click()
+            await user.open(Routes.ENVIRONMENT)
+            user.find(Labels.VALIDATE).click()
             await user.should_see("All required variables present")
 
     async def test_save_writes_file(self, tmp_path):
         env_path = tmp_path / "save_test.env"
         env_path.write_text("PRIMARY_HOST=1.2.3.4\nHOME_API_TOKEN=x\nMESH_KEY=y\n")
         async with webui(tmp_path, env_path=str(env_path)) as user:
-            await user.open("/environment")
-            user.find("Save").click()
+            await user.open(Routes.ENVIRONMENT)
+            user.find(Labels.SAVE).click()
             assert env_path.exists()
             content = env_path.read_text()
             assert "PRIMARY_HOST=" in content
@@ -185,10 +185,10 @@ class TestEnvironment:
     async def test_create_then_save_roundtrip(self, tmp_path):
         env_path = tmp_path / "roundtrip.env"
         async with webui(tmp_path, env_path=str(env_path)) as user:
-            await user.open("/environment")
-            user.find("Create .env").click()
+            await user.open(Routes.ENVIRONMENT)
+            user.find(Labels.CREATE_ENV).click()
             assert env_path.exists()
-            user.find("Save").click()
+            user.find(Labels.SAVE).click()
             assert env_path.exists()
             backup = tmp_path / "roundtrip.env.bak"
             assert backup.exists()
@@ -200,8 +200,8 @@ class TestEnvironment:
 class TestHosts:
     async def test_shows_all_hosts(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/hosts")
-            await user.should_see("Host Connectivity")
+            await user.open(Routes.HOSTS)
+            await user.should_see(PageTitles.HOSTS)
             with user:
                 tables = [e for e in ui.context.client.layout.descendants() if isinstance(e, ui.table)]
                 assert len(tables) == 1
@@ -213,7 +213,7 @@ class TestHosts:
 
     async def test_shows_wol_status(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/hosts")
+            await user.open(Routes.HOSTS)
             with user:
                 tables = [e for e in ui.context.client.layout.descendants() if isinstance(e, ui.table)]
                 wol_values = [r.get("wol", "") for r in tables[0].rows]
@@ -222,8 +222,8 @@ class TestHosts:
     async def test_probe_updates_status(self, tmp_path):
         with patch("scripts.webui.data.build.probe_host", return_value=True):
             async with webui(tmp_path) as user:
-                await user.open("/hosts")
-                user.find("Probe All").click()
+                await user.open(Routes.HOSTS)
+                user.find(Labels.PROBE_ALL).click()
                 await asyncio.sleep(0.5)
                 with user:
                     tables = [e for e in ui.context.client.layout.descendants() if isinstance(e, ui.table)]
@@ -233,8 +233,8 @@ class TestHosts:
     async def test_unreachable_shows_error(self, tmp_path):
         with patch("scripts.webui.data.build.probe_host", return_value=False):
             async with webui(tmp_path) as user:
-                await user.open("/hosts")
-                user.find("Probe All").click()
+                await user.open(Routes.HOSTS)
+                user.find(Labels.PROBE_ALL).click()
                 await asyncio.sleep(0.5)
                 with user:
                     tables = [e for e in ui.context.client.layout.descendants() if isinstance(e, ui.table)]
@@ -245,19 +245,19 @@ class TestHosts:
         mock_result = data.SshResult(success=True, output="ok")
         with patch("scripts.webui.data.test_ssh_connection", return_value=mock_result):
             async with webui(tmp_path) as user:
-                await user.open("/hosts")
+                await user.open(Routes.HOSTS)
                 with user:
                     tables = [e for e in ui.context.client.layout.descendants() if isinstance(e, ui.table)]
                     tables[0].selected = [tables[0].rows[0]]
-                user.find("Test SSH").click()
+                user.find(Labels.TEST_SSH).click()
                 await asyncio.sleep(0.5)
                 await user.should_see("OK")
 
     async def test_ssh_button_no_selection(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/hosts")
-            user.find("Test SSH").click()
-            await user.should_see("Select a row first")
+            await user.open(Routes.HOSTS)
+            user.find(Labels.TEST_SSH).click()
+            await user.should_see(Labels.SELECT_ROW)
 
 
 # ── Services page ────────────────────────────────────────────────────
@@ -266,20 +266,20 @@ class TestHosts:
 class TestServices:
     async def test_shows_all_tags(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/services")
+            await user.open(Routes.SERVICES)
             for svc in data.get_service_tags():
                 await user.should_see(svc.tag)
 
     async def test_deploy_without_selection_warns(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/services")
-            user.find("Deploy Selected").click()
-            await user.should_see("No services selected")
+            await user.open(Routes.SERVICES)
+            user.find(Labels.DEPLOY_SELECTED).click()
+            await user.should_see(Labels.NO_SERVICES)
 
     async def test_select_all(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/services")
-            user.find("Select All").click()
+            await user.open(Routes.SERVICES)
+            user.find(Labels.SELECT_ALL).click()
             with user:
                 cbs = [e for e in ui.context.client.layout.descendants() if isinstance(e, ui.checkbox)]
                 checked = [cb for cb in cbs if cb.value]
@@ -288,9 +288,9 @@ class TestServices:
 
     async def test_deselect_all(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/services")
-            user.find("Select All").click()
-            user.find("Deselect All").click()
+            await user.open(Routes.SERVICES)
+            user.find(Labels.SELECT_ALL).click()
+            user.find(Labels.DESELECT_ALL).click()
             with user:
                 cbs = [e for e in ui.context.client.layout.descendants() if isinstance(e, ui.checkbox)]
                 checked = [cb for cb in cbs if cb.value]
@@ -299,7 +299,7 @@ class TestServices:
     async def test_preselection(self, tmp_path):
         async with webui(tmp_path) as user:
             nicegui_app.storage.general["selected_tags"] = ["openwrt", "infra"]
-            await user.open("/services")
+            await user.open(Routes.SERVICES)
             with user:
                 cbs = [e for e in ui.context.client.layout.descendants() if isinstance(e, ui.checkbox)]
                 checked = [cb for cb in cbs if cb.value]
@@ -308,14 +308,14 @@ class TestServices:
     async def test_deploy_navigates(self, tmp_path):
         async with webui(tmp_path) as user:
             nicegui_app.storage.general["selected_tags"] = ["openwrt"]
-            await user.open("/services")
-            user.find("Deploy Selected").click()
+            await user.open(Routes.SERVICES)
+            user.find(Labels.DEPLOY_SELECTED).click()
             await user.should_see("Deploy")
 
     async def test_profile_network_only(self, tmp_path):
         """Verify Network Only profile selects the right tags."""
         async with webui(tmp_path) as user:
-            await user.open("/services")
+            await user.open(Routes.SERVICES)
             with user:
                 selects = [e for e in ui.context.client.layout.descendants() if isinstance(e, ui.select)]
                 assert len(selects) == 1
@@ -332,8 +332,8 @@ class TestServices:
     async def test_profile_custom_clears(self, tmp_path):
         """Custom profile should clear all selections."""
         async with webui(tmp_path) as user:
-            await user.open("/services")
-            user.find("Select All").click()
+            await user.open(Routes.SERVICES)
+            user.find(Labels.SELECT_ALL).click()
             with user:
                 selects = [e for e in ui.context.client.layout.descendants() if isinstance(e, ui.select)]
                 selects[0].set_value("Custom")
@@ -350,20 +350,20 @@ class TestServices:
 class TestDeploy:
     async def test_no_tags_shows_message(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/deploy")
-            await user.should_see("No tags selected")
+            await user.open(Routes.DEPLOY)
+            await user.should_see(Labels.NO_TAGS_SELECTED)
 
     async def test_shows_selected_tags(self, tmp_path):
         async with webui(tmp_path) as user:
             nicegui_app.storage.general["selected_tags"] = ["pihole", "wireguard"]
-            await user.open("/deploy")
+            await user.open(Routes.DEPLOY)
             await user.should_see("pihole")
             await user.should_see("wireguard")
 
     async def test_shows_hosts_for_tags(self, tmp_path):
         async with webui(tmp_path) as user:
             nicegui_app.storage.general["selected_tags"] = ["gaming"]
-            await user.open("/deploy")
+            await user.open(Routes.DEPLOY)
             await user.should_see("ai")
 
     async def test_start_deploy_runs_subprocess(self, tmp_path):
@@ -391,18 +391,18 @@ class TestDeploy:
         with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
             async with webui(tmp_path) as user:
                 nicegui_app.storage.general["selected_tags"] = ["infra"]
-                await user.open("/deploy")
-                user.find("Start Deploy").click()
+                await user.open(Routes.DEPLOY)
+                user.find(Labels.START_DEPLOY).click()
                 await asyncio.sleep(0.5)
                 await user.should_see("succeeded")
 
     async def test_deploy_no_tags_warns(self, tmp_path):
         async with webui(tmp_path) as user:
             nicegui_app.storage.general["selected_tags"] = []
-            await user.open("/deploy")
-            user.find("Start Deploy").click()
+            await user.open(Routes.DEPLOY)
+            user.find(Labels.START_DEPLOY).click()
             await asyncio.sleep(0.1)
-            await user.should_see("No tags selected")
+            await user.should_see(Labels.NO_TAGS_SELECTED)
 
     async def test_cancel_sends_signal(self, tmp_path):
         """Verify cancel button sends SIGTERM to the running process."""
@@ -435,10 +435,10 @@ class TestDeploy:
         with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
             async with webui(tmp_path) as user:
                 nicegui_app.storage.general["selected_tags"] = ["infra"]
-                await user.open("/deploy")
-                user.find("Start Deploy").click()
+                await user.open(Routes.DEPLOY)
+                user.find(Labels.START_DEPLOY).click()
                 await asyncio.sleep(0.2)
-                user.find("Cancel").click()
+                user.find(Labels.CANCEL).click()
                 await asyncio.sleep(0.5)
                 assert fake_proc._signal == signal.SIGTERM
 
@@ -449,8 +449,8 @@ class TestDeploy:
 class TestImages:
     async def test_shows_all_images(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/images")
-            await user.should_see("Image Management")
+            await user.open(Routes.IMAGES)
+            await user.should_see(PageTitles.IMAGES)
             with user:
                 tables = [e for e in ui.context.client.layout.descendants() if isinstance(e, ui.table)]
                 assert len(tables) == 1
@@ -465,7 +465,7 @@ class TestImages:
             (images_dir / pattern.replace("*", "test")).write_bytes(b"\x00" * 1024)
         async with webui(tmp_path) as user:
             nicegui_app.storage.general["images_dir"] = str(images_dir)
-            await user.open("/images")
+            await user.open(Routes.IMAGES)
             with user:
                 tables = [e for e in ui.context.client.layout.descendants() if isinstance(e, ui.table)]
                 statuses = [r["status"] for r in tables[0].rows]
@@ -474,7 +474,7 @@ class TestImages:
 
     async def test_all_missing_initially(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/images")
+            await user.open(Routes.IMAGES)
             with user:
                 tables = [e for e in ui.context.client.layout.descendants() if isinstance(e, ui.table)]
                 statuses = set(r["status"] for r in tables[0].rows)
@@ -482,9 +482,9 @@ class TestImages:
 
     async def test_build_selected_no_selection_warns(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/images")
-            user.find("Build Selected").click()
-            await user.should_see("Select an image to build")
+            await user.open(Routes.IMAGES)
+            user.find(Labels.BUILD_SELECTED).click()
+            await user.should_see(Labels.SELECT_IMAGE)
 
     async def test_build_all_runs_subprocess(self, tmp_path):
 
@@ -503,8 +503,8 @@ class TestImages:
 
         with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
             async with webui(tmp_path) as user:
-                await user.open("/images")
-                user.find("Build All").click()
+                await user.open(Routes.IMAGES)
+                user.find(Labels.BUILD_ALL).click()
                 await asyncio.sleep(0.5)
                 await user.should_see("Build completed")
 
@@ -518,25 +518,25 @@ class TestEndToEnd:
         env_path = tmp_path / ".env"
         env_path.write_text("PRIMARY_HOST=1.2.3.4\nHOME_API_TOKEN=x\nMESH_KEY=y\n")
         async with webui(tmp_path, env_path=str(env_path)) as user:
-            await user.open("/")
+            await user.open(Routes.DASHBOARD)
             await user.should_see("PRODUCTION")
 
-            await user.open("/environment")
+            await user.open(Routes.ENVIRONMENT)
             await user.should_see("All required variables present")
 
-            await user.open("/hosts")
-            await user.should_see("Host Connectivity")
+            await user.open(Routes.HOSTS)
+            await user.should_see(PageTitles.HOSTS)
 
-            await user.open("/services")
-            await user.should_see("Service Selection")
+            await user.open(Routes.SERVICES)
+            await user.should_see(PageTitles.SERVICES)
 
     async def test_full_deploy_flow(self, tmp_path):
         """Dashboard Full Deploy -> Services -> Deploy."""
         async with webui(tmp_path) as user:
-            await user.open("/")
-            user.find("Full Deploy").click()
-            await user.should_see("Service Selection")
-            user.find("Deploy Selected").click()
+            await user.open(Routes.DASHBOARD)
+            user.find(Labels.FULL_DEPLOY).click()
+            await user.should_see(PageTitles.SERVICES)
+            user.find(Labels.DEPLOY_SELECTED).click()
             await user.should_see("Deploy")
 
 
@@ -546,42 +546,49 @@ class TestEndToEnd:
 class TestNodes:
     async def test_empty_fleet(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/nodes")
-            await user.should_see("Fleet Nodes")
-            await user.should_see("No nodes registered")
+            await user.open(Routes.NODES)
+            await user.should_see(PageTitles.NODES)
+            await user.should_see(Labels.NODE_STATUS)
 
-    async def test_shows_registered_nodes(self, tmp_path):
+    async def test_shows_configured_hosts(self, tmp_path):
+        """Fleet always shows configured hosts from env, even without heartbeats."""
+        async with webui(tmp_path) as user:
+            await user.open(Routes.NODES)
+            await user.should_see("home")
+            await user.should_see(Labels.FLEET_HEALTH)
+
+    async def test_shows_host_with_telemetry(self, tmp_path):
         state_dir = tmp_path / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
         checkin = data.NodeCheckin(
-            node_id="test-node-1",
-            hostname="test-node-1",
-            local_ips=["192.168.1.100"],
+            node_id="home",
+            hostname="home",
+            local_ips=["192.168.86.201"],
             uptime_seconds=86400,
             services=["vm:100:openwrt"],
             disk_usage_pct=45.2,
             memory_usage_pct=62.1,
             version="1.0",
         )
-        data.register_checkin(state_dir, checkin, "10.0.0.1")
+        data.register_checkin(state_dir, checkin, "192.168.86.201")
         async with webui(tmp_path) as user:
-            await user.open("/nodes")
-            await user.should_see("test-node-1")
-            await user.should_see("Fleet Health")
+            await user.open(Routes.NODES)
+            await user.should_see("home")
+            await user.should_see(Labels.FLEET_HEALTH)
 
-    async def test_shows_empty_state(self, tmp_path):
+    async def test_shows_configured_state(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/nodes")
-            await user.should_see("No nodes registered")
+            await user.open(Routes.NODES)
+            await user.should_see(Labels.NODE_STATUS)
 
     async def test_auto_refresh_toggle(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/nodes")
+            await user.open(Routes.NODES)
             await user.should_see("Auto-refresh")
 
     async def test_dashboard_shows_fleet_card(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/")
+            await user.open(Routes.DASHBOARD)
             await user.should_see("Fleet")
 
     async def test_health_banner_shows_score(self, tmp_path):
@@ -595,10 +602,10 @@ class TestNodes:
             )
             data.register_checkin(state_dir, checkin, "10.0.0.1")
         async with webui(tmp_path) as user:
-            await user.open("/nodes")
-            await user.should_see("Fleet Health")
+            await user.open(Routes.NODES)
+            await user.should_see(Labels.FLEET_HEALTH)
             await user.should_see("Online")
-            await user.should_see("Services")
+            await user.should_see("Guests")
 
     async def test_alerts_panel_shows_for_high_disk(self, tmp_path):
         state_dir = tmp_path / "state"
@@ -610,7 +617,7 @@ class TestNodes:
         )
         data.register_checkin(state_dir, checkin, "10.0.0.1")
         async with webui(tmp_path) as user:
-            await user.open("/nodes")
+            await user.open(Routes.NODES)
             await user.should_see("Alerts")
             await user.should_see("Disk usage 92.0%")
 
@@ -626,8 +633,8 @@ class TestNodes:
             )
             data.register_checkin(state_dir, checkin, "10.0.0.1")
         async with webui(tmp_path) as user:
-            await user.open("/nodes")
-            await user.should_see("Service Matrix")
+            await user.open(Routes.NODES)
+            await user.should_see(Labels.SERVICE_MATRIX)
             with user:
                 tables = [e for e in ui.context.client.layout.descendants()
                           if isinstance(e, ui.table)]
@@ -641,31 +648,31 @@ class TestNodes:
         state_dir = tmp_path / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
         checkin = data.NodeCheckin(
-            node_id="cardtest", hostname="cardtest", local_ips=["10.0.0.1"],
+            node_id="home", hostname="home", local_ips=["192.168.86.201"],
             uptime_seconds=86400, services=["ct:500:netdata"],
             disk_usage_pct=45.0, memory_usage_pct=55.0, version="2.0",
         )
-        data.register_checkin(state_dir, checkin, "10.0.0.1")
+        data.register_checkin(state_dir, checkin, "192.168.86.201")
         async with webui(tmp_path) as user:
-            await user.open("/nodes")
-            await user.should_see("cardtest")
+            await user.open(Routes.NODES)
+            await user.should_see("home")
             await user.should_see("v2.0")
-            await user.should_see("1 service running")
+            await user.should_see("1 guest running")
 
     async def test_dashboard_fleet_card_health_score(self, tmp_path):
         state_dir = tmp_path / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
         checkin = data.NodeCheckin(
-            node_id="dash-node", hostname="dash-node", local_ips=["10.0.0.1"],
+            node_id="home", hostname="home", local_ips=["192.168.86.201"],
             uptime_seconds=3600, services=["ct:500:netdata", "ct:501:rsyslog"],
             disk_usage_pct=30.0, memory_usage_pct=40.0, version="1.0",
         )
-        data.register_checkin(state_dir, checkin, "10.0.0.1")
+        data.register_checkin(state_dir, checkin, "192.168.86.201")
         async with webui(tmp_path) as user:
-            await user.open("/")
+            await user.open(Routes.DASHBOARD)
             await user.should_see("Fleet")
             await user.should_see("Health")
-            await user.should_see("2 services")
+            await user.should_see("2 guests running")
 
     async def test_dashboard_fleet_card_critical_alert(self, tmp_path):
         state_dir = tmp_path / "state"
@@ -677,14 +684,87 @@ class TestNodes:
         )
         data.register_checkin(state_dir, checkin, "10.0.0.1")
         async with webui(tmp_path) as user:
-            await user.open("/")
+            await user.open(Routes.DASHBOARD)
             await user.should_see("1 critical alert")
 
     async def test_dashboard_fleet_view_button(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/")
-            user.find("View Fleet Dashboard").click()
-            await user.should_see("Fleet Nodes")
+            await user.open(Routes.DASHBOARD)
+            user.find(Labels.VIEW_FLEET).click()
+            await user.should_see(PageTitles.NODES)
+
+    async def test_dashboard_singular_guest(self, tmp_path):
+        """Dashboard fleet card shows '1 guest' (singular) correctly."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        checkin = data.NodeCheckin(
+            node_id="home", hostname="home", local_ips=["192.168.86.201"],
+            uptime_seconds=3600, services=["ct:500:netdata"],
+            disk_usage_pct=30.0, memory_usage_pct=40.0, version="1.0",
+        )
+        data.register_checkin(state_dir, checkin, "192.168.86.201")
+        async with webui(tmp_path) as user:
+            await user.open(Routes.DASHBOARD)
+            await user.should_see("1 guest running")
+
+
+class TestNodeDetail:
+    """Tests for /nodes/{hostname} detail page."""
+
+    async def test_detail_page_shows_hostname(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        checkin = data.NodeCheckin(
+            node_id="home", hostname="home", local_ips=["192.168.86.201"],
+            uptime_seconds=259200, services=["vm:100:openwrt", "ct:102:pihole"],
+            disk_usage_pct=45.0, memory_usage_pct=55.0, version="2.0",
+        )
+        data.register_checkin(state_dir, checkin, "192.168.86.201")
+        async with webui(tmp_path) as user:
+            await user.open("/nodes/home")
+            await user.should_see(PageTitles.NODE_DETAIL)
+            await user.should_see("home")
+
+    async def test_detail_page_shows_resources(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        checkin = data.NodeCheckin(
+            node_id="home", hostname="home", local_ips=["192.168.86.201"],
+            uptime_seconds=86400, services=["vm:100:openwrt"],
+            disk_usage_pct=72.5, memory_usage_pct=88.0, version="1.0",
+        )
+        data.register_checkin(state_dir, checkin, "192.168.86.201")
+        async with webui(tmp_path) as user:
+            await user.open("/nodes/home")
+            await user.should_see("Resources")
+            await user.should_see("Disk")
+            await user.should_see("Memory")
+
+    async def test_detail_page_shows_guests(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        checkin = data.NodeCheckin(
+            node_id="home", hostname="home", local_ips=["192.168.86.201"],
+            uptime_seconds=86400,
+            services=["vm:100:openwrt", "ct:101:wireguard", "ct:102:pihole"],
+            disk_usage_pct=30.0, memory_usage_pct=40.0, version="1.0",
+        )
+        data.register_checkin(state_dir, checkin, "192.168.86.201")
+        async with webui(tmp_path) as user:
+            await user.open("/nodes/home")
+            await user.should_see("Guests")
+
+    async def test_detail_page_not_found(self, tmp_path):
+        """Unknown hostname shows error message."""
+        async with webui(tmp_path) as user:
+            await user.open("/nodes/nonexistent")
+            await user.should_see("not found")
+
+    async def test_detail_page_back_button(self, tmp_path):
+        """Detail page has a back button to nodes list."""
+        async with webui(tmp_path) as user:
+            await user.open("/nodes/home")
+            await user.should_see(PageTitles.NODE_DETAIL)
 
 
 # ── Images quick-build ──────────────────────────────────────────────
@@ -696,12 +776,12 @@ class TestNodes:
 class TestHub:
     async def test_shows_header(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/hub")
-            await user.should_see("Home Hub")
+            await user.open(Routes.HUB)
+            await user.should_see(PageTitles.HUB)
 
     async def test_shows_all_service_sections(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/hub")
+            await user.open(Routes.HUB)
             await user.should_see("Infrastructure")
             await user.should_see("Desktop & Media")
             await user.should_see("Settings & Network")
@@ -710,19 +790,19 @@ class TestHub:
 
     async def test_shows_all_service_titles(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/hub")
+            await user.open(Routes.HUB)
             for svc in data.get_hub_services():
                 await user.should_see(svc.title)
 
     async def test_disabled_services_show_not_available(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/hub")
-            await user.should_see("Not available")
+            await user.open(Routes.HUB)
+            await user.should_see(Labels.NOT_AVAILABLE)
 
     async def test_has_sidebar(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/hub")
-            await user.should_see("vm_builds")
+            await user.open(Routes.HUB)
+            await user.should_see(Labels.APP_TITLE)
 
 
 # ── Images quick-build ──────────────────────────────────────────────
@@ -731,7 +811,7 @@ class TestHub:
 class TestImagesQuickBuild:
     async def test_shows_quick_build_buttons(self, tmp_path):
         async with webui(tmp_path) as user:
-            await user.open("/images")
+            await user.open(Routes.IMAGES)
             await user.should_see("Mesh LXC")
             await user.should_see("Router VM")
 
@@ -1852,3 +1932,58 @@ class TestEndToEndCallhomeFlow:
                 headers={"x-callhome-token": public_key},
             )
             assert resp.status_code != 403
+
+
+class TestHostRegisterEndpoint:
+    """POST /api/hosts/register — manual host registration."""
+
+    async def test_register_new_host(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            resp = await client.post(
+                data.ApiRoutes.HOST_REGISTER,
+                json={"name": "edge-01", "ip": "10.0.0.50"},
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["status"] == "ok"
+            assert body["name"] == "edge-01"
+            assert body["bucket"] == "lab"
+
+    async def test_register_with_bucket(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            resp = await client.post(
+                data.ApiRoutes.HOST_REGISTER,
+                json={"name": "test-unit", "ip": "192.168.86.230", "bucket": "test"},
+            )
+            assert resp.status_code == 200
+            assert resp.json()["bucket"] == "test"
+
+    async def test_register_missing_name(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            resp = await client.post(
+                data.ApiRoutes.HOST_REGISTER,
+                json={"ip": "10.0.0.50"},
+            )
+            assert resp.status_code == 400
+
+    async def test_register_missing_ip(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            resp = await client.post(
+                data.ApiRoutes.HOST_REGISTER,
+                json={"name": "edge-01"},
+            )
+            assert resp.status_code == 400
+
+    async def test_registered_host_in_fleet(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        async with api_client(tmp_path) as client:
+            await client.post(
+                data.ApiRoutes.HOST_REGISTER,
+                json={"name": "manual-host", "ip": "10.0.0.99", "mac": "aa:bb:cc:dd:ee:ff"},
+            )
+        env = {"PRIMARY_HOST": "192.168.86.201"}
+        fleet = data.build_fleet(env, state_dir)
+        manual = fleet.get_host("manual-host")
+        assert manual is not None
+        assert manual.mac == "aa:bb:cc:dd:ee:ff"

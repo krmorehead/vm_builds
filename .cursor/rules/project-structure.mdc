@@ -72,6 +72,29 @@ Ansible handles initial provisioning and configuration. The Manager API
 handles everything after: status queries, mode switching, service toggling,
 and fleet health monitoring.
 
+### INVARIANT: kiosk_nodes = ALL proxmox hosts
+EVERY physical host MUST be in `kiosk_nodes`. A host without a Manager
+(Kiosk LXC) cannot participate in the 3-tier heartbeat system — it is
+invisible to the SuperManager. The verify playbook hard-fails if any
+`proxmox` host is missing from `kiosk_nodes`.
+
+When adding a new host to `proxmox`, ALWAYS add it to `kiosk_nodes` in
+BOTH `inventory/hosts.yml` AND `molecule/default/molecule.yml`.
+
+Previous bug: bridge-1 and bridge-2 were in `proxmox` but NOT in
+`kiosk_nodes`. They had no Manager, no heartbeat, and were invisible
+to the SuperManager. This was not caught because there was no gate.
+
+### INVARIANT: Heartbeat watchdog kills on stale
+A background watchdog (`scripts/heartbeat_watchdog.sh`) polls
+`/api/fleet/stale` every second during the entire run. The instant
+any previously-healthy service stops heartbeating, the watchdog
+kills the ansible-playbook process. No grace period. No waiting
+for end-of-run circuit breakers. Dead heartbeat = dead run.
+
+The watchdog starts in Phase 0 of `site.yml` and is cleaned up
+in `cleanup.yml`. Its PID is stored at `.state/watchdog.pid`.
+
 - NEVER let UI pages SSH to containers. All operations go through the
   Manager API via HTTP.
 - NEVER embed inline shell logic (`uci set`, `iw`, `wifi down/up`) in
@@ -158,8 +181,13 @@ Phase 3: Services (flavor groups span both primary + LAN hosts)
            deploy_stamp: gaming_lxc
   Play 32: gaming_lxc_configure (gaming_nodes) tag: gaming, never
 
+Phase 3c: Post-configure hookscript attachment
+  Play 33: desktop_nodes — Attach display-exclusive hookscript to
+           DRI-sharing containers/VMs (Kodi, Kiosk, Moonlight, Desktop)
+           tag: kiosk, desktop, media, moonlight
+
 Phase 3d: Heartbeat circuit breaker (post-configure)
-  Play 33: localhost — Query /api/fleet/stale, hard-fail if any
+  Play 34: localhost — Query /api/fleet/stale, hard-fail if any
            previously-healthy container stopped heartbeating
 
 Per-feature plays (opt-in via --tags, tagged with [never])
@@ -211,7 +239,8 @@ Service-specific provision plays target flavor groups.
 - `service_nodes` — Home Assistant
 - `media_nodes` — Jellyfin, Kodi (home only — media server and player)
 - `streaming_nodes` — Moonlight streaming client (mesh1 — MUST be on a different host than Sunshine server)
-- `desktop_nodes` — Desktop VM, UX Kiosk
+- `desktop_nodes` — Desktop VM (home only — display output host)
+- `kiosk_nodes` — Manager/Kiosk LXC (ALL hosts — MUST equal `proxmox` membership. Every host needs a Manager for 3-tier heartbeat)
 - `gaming_nodes` — Gaming LXC with GPU render device sharing (ai only; uses Fedora + Sunshine + dsda-doom)
 - `bridge_nodes` — Dedicated WiFi Bridge LXC (bridge-1, bridge-2 — transparent L2 WDS AP/STA link)
 - `lan_hosts` — Satellite Proxmox nodes behind the OpenWrt router (accessed via ProxyCommand; mesh1 only)
@@ -239,8 +268,9 @@ All VMIDs defined in `group_vars/all.yml`.
 - **Primary host**: `PRIMARY_HOST` in `.env`/`test.env` — the entry point IP that `build.py` probes.
 - **Additional host IPs**: `AI_HOST`, `MESH_2_HOST` in `.env`/`test.env` for directly reachable nodes.
 - **Optional env vars**: `.env` file → `lookup('env', 'VAR_NAME') | default('', true)` in role `defaults/main.yml` (e.g., `WAN_MAC`)
+- **Web UI / API port**: `WEBUI_PORT` in `.env`/`test.env` (default: 52500). Controls the NiceGUI web UI, callhome API, and headless API server ports. MUST be in a range open in the controller's firewall (currently 52500-53000). `build.py`, `app.py`, and `start_test_api.py` all read this env var.
 - **Generated secrets and dynamic config**: Auto-generated during runs → written to `{{ env_generated_path }}` on the controller via `blockinfile`. Resolves to `test.env.generated` under Molecule, `.env.generated` in production. Includes auto-generated keys (WireGuard) and dynamic runtime config (LAN_GATEWAY, LAN_CIDR). See `secret-generation` rule.
-- **Callhome server URL**: Written to `.state/callhome_url` by `build.py` (production) or `prepare.yml` (test). Read by `callhome_server` in `group_vars/all.yml` via `lookup('file')`. Hard-fails if missing. NEVER set via env var or hardcode in `.env`/`test.env`.
+- **Callhome server URL**: Written to `.state/callhome_url` by `build.py` (production), `prepare.yml` (test), or the NiceGUI app on startup. Read by `callhome_server` in `group_vars/all.yml` via `lookup('file')`. Hard-fails if missing. NEVER set via env var or hardcode in `.env`/`test.env`.
 - **Shared VM params**: `group_vars/all.yml` (VMID, image path, storage, `project_root`, `env_generated_path`, `callhome_server`)
 - **Proxmox connection**: `group_vars/proxmox.yml` (API auth, SSH settings)
 - **Per-host overrides**: `host_vars/<hostname>.yml` (IP, reboot policy)
@@ -262,6 +292,7 @@ All VMIDs defined in `group_vars/all.yml`.
 | `.env.generated` | Auto-generated secrets during production runs (gitignored) |
 | `.state/addresses.json` | Cached host IPs for cross-run discovery (gitignored) |
 | `.state/callhome_url` | API server URL written by build.py/prepare.yml, read by Ansible (gitignored) |
+| `.state/registry.json` | Persistent PHYSICAL HOST identity store — name, IP, MAC, bucket, source. Written by `HostRegistry.register()` only. Contains Proxmox nodes from env vars, manual form, or TEST_UNITS. NEVER from container heartbeats. (gitignored) |
 | `.state/test_api.pid` | API server PID for molecule cleanup (gitignored) |
 | `tasks/reconstruct_openwrt_group.yml` | Reusable dynamic group reconstruction for per-feature scenarios and rollback |
 | `tasks/reconstruct_wireguard_group.yml` | Reusable dynamic group reconstruction for WireGuard |
@@ -307,21 +338,34 @@ All VMIDs defined in `group_vars/all.yml`.
 | `molecule/mesh1-infra/` | Lightweight infra-only on mesh1 (quick iteration) |
 | `wol.sh` | Wake-on-LAN utility: wake hosts by alias or MAC. Proxied WoL for LAN hosts via PRIMARY_HOST |
 | `scripts/webui.sh` | Interactive Web UI launcher (wraps scripts/webui/app.py) |
-| `scripts/webui/` | NiceGUI-based interactive build menu and kiosk hub (data.py, app.py, pages/) |
+| `scripts/webui/` | NiceGUI-based interactive build menu and kiosk hub (data.py, app.py, pages/). UI constants (`Routes`, `PageTitles`, `Labels`, `ApiRoutes`, `NAV_SECTIONS`) live in `data.py` — shared by page modules and tests |
 | `scripts/callhome.py` | Call-home client for fleet nodes (Python, stdlib-only). Container + host mode heartbeats with systemd/port health |
 | `scripts/callhome.sh` | Call-home client for BusyBox/OpenWrt nodes (shell, curl/wget). Lightweight alternative to callhome.py |
 | `scripts/image-builder/files-mesh-lxc/usr/sbin/wifi_setup.sh` | Container-side WiFi WDS setup script. configure/switch-mode/status subcommands. Baked into mesh LXC image, callable by Ansible and manager API |
 | `scripts/image-builder/files-mesh-lxc/usr/sbin/batman_trigger.sh` | Container-side batman-adv enable/disable/status script. HMAC-authenticated mutations. Baked into mesh LXC image |
 
 ## Event-driven fleet monitoring (callhome architecture)
-The project uses an inverted data flow: containers heartbeat their health
-to a central management API, replacing SSH polling for readiness checks.
+The project uses a 3-tier event-driven architecture:
+
+1. **Containers/VMs** heartbeat to their local **Manager** (kiosk_server on each host)
+2. **Managers** aggregate container health and emit to the **SuperManager** (central app.py)
+3. **SuperManager** stores telemetry in `nodes.json` and presents the fleet dashboard
+
+The `HostRegistry` (`registry.json`) contains PHYSICAL HOST identities only —
+seeded from env vars, manual registration, or TEST_UNITS. Container heartbeats
+NEVER create host registry entries. Container health is stored in `nodes.json`
+and grouped under the parent host in the fleet dashboard.
+
+Previous bug: `register_checkin()` called `HostRegistry.register()` for every
+heartbeat, creating host entries for containers (pihole, wireguard, etc.) that
+appeared as independent fleet members on the dashboard.
 
 ### Base state
 The central management API (`app.py --headless`) starts BEFORE Ansible
 provisioning begins. Both `build.py` (production) and molecule's
-`prepare.yml` (test) launch it as a background subprocess on port 8088
-and write the URL to `.state/callhome_url`. Ansible reads this file via
+`prepare.yml` (test) launch it as a background subprocess on the port
+set by `WEBUI_PORT` env var (default 52500) and write the URL to
+`.state/callhome_url`. Ansible reads this file via
 the `callhome_server` variable in `group_vars/all.yml` — hard-fails if
 missing. This is base infrastructure — all containers depend on it for
 health reporting.
@@ -398,6 +442,48 @@ Fleet readiness matches services by container hostname, node_id, or
 `container_health.container_id`. Container hostnames are set by the
 `<type>_ct_hostname` default (e.g., `pihole`, `rsyslog`, `kiosk`) and
 must match the names in the fleet readiness query.
+
+## National host expectations
+Hosts are built locally, deployed to remote locations, and call home
+over the internet. ALWAYS assume a national host already has a standard
+build from `build-images.sh` — including WireGuard, callhome agent,
+and all service containers. National hosts are NOT bare metal that need
+bootstrapping from scratch.
+
+### Deployment lifecycle
+1. Host is provisioned locally with a full build (all services baked in)
+2. Host is shipped to the remote site and connected to the internet
+3. On first boot, WireGuard connects outbound to the management server
+4. Callhome agent begins heartbeating to the management API
+5. Host is "registered" in `nodes.json` from its first heartbeat
+
+### VPN as management plane
+WireGuard provides a persistent, NAT-traversing tunnel to every national
+host. The VPN is the primary management path for hosts behind firewalls:
+- SSH access via VPN IP for Ansible and ad-hoc maintenance
+- Callhome kickstart: restart the callhome service if it crashes
+- TCP reachability probe: VPN IP is probed when public IP is unreachable
+- `PersistentKeepalive = 25` keeps the NAT mapping alive indefinitely
+
+### What to assume about national hosts
+- WireGuard LXC is running with a VPN IP on the `wg0` interface
+- Callhome agent is running in every container (baked into images)
+- All standard services are deployed and configured
+- The host has already heartbeated at least once (registered)
+- Last-known state (services, disk, memory) persists in `nodes.json`
+
+### Recovery hierarchy
+| Layer | Mechanism | What it covers |
+|---|---|---|
+| L3 VPN | WireGuard | NAT traversal, SSH access, survives callhome crash |
+| L7 heartbeat | callhome | Health metrics, service status, survives VPN restart |
+| L7 kickstart | SSH via VPN | Restart callhome, debug, run ad-hoc Ansible |
+
+### VPN IP env vars
+Each host with a VPN tunnel has a `<NAME>_VPN_IP` env var (e.g.,
+`HOME_VPN_IP=10.0.0.1`). The webui reads these to probe VPN IPs when
+the primary IP is unreachable. Add new hosts to `_HOST_VPN_MAP` in
+`scripts/webui/data.py`.
 
 ## Adding a new LXC service — checklist
 1. **Build the image first.** Add the service's image build to `build-images.sh` (or create a new build script). All packages baked in. Define the image path in `group_vars/all.yml`.

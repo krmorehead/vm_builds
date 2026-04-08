@@ -1,4 +1,9 @@
-"""Deploy execution page with live output streaming."""
+"""Deploy execution page with live output streaming.
+
+Deploy output is persisted to .state/deploy_output.log so it survives
+browser disconnects. If a deploy is running when the page loads, the
+log file contents are loaded into the output area.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +14,16 @@ import time
 from nicegui import app as nicegui_app, ui
 
 from scripts.webui import data, theme
-from scripts.webui.run_process import stream_process
+from scripts.webui.data import Labels, PageTitles
+from scripts.webui.run_process import DEPLOY_LOG, stream_process
+
+_deploy_state: dict = {
+    "running": False,
+    "process": None,
+    "start_time": 0.0,
+    "env_file": "",
+    "host_limit": None,
+}
 
 
 def register() -> None:
@@ -19,10 +33,9 @@ def register() -> None:
 
         env_path = get_env_path()
         state_dir = get_state_dir()
-        state: dict = {"running": False, "process": None, "start_time": 0.0}
 
         with theme.page_shell("deploy"):
-            theme.page_header("Deploy")
+            theme.page_header(PageTitles.DEPLOY)
 
             summary = ui.label("").classes("text-sm")
 
@@ -34,42 +47,55 @@ def register() -> None:
             log = ui.log(max_lines=2000).classes("w-full h-96 font-mono text-xs")
             status_label = ui.label("").classes("text-sm font-semibold")
 
+            if _deploy_state["running"]:
+                theme.status_text(status_label, "Deploy in progress...", "info")
+                if DEPLOY_LOG.exists():
+                    for line in DEPLOY_LOG.read_text().splitlines()[-200:]:
+                        log.push(line)
+
             def _sync_buttons() -> None:
-                if state["running"]:
+                if _deploy_state["running"]:
                     start_btn.disable()
                     cancel_btn.enable()
                 else:
                     start_btn.enable()
                     cancel_btn.disable()
 
+            def _safe_ui(fn: object, *args: object) -> None:
+                """Call a UI function, ignoring RuntimeError from stale sessions."""
+                try:
+                    fn(*args)  # type: ignore[operator]
+                except RuntimeError:
+                    pass
+
             def _finish_deploy(exit_code: int, tags: list[str]) -> None:
-                elapsed = time.monotonic() - state["start_time"]
-                state["running"] = False
-                _sync_buttons()
+                elapsed = time.monotonic() - _deploy_state["start_time"]
+                _deploy_state["running"] = False
+                _safe_ui(_sync_buttons)
 
                 tl = data.stop_timeline()
                 if tl:
                     data.save_timeline(state_dir, tl)
 
                 if exit_code == 0:
-                    theme.status_text(status_label, f"Deploy succeeded in {elapsed:.0f}s", "success")
+                    _safe_ui(theme.status_text, status_label, f"Deploy succeeded in {elapsed:.0f}s", "success")
                 elif exit_code == -15:
-                    theme.status_text(status_label, "Deploy cancelled", "warning")
+                    _safe_ui(theme.status_text, status_label, "Deploy cancelled", "warning")
                 else:
-                    theme.status_text(status_label, f"Deploy failed (exit {exit_code}) after {elapsed:.0f}s", "error")
+                    _safe_ui(theme.status_text, status_label, f"Deploy failed (exit {exit_code}) after {elapsed:.0f}s", "error")
 
                 record = data.DeployRecord(
                     timestamp=time.strftime("%Y-%m-%dT%H:%M:%S"),
                     tags=tags,
-                    env_file=str(env_path),
+                    env_file=_deploy_state.get("env_file", str(env_path)),
                     exit_code=exit_code,
                     duration_seconds=round(elapsed, 1),
-                    host_limit=limit_input.value.strip() or None,
+                    host_limit=_deploy_state.get("host_limit"),
                 )
                 data.save_deploy_record(state_dir, record)
 
             async def _start_deploy() -> None:
-                if state["running"]:
+                if _deploy_state["running"]:
                     ui.notify("A deployment is already running.", type="warning")
                     return
 
@@ -94,8 +120,10 @@ def register() -> None:
 
                 log.clear()
                 theme.status_text(status_label, "Deploying...", "info")
-                state["running"] = True
-                state["start_time"] = time.monotonic()
+                _deploy_state["running"] = True
+                _deploy_state["start_time"] = time.monotonic()
+                _deploy_state["env_file"] = str(env_path)
+                _deploy_state["host_limit"] = limit
                 data.start_timeline()
                 _sync_buttons()
 
@@ -107,19 +135,20 @@ def register() -> None:
                 def _on_line(text: str) -> None:
                     if text.startswith("PLAY ["):
                         play_name = text.split("[", 1)[1].rstrip("]") if "[" in text else text
-                        status_label.text = f"Running: {play_name}"
+                        _safe_ui(setattr, status_label, "text", f"Running: {play_name}")
 
                 rc = await stream_process(
                     cmd, log,
                     env_extra=env_extra,
                     on_line=_on_line,
-                    proc_holder=state,
+                    proc_holder=_deploy_state,
+                    log_file=DEPLOY_LOG,
                 )
                 _finish_deploy(rc, tags)
 
             async def _cancel_deploy() -> None:
-                proc = state.get("process")
-                if proc and state["running"]:
+                proc = _deploy_state.get("process")
+                if proc and _deploy_state["running"]:
                     proc.send_signal(signal.SIGTERM)
                     try:
                         await asyncio.wait_for(proc.wait(), timeout=5.0)
@@ -129,12 +158,12 @@ def register() -> None:
 
             with ui.row().classes("gap-3"):
                 start_btn = ui.button(
-                    "Start Deploy",
+                    Labels.START_DEPLOY,
                     icon="play_arrow",
                     on_click=_start_deploy,
                 ).classes("action-btn")
                 cancel_btn = ui.button(
-                    "Cancel",
+                    Labels.CANCEL,
                     icon="stop",
                     on_click=_cancel_deploy,
                 ).classes("outline-btn")

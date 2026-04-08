@@ -10,7 +10,7 @@ from __future__ import annotations
 from nicegui import ui
 
 from scripts.webui import theme
-from scripts.webui.data import get_mesh_nodes
+from scripts.webui.data import Labels, PageTitles, get_mesh_nodes
 from scripts.webui.heartbeat import signal_quality
 
 
@@ -30,7 +30,7 @@ def _mesh_content() -> None:
     mesh_ap, mesh_stas = get_mesh_nodes()
     all_nodes = [mesh_ap] + mesh_stas
 
-    theme.page_header("Mesh Network", "WDS mesh topology and peer status")
+    theme.page_header(PageTitles.MESH, "WDS mesh topology and peer status")
     with ui.row().classes("items-center gap-1"):
         theme.help_tooltip(
             "Your mesh network uses WDS (Wireless Distribution System) to connect "
@@ -69,7 +69,7 @@ def _mesh_content() -> None:
 
     with ui.row().classes("gap-3 mt-4"):
         ui.button(
-            "Refresh Now", icon="refresh", on_click=_refresh,
+            Labels.REFRESH_NOW, icon="refresh", on_click=_refresh,
         ).classes("outline-btn")
 
     batman_container = ui.column().classes("w-full mt-6")
@@ -111,13 +111,13 @@ def _render_topology(node_data: dict) -> None:
                         if sig:
                             sig_dbm = int(sig)
 
-                link_color = theme.COLOR_SUCCESS if connected else theme.COLOR_ERROR
+                link_color = theme.COLOR_SUCCESS if connected else theme.TEXT_DISABLED
                 ui.icon("arrow_forward", size="md").style(f"color: {link_color}")
 
                 with ui.column().classes("items-center gap-1"):
                     icon_name = "wifi" if connected else "wifi_off"
                     ui.icon(icon_name, size="xl").style(
-                        f"color: {theme.COLOR_SUCCESS if connected else theme.COLOR_ERROR}"
+                        f"color: {theme.COLOR_SUCCESS if connected else theme.TEXT_DISABLED}"
                     )
                     ui.label(sta_id).classes("text-sm font-mono font-semibold").style(
                         f"color: {theme.TEXT_PRIMARY}"
@@ -268,7 +268,7 @@ def _render_batman_section(container) -> None:
                                         continue
                                     active = info.get("active", False)
                                     icon_name = "check_circle" if active else "cancel"
-                                    color = "#4ade80" if active else theme.TEXT_DISABLED
+                                    color = theme.COLOR_SUCCESS if active else theme.TEXT_DISABLED
                                     with ui.row().classes("items-center gap-2"):
                                         ui.icon(icon_name, size="xs").style(f"color: {color}")
                                         ui.label(node_id).classes("text-sm font-mono").style(
@@ -317,7 +317,7 @@ def _render_batman_section(container) -> None:
                         else:
                             batman_badge.set_text("Error")
                             batman_badge.props("outline color=red")
-                except Exception:
+                except (httpx.HTTPError, OSError):
                     batman_badge.set_text("Unavailable")
                     batman_badge.props("outline color=grey")
 
@@ -341,21 +341,21 @@ def _render_batman_section(container) -> None:
                             )
                         else:
                             ui.notify(f"Batman {action} failed: {resp.status_code}", type="negative")
-                except Exception as exc:
+                except (httpx.HTTPError, OSError) as exc:
                     ui.notify(f"Batman {action} failed: {exc}", type="negative")
                 await _check_status()
 
             with ui.row().classes("gap-3 mt-2"):
                 ui.button(
-                    "Enable Batman", icon="play_arrow",
+                    Labels.ENABLE_BATMAN, icon="play_arrow",
                     on_click=lambda: _toggle_batman(True),
                 ).classes("action-btn")
                 ui.button(
-                    "Disable Batman", icon="stop",
+                    Labels.DISABLE_BATMAN, icon="stop",
                     on_click=lambda: _toggle_batman(False),
                 ).classes("outline-btn")
                 ui.button(
-                    "Refresh Status", icon="refresh",
+                    Labels.REFRESH_STATUS, icon="refresh",
                     on_click=_check_status,
                 ).classes("outline-btn")
 

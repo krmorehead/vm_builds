@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import secrets
 import shutil
 import subprocess
@@ -29,9 +30,149 @@ if str(PROJECT_ROOT) not in sys.path:
 import build  # noqa: E402
 
 
+# ── UI string constants (shared by page modules and tests) ───────────
+
+class Routes:
+    """URL paths for all application pages."""
+    DASHBOARD = "/"
+    HUB = "/hub"
+    BRIDGE = "/bridge"
+    MESH = "/mesh"
+    ROUTER = "/router"
+    SERVICES = "/services"
+    DEPLOY = "/deploy"
+    IMAGES = "/images"
+    NODES = "/nodes"
+    NODE_DETAIL = "/nodes/{hostname}"
+    HOSTS = "/hosts"
+    ENVIRONMENT = "/environment"
+    CONTAINERS = "/containers"
+    LAUNCH = "/launch"
+    TIMELINE = "/timeline"
+    VIEW = "/view"
+
+
+class ApiRoutes:
+    """REST API paths for internal and external calls."""
+    CHECKIN = "/api/checkin"
+    NODES = "/api/nodes"
+    FLEET_READY = "/api/fleet/ready"
+    FLEET_STALE = "/api/fleet/stale"
+    FLEET_HEALTH = "/api/fleet/health"
+    CONTAINER_READY = "/api/container/{container_id}/ready"
+    EVENTS = "/api/events"
+    TIMELINE_START = "/api/timeline/start"
+    TIMELINE_STOP = "/api/timeline/stop"
+    TIMELINE_CURRENT = "/api/timeline/current"
+    HOST_REGISTER = "/api/hosts/register"
+    GUESTS = "/api/guests"
+    GUEST_ACTION = "/api/guests/{vmid}/{action}"
+    WIFI_MODE = "/api/wifi/mode/{node}/{mode}"
+    WIFI_STATUS = "/api/wifi/status/{node}"
+    BATMAN_ENABLE = "/api/batman/enable"
+    BATMAN_DISABLE = "/api/batman/disable"
+    BATMAN_STATUS = "/api/batman/status"
+    BRIDGE_RESTART_WIFI = "/api/bridge/restart-wifi"
+    HEARTBEAT_SUBSCRIBE = "/api/heartbeat/subscribe"
+    HEARTBEAT_SUBSCRIPTION = "/api/heartbeat/subscribe/{subscription_id}"
+    HEARTBEAT_METRIC = "/api/heartbeat/{node_id}/{metric_type}"
+    HEARTBEAT_SUBSCRIPTIONS = "/api/heartbeat/subscriptions"
+
+
+class PageTitles:
+    """Primary heading text for each page."""
+    DASHBOARD = "vm_builds"
+    HUB = "Home Hub"
+    BRIDGE = "WiFi Bridge"
+    MESH = "Mesh Network"
+    ROUTER = "Router"
+    SERVICES = "Service Selection"
+    DEPLOY = "Deploy"
+    IMAGES = "Image Management"
+    NODES = "Fleet Nodes"
+    NODE_DETAIL = "Node Detail"
+    HOSTS = "Host Connectivity"
+    ENVIRONMENT = "Environment"
+    CONTAINERS = "Containers & VMs"
+    TIMELINE = "Deploy Timeline"
+
+
+class Labels:
+    """Shared button text and status messages used across pages and tests."""
+    APP_TITLE = "vm_builds"
+    HOME = "Home"
+    HOME_HUB = "Home Hub"
+    BACK_TO_HUB = "Back to Hub"
+    FULL_DEPLOY = "Full Deploy"
+    BUILD_IMAGES = "Build Images"
+    CHECK_HOSTS = "Check Hosts"
+    VIEW_FLEET = "View Fleet Dashboard"
+    START_DEPLOY = "Start Deploy"
+    CANCEL = "Cancel"
+    SELECT_ALL = "Select All"
+    DESELECT_ALL = "Deselect All"
+    DEPLOY_SELECTED = "Deploy Selected"
+    REFRESH = "Refresh"
+    REFRESH_NOW = "Refresh Now"
+    VALIDATE = "Validate"
+    SAVE = "Save"
+    CREATE_ENV = "Create .env"
+    PROBE_ALL = "Probe All"
+    TEST_SSH = "Test SSH"
+    BUILD_SELECTED = "Build Selected"
+    BUILD_ALL = "Build All"
+    DEPLOY_BRIDGE = "Deploy Bridge"
+    RESTART_WIFI = "Restart WiFi"
+    FORCE_REPAIR = "Force Re-pair"
+    ENABLE_BATMAN = "Enable Batman"
+    DISABLE_BATMAN = "Disable Batman"
+    REFRESH_STATUS = "Refresh Status"
+    CONTAINERS = "Containers"
+    NOT_AVAILABLE = "Not available"
+    NO_TAGS_SELECTED = "No tags selected"
+    NO_VMID = "No VMID configured"
+    NO_URL = "No URL configured"
+    NO_SERVICES = "No services selected"
+    SELECT_ROW = "Select a row first"
+    SELECT_IMAGE = "Select an image to build"
+    NODE_STATUS = "Node Status"
+    FLEET_HEALTH = "Fleet Health"
+    SERVICE_MATRIX = "Service Matrix"
+    ADD_HOST = "Add Host"
+    REGISTER = "Register"
+    BUCKET_TEST = "Test Units"
+    BUCKET_LAB = "Lab Units"
+    BUCKET_PRODUCTION = "Production"
+
+
+NavItem = tuple[str, str, str]  # (label, path, icon)
+KioskNavItem = tuple[str, str, str]  # (label, path, icon)
+
+NAV_SECTIONS: list[NavItem] = [
+    ("Dashboard", Routes.DASHBOARD, "dashboard"),
+    ("Home Hub", Routes.HUB, "tv"),
+    ("Bridge", Routes.BRIDGE, "swap_horiz"),
+    ("Mesh", Routes.MESH, "hub"),
+    ("Router", Routes.ROUTER, "router"),
+    ("Services", Routes.SERVICES, "widgets"),
+    ("Deploy", Routes.DEPLOY, "rocket_launch"),
+    ("Images", Routes.IMAGES, "inventory_2"),
+    ("Nodes", Routes.NODES, "device_hub"),
+    ("Hosts", Routes.HOSTS, "dns"),
+    ("Environment", Routes.ENVIRONMENT, "settings"),
+]
+
+KIOSK_NAV_ITEMS: list[KioskNavItem] = [
+    ("Bridge", Routes.BRIDGE, "swap_horiz"),
+    ("Mesh", Routes.MESH, "hub"),
+    ("Router", Routes.ROUTER, "router"),
+    ("Containers", Routes.CONTAINERS, "view_in_ar"),
+]
+
+
 # ── Server port for internal API calls ────────────────────────────────
 
-_SERVER_PORT: int = 9001
+_SERVER_PORT: int = int(os.environ.get("WEBUI_PORT", "52500"))
 
 
 def set_server_port(port: int) -> None:
@@ -41,7 +182,7 @@ def set_server_port(port: int) -> None:
 
 
 def get_api_base_url() -> str:
-    """Return the base URL for internal API calls (e.g. http://127.0.0.1:9001)."""
+    """Return the base URL for internal API calls (e.g. http://127.0.0.1:52500)."""
     return f"http://127.0.0.1:{_SERVER_PORT}"
 
 
@@ -237,7 +378,8 @@ ENV_TEMPLATE: list[EnvVar] = [
     EnvVar("DESKTOP_AUTOLOGIN", "Enable autologin on desktop VM", False, "false", False),
     EnvVar("DESKTOP_DEFAULT_SESSION", "Default desktop session (plasma/gnome)", False, "plasma", False),
     EnvVar("HA_ADMIN_PASSWORD", "Home Assistant admin password", False, "", True),
-    EnvVar("CALLHOME_SERVER", "Management server URL for fleet call-home", False, "http://localhost:9001", False),
+    EnvVar("WEBUI_PORT", "Web UI / API port (firewall must allow)", False, "52500", False),
+    EnvVar("CALLHOME_SERVER", "Management server URL for fleet call-home (auto-detected)", False, "", False),
     EnvVar("CALLHOME_PRIVATE_KEY", "Server-side secret for validating call-home tokens", False, "", True),
     EnvVar("CALLHOME_PUBLIC_KEY", "Token distributed to nodes for call-home auth", False, "", True),
     EnvVar("BRIDGE_1_HOST", "IP of the first WiFi bridge node", False, "192.168.86.230", False),
@@ -281,6 +423,7 @@ class HostInfo:
     env_var: str
     wol_capable: bool
     is_lan: bool = False
+    vpn_ip: str = ""
 
 
 @dataclass
@@ -312,6 +455,299 @@ _HOST_MAP = {
     "BRIDGE_2_HOST": "bridge-2",
 }
 
+_HOST_VPN_MAP: dict[str, str] = {
+    "home": "HOME_VPN_IP",
+    "ai": "AI_VPN_IP",
+    "mesh1": "MESH_1_VPN_IP",
+    "mesh2": "MESH_2_VPN_IP",
+    "bridge-1": "BRIDGE_1_VPN_IP",
+    "bridge-2": "BRIDGE_2_VPN_IP",
+}
+
+
+# ── Host Registry (persistent identity store) ────────────────────────
+
+
+class HostBucket:
+    """IP-based host classification.
+
+    Last octet of the IP determines the bucket for auto-discovered hosts.
+    ``RANGES`` is an ordered list of ``(bucket_name, octet_ranges)`` —
+    add new buckets by appending to the list.
+    """
+
+    TEST = "test"
+    LAB = "lab"
+    PRODUCTION = "production"
+
+    RANGES: list[tuple[str, list[range]]] = [
+        (TEST, [range(200, 256)]),
+        (LAB, [range(0, 100), range(100, 200)]),
+    ]
+    DEFAULT = PRODUCTION
+
+    @staticmethod
+    def classify_ip(ip: str) -> str:
+        """Determine bucket from the last octet of an IP address."""
+        try:
+            last_octet = int(ip.rsplit(".", 1)[-1])
+        except (ValueError, IndexError):
+            return HostBucket.DEFAULT
+        for bucket_name, ranges in HostBucket.RANGES:
+            if any(last_octet in r for r in ranges):
+                return bucket_name
+        return HostBucket.DEFAULT
+
+
+@dataclass
+class HostRecord:
+    """Persistent registry entry for a known host.
+
+    Stored in ``.state/registry.json``. Identity fields (``name``,
+    ``mac``) are used for upsert matching. ``bucket`` and ``source``
+    are immutable after creation — subsequent registrations update
+    mutable fields (``ip``, ``mac``, ``vpn_ip``, ``last_seen``) only.
+    """
+
+    name: str
+    ip: str
+    mac: str = ""
+    bucket: str = ""
+    source: str = "manual"
+    is_lan: bool = False
+    wol_capable: bool = True
+    vpn_ip: str = ""
+    first_seen: str = ""
+    last_seen: str = ""
+
+
+def extract_primary_mac(extensions: dict[str, dict]) -> str:
+    """Pick the first real MAC from heartbeat network extensions.
+
+    Skips loopback (``00:00:00:00:00:00``), locally-administered
+    (``fe:...``), and empty addresses. Returns ``""`` if none found.
+    """
+    net = extensions.get("network", {})
+    interfaces = net.get("interfaces", [])
+    if not interfaces and isinstance(net, dict):
+        interfaces = net.get("data", {}).get("interfaces", [])
+    for iface in interfaces:
+        mac = iface.get("mac", "").lower().strip()
+        if not mac or mac == "00:00:00:00:00:00":
+            continue
+        if mac.startswith("fe:"):
+            continue
+        name = iface.get("name", "")
+        if name == "lo":
+            continue
+        return mac
+    return ""
+
+
+class HostRegistry:
+    """Persistent host identity store backed by ``.state/registry.json``.
+
+    Single responsibility: **who are my hosts** — name, IP, MAC, bucket,
+    and how they were discovered (source). Telemetry data lives separately
+    in ``nodes.json``.
+
+    ``register()`` is the ONLY write path. Every caller — env seeding,
+    heartbeat auto-register, manual form, ``TEST_UNITS`` — MUST go
+    through ``register()``. NEVER write to ``registry.json`` directly
+    or duplicate upsert logic elsewhere.
+    """
+
+    def __init__(self, state_dir: Path) -> None:
+        self._state_dir = state_dir
+        self._file = state_dir / "registry.json"
+        self._records: list[HostRecord] = []
+        self._loaded = False
+
+    def _ensure_loaded(self) -> None:
+        if not self._loaded:
+            self._records = self._load_from_disk()
+            self._loaded = True
+
+    def _load_from_disk(self) -> list[HostRecord]:
+        if not self._file.exists():
+            return []
+        try:
+            raw = json.loads(self._file.read_text())
+            return [
+                HostRecord(
+                    name=r.get("name", ""),
+                    ip=r.get("ip", ""),
+                    mac=r.get("mac", ""),
+                    bucket=r.get("bucket", ""),
+                    source=r.get("source", "manual"),
+                    is_lan=r.get("is_lan", False),
+                    wol_capable=r.get("wol_capable", True),
+                    vpn_ip=r.get("vpn_ip", ""),
+                    first_seen=r.get("first_seen", ""),
+                    last_seen=r.get("last_seen", ""),
+                )
+                for r in raw
+            ]
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    def _save(self) -> None:
+        self._state_dir.mkdir(parents=True, exist_ok=True)
+        raw = [
+            {
+                "name": r.name,
+                "ip": r.ip,
+                "mac": r.mac,
+                "bucket": r.bucket,
+                "source": r.source,
+                "is_lan": r.is_lan,
+                "wol_capable": r.wol_capable,
+                "vpn_ip": r.vpn_ip,
+                "first_seen": r.first_seen,
+                "last_seen": r.last_seen,
+            }
+            for r in self._records
+        ]
+        self._file.write_text(json.dumps(raw, indent=2) + "\n")
+
+    def all(self) -> list[HostRecord]:
+        """Return all registered hosts."""
+        self._ensure_loaded()
+        return list(self._records)
+
+    def find_by_mac(self, mac: str) -> HostRecord | None:
+        """Find a host by MAC address."""
+        self._ensure_loaded()
+        mac_lower = mac.lower().strip()
+        if not mac_lower:
+            return None
+        return next(
+            (r for r in self._records if r.mac.lower() == mac_lower), None
+        )
+
+    def find_by_name(self, name: str) -> HostRecord | None:
+        """Find a host by name."""
+        self._ensure_loaded()
+        return next((r for r in self._records if r.name == name), None)
+
+    def register(
+        self,
+        name: str,
+        ip: str,
+        *,
+        mac: str = "",
+        bucket: str = "",
+        source: str = "manual",
+        is_lan: bool = False,
+        wol_capable: bool = True,
+        vpn_ip: str = "",
+    ) -> HostRecord:
+        """Upsert a host into the registry. THE ONLY write path.
+
+        Resolution order for identity matching:
+        1. MAC match (if provided and non-empty) — hardware identity
+        2. Name match — logical identity
+        3. No match — create new record
+
+        On match: update mutable fields (ip, mac, vpn_ip, last_seen).
+        Immutable-on-create fields (bucket, source, first_seen) are
+        never overwritten by subsequent registrations.
+
+        Bucket is auto-classified from IP if not explicitly provided.
+
+        Every caller — env seeding, heartbeat auto-register, manual
+        form, TEST_UNITS — MUST go through this method. NEVER write
+        to registry.json directly or duplicate upsert logic elsewhere.
+        """
+        self._ensure_loaded()
+        now = datetime.now().isoformat(timespec="seconds")
+        resolved_bucket = bucket or HostBucket.classify_ip(ip)
+
+        existing = self.find_by_mac(mac) if mac else None
+        if not existing:
+            existing = self.find_by_name(name)
+
+        if existing:
+            if ip:
+                existing.ip = ip
+            if mac:
+                existing.mac = mac
+            if vpn_ip:
+                existing.vpn_ip = vpn_ip
+            existing.last_seen = now
+            self._save()
+            return existing
+
+        record = HostRecord(
+            name=name,
+            ip=ip,
+            mac=mac,
+            bucket=resolved_bucket,
+            source=source,
+            is_lan=is_lan,
+            wol_capable=wol_capable,
+            vpn_ip=vpn_ip,
+            first_seen=now,
+            last_seen=now,
+        )
+        self._records.append(record)
+        self._save()
+        return record
+
+    def seed_from_env(self, env: dict[str, str]) -> None:
+        """Populate registry from env vars (``_HOST_MAP`` + ``TEST_UNITS``).
+
+        Idempotent — existing records are updated, not duplicated.
+        Delegates every write to ``register()``.
+        """
+        self._ensure_loaded()
+
+        for env_var, name in _HOST_MAP.items():
+            ip = env.get(env_var, "")
+            if env_var == "PRIMARY_HOST" or ip:
+                vpn_env = _HOST_VPN_MAP.get(name, "")
+                self.register(
+                    name,
+                    ip or env.get("PRIMARY_HOST", ""),
+                    source="env",
+                    wol_capable=_read_wol_capable(name),
+                    vpn_ip=env.get(vpn_env, "") if vpn_env else "",
+                )
+
+        mesh1_vpn_env = _HOST_VPN_MAP.get("mesh1", "")
+        self.register(
+            "mesh1",
+            env.get("MESH_1_HOST", "10.10.10.210"),
+            source="env",
+            is_lan=True,
+            wol_capable=_read_wol_capable("mesh1"),
+            vpn_ip=env.get(mesh1_vpn_env, "") if mesh1_vpn_env else "",
+        )
+
+        test_units = env.get("TEST_UNITS", "")
+        if test_units:
+            for ip_str in test_units.split(","):
+                ip_str = ip_str.strip()
+                if not ip_str:
+                    continue
+                try:
+                    last_octet = ip_str.rsplit(".", 1)[-1]
+                except (ValueError, IndexError):
+                    last_octet = ip_str
+                test_name = f"test-{last_octet}"
+                if not self.find_by_name(test_name):
+                    existing_by_ip = next(
+                        (r for r in self._records if r.ip == ip_str), None
+                    )
+                    if existing_by_ip:
+                        continue
+                    self.register(
+                        test_name,
+                        ip_str,
+                        bucket=HostBucket.TEST,
+                        source="test_units",
+                    )
+
 
 def _read_wol_capable(name: str) -> bool:
     """Read wol_capable from host_vars YAML (simple grep, no YAML dep)."""
@@ -331,20 +767,24 @@ def get_known_hosts(env: dict[str, str]) -> list[HostInfo]:
     for env_var, name in _HOST_MAP.items():
         ip = env.get(env_var, "")
         if env_var == "PRIMARY_HOST" or ip:
+            vpn_env = _HOST_VPN_MAP.get(name, "")
             hosts.append(HostInfo(
                 name=name,
                 ip=ip or env.get("PRIMARY_HOST", ""),
                 env_var=env_var,
                 wol_capable=_read_wol_capable(name),
                 is_lan=False,
+                vpn_ip=env.get(vpn_env, "") if vpn_env else "",
             ))
 
+    mesh1_vpn_env = _HOST_VPN_MAP.get("mesh1", "")
     hosts.append(HostInfo(
         name="mesh1",
         ip="10.10.10.210",
         env_var="MESH_1_HOST",
         wol_capable=_read_wol_capable("mesh1"),
         is_lan=True,
+        vpn_ip=env.get(mesh1_vpn_env, "") if mesh1_vpn_env else "",
     ))
     return hosts
 
@@ -383,6 +823,89 @@ def test_ssh_connection(ip: str) -> SshResult:
         return SshResult(success=False, error="SSH connection timed out")
     except FileNotFoundError:
         return SshResult(success=False, error="ssh binary not found")
+
+
+@dataclass
+class KickstartResult:
+    """Result of a callhome kickstart attempt on a remote host."""
+
+    success: bool
+    restarted: int = 0
+    errors: list[str] = field(default_factory=list)
+    message: str = ""
+
+
+def kickstart_callhome(host: Host) -> KickstartResult:
+    """SSH to a host and restart callhome on all running LXC containers.
+
+    Uses the best reachable IP (primary or VPN). Discovers running
+    containers via ``pct list``, then restarts the callhome service
+    inside each one. Safe to call on hosts that are already healthy.
+    """
+    ip = host.reachable_ip
+    if not ip:
+        return KickstartResult(
+            success=False, message="No reachable IP for this host"
+        )
+
+    ssh_base = [
+        "ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=no", f"root@{ip}",
+    ]
+
+    # Discover running containers
+    try:
+        result = subprocess.run(
+            [*ssh_base, "pct list 2>/dev/null | tail -n +2 | awk '{print $1, $2}'"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        return KickstartResult(success=False, message=f"SSH failed: {exc}")
+
+    if result.returncode != 0:
+        return KickstartResult(
+            success=False, message=f"pct list failed: {result.stderr.strip()}"
+        )
+
+    running_vmids: list[str] = []
+    for line in result.stdout.strip().splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1].lower() == "running":
+            running_vmids.append(parts[0])
+
+    if not running_vmids:
+        return KickstartResult(
+            success=True, restarted=0,
+            message="No running containers found",
+        )
+
+    restarted = 0
+    errors: list[str] = []
+    for vmid in running_vmids:
+        cmd = (
+            f"pct exec {vmid} -- "
+            f"sh -c 'if [ -f /etc/init.d/callhome ]; then /etc/init.d/callhome restart; "
+            f"elif command -v systemctl >/dev/null 2>&1; then systemctl restart callhome 2>/dev/null; "
+            f"else echo no-callhome; fi'"
+        )
+        try:
+            r = subprocess.run(
+                [*ssh_base, cmd],
+                capture_output=True, text=True, timeout=15,
+            )
+            if r.returncode == 0 and "no-callhome" not in r.stdout:
+                restarted += 1
+            elif "no-callhome" not in r.stdout:
+                errors.append(f"CT {vmid}: {r.stderr.strip()}")
+        except subprocess.TimeoutExpired:
+            errors.append(f"CT {vmid}: timeout")
+
+    return KickstartResult(
+        success=True,
+        restarted=restarted,
+        errors=errors,
+        message=f"Restarted callhome on {restarted}/{len(running_vmids)} containers",
+    )
 
 
 # ── Service tags ─────────────────────────────────────────────────────
@@ -518,6 +1041,490 @@ class DeployRecord:
     exit_code: int
     duration_seconds: float
     host_limit: str | None = None
+
+
+# ── Ansible exit code semantics ───────────────────────────────────────
+
+ANSIBLE_EXIT_CODES: dict[int, str] = {
+    0: "success",
+    1: "error",
+    2: "host unreachable or task failed",
+    3: "invalid command/args",
+    4: "host unreachable",
+    5: "bad module result",
+    99: "interrupted by user",
+    250: "unexpected error",
+}
+
+
+def exit_code_label(exit_code: int) -> str:
+    """Human-readable label for an Ansible exit code."""
+    if exit_code == 0:
+        return "success"
+    desc = ANSIBLE_EXIT_CODES.get(exit_code, "unknown error")
+    return f"failed — {desc}"
+
+
+def exit_code_color(exit_code: int) -> str:
+    """Semantic badge color for an Ansible exit code."""
+    return "green" if exit_code == 0 else "red"
+
+
+# ── Host and Fleet domain model ──────────────────────────────────────
+
+
+@dataclass
+class GuestInfo:
+    """A VM or container running on a Proxmox host."""
+
+    vmid: str
+    name: str
+    vm_type: str  # "vm" or "ct"
+    running: bool = True
+
+
+@dataclass
+class HostTelemetry:
+    """Live telemetry snapshot from a host's callhome heartbeat."""
+
+    node_id: str
+    last_ip: str
+    local_ips: list[str]
+    first_seen: str
+    last_seen: str
+    uptime_seconds: float
+    services: list[str]
+    disk_usage_pct: float
+    memory_usage_pct: float
+    version: str
+    status: str = "offline"
+    container_health: ContainerHealth | None = None
+
+
+def _parse_guests(services: list[str]) -> list[GuestInfo]:
+    """Parse service strings ('vm:100:openwrt') into GuestInfo objects."""
+    guests: list[GuestInfo] = []
+    for entry in services:
+        parts = entry.split(":")
+        if len(parts) >= 2:
+            guests.append(GuestInfo(
+                vmid=parts[1],
+                name=parts[2] if len(parts) > 2 else parts[1],
+                vm_type=parts[0],
+                running=True,
+            ))
+    return guests
+
+
+class Host:
+    """A Proxmox host with identity, deploy history, telemetry, and derived health.
+
+    Business logic lives here — the UI layer only reads properties.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        ip: str,
+        *,
+        is_lan: bool = False,
+        wol_capable: bool = True,
+        vpn_ip: str = "",
+        bucket: str = "",
+        mac: str = "",
+    ) -> None:
+        self.name = name
+        self.ip = ip
+        self.is_lan = is_lan
+        self.wol_capable = wol_capable
+        self.vpn_ip = vpn_ip
+        self.bucket = bucket
+        self.mac = mac
+        self.deploys: list[DeployRecord] = []
+        self.telemetry: HostTelemetry | None = None
+        self.reachable: bool | None = None
+        self._guests: list[GuestInfo] | None = None
+
+    def attach_telemetry(self, telemetry: HostTelemetry) -> None:
+        """Wire live heartbeat data into this host."""
+        self.telemetry = telemetry
+        self._guests = _parse_guests(telemetry.services)
+
+    # ── Deploy health ────────────────────────────────────────────
+
+    @property
+    def last_deploy(self) -> DeployRecord | None:
+        return self.deploys[-1] if self.deploys else None
+
+    @property
+    def healthy(self) -> bool:
+        """True when the most recent deploy succeeded or no deploys recorded."""
+        if not self.deploys:
+            return True
+        return self.deploys[-1].exit_code == 0
+
+    @property
+    def errors(self) -> list[str]:
+        issues: list[str] = []
+        if self.deploys and self.deploys[-1].exit_code != 0:
+            last = self.deploys[-1]
+            issues.append(
+                f"Last deploy failed: {exit_code_label(last.exit_code)} "
+                f"({last.timestamp})"
+            )
+        if self.telemetry and self.telemetry.status == "offline":
+            issues.append("Host offline — no heartbeat received recently")
+        elif not self.telemetry and self.reachable is False:
+            issues.append("Host unreachable — SSH port 22 not responding")
+        return issues
+
+    @property
+    def warnings(self) -> list[str]:
+        """Non-critical warnings (degraded but not broken)."""
+        warns: list[str] = []
+        if not self.telemetry and self.reachable:
+            warns.append("Reachable but no heartbeat — callhome agent may not be running")
+        return warns
+
+    # ── Telemetry properties ─────────────────────────────────────
+
+    @property
+    def online(self) -> bool:
+        if not self.telemetry:
+            return False
+        return self.telemetry.status == "online"
+
+    @property
+    def reachable_ip(self) -> str:
+        """Best IP to reach this host — primary if reachable, else VPN."""
+        if self.reachable and self.ip and not self.is_lan:
+            return self.ip
+        if self.vpn_ip:
+            return self.vpn_ip
+        return self.ip
+
+    @property
+    def registered(self) -> bool:
+        """True if this host has ever sent a heartbeat (has telemetry data).
+
+        For nationally distributed units, this distinguishes 'deployed and
+        reporting' from 'configured but never heartbeated'. A registered
+        host that goes dark retains its last-known state (services, disk,
+        memory) for historical display.
+        """
+        return self.telemetry is not None
+
+    @property
+    def status(self) -> str:
+        if self.telemetry:
+            return self.telemetry.status
+        if self.reachable:
+            return "reachable"
+        if self.reachable is False:
+            return "unreachable"
+        return "unknown"
+
+    @property
+    def uptime(self) -> str:
+        if not self.telemetry:
+            return "--"
+        return format_uptime(self.telemetry.uptime_seconds)
+
+    @property
+    def uptime_seconds(self) -> float:
+        if not self.telemetry:
+            return 0.0
+        return self.telemetry.uptime_seconds
+
+    @property
+    def disk_pct(self) -> float:
+        if not self.telemetry:
+            return 0.0
+        return self.telemetry.disk_usage_pct
+
+    @property
+    def memory_pct(self) -> float:
+        if not self.telemetry:
+            return 0.0
+        return self.telemetry.memory_usage_pct
+
+    @property
+    def version(self) -> str:
+        if not self.telemetry:
+            return ""
+        return self.telemetry.version
+
+    @property
+    def last_seen(self) -> str:
+        if not self.telemetry:
+            return ""
+        return self.telemetry.last_seen
+
+    @property
+    def last_seen_relative(self) -> str:
+        if not self.telemetry:
+            return "never"
+        return format_last_seen_relative(self.telemetry.last_seen)
+
+    @property
+    def local_ips(self) -> list[str]:
+        if not self.telemetry:
+            return []
+        return self.telemetry.local_ips
+
+    @property
+    def extensions(self) -> dict[str, dict]:
+        if not self.telemetry or not self.telemetry.container_health:
+            return {}
+        return self.telemetry.container_health.extensions
+
+    # ── Guest properties ─────────────────────────────────────────
+
+    @property
+    def guests(self) -> list[GuestInfo]:
+        return self._guests if self._guests is not None else []
+
+    @property
+    def guest_count(self) -> int:
+        return len(self.guests)
+
+    @property
+    def running_guests(self) -> int:
+        return sum(1 for g in self.guests if g.running)
+
+    @property
+    def vms(self) -> list[GuestInfo]:
+        return [g for g in self.guests if g.vm_type == "vm"]
+
+    @property
+    def containers(self) -> list[GuestInfo]:
+        return [g for g in self.guests if g.vm_type == "ct"]
+
+    def __repr__(self) -> str:
+        status = "healthy" if self.healthy else "unhealthy"
+        return f"Host({self.name!r}, {self.ip!r}, {status})"
+
+
+class Fleet:
+    """Collection of hosts with aggregate health and telemetry."""
+
+    def __init__(self, hosts: list[Host]) -> None:
+        self.hosts = hosts
+
+    # ── Deploy health ────────────────────────────────────────────
+
+    @property
+    def healthy(self) -> bool:
+        return all(h.healthy for h in self.hosts)
+
+    @property
+    def errors(self) -> list[str]:
+        return [f"{h.name}: {e}" for h in self.hosts for e in h.errors]
+
+    @property
+    def warnings(self) -> list[str]:
+        return [f"{h.name}: {w}" for h in self.hosts for w in h.warnings]
+
+    @property
+    def unhealthy_hosts(self) -> list[Host]:
+        return [h for h in self.hosts if not h.healthy]
+
+    @property
+    def registered_count(self) -> int:
+        """Hosts that have ever sent a heartbeat."""
+        return sum(1 for h in self.hosts if h.registered)
+
+    @property
+    def last_deploy(self) -> DeployRecord | None:
+        """Most recent deploy across all hosts, sorted by timestamp."""
+        all_deploys = [d for h in self.hosts for d in h.deploys]
+        if not all_deploys:
+            return None
+        return max(all_deploys, key=lambda d: d.timestamp)
+
+    @property
+    def host_count(self) -> int:
+        return len(self.hosts)
+
+    # ── Telemetry aggregates ─────────────────────────────────────
+
+    @property
+    def online_count(self) -> int:
+        return sum(1 for h in self.hosts if h.online)
+
+    @property
+    def offline_count(self) -> int:
+        return self.host_count - self.online_count
+
+    @property
+    def reachable_count(self) -> int:
+        """Hosts reachable via SSH (with or without heartbeat)."""
+        return sum(1 for h in self.hosts if h.online or h.reachable)
+
+    @property
+    def has_telemetry(self) -> bool:
+        return any(h.telemetry is not None for h in self.hosts)
+
+    @property
+    def total_guests(self) -> int:
+        return sum(h.guest_count for h in self.hosts)
+
+    @property
+    def running_guests(self) -> int:
+        return sum(h.running_guests for h in self.hosts)
+
+    @property
+    def total_services(self) -> int:
+        return self.total_guests
+
+    @property
+    def avg_disk_pct(self) -> float:
+        vals = [h.disk_pct for h in self.hosts if h.disk_pct > 0]
+        return round(sum(vals) / len(vals), 1) if vals else 0.0
+
+    @property
+    def avg_memory_pct(self) -> float:
+        vals = [h.memory_pct for h in self.hosts if h.memory_pct > 0]
+        return round(sum(vals) / len(vals), 1) if vals else 0.0
+
+    @property
+    def worst_disk(self) -> Host | None:
+        with_telem = [h for h in self.hosts if h.telemetry]
+        return max(with_telem, key=lambda h: h.disk_pct) if with_telem else None
+
+    @property
+    def worst_memory(self) -> Host | None:
+        with_telem = [h for h in self.hosts if h.telemetry]
+        return max(with_telem, key=lambda h: h.memory_pct) if with_telem else None
+
+    @property
+    def health_score(self) -> int:
+        """0-100 fleet health: availability (40%), disk (30%), memory (30%)."""
+        if not self.has_telemetry:
+            return 100
+        total = sum(1 for h in self.hosts if h.telemetry)
+        if total == 0:
+            return 100
+        online = sum(1 for h in self.hosts if h.online)
+        avail_score = (online / total) * 40
+
+        reporting = [h for h in self.hosts if h.telemetry and h.status != "offline"]
+        if reporting:
+            disk_score = sum(_resource_score(h.disk_pct) for h in reporting)
+            mem_score = sum(_resource_score(h.memory_pct) for h in reporting)
+            disk_score = (disk_score / len(reporting)) * 30
+            mem_score = (mem_score / len(reporting)) * 30
+        else:
+            disk_score = 0.0
+            mem_score = 0.0
+
+        return max(0, min(100, round(avail_score + disk_score + mem_score)))
+
+    def hosts_by_bucket(self, bucket: str) -> list[Host]:
+        """Return hosts belonging to a specific bucket."""
+        return [h for h in self.hosts if h.bucket == bucket]
+
+    def get_host(self, name: str) -> Host | None:
+        """Look up a host by name."""
+        return next((h for h in self.hosts if h.name == name), None)
+
+    def __repr__(self) -> str:
+        status = "healthy" if self.healthy else f"{len(self.unhealthy_hosts)} unhealthy"
+        return f"Fleet({self.host_count} hosts, {status})"
+
+
+def _deploy_targets_host(record: DeployRecord, host_name: str) -> bool:
+    """Check if a deploy record targeted a specific host."""
+    if not record.host_limit:
+        return True
+    return host_name in record.host_limit
+
+
+def build_fleet(env: dict[str, str], state_dir: Path) -> Fleet:
+    """Build a Fleet from the HostRegistry, deploy history, and live telemetry.
+
+    Wires together four data sources into a single domain object:
+    1. Host identity from registry.json (via HostRegistry)
+    2. Deploy history from deploy_history.json
+    3. Live telemetry from nodes.json (callhome heartbeats)
+    4. TCP probes for hosts without heartbeat data
+    """
+    registry = HostRegistry(state_dir)
+    registry.seed_from_env(env)
+
+    history = load_deploy_history(state_dir)
+    nodes = load_node_registry(state_dir)
+
+    node_map: dict[str, RegisteredNode] = {}
+    for n in nodes:
+        node_map[n.hostname] = n
+        node_map[n.node_id] = n
+
+    hosts: list[Host] = []
+    for rec in registry.all():
+        host = Host(
+            name=rec.name,
+            ip=rec.ip,
+            is_lan=rec.is_lan,
+            wol_capable=rec.wol_capable,
+            vpn_ip=rec.vpn_ip,
+            bucket=rec.bucket,
+            mac=rec.mac,
+        )
+        for record in history:
+            if _deploy_targets_host(record, host.name):
+                host.deploys.append(record)
+
+        node = node_map.get(rec.name)
+        if node:
+            host.attach_telemetry(HostTelemetry(
+                node_id=node.node_id,
+                last_ip=node.last_ip,
+                local_ips=node.local_ips,
+                first_seen=node.first_seen,
+                last_seen=node.last_seen,
+                uptime_seconds=node.uptime_seconds,
+                services=node.services,
+                disk_usage_pct=node.disk_usage_pct,
+                memory_usage_pct=node.memory_usage_pct,
+                version=node.version,
+                status=node.status,
+                container_health=node.container_health,
+            ))
+        hosts.append(host)
+
+    _probe_reachable_hosts(hosts)
+
+    return Fleet(hosts)
+
+
+def _probe_reachable_hosts(hosts: list[Host]) -> None:
+    """Fast parallel TCP port-22 probe for hosts without heartbeat data.
+
+    Tries the primary IP first. For nationally distributed units behind
+    NAT/firewalls where the primary IP is unreachable, falls back to the
+    WireGuard VPN IP which traverses the firewall via the persistent
+    tunnel. LAN hosts (need ProxyCommand) are probed via VPN if
+    configured, since the VPN bypasses the router dependency.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    probeable = [h for h in hosts if not h.telemetry and (h.ip or h.vpn_ip)]
+    if not probeable:
+        return
+
+    def _probe(host: Host) -> None:
+        if host.ip and not host.is_lan:
+            if build.probe_host(host.ip, timeout=2.0):
+                host.reachable = True
+                return
+        if host.vpn_ip:
+            host.reachable = build.probe_host(host.vpn_ip, timeout=2.0)
+        elif not host.is_lan:
+            host.reachable = False
+
+    with ThreadPoolExecutor(max_workers=min(len(probeable), 10)) as pool:
+        list(pool.map(_probe, probeable))
 
 
 def build_deploy_command(
@@ -759,19 +1766,6 @@ def get_mesh_nodes() -> tuple[str, list[str]]:
     return "home", ["mesh1", "mesh2"]
 
 
-def get_all_wifi_nodes() -> list[dict]:
-    """Return all WiFi-capable nodes with their default roles.
-
-    Unified view for the manager to know which nodes can be
-    mode-switched and what their default role is.
-    """
-    mesh_ap, mesh_stas = get_mesh_nodes()
-    return [
-        {"node_id": mesh_ap, "label": "Router (home)", "default_role": "ap", "type": "mesh"},
-        *[{"node_id": s, "label": s, "default_role": "sta", "type": "mesh"} for s in mesh_stas],
-        *[{**n, "type": "bridge"} for n in get_bridge_nodes()],
-    ]
-
 
 def get_router_node() -> str:
     """Return the router node ID."""
@@ -903,35 +1897,16 @@ def format_uptime(seconds: float) -> str:
 
 def format_node_status(status: str) -> str:
     """Status string with Unicode indicator dot."""
-    if status == "online":
-        return "\u25cf Online"
-    if status == "stale":
-        return "\u25cb Stale"
-    return "\u25cb Offline"
+    labels = {
+        "online": "\u25cf Online",
+        "stale": "\u25cb Stale",
+        "reachable": "\u25cb Reachable",
+        "unreachable": "\u25cf Unreachable",
+        "unknown": "\u25cb Unknown",
+        "offline": "\u25cb Offline",
+    }
+    return labels.get(status, "\u25cb Offline")
 
-
-def fleet_summary(nodes: list[RegisteredNode]) -> tuple[str, str]:
-    """Compute a one-line fleet summary and its status level.
-
-    Returns (text, status) where status is "success", "warning", "error", or "info".
-    """
-    if not nodes:
-        return "No nodes registered", "info"
-    online = sum(1 for n in nodes if n.status == "online")
-    total = len(nodes)
-    if online == total:
-        return f"All {total} nodes online", "success"
-    stale = sum(1 for n in nodes if n.status == "stale")
-    offline = sum(1 for n in nodes if n.status == "offline")
-    parts = []
-    if online:
-        parts.append(f"{online} online")
-    if stale:
-        parts.append(f"{stale} stale")
-    if offline:
-        parts.append(f"{offline} offline")
-    level = "warning" if online > 0 else "error"
-    return " · ".join(parts), level
 
 
 def _compute_node_status(last_seen: str) -> str:
@@ -1031,7 +2006,14 @@ def _write_fleet_ips(state_dir: Path, nodes: list[RegisteredNode]) -> None:
 
 
 def register_checkin(state_dir: Path, checkin: NodeCheckin, remote_ip: str) -> RegisteredNode:
-    """Process a call-home heartbeat: upsert the node in the registry.
+    """Process a call-home heartbeat: upsert the node in ``nodes.json``.
+
+    Heartbeats update the live telemetry store (``nodes.json``) only.
+    The ``HostRegistry`` (``registry.json``) is NOT modified here — it
+    contains physical host identities seeded from env vars or manual
+    registration. Containers heartbeat their health data into
+    ``nodes.json``; the fleet dashboard groups that data under the
+    parent host, never as independent fleet members.
 
     Emits SSE events on state transitions:
       - ``container_ready``  — first check-in or readiness flip to True
@@ -1149,6 +2131,8 @@ def check_container_ready(state_dir: Path, container_id: str) -> dict:
     A container is ready when:
       - It was seen within CONTAINER_READY_SECONDS
       - Its container_health.ready flag is True (if container_health present)
+
+    Also searches nested containers in extensions.containers (3-tier model).
     """
     nodes = load_node_registry(state_dir)
     for n in nodes:
@@ -1173,6 +2157,21 @@ def check_container_ready(state_dir: Path, container_id: str) -> dict:
                 "systemd_services": {},
                 "listening_ports": [],
             }
+        if n.container_health:
+            nested = n.container_health.extensions.get("containers", {})
+            if container_id in nested:
+                ct = nested[container_id]
+                recent = _is_recently_seen(n.last_seen)
+                return {
+                    "container_id": container_id,
+                    "ready": recent and ct.get("ready", False),
+                    "status": "running" if ct.get("ready") else "degraded",
+                    "last_seen": ct.get("last_seen", n.last_seen),
+                    "systemd_services": {},
+                    "listening_ports": [],
+                    "extensions": {},
+                    "host": n.hostname,
+                }
     return {
         "container_id": container_id,
         "ready": False,
@@ -1188,8 +2187,12 @@ def check_fleet_readiness(
 ) -> dict:
     """Check readiness of multiple services at once.
 
-    Matches expected service names against container_health.container_id,
-    hostname, or node_id in the registry.
+    Matches expected service names against:
+    1. Top-level hostname / node_id / container_health.container_id
+    2. Nested containers in extensions.containers (3-tier Manager relay)
+
+    In the 3-tier model, Managers relay host-level heartbeats that embed
+    container data in ``container_health.extensions.containers``.
     """
     nodes = load_node_registry(state_dir)
     results: dict[str, dict] = {}
@@ -1214,6 +2217,20 @@ def check_fleet_readiness(
                 }
                 found = True
                 break
+
+            if not found and n.container_health:
+                nested = n.container_health.extensions.get("containers", {})
+                if svc in nested:
+                    ct_info = nested[svc]
+                    recent = _is_recently_seen(n.last_seen)
+                    results[svc] = {
+                        "ready": recent and ct_info.get("ready", False),
+                        "status": "running" if ct_info.get("ready") else "degraded",
+                        "last_seen": ct_info.get("last_seen", n.last_seen),
+                        "node_id": n.node_id,
+                    }
+                    found = True
+                    break
         if not found:
             results[svc] = {
                 "ready": False,
@@ -1243,6 +2260,7 @@ def check_fleet_staleness(
       - stale: previously seen but heartbeat expired (circuit breaker trigger)
       - never_seen: no record — still provisioning, not an error
 
+    Also checks nested containers in extensions.containers (3-tier model).
     Returns ``has_stale: True`` when any service has regressed from healthy
     to stale, signaling that something went wrong mid-run.
     """
@@ -1272,6 +2290,22 @@ def check_fleet_staleness(
                     })
                 found = True
                 break
+
+            if not found and n.container_health:
+                nested = n.container_health.extensions.get("containers", {})
+                if svc in nested:
+                    recent = _is_recently_seen(n.last_seen, max_age_seconds)
+                    if recent:
+                        healthy.append(svc)
+                    else:
+                        stale.append({
+                            "service": svc,
+                            "last_seen": n.last_seen,
+                            "node_id": n.node_id,
+                            "status": n.status,
+                        })
+                    found = True
+                    break
         if not found:
             never_seen.append(svc)
 

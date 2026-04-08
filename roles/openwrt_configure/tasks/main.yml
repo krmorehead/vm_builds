@@ -281,14 +281,15 @@
 
 - name: Remove existing DHCP reservations for proxmox host
   ansible.builtin.raw: |
-    while uci -q get dhcp.@host[-1] >/dev/null 2>&1; do
-      name=$(uci -q get dhcp.@host[-1].name 2>/dev/null)
-      mac=$(uci -q get dhcp.@host[-1].mac 2>/dev/null | tr 'A-F' 'a-f')
-      target_mac=$(echo '{{ _lan_bridge_mac.stdout | trim }}' | tr 'A-F' 'a-f')
+    target_mac=$(echo '{{ _lan_bridge_mac.stdout | trim }}' | tr 'A-F' 'a-f')
+    idx=0
+    while uci -q get dhcp.@host[$idx] >/dev/null 2>&1; do
+      name=$(uci -q get dhcp.@host[$idx].name 2>/dev/null)
+      mac=$(uci -q get dhcp.@host[$idx].mac 2>/dev/null | tr 'A-F' 'a-f')
       if [ "$name" = "proxmox" ] || [ "$mac" = "$target_mac" ]; then
-        uci delete dhcp.@host[-1]
+        uci delete dhcp.@host[$idx]
       else
-        break
+        idx=$((idx + 1))
       fi
     done
   changed_when: false

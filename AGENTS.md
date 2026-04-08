@@ -56,6 +56,9 @@ This tree organizes all skills by domain area to help agents quickly find releva
 - **ansible-shell-safety** — Shell task patterns, pipefail requirements, heredoc pitfalls
 - **python-code-style** — Python conventions, error handling, type hints
 - **writing-skills** — Skill writing patterns and documentation standards
+- **webui-design-system** — NiceGUI design system, color semantics, scalable test constants
+- **webui-manual-testing** — Manual testing procedures for SuperManager, Manager, and Kiosk UIs
+- **webui-ux-principles** — UX design principles: color semantics, icon choices, layout, information hierarchy
 
 ### **Build & Scripting**
 - **build-entry-point** — Build.py orchestration, shell delegation, host probing
@@ -73,6 +76,7 @@ This tree organizes all skills by domain area to help agents quickly find releva
 - **molecule-group-reconstruction** — Dynamic group patterns and reconstruction
 - **clean-baselines** — Baseline establishment and maintenance patterns
 - **use-idle-time** — Productive wait time utilization during test runs
+- **code-review-checklist** — Code review covering MVC/OOP separation, Ansible safety, UI conventions, test quality
 
 ### **Network & OpenWrt Patterns**
 - **openwrt-busybox-constraints** — BusyBox ash shell limitations and constraints for OpenWrt
@@ -130,6 +134,7 @@ This tree organizes all skills by domain area to help agents quickly find releva
 - **learn-from-mistakes** — Update skills and rules when encountering new issues to prevent recurrence
 - **opencode-rules-writing** — Skill writing patterns and LLM-optimized skills
 - **early-validation-patterns** — Proactive validation patterns to catch issues early and prevent debugging blind
+- **code-review-checklist** — Code review checklist covering MVC/OOP separation, Ansible safety, UI conventions, and test quality
 
 ## Project Structure
 
@@ -221,10 +226,11 @@ pytest tests/ -v
 - Validate with: `ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST "echo test"` and `ansible home -m ping`
 
 **MANDATORY: Heartbeat API Server (callhome)**
-- `.state/callhome_url` is the SOLE source of truth for `callhome_server`. Both `build.py` (production) and `prepare.yml` (test) write this file. Ansible hard-fails if it is missing.
+- `.state/callhome_url` is the SOLE source of truth for `callhome_server`. Both `build.py` (production), `prepare.yml` (test), and the NiceGUI app write this file on startup. Ansible hard-fails if it is missing.
 - `prepare.yml` starts the headless API server automatically before converge. `cleanup.yml` stops it.
 - NEVER hardcode `CALLHOME_SERVER` in env files. The URL is detected dynamically.
-- During molecule runs, query `http://localhost:8088/api/fleet/health` for real-time fleet status.
+- ALL ports are controlled by the `WEBUI_PORT` env var (default: 52500, set to 52525 in test.env/.env). This port MUST be open in the controller's firewall.
+- During molecule runs, query `http://localhost:$WEBUI_PORT/api/fleet/health` for real-time fleet status.
 
 **MANDATORY: Testing Workflow**
 - Use `molecule converge + verify` for day-to-day iteration (preserves baseline)
@@ -341,6 +347,13 @@ For async patterns: @.agents/skills/async-job-patterns
 - Testing workflow: @.agents/skills/testing-workflow
 - Performance optimization: @.agents/skills/molecule-performance
 - Diagnostics patterns: @.agents/skills/openwrt-diagnostics
+- Code review (MVC, safety, conventions): @.agents/skills/code-review-checklist
+- Manual UI testing: @.agents/skills/webui-manual-testing
+
+**Web UI Design and UX:**
+- Design system (colors, CSS, constants): @.agents/skills/webui-design-system
+- UX principles (human-intuitive design): @.agents/skills/webui-ux-principles
+- Manual testing procedures: @.agents/skills/webui-manual-testing
 
 **Runtime Operations & Fleet Management (3-tier hierarchy):**
 - Manager API pattern: @.agents/skills/manager-api-pattern

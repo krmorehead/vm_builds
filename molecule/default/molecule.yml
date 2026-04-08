@@ -49,10 +49,12 @@ platforms:
     groups:
       - proxmox
       - bridge_nodes
+      - kiosk_nodes
   - name: bridge-2
     groups:
       - proxmox
       - bridge_nodes
+      - kiosk_nodes
 
 provisioner:
   name: ansible

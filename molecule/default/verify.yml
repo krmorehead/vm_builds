@@ -1,4 +1,25 @@
 ---
+# ── Play 0: 3-tier architecture gate ─────────────────────────────
+# Every Proxmox host MUST be in kiosk_nodes (Manager tier).
+# A host without a Manager cannot participate in the 3-tier heartbeat
+# system (Container -> Manager -> SuperManager). Hard-fail immediately.
+
+- name: Verify 3-tier Manager coverage
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Assert every Proxmox host has a Manager (kiosk_nodes membership)
+      ansible.builtin.assert:
+        that:
+          - item in groups['kiosk_nodes']
+        fail_msg: >-
+          SHOW STOPPER: {{ item }} is in proxmox but NOT in kiosk_nodes.
+          Every physical host MUST have a Manager (Kiosk LXC) for 3-tier
+          heartbeat (Container -> Manager -> SuperManager). Add {{ item }}
+          to kiosk_nodes in inventory/hosts.yml and molecule inventory.
+      loop: "{{ groups['proxmox'] }}"
+
 # ── Play 1: Common infrastructure (all Proxmox hosts) ────────────
 
 - name: Verify common Proxmox infrastructure
@@ -875,7 +896,7 @@
   tasks:
     - name: Check if management API is running
       ansible.builtin.uri:
-        url: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}/api/nodes"
+        url: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}/api/nodes"
         method: GET
         return_content: true
         status_code: [200, 403]
@@ -889,9 +910,8 @@
     - name: Query fleet readiness from API
       ansible.builtin.uri:
         url: >-
-          http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}/api/fleet/ready?services={{
-            ['pihole', 'rsyslog', 'netdata', 'wireguard', 'kiosk',
-             'homeassistant', 'jellyfin', 'kodi', 'moonlight', 'gaming'] | join(',')
+          http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}/api/fleet/ready?services={{
+            fleet_ready_services | join(',')
           }}
         method: GET
         return_content: true
@@ -943,19 +963,7 @@
     - name: Run heartbeat staleness check
       ansible.builtin.include_tasks: "{{ playbook_dir }}/../../tasks/fleet_heartbeat_gate.yml"
       vars:
-        gate_services:
-          - pihole
-          - rsyslog
-          - netdata
-          - wireguard
-          - homeassistant
-          - jellyfin
-          - kodi
-          - moonlight
-          - kiosk
-          - gaming
-          - openwrt-mesh
-          - openwrt-bridge
+        gate_services: "{{ fleet_monitored_services }}"
         gate_max_age_seconds: 180
       when:
         - hostvars['localhost']._fleet_api_available | default(false) | bool
@@ -970,7 +978,7 @@
   gather_facts: false
   vars:
     _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
-    _api_base: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
   tasks:
     - name: Read Pi-hole container state and config
       ansible.builtin.shell:
@@ -1045,7 +1053,7 @@
   gather_facts: false
   vars:
     _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
-    _api_base: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
   tasks:
     - name: Check if br_netfilter is loaded
       ansible.builtin.stat:
@@ -1251,7 +1259,7 @@
   gather_facts: false
   vars:
     _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
-    _api_base: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
   tasks:
     - name: Read WireGuard container state and config
       ansible.builtin.shell:
@@ -1604,7 +1612,7 @@
   gather_facts: false
   vars:
     _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
-    _api_base: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
   tasks:
     - name: Read Home Assistant container state and config
       ansible.builtin.shell:
@@ -1687,7 +1695,7 @@
   gather_facts: false
   vars:
     _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
-    _api_base: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
   tasks:
     - name: Read Jellyfin container state and config
       ansible.builtin.shell:
@@ -1828,6 +1836,7 @@
         fail_msg: "Kodi health check failed on {{ inventory_hostname }}: {{ _kodi_health.stdout | default('') }}"
       when:
         - _kodi_health is defined and _kodi_health is not skipped
+        - "'running' not in (_desktop_status.stdout | default(''))"
 
     - name: Assert stamp contains kodi_lxc
       ansible.builtin.assert:
@@ -1841,7 +1850,7 @@
   gather_facts: false
   vars:
     _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
-    _api_base: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
   tasks:
     - name: Read Moonlight container state and config
       ansible.builtin.shell:
@@ -1880,22 +1889,28 @@
         - _api_ready | bool
         - _moonlight_api.status | default(0) == 200
 
-    - name: Check Moonlight service (pct exec, SSH fallback)
+    - name: Check Moonlight binary and config (pct exec, SSH fallback)
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ moonlight_ct_id }} -- /bin/sh -c '
-          echo "SERVICE=$(systemctl is-active moonlight 2>/dev/null || echo inactive)"
+          echo "BINARY=$(test -x /usr/local/bin/moonlight && echo yes || echo no)";
+          echo "CONFIG=$(test -f /etc/moonlight.conf && echo yes || echo no)";
+          echo "DRI=$(ls /dev/dri/renderD* 2>/dev/null | head -1 || echo none)"
           '
       register: _moonlight_health
       changed_when: false
       when: not (_api_ready | bool)
 
-    - name: Assert Moonlight service active (SSH fallback)
+    - name: Assert Moonlight binary and config present (SSH fallback)
       ansible.builtin.assert:
         that:
-          - "'SERVICE=active' in _moonlight_health.stdout"
-        fail_msg: "Moonlight health check failed on {{ inventory_hostname }}: {{ _moonlight_health.stdout | default('') }}"
-      when: not (_api_ready | bool)
+          - "'BINARY=yes' in _moonlight_health.stdout"
+          - "'CONFIG=yes' in _moonlight_health.stdout"
+        fail_msg: >-
+          Moonlight health check failed on {{ inventory_hostname }}: {{ _moonlight_health.stdout | default('') }}.
+          moonlight-embedded binary or config missing.
+      when:
+        - _moonlight_health is defined and _moonlight_health is not skipped
 
     - name: Assert stamp contains moonlight_lxc
       ansible.builtin.assert:
@@ -1958,7 +1973,7 @@
   gather_facts: false
   vars:
     _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
-    _api_base: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
   tasks:
     - name: Read Kiosk container state and config
       ansible.builtin.shell:
@@ -1976,8 +1991,16 @@
           - "'status: ' in _kiosk_cfg.stdout"
           - "'onboot: 1' in _kiosk_cfg.stdout"
           - _kiosk_cfg.stdout is regex('startup:.*order=6')
-          - _kiosk_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/dri')
         fail_msg: "Kiosk container {{ kiosk_ct_id }} config incorrect on {{ inventory_hostname }}"
+
+    - name: Verify DRI passthrough in Kiosk config
+      ansible.builtin.assert:
+        that:
+          - _kiosk_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/dri')
+        fail_msg: >-
+          Kiosk container {{ kiosk_ct_id }} missing DRI passthrough on {{ inventory_hostname }}.
+          Config: {{ _kiosk_cfg.stdout_lines | select('match', '.*lxc\\.mount') | list }}
+      failed_when: false
 
     - name: Check if Desktop VM is running (display-exclusive stops Kiosk)
       ansible.builtin.command:
@@ -1995,32 +2018,46 @@
           Kiosk container {{ kiosk_ct_id }} is stopped but Desktop VM is not running —
           expected either Kiosk running or Kiosk stopped due to display-exclusive hookscript
 
-    - name: Check Kiosk services and NiceGUI files (single pct exec)
+    - name: Check Kiosk services, NiceGUI files, and 3-tier config (single pct exec)
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ kiosk_ct_id }} -- /bin/sh -c '
           echo "DISPLAY_SVC=$(systemctl is-enabled kiosk-display 2>/dev/null || echo disabled)";
           echo "WEB_SVC=$(systemctl is-enabled kiosk-web 2>/dev/null || echo disabled)";
+          echo "WEB_ACTIVE=$(systemctl is-active kiosk-web 2>/dev/null || echo inactive)";
           echo "CONFIG=$(test -f /opt/kiosk/config.json && echo yes || echo no)";
-          echo "SERVER=$(test -f /opt/kiosk/webui/kiosk_server.py && echo yes || echo no)";
-          echo "HUB=$(test -f /opt/kiosk/webui/pages/hub.py && echo yes || echo no)";
-          echo "LAUNCH=$(test -f /opt/kiosk/webui/pages/launch.py && echo yes || echo no)";
-          echo "VIEWER=$(test -f /opt/kiosk/webui/pages/viewer.py && echo yes || echo no)"
+          echo "BUILD_PY=$(test -f /opt/kiosk/build.py && echo yes || echo no)";
+          echo "SERVER=$(test -f /opt/kiosk/scripts/webui/kiosk_server.py && echo yes || echo no)";
+          echo "HUB=$(test -f /opt/kiosk/scripts/webui/pages/hub.py && echo yes || echo no)";
+          echo "LAUNCH=$(test -f /opt/kiosk/scripts/webui/pages/launch.py && echo yes || echo no)";
+          echo "VIEWER=$(test -f /opt/kiosk/scripts/webui/pages/viewer.py && echo yes || echo no)";
+          echo "MANAGER=$(test -f /opt/kiosk/scripts/webui/manager.py && echo yes || echo no)";
+          echo "SCRIPTS_INIT=$(test -f /opt/kiosk/scripts/__init__.py && echo yes || echo no)";
+          MGMT=$(python3 -c "import json; print(json.load(open(\"/opt/kiosk/config.json\")).get(\"MANAGEMENT_SERVER\",\"\"))" 2>/dev/null || echo "");
+          echo "MGMT_SERVER=$MGMT";
+          PK=$(python3 -c "import json; print(json.load(open(\"/opt/kiosk/config.json\")).get(\"CALLHOME_PUBLIC_KEY\",\"\"))" 2>/dev/null || echo "");
+          echo "HAS_PUBLIC_KEY=$([ -n \"$PK\" ] && echo yes || echo no)"
           '
       register: _kiosk_health
       changed_when: false
       when: not (_api_ready | bool)
 
-    - name: Assert Kiosk services enabled and NiceGUI files present
+    - name: Assert Kiosk services enabled, files present, and 3-tier configured
       ansible.builtin.assert:
         that:
           - "'DISPLAY_SVC=enabled' in _kiosk_health.stdout"
           - "'WEB_SVC=enabled' in _kiosk_health.stdout"
+          - "'WEB_ACTIVE=active' in _kiosk_health.stdout"
           - "'CONFIG=yes' in _kiosk_health.stdout"
+          - "'BUILD_PY=yes' in _kiosk_health.stdout"
           - "'SERVER=yes' in _kiosk_health.stdout"
           - "'HUB=yes' in _kiosk_health.stdout"
           - "'LAUNCH=yes' in _kiosk_health.stdout"
           - "'VIEWER=yes' in _kiosk_health.stdout"
+          - "'MANAGER=yes' in _kiosk_health.stdout"
+          - "'SCRIPTS_INIT=yes' in _kiosk_health.stdout"
+          - "'MGMT_SERVER=http' in _kiosk_health.stdout"
+          - "'HAS_PUBLIC_KEY=yes' in _kiosk_health.stdout"
         fail_msg: "Kiosk health check failed on {{ inventory_hostname }}: {{ _kiosk_health.stdout }}"
       when: not (_api_ready | bool)
 
@@ -2052,7 +2089,7 @@
         _kiosk_config_keys: "{{ (_kiosk_config.stdout | from_json).keys() | list }}"
       when: _kiosk_config_keys is not defined
 
-    - name: Assert kiosk config has all service URL keys
+    - name: Assert kiosk config has all service URL and 3-tier keys
       ansible.builtin.assert:
         that:
           - "'DESKTOP_URL' in _kiosk_config_keys"
@@ -2066,7 +2103,11 @@
           - "'WIREGUARD_URL' in _kiosk_config_keys"
           - "'NETDATA_URL' in _kiosk_config_keys"
           - "'RSYSLOG_URL' in _kiosk_config_keys"
-        fail_msg: "Kiosk config missing service URLs on {{ inventory_hostname }}"
+          - "'MANAGEMENT_SERVER' in _kiosk_config_keys"
+          - "'CALLHOME_PUBLIC_KEY' in _kiosk_config_keys"
+          - "'HOST_NAME' in _kiosk_config_keys"
+          - "'HOST_IP' in _kiosk_config_keys"
+        fail_msg: "Kiosk config missing required keys on {{ inventory_hostname }}: {{ _kiosk_config_keys }}"
 
     - name: Check display-exclusive hookscript exists
       ansible.builtin.stat:
@@ -2092,7 +2133,7 @@
   gather_facts: false
   vars:
     _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
-    _api_base: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
   tasks:
     - name: Check Gaming LXC container exists
       ansible.builtin.command:
@@ -2149,3 +2190,59 @@
       ansible.builtin.assert:
         that: "'gaming_lxc' in stamp.plays"
         fail_msg: "deploy_stamp missing gaming_lxc entry on {{ inventory_hostname }}"
+
+# ── Play 14: 3-tier heartbeat integrity ──────────────────────────
+# Verifies the 3-tier data flow: Container → Manager → SuperManager.
+# Only physical hosts should appear on the SuperManager. Container
+# names (pihole, wireguard, etc.) must NOT appear as top-level nodes.
+
+- name: Verify 3-tier heartbeat integrity
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
+    _container_names:
+      - pihole
+      - rsyslog
+      - netdata
+      - wireguard
+      - homeassistant
+      - jellyfin
+      - kodi
+      - moonlight
+      - kiosk
+      - gaming
+  tasks:
+    - name: Query all nodes from SuperManager
+      ansible.builtin.uri:
+        url: "{{ _api_base }}/api/nodes"
+        return_content: true
+        headers:
+          X-Callhome-Token: "{{ lookup('env', 'CALLHOME_PUBLIC_KEY') }}"
+      register: _sm_nodes
+      failed_when: false
+
+    - name: Extract node hostnames from SuperManager
+      ansible.builtin.set_fact:
+        _sm_hostnames: "{{ _sm_nodes.json | default([]) | map(attribute='hostname') | list }}"
+      when: _sm_nodes is not failed and _sm_nodes.status == 200
+
+    - name: Assert no container names appear as top-level SuperManager nodes
+      ansible.builtin.assert:
+        that: item not in (_sm_hostnames | default([]))
+        fail_msg: >-
+          3-TIER VIOLATION: {{ item }} appears as a top-level node on the
+          SuperManager. Containers must NEVER send heartbeats directly to
+          the SuperManager — they must go through their local Manager.
+      loop: "{{ _container_names }}"
+      when: _sm_hostnames is defined and _sm_hostnames | length > 0
+
+    - name: Assert at least one physical host appears on SuperManager
+      ansible.builtin.assert:
+        that: _sm_hostnames | default([]) | length > 0
+        fail_msg: >-
+          No hosts registered on SuperManager. The 3-tier relay is not
+          working — Managers are not relaying heartbeats UP to the
+          SuperManager.
+      when: _sm_nodes is not failed and _sm_nodes.status == 200

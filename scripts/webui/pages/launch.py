@@ -18,7 +18,7 @@ import httpx
 from nicegui import ui
 
 from scripts.webui import theme
-from scripts.webui.data import DISPLAY_APPS, get_api_base_url
+from scripts.webui.data import DISPLAY_APPS, Labels, Routes, get_api_base_url
 
 
 async def _launch_guest(vmid: str) -> dict:
@@ -30,7 +30,7 @@ async def _launch_guest(vmid: str) -> dict:
                 timeout=5,
             )
             return resp.json()
-    except Exception:
+    except (httpx.HTTPError, OSError):
         return {"success": True, "note": "display handoff in progress"}
 
 
@@ -68,8 +68,8 @@ def register() -> None:
                     f"color: {theme.COLOR_ERROR}"
                 )
                 ui.button(
-                    "Back to Hub", icon="home",
-                    on_click=lambda: ui.navigate.to("/hub"),
+                    Labels.BACK_TO_HUB, icon="home",
+                    on_click=lambda: ui.navigate.to(Routes.HUB),
                 ).classes("action-btn mt-4")
                 return
 

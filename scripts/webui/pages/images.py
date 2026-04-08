@@ -5,6 +5,7 @@ from __future__ import annotations
 from nicegui import ui
 
 from scripts.webui import data, theme
+from scripts.webui.data import Labels, PageTitles
 from scripts.webui.run_process import stream_process
 
 LOCAL_TARGETS = [
@@ -23,7 +24,7 @@ def register() -> None:
         state: dict = {"building": False}
 
         with theme.page_shell("images"):
-            theme.page_header("Image Management")
+            theme.page_header(PageTitles.IMAGES)
 
             status_summary = ui.label("").classes("text-sm")
 
@@ -120,14 +121,14 @@ def register() -> None:
                 await _run_build(cmd)
 
             with ui.row().classes("gap-3"):
-                ui.button("Refresh", icon="refresh", on_click=_refresh_table).classes("subtle-btn")
+                ui.button(Labels.REFRESH, icon="refresh", on_click=_refresh_table).classes("subtle-btn")
                 build_btn = ui.button(
-                    "Build Selected",
+                    Labels.BUILD_SELECTED,
                     icon="build",
                     on_click=_build_selected,
                 ).classes("outline-btn")
                 build_all_btn = ui.button(
-                    "Build All (Parallel)",
+                    Labels.BUILD_ALL,
                     icon="rocket_launch",
                     on_click=_build_all,
                 ).classes("action-btn")

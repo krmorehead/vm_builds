@@ -7,6 +7,7 @@ import asyncio
 from nicegui import ui
 
 from scripts.webui import data, theme
+from scripts.webui.data import Labels, PageTitles
 from scripts.webui.components import test_ssh_from_table
 
 
@@ -20,7 +21,7 @@ def register() -> None:
         statuses: dict[str, data.HostStatus] = {}
 
         with theme.page_shell("hosts"):
-            theme.page_header("Host Connectivity")
+            theme.page_header(PageTitles.HOSTS)
 
             status_label = ui.label("").classes("text-sm")
 
@@ -89,7 +90,7 @@ def register() -> None:
                 _populate_table()
 
             with ui.row().classes("gap-3"):
-                ui.button("Probe All", icon="wifi_find", on_click=_probe_hosts).classes("action-btn")
-                ui.button("Test SSH", icon="terminal", on_click=lambda: test_ssh_from_table(table)).classes("outline-btn")
+                ui.button(Labels.PROBE_ALL, icon="wifi_find", on_click=_probe_hosts).classes("action-btn")
+                ui.button(Labels.TEST_SSH, icon="terminal", on_click=lambda: test_ssh_from_table(table)).classes("outline-btn")
 
             _populate_table()

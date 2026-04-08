@@ -140,6 +140,8 @@ alwaysApply: true
 - After disabling enterprise repos, add the no-subscription repo (`pve-no-subscription`) so Proxmox packages remain updateable.
 - ALWAYS add cleanup tasks that restore `.disabled` repos to their original names and remove the no-subscription repo file.
 - Previous bug: `Enabled: false` and `Enabled: no` appended to deb822 files were silently ignored by apt, causing all `apt-get` operations to hang on the enterprise repo connection.
+- Enterprise repo disabling MUST happen in `pre_tasks` of infrastructure plays, before ANY role that runs `apt update`. Placing it in `proxmox_igpu` (which runs after `proxmox_pci_passthrough`) leaves earlier roles exposed to enterprise repo failures.
+- Previous bug: `proxmox_pci_passthrough` ran `apt update` for firmware packages before `proxmox_igpu` disabled enterprise repos. `mesh2` failed with 401 Unauthorized from `enterprise.proxmox.com`. Fix: moved repo disabling to `pre_tasks` of both infra plays in `site.yml`.
 
 ## DNS resolution
 - After cleanup destroys the OpenWrt router VM, `/etc/resolv.conf` on the Proxmox host still points to `10.10.10.1` (the router's LAN IP). Without the router running, DNS breaks and all `apt` operations hang.
@@ -321,12 +323,27 @@ alwaysApply: true
 ## Host recoverability and WoL safety
 - Every host MUST declare `wol_capable` (true/false) in host_vars. This tracks whether the host can be remotely recovered after a crash or shutdown.
 - USB ethernet adapters do NOT support WoL. Hosts connected via USB ethernet only (e.g., `ai`) MUST have `wol_capable: false`.
-- NEVER use `modprobe -r` for GPU driver cleanup. ALWAYS use sysfs operations: unbind from vfio-pci, clear `driver_override`, PCI bus rescan. This is safe on ALL hosts regardless of GPU count. The PCI rescan triggers the kernel to auto-bind the native driver without module unload/reload.
+- NEVER use `modprobe -r` for GPU driver cleanup. ALWAYS use sysfs operations: unbind from vfio-pci, clear `driver_override`, PCI bus rescan, then EXPLICITLY bind to the native driver (`echo PCI_ADDR > /sys/bus/pci/drivers/<driver>/bind`). PCI rescan alone does NOT auto-bind when the module is already loaded. This is safe on ALL hosts regardless of GPU count.
 - NEVER shut down, crash, or run destructive kernel operations on hosts with `wol_capable: false`. These hosts cannot be recovered remotely.
 - `scripts/wol.sh` MUST NOT include non-WoL hosts. `tests/test_wol.py` enforces this.
 - The E2E verify playbook asserts `wol_capable` is defined for every host and that non-WoL hosts don't appear in wol.sh.
 - Previous bug: E2E cleanup ran `modprobe -r amdgpu` on `ai` (single AMD GPU, USB ethernet). Kernel panicked, host crashed. Required physical power-on. Fix: replaced all GPU `modprobe -r` with sysfs unbind + PCI rescan. Now safe on any host.
 - Previous bug: `ai` was listed in `wol.sh` with its PCIe NIC MAC, but `ai` is connected via USB ethernet only. WoL was impossible.
+
+## OpenWrt LXC default LAN IP collision
+- OpenWrt LXC containers boot with 192.168.1.1 on br-lan regardless of the Proxmox-assigned static IP. On WAN-bridged hosts, this collides with the router VM's bootstrap target (also 192.168.1.1).
+- OpenWrt LXC provision roles MUST override the default LAN IP to the assigned container IP via `uci set network.lan.ipaddr` during provisioning — not just in the configure role.
+- The `openwrt_vm` role MUST detect already-configured VMs (LAN IP reachable) and skip bootstrap. On re-runs the bootstrap IP (192.168.1.1) no longer exists.
+- Previous bug: Bridge LXC containers on bridge-1/bridge-2 had 192.168.1.1 on vmbr0. The `openwrt_vm` bootstrap SSH connected to a bridge container instead of the VM. Configure failed with "No LAN devices found" because the container only had 1 interface.
+
+## pmxcfs file operations
+- NEVER use `echo >> /etc/pve/lxc/<CTID>.conf` or any append operation on pmxcfs files. The Proxmox cluster filesystem rejects POSIX append with "File exists" error.
+- ALWAYS use read-modify-write: `cp` to `/tmp`, modify, `cp` back.
+- Previous bug: `lxc_device_passthrough.yml` used `echo >> $lxc_conf` to add mount entries. Failed on ai and mesh2 with "File exists."
+
+## OpenWrt DHCP static lease management
+- When removing DHCP static leases via UCI, iterate from index 0 upward, NOT from `@host[-1]`. Iterating from the end with `break` on non-match stops early, leaving duplicates earlier in the list.
+- Previous bug: The cleanup loop used `@host[-1]` and broke on the first non-proxmox entry from the end. A proxmox entry earlier in the list survived, and the add task created a duplicate. Dnsmasq refused to start: "duplicate dhcp-host IP address 10.10.10.2."
 
 ## Documentation accuracy
 - When changing a role's exported facts, bridge names, device paths, or connection patterns, ALWAYS update `docs/architecture/` in the same commit.

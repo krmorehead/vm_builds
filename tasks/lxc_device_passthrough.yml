@@ -7,13 +7,27 @@
 #   lxc_dev_ct_id          — container VMID (e.g. {{ jellyfin_ct_id }})
 #   lxc_dev_conf_entries   — list of lxc.mount.entry / lxc.cgroup2 lines to add
 #
-# Consumed by: jellyfin_lxc, kodi_lxc, moonlight_lxc, gaming_lxc
+# Consumed by: jellyfin_lxc, kodi_lxc, moonlight_lxc, kiosk_lxc, gaming_lxc
+
+- name: Resolve container config path on this node
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      if [ -f "/etc/pve/lxc/{{ lxc_dev_ct_id }}.conf" ]; then
+        echo "/etc/pve/lxc/{{ lxc_dev_ct_id }}.conf"
+      else
+        node=$(hostname)
+        echo "/etc/pve/nodes/${node}/lxc/{{ lxc_dev_ct_id }}.conf"
+      fi
+    executable: /bin/bash
+  register: _lxc_conf_path
+  changed_when: false
 
 - name: Check for existing device mount entries
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
-      grep -c 'lxc.mount.entry.*dev/dri' /etc/pve/lxc/{{ lxc_dev_ct_id }}.conf 2>/dev/null || echo 0
+      grep -c 'lxc.mount.entry.*dev/dri' "{{ _lxc_conf_path.stdout | trim }}" 2>/dev/null || echo 0
     executable: /bin/bash
   register: _lxc_dev_mounts
   changed_when: false
@@ -29,14 +43,20 @@
 - name: Apply device bind mounts and cgroup allowlists
   ansible.builtin.shell:
     cmd: |
-      set -o pipefail
-      lxc_conf="/etc/pve/lxc/{{ lxc_dev_ct_id }}.conf"
+      set -euo pipefail
+      lxc_conf="{{ _lxc_conf_path.stdout | trim }}"
+      tmp_conf="/tmp/lxc-{{ lxc_dev_ct_id }}.conf"
+      cp "$lxc_conf" "$tmp_conf"
       {% for entry in lxc_dev_conf_entries %}
-      grep -qF "{{ entry }}" "$lxc_conf" 2>/dev/null || echo "{{ entry }}" >> "$lxc_conf"
+      grep -qF "{{ entry }}" "$tmp_conf" 2>/dev/null || echo "{{ entry }}" >> "$tmp_conf"
       {% endfor %}
+      cp "$tmp_conf" "$lxc_conf"
+      rm -f "$tmp_conf"
     executable: /bin/bash
   when: (_lxc_dev_mounts.stdout | trim | int) == 0
-  changed_when: true
+  register: _lxc_dev_apply
+  changed_when: _lxc_dev_apply.rc == 0
+  failed_when: _lxc_dev_apply.rc != 0
 
 - name: Start container with device mounts
   ansible.builtin.command:

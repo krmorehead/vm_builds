@@ -23,6 +23,36 @@ callhome_server: "{{ lookup('file', project_root + '/.state/callhome_url', error
 callhome_public_key: "{{ lookup('env', 'CALLHOME_PUBLIC_KEY') }}"
 callhome_private_key: "{{ lookup('env', 'CALLHOME_PRIVATE_KEY') }}"
 
+# Single source of truth for fleet service names used by readiness gates,
+# staleness checks, and the heartbeat watchdog. Add new services HERE.
+fleet_monitored_services:
+  - pihole
+  - rsyslog
+  - netdata
+  - wireguard
+  - homeassistant
+  - jellyfin
+  - kodi
+  - moonlight
+  - kiosk
+  - gaming
+  - openwrt-mesh
+  - openwrt-bridge
+
+# Subset used for pre-configure readiness (excludes mesh/bridge which
+# are provisioned later and don't have callhome yet at that point).
+fleet_ready_services:
+  - pihole
+  - rsyslog
+  - netdata
+  - wireguard
+  - homeassistant
+  - jellyfin
+  - kodi
+  - moonlight
+  - kiosk
+  - gaming
+
 # ── Storage ───────────────────────────────────────────────────────
 proxmox_storage: local-lvm
 
@@ -144,6 +174,7 @@ moonlight_ct_id: 302
 # ── Desktop Tier (400-499) ───────────────────────────────────────
 desktop_vm_id: 400
 kiosk_ct_id: 401
+kiosk_manager_port: "{{ lookup('env', 'KIOSK_MANAGER_PORT') | default('9001', true) }}"
 
 # ── Observability Tier (500-599) ─────────────────────────────────
 netdata_ct_id: 500

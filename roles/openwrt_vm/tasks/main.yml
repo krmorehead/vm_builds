@@ -209,6 +209,30 @@
     state: started
   delegate_to: localhost
 
+# ── Detect already-configured VM ─────────────────────────────────
+# On re-runs the VM is already configured with LAN on vmbr1 at
+# 10.10.10.1. The bootstrap IP (192.168.1.1) no longer exists.
+# Probe the configured LAN IP first; fall back to bootstrap only
+# for fresh VMs.
+
+- name: Check if OpenWrt is reachable on configured LAN IP
+  ansible.builtin.wait_for:
+    host: "{{ openwrt_lan_ip | default('10.10.10.1') }}"
+    port: 22
+    timeout: 5
+  register: _openwrt_lan_probe
+  failed_when: false
+  when: vm_exists | bool
+
+- name: Set connection target based on probe result
+  ansible.builtin.set_fact:
+    _openwrt_connect_ip: >-
+      {{ openwrt_lan_ip | default('10.10.10.1')
+         if (vm_exists | bool) and (_openwrt_lan_probe.state | default('')) == 'started'
+         else openwrt_bootstrap_gw }}
+    _openwrt_needs_bootstrap: >-
+      {{ not ((vm_exists | bool) and (_openwrt_lan_probe.state | default('')) == 'started') }}
+
 # ── Bootstrap connectivity to OpenWrt LAN ────────────────────────
 
 - name: Select LAN-side bridge for bootstrap
@@ -223,6 +247,7 @@
     cmd: ip addr show dev {{ _bootstrap_bridge }}
   register: bridge_addr
   changed_when: false
+  when: _openwrt_needs_bootstrap | bool
 
 - name: Add temporary IP to LAN bridge
   ansible.builtin.command:
@@ -230,14 +255,17 @@
       ip addr add
       {{ openwrt_bootstrap_ip }}/{{ openwrt_bootstrap_cidr }}
       dev {{ _bootstrap_bridge }}
-  when: "openwrt_bootstrap_ip not in bridge_addr.stdout"
+  when:
+    - _openwrt_needs_bootstrap | bool
+    - "openwrt_bootstrap_ip not in (bridge_addr.stdout | default(''))"
 
 - name: Wait for OpenWrt SSH on LAN interface
   ansible.builtin.wait_for:
-    host: "{{ openwrt_bootstrap_gw }}"
+    host: "{{ _openwrt_connect_ip }}"
     port: 22
     delay: 10
     timeout: 120
+  when: _openwrt_needs_bootstrap | bool
 
 - name: Bootstrap diagnostics
   ansible.builtin.shell:
@@ -256,7 +284,7 @@
 
 - name: Report bootstrap state
   ansible.builtin.debug:
-    var: _boot_diag.stdout_lines
+    msg: "connect_ip={{ _openwrt_connect_ip }}, needs_bootstrap={{ _openwrt_needs_bootstrap }}, {{ _boot_diag.stdout_lines | default([]) | join(', ') }}"
 
 - name: Detect upstream gateway IP for LAN subnet selection
   ansible.builtin.shell:
@@ -276,7 +304,7 @@
   ansible.builtin.add_host:
     name: "{{ openwrt_vm_name }}"
     groups: openwrt
-    ansible_host: "{{ openwrt_bootstrap_gw }}"
+    ansible_host: "{{ _openwrt_connect_ip }}"
     ansible_user: root
     ansible_ssh_pass: ""
     ansible_ssh_common_args: >-

@@ -5,6 +5,7 @@ from __future__ import annotations
 from nicegui import app as nicegui_app, ui
 
 from scripts.webui import data, theme
+from scripts.webui.data import Labels, PageTitles, Routes
 
 
 def register() -> None:
@@ -15,7 +16,7 @@ def register() -> None:
         checkboxes: dict[str, ui.checkbox] = {}
 
         with theme.page_shell("services"):
-            theme.page_header("Service Selection")
+            theme.page_header(PageTitles.SERVICES)
 
             with ui.row().classes("gap-4 items-center"):
                 profile_options = {p.name: p.name for p in profiles}
@@ -47,10 +48,10 @@ def register() -> None:
                 checkboxes[svc.tag] = cb
 
             with ui.row().classes("gap-3 mt-4"):
-                ui.button("Select All", icon="select_all", on_click=lambda: _select_all()).classes("subtle-btn")
-                ui.button("Deselect All", icon="deselect", on_click=lambda: _deselect_all()).classes("subtle-btn")
+                ui.button(Labels.SELECT_ALL, icon="select_all", on_click=lambda: _select_all()).classes("subtle-btn")
+                ui.button(Labels.DESELECT_ALL, icon="deselect", on_click=lambda: _deselect_all()).classes("subtle-btn")
                 ui.button(
-                    "Deploy Selected \u2192",
+                    f"{Labels.DEPLOY_SELECTED} \u2192",
                     icon="rocket_launch",
                     on_click=lambda: _deploy_selected(),
                 ).classes("action-btn")
@@ -98,6 +99,6 @@ def register() -> None:
                     ui.notify("No services selected.", type="warning")
                     return
                 nicegui_app.storage.general["selected_tags"] = selected
-                ui.navigate.to("/deploy")
+                ui.navigate.to(Routes.DEPLOY)
 
             _apply_preselection()

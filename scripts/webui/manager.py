@@ -4,6 +4,10 @@ Initialized by either app.py (central console) or kiosk_server.py
 (per-host manager). Provides shared singletons and API registration
 that work identically in both contexts.
 
+When running as a per-host Manager (kiosk_server), this module also:
+  - Accepts container heartbeats via ``POST /api/checkin``
+  - Relays a single host-level heartbeat UP to the SuperManager
+
 The node_resolver is pluggable:
   - app.py supplies a resolver that reads from .env / test.env
   - kiosk_server.py supplies a resolver that reads from config.json NODE_IPS
@@ -12,7 +16,11 @@ The node_resolver is pluggable:
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import logging
+import urllib.request
+import urllib.error
+from datetime import datetime
 from typing import Any, Callable
 
 from scripts.webui import heartbeat
@@ -57,6 +65,7 @@ def reset() -> None:
     _metric_cache = None
     _node_resolver = None
     _auth_validator = None
+    _container_checkins.clear()
 
 
 def get_subscription_manager() -> heartbeat.SubscriptionManager:
@@ -106,6 +115,59 @@ def _get_mesh_key() -> str:
     return os.environ.get("MESH_KEY", "")
 
 
+def _get_host_name() -> str:
+    """Retrieve HOST_NAME from app storage or environment."""
+    import os
+    try:
+        from nicegui import app
+        name = app.storage.general.get("host_name", "")
+        if name:
+            return name
+    except (ImportError, RuntimeError):
+        pass
+    return os.environ.get("HOST_NAME", "")
+
+
+def _get_management_server() -> str:
+    """Retrieve MANAGEMENT_SERVER (SuperManager URL) from app storage."""
+    try:
+        from nicegui import app
+        return app.storage.general.get("management_server", "")
+    except (ImportError, RuntimeError):
+        return ""
+
+
+def _get_callhome_public_key() -> str:
+    """Retrieve CALLHOME_PUBLIC_KEY from app storage or environment."""
+    import os
+    try:
+        from nicegui import app
+        key = app.storage.general.get("callhome_public_key", "")
+        if key:
+            return key
+    except (ImportError, RuntimeError):
+        pass
+    return os.environ.get("CALLHOME_PUBLIC_KEY", "")
+
+
+# ── Container heartbeat store ────────────────────────────────────────
+# Containers on this physical unit POST their health here.
+# The relay loop bundles these into the host-level heartbeat sent
+# UP to the SuperManager.
+
+_container_checkins: dict[str, dict] = {}
+
+
+def get_container_checkins() -> dict[str, dict]:
+    """Return the current container heartbeat store (for tests)."""
+    return _container_checkins
+
+
+def clear_container_checkins() -> None:
+    """Clear the container heartbeat store (for tests)."""
+    _container_checkins.clear()
+
+
 # ── Background poller ────────────────────────────────────────────────
 
 
@@ -130,16 +192,198 @@ async def _heartbeat_poller() -> None:
                     result = await asyncio.to_thread(collector, ip)
                     result.node_id = node_id
                     cache.store(result)
-                except Exception as exc:
+                except (OSError, ValueError, TypeError, RuntimeError) as exc:
                     log.warning("Collector %s for %s failed: %s", metric_type, node_id, exc)
-        except Exception as exc:
+        except (OSError, ValueError, TypeError, RuntimeError) as exc:
             log.error("Heartbeat poller error: %s", exc)
         await asyncio.sleep(5)
 
 
+# ── Host-level relay to SuperManager ─────────────────────────────────
+
+
+def _collect_host_metrics(host_ip: str) -> dict:
+    """Collect disk/memory/uptime/guests from the Proxmox host via SSH."""
+    metrics: dict[str, Any] = {
+        "disk_usage_pct": 0,
+        "memory_usage_pct": 0,
+        "uptime_seconds": 0,
+        "services": [],
+    }
+    ok, out = heartbeat._ssh_exec(
+        host_ip,
+        "df / | awk 'NR==2{print $5}'; "
+        "free | awk 'NR==2{printf \"%.0f\\n\", $3/$2*100}'; "
+        "awk '{print int($1)}' /proc/uptime",
+        timeout=10,
+    )
+    if ok:
+        lines = out.strip().splitlines()
+        if len(lines) >= 3:
+            try:
+                metrics["disk_usage_pct"] = int(lines[0].replace("%", ""))
+                metrics["memory_usage_pct"] = int(lines[1])
+                metrics["uptime_seconds"] = int(lines[2])
+            except (ValueError, IndexError):
+                pass
+
+    ok_ct, ct_out = heartbeat._ssh_exec(
+        host_ip, "pct list 2>/dev/null || true", timeout=10,
+    )
+    if ok_ct and ct_out:
+        for line in ct_out.strip().splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 3:
+                status = parts[1].lower()
+                metrics["services"].append(f"ct:{parts[0]}:{parts[2]}:{status}")
+
+    ok_vm, vm_out = heartbeat._ssh_exec(
+        host_ip, "qm list 2>/dev/null || true", timeout=10,
+    )
+    if ok_vm and vm_out:
+        for line in vm_out.strip().splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 3:
+                status = parts[1].lower()
+                metrics["services"].append(f"vm:{parts[0]}:{parts[2]}:{status}")
+
+    return metrics
+
+
+def build_relay_payload(
+    host_name: str,
+    host_ip: str,
+    host_metrics: dict,
+    container_checkins: dict[str, dict],
+) -> dict:
+    """Build the host-level heartbeat payload for the SuperManager.
+
+    This is a standard NodeCheckin payload so the SuperManager's existing
+    ``/api/checkin`` handler works unchanged. Container health is nested
+    inside ``container_health.extensions.containers``.
+    """
+    containers_summary: dict[str, dict] = {}
+    for ct_name, ct_data in container_checkins.items():
+        payload = ct_data.get("payload", {})
+        containers_summary[ct_name] = {
+            "ready": bool(
+                payload.get("container_health", {}).get("ready", False)
+                if payload.get("container_health") else False
+            ),
+            "disk_pct": payload.get("disk_usage_pct", 0),
+            "mem_pct": payload.get("memory_usage_pct", 0),
+            "uptime": payload.get("uptime_seconds", 0),
+            "last_seen": ct_data.get("received_at", ""),
+        }
+
+    return {
+        "node_id": host_name,
+        "hostname": host_name,
+        "local_ips": [host_ip] if host_ip else [],
+        "uptime_seconds": host_metrics.get("uptime_seconds", 0),
+        "disk_usage_pct": host_metrics.get("disk_usage_pct", 0),
+        "memory_usage_pct": host_metrics.get("memory_usage_pct", 0),
+        "services": host_metrics.get("services", []),
+        "version": "1.0",
+        "container_health": {
+            "container_id": host_name,
+            "ready": True,
+            "systemd_services": {},
+            "listening_ports": [],
+            "extensions": {
+                "containers": containers_summary,
+            },
+        },
+    }
+
+
+async def handle_container_checkin(request: "StarletteRequest") -> "JSONResponse":
+    """Accept heartbeats from containers on this physical unit.
+
+    Module-level so it's importable for testing. Only mounted as a route
+    when running as a per-host Manager (MANAGEMENT_SERVER is set).
+    """
+    from starlette.responses import JSONResponse as _JSONResp
+    try:
+        body = await request.json()
+    except (ValueError, TypeError, _json.JSONDecodeError):
+        return _JSONResp({"error": "Invalid JSON"}, status_code=400)
+    hostname = body.get("hostname", body.get("node_id", ""))
+    if not hostname:
+        return _JSONResp({"error": "Missing hostname/node_id"}, status_code=400)
+    _container_checkins[hostname] = {
+        "payload": body,
+        "received_at": datetime.now().isoformat(),
+    }
+    return _JSONResp({"status": "ok"})
+
+
+def _post_to_supermanager(url: str, payload: dict, token: str = "") -> bool:
+    """POST a heartbeat payload to the SuperManager. Returns True on success."""
+    log = logging.getLogger("vm_builds.relay")
+    body = _json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["X-Callhome-Token"] = token
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            return True
+    except urllib.error.HTTPError as exc:
+        log.warning("Relay HTTP error %s: %s", exc.code, exc.read().decode()[:200])
+        return False
+    except (urllib.error.URLError, OSError) as exc:
+        log.warning("Relay network error: %s", exc)
+        return False
+
+
+async def _relay_heartbeat() -> None:
+    """Background task: collect host metrics + relay UP to SuperManager.
+
+    Runs every 30s. Only active when MANAGEMENT_SERVER is configured
+    (i.e., running as a per-host Manager, not as the SuperManager itself).
+    """
+    log = logging.getLogger("vm_builds.relay")
+    await asyncio.sleep(5)
+
+    while True:
+        try:
+            mgmt_server = _get_management_server()
+            if not mgmt_server:
+                await asyncio.sleep(30)
+                continue
+
+            host_name = _get_host_name()
+            host_ip = _get_host_ip()
+            if not host_name or not host_ip:
+                log.warning("HOST_NAME or HOST_IP not configured, skipping relay")
+                await asyncio.sleep(30)
+                continue
+
+            host_metrics = await asyncio.to_thread(_collect_host_metrics, host_ip)
+
+            payload = build_relay_payload(
+                host_name, host_ip, host_metrics, _container_checkins,
+            )
+
+            token = _get_callhome_public_key()
+            url = f"{mgmt_server.rstrip('/')}/api/checkin"
+            ok = await asyncio.to_thread(_post_to_supermanager, url, payload, token)
+            if ok:
+                log.debug("Relayed heartbeat for %s to %s", host_name, mgmt_server)
+            else:
+                log.warning("Failed to relay heartbeat for %s to %s", host_name, mgmt_server)
+        except (OSError, ValueError, TypeError, RuntimeError) as exc:
+            log.error("Relay heartbeat error: %s", exc)
+        await asyncio.sleep(30)
+
+
 def start_poller() -> None:
-    """Launch the heartbeat background poller as an asyncio task."""
+    """Launch background tasks: heartbeat poller + relay (if Manager)."""
     asyncio.create_task(_heartbeat_poller())
+    mgmt_server = _get_management_server()
+    if mgmt_server:
+        asyncio.create_task(_relay_heartbeat())
 
 
 # ── API registration ─────────────────────────────────────────────────
@@ -241,7 +485,7 @@ def register_api(starlette_app: Any) -> None:
         body = {}
         try:
             body = await request.json()
-        except Exception:
+        except (ValueError, TypeError):
             pass
         target = body.get("target", "all")
         nodes = get_bridge_nodes()
@@ -254,7 +498,7 @@ def register_api(starlette_app: Any) -> None:
             if not ip:
                 results[node["node_id"]] = {"success": False, "error": "IP not resolved"}
                 continue
-            ok, output = heartbeat._ssh_exec(ip, "wifi_setup.sh restart", timeout=15)
+            ok, output = heartbeat._ssh_exec(ip, "/usr/local/bin/wifi_setup.sh restart", timeout=15)
             results[node["node_id"]] = {"success": ok, "output": output[:200]}
         return JSONResponse(results)
 
@@ -299,7 +543,7 @@ def register_api(starlette_app: Any) -> None:
                 continue
             ok, out = await _asyncio.to_thread(
                 heartbeat._ssh_exec, ip,
-                f"batman_trigger.sh {action} {token}",
+                f"/usr/local/bin/batman_trigger.sh {action} {token}",
                 timeout=30,
             )
             results[node_id] = {"success": ok, "output": out[:300]}
@@ -312,7 +556,7 @@ def register_api(starlette_app: Any) -> None:
                     continue
                 ok, out = await _asyncio.to_thread(
                     heartbeat._ssh_exec, ip,
-                    "batman_trigger.sh status",
+                    "/usr/local/bin/batman_trigger.sh status",
                     timeout=10,
                 )
                 if ok:
@@ -342,7 +586,7 @@ def register_api(starlette_app: Any) -> None:
                 continue
             ok, out = await _asyncio.to_thread(
                 heartbeat._ssh_exec, ip,
-                "batman_trigger.sh status",
+                "/usr/local/bin/batman_trigger.sh status",
                 timeout=10,
             )
             if ok:
@@ -382,7 +626,7 @@ def register_api(starlette_app: Any) -> None:
         import asyncio as _asyncio
         ok, out = await _asyncio.to_thread(
             heartbeat._ssh_exec, ip,
-            f"wifi_setup.sh switch-mode {mode}",
+            f"/usr/local/bin/wifi_setup.sh switch-mode {mode}",
             timeout=30,
         )
         return JSONResponse({
@@ -401,7 +645,7 @@ def register_api(starlette_app: Any) -> None:
         import asyncio as _asyncio
         ok, out = await _asyncio.to_thread(
             heartbeat._ssh_exec, ip,
-            "wifi_setup.sh status",
+            "/usr/local/bin/wifi_setup.sh status",
             timeout=10,
         )
         if not ok:
@@ -533,6 +777,16 @@ def register_api(starlette_app: Any) -> None:
             "vmid": vmid, "action": action,
             "success": ok, "output": out[:300],
         })
+
+    # ── Container heartbeat ingestion (Manager-only) ────────────
+    # Only register /api/checkin when running as a per-host Manager
+    # (MANAGEMENT_SERVER is set). The SuperManager (app.py) has its own
+    # /api/checkin handler that writes to nodes.json.
+
+    if _get_management_server():
+        starlette_app.routes.insert(0, Route(
+            "/api/checkin", handle_container_checkin, methods=["POST"],
+        ))
 
     starlette_app.routes.insert(0, Route(
         "/api/guests", _api_guests, methods=["GET"],

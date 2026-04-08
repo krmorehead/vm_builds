@@ -390,6 +390,1123 @@ class TestDeployHistory:
         assert history == []
 
 
+# ── Host and Fleet domain model ───────────────────────────────────────
+
+
+class TestExitCodeLabel:
+    def test_success(self):
+        assert data.exit_code_label(0) == "success"
+
+    def test_known_failure(self):
+        label = data.exit_code_label(2)
+        assert "failed" in label
+        assert "host unreachable" in label
+
+    def test_unknown_code(self):
+        label = data.exit_code_label(42)
+        assert "failed" in label
+        assert "unknown error" in label
+
+    def test_all_known_codes(self):
+        for code in data.ANSIBLE_EXIT_CODES:
+            label = data.exit_code_label(code)
+            if code == 0:
+                assert label == "success"
+            else:
+                assert label.startswith("failed")
+
+
+class TestHost:
+    def _make_record(self, exit_code=0, timestamp="2026-04-05T10:00:00", host_limit=None):
+        return data.DeployRecord(
+            timestamp=timestamp,
+            tags=["infra"],
+            env_file=".env",
+            exit_code=exit_code,
+            duration_seconds=60.0,
+            host_limit=host_limit,
+        )
+
+    def test_healthy_no_deploys(self):
+        host = data.Host("home", "192.168.86.201")
+        assert host.healthy is True
+        assert host.errors == []
+
+    def test_healthy_after_success(self):
+        host = data.Host("home", "192.168.86.201")
+        host.deploys.append(self._make_record(exit_code=0))
+        assert host.healthy is True
+        assert host.errors == []
+
+    def test_unhealthy_after_failure(self):
+        host = data.Host("home", "192.168.86.201")
+        host.deploys.append(self._make_record(exit_code=2))
+        assert host.healthy is False
+        assert len(host.errors) == 1
+        assert "host unreachable" in host.errors[0]
+
+    def test_recovers_after_success_following_failure(self):
+        host = data.Host("home", "192.168.86.201")
+        host.deploys.append(self._make_record(exit_code=2, timestamp="2026-04-04T10:00:00"))
+        host.deploys.append(self._make_record(exit_code=0, timestamp="2026-04-05T10:00:00"))
+        assert host.healthy is True
+        assert host.errors == []
+
+    def test_last_deploy(self):
+        host = data.Host("home", "192.168.86.201")
+        r1 = self._make_record(timestamp="2026-04-04T10:00:00")
+        r2 = self._make_record(timestamp="2026-04-05T10:00:00")
+        host.deploys.extend([r1, r2])
+        assert host.last_deploy is r2
+
+    def test_last_deploy_none(self):
+        host = data.Host("home", "192.168.86.201")
+        assert host.last_deploy is None
+
+    def test_repr_healthy(self):
+        host = data.Host("home", "192.168.86.201")
+        assert "healthy" in repr(host)
+
+    def test_repr_unhealthy(self):
+        host = data.Host("home", "192.168.86.201")
+        host.deploys.append(self._make_record(exit_code=1))
+        assert "unhealthy" in repr(host)
+
+    def test_properties_passthrough(self):
+        host = data.Host("mesh1", "10.10.10.210", is_lan=True, wol_capable=False)
+        assert host.name == "mesh1"
+        assert host.ip == "10.10.10.210"
+        assert host.is_lan is True
+        assert host.wol_capable is False
+
+
+class TestFleet:
+    def _make_host(self, name, exit_code=None):
+        host = data.Host(name, f"10.0.0.{hash(name) % 255}")
+        if exit_code is not None:
+            host.deploys.append(data.DeployRecord(
+                timestamp="2026-04-05T10:00:00",
+                tags=["infra"],
+                env_file=".env",
+                exit_code=exit_code,
+                duration_seconds=60.0,
+            ))
+        return host
+
+    def test_healthy_all_success(self):
+        fleet = data.Fleet([
+            self._make_host("home", exit_code=0),
+            self._make_host("ai", exit_code=0),
+        ])
+        assert fleet.healthy is True
+        assert fleet.errors == []
+        assert fleet.unhealthy_hosts == []
+
+    def test_healthy_no_deploys(self):
+        fleet = data.Fleet([self._make_host("home"), self._make_host("ai")])
+        assert fleet.healthy is True
+
+    def test_unhealthy_one_failure(self):
+        fleet = data.Fleet([
+            self._make_host("home", exit_code=0),
+            self._make_host("ai", exit_code=2),
+        ])
+        assert fleet.healthy is False
+        assert len(fleet.errors) == 1
+        assert "ai" in fleet.errors[0]
+        assert len(fleet.unhealthy_hosts) == 1
+        assert fleet.unhealthy_hosts[0].name == "ai"
+
+    def test_host_count(self):
+        fleet = data.Fleet([self._make_host("a"), self._make_host("b"), self._make_host("c")])
+        assert fleet.host_count == 3
+
+    def test_last_deploy_across_hosts(self):
+        h1 = self._make_host("home", exit_code=0)
+        h2 = data.Host("ai", "10.0.0.2")
+        h2.deploys.append(data.DeployRecord(
+            timestamp="2026-04-06T12:00:00",
+            tags=["gaming"],
+            env_file=".env",
+            exit_code=0,
+            duration_seconds=120.0,
+        ))
+        fleet = data.Fleet([h1, h2])
+        assert fleet.last_deploy is not None
+        assert fleet.last_deploy.timestamp == "2026-04-06T12:00:00"
+
+    def test_last_deploy_none(self):
+        fleet = data.Fleet([self._make_host("home")])
+        assert fleet.last_deploy is None
+
+    def test_repr(self):
+        fleet = data.Fleet([self._make_host("home", exit_code=0)])
+        assert "1 hosts" in repr(fleet)
+        assert "healthy" in repr(fleet)
+
+    def test_repr_unhealthy(self):
+        fleet = data.Fleet([
+            self._make_host("home", exit_code=0),
+            self._make_host("ai", exit_code=1),
+        ])
+        assert "1 unhealthy" in repr(fleet)
+
+    def test_empty_fleet(self):
+        fleet = data.Fleet([])
+        assert fleet.healthy is True
+        assert fleet.host_count == 0
+        assert fleet.errors == []
+        assert fleet.last_deploy is None
+
+
+class TestBuildFleet:
+    def test_builds_from_env_and_history(self, tmp_path):
+        env = {"PRIMARY_HOST": "192.168.86.201", "AI_HOST": "192.168.86.220"}
+        record = data.DeployRecord(
+            timestamp="2026-04-05T10:00:00",
+            tags=["infra"],
+            env_file=".env",
+            exit_code=0,
+            duration_seconds=60.0,
+        )
+        data.save_deploy_record(tmp_path, record)
+
+        fleet = data.build_fleet(env, tmp_path)
+        assert fleet.host_count >= 3  # home, ai, mesh1
+        assert fleet.healthy is True
+
+        home = next(h for h in fleet.hosts if h.name == "home")
+        assert len(home.deploys) == 1
+        assert home.healthy is True
+
+    def test_host_limit_filters_deploys(self, tmp_path):
+        env = {"PRIMARY_HOST": "192.168.86.201", "AI_HOST": "192.168.86.220"}
+        record = data.DeployRecord(
+            timestamp="2026-04-05T10:00:00",
+            tags=["gaming"],
+            env_file=".env",
+            exit_code=2,
+            duration_seconds=60.0,
+            host_limit="ai",
+        )
+        data.save_deploy_record(tmp_path, record)
+
+        fleet = data.build_fleet(env, tmp_path)
+        home = next(h for h in fleet.hosts if h.name == "home")
+        ai = next(h for h in fleet.hosts if h.name == "ai")
+
+        assert len(home.deploys) == 0
+        assert home.healthy is True
+        assert len(ai.deploys) == 1
+        assert ai.healthy is False
+
+    def test_empty_history(self, tmp_path):
+        env = {"PRIMARY_HOST": "192.168.86.201"}
+        fleet = data.build_fleet(env, tmp_path)
+        assert fleet.healthy is True
+        for host in fleet.hosts:
+            assert host.deploys == []
+
+    def test_recovery_scenario(self, tmp_path):
+        """Old failure followed by success = healthy."""
+        env = {"PRIMARY_HOST": "192.168.86.201"}
+        data.save_deploy_record(tmp_path, data.DeployRecord(
+            timestamp="2026-04-04T10:00:00", tags=["infra"],
+            env_file=".env", exit_code=2, duration_seconds=60.0,
+        ))
+        data.save_deploy_record(tmp_path, data.DeployRecord(
+            timestamp="2026-04-05T10:00:00", tags=["infra"],
+            env_file=".env", exit_code=0, duration_seconds=60.0,
+        ))
+        fleet = data.build_fleet(env, tmp_path)
+        assert fleet.healthy is True
+        home = next(h for h in fleet.hosts if h.name == "home")
+        assert home.healthy is True
+        assert len(home.deploys) == 2
+
+    def test_hosts_have_bucket(self, tmp_path):
+        env = {"PRIMARY_HOST": "192.168.86.201"}
+        fleet = data.build_fleet(env, tmp_path)
+        home = fleet.get_host("home")
+        assert home is not None
+        assert home.bucket == "test"
+
+    def test_test_units_in_fleet(self, tmp_path):
+        env = {
+            "PRIMARY_HOST": "192.168.86.201",
+            "TEST_UNITS": "192.168.86.230,192.168.86.231",
+        }
+        fleet = data.build_fleet(env, tmp_path)
+        test_bucket = fleet.hosts_by_bucket("test")
+        test_names = [h.name for h in test_bucket]
+        assert "test-230" in test_names
+        assert "test-231" in test_names
+
+    def test_hosts_by_bucket(self, tmp_path):
+        env = {"PRIMARY_HOST": "192.168.86.201"}
+        fleet = data.build_fleet(env, tmp_path)
+        test_hosts = fleet.hosts_by_bucket("test")
+        assert len(test_hosts) >= 1
+
+
+class TestDeployTargetsHost:
+    def test_no_limit_targets_all(self):
+        record = data.DeployRecord(
+            timestamp="2026-04-05T10:00:00", tags=["infra"],
+            env_file=".env", exit_code=0, duration_seconds=60.0,
+        )
+        assert data._deploy_targets_host(record, "home") is True
+        assert data._deploy_targets_host(record, "ai") is True
+
+    def test_limit_matches(self):
+        record = data.DeployRecord(
+            timestamp="2026-04-05T10:00:00", tags=["gaming"],
+            env_file=".env", exit_code=0, duration_seconds=60.0,
+            host_limit="ai",
+        )
+        assert data._deploy_targets_host(record, "ai") is True
+        assert data._deploy_targets_host(record, "home") is False
+
+    def test_limit_partial_match(self):
+        record = data.DeployRecord(
+            timestamp="2026-04-05T10:00:00", tags=["infra"],
+            env_file=".env", exit_code=0, duration_seconds=60.0,
+            host_limit="home,mesh1",
+        )
+        assert data._deploy_targets_host(record, "home") is True
+        assert data._deploy_targets_host(record, "mesh1") is True
+        assert data._deploy_targets_host(record, "ai") is False
+
+
+# ── HostTelemetry + GuestInfo ─────────────────────────────────────────
+
+
+class TestGuestInfo:
+    def test_dataclass_fields(self):
+        g = data.GuestInfo(vmid="100", name="openwrt", vm_type="vm", running=True)
+        assert g.vmid == "100"
+        assert g.name == "openwrt"
+        assert g.vm_type == "vm"
+        assert g.running is True
+
+    def test_default_running(self):
+        g = data.GuestInfo(vmid="101", name="wireguard", vm_type="ct")
+        assert g.running is True
+
+
+class TestParseGuests:
+    def test_standard_entries(self):
+        guests = data._parse_guests(["vm:100:openwrt", "ct:101:wireguard"])
+        assert len(guests) == 2
+        assert guests[0].vmid == "100"
+        assert guests[0].name == "openwrt"
+        assert guests[0].vm_type == "vm"
+        assert guests[1].vm_type == "ct"
+
+    def test_no_name(self):
+        guests = data._parse_guests(["vm:100"])
+        assert len(guests) == 1
+        assert guests[0].name == "100"
+
+    def test_empty(self):
+        assert data._parse_guests([]) == []
+
+    def test_malformed_entry_skipped(self):
+        guests = data._parse_guests(["bad", "vm:100:ok"])
+        assert len(guests) == 1
+        assert guests[0].name == "ok"
+
+
+class TestHostTelemetry:
+    def test_construction(self):
+        t = data.HostTelemetry(
+            node_id="home", last_ip="192.168.86.201",
+            local_ips=["192.168.86.201", "10.10.10.2"],
+            first_seen="2026-04-01T10:00:00", last_seen="2026-04-07T10:00:00",
+            uptime_seconds=86400.0, services=["vm:100:openwrt"],
+            disk_usage_pct=45.0, memory_usage_pct=62.0, version="1.0",
+            status="online",
+        )
+        assert t.node_id == "home"
+        assert t.status == "online"
+        assert t.disk_usage_pct == 45.0
+
+    def test_default_status_offline(self):
+        t = data.HostTelemetry(
+            node_id="x", last_ip="", local_ips=[], first_seen="", last_seen="",
+            uptime_seconds=0, services=[], disk_usage_pct=0, memory_usage_pct=0,
+            version="",
+        )
+        assert t.status == "offline"
+
+
+class TestHostWithTelemetry:
+    def _make_telemetry(self, **overrides):
+        defaults = dict(
+            node_id="home", last_ip="192.168.86.201",
+            local_ips=["192.168.86.201"], first_seen="2026-04-01T10:00:00",
+            last_seen="2026-04-07T10:00:00", uptime_seconds=259200.0,
+            services=["vm:100:openwrt", "ct:101:wireguard", "ct:102:pihole"],
+            disk_usage_pct=45.0, memory_usage_pct=62.0, version="1.0",
+            status="online",
+        )
+        defaults.update(overrides)
+        return data.HostTelemetry(**defaults)
+
+    def test_online_with_telemetry(self):
+        host = data.Host("home", "192.168.86.201")
+        host.attach_telemetry(self._make_telemetry(status="online"))
+        assert host.online is True
+        assert host.status == "online"
+
+    def test_offline_no_telemetry(self):
+        host = data.Host("home", "192.168.86.201")
+        assert host.online is False
+        assert host.status == "unknown"
+
+    def test_disk_pct(self):
+        host = data.Host("home", "192.168.86.201")
+        host.attach_telemetry(self._make_telemetry(disk_usage_pct=72.5))
+        assert host.disk_pct == 72.5
+
+    def test_disk_pct_no_telemetry(self):
+        host = data.Host("home", "192.168.86.201")
+        assert host.disk_pct == 0.0
+
+    def test_memory_pct(self):
+        host = data.Host("home", "192.168.86.201")
+        host.attach_telemetry(self._make_telemetry(memory_usage_pct=88.0))
+        assert host.memory_pct == 88.0
+
+    def test_guests(self):
+        host = data.Host("home", "192.168.86.201")
+        host.attach_telemetry(self._make_telemetry())
+        assert host.guest_count == 3
+        assert host.running_guests == 3
+        assert len(host.vms) == 1
+        assert len(host.containers) == 2
+
+    def test_guests_empty_no_telemetry(self):
+        host = data.Host("home", "192.168.86.201")
+        assert host.guests == []
+        assert host.guest_count == 0
+        assert host.running_guests == 0
+        assert host.vms == []
+        assert host.containers == []
+
+    def test_uptime(self):
+        host = data.Host("home", "192.168.86.201")
+        host.attach_telemetry(self._make_telemetry(uptime_seconds=259200.0))
+        assert host.uptime == "3d 0h"
+
+    def test_uptime_no_telemetry(self):
+        host = data.Host("home", "192.168.86.201")
+        assert host.uptime == "--"
+
+    def test_version(self):
+        host = data.Host("home", "192.168.86.201")
+        host.attach_telemetry(self._make_telemetry(version="2.1"))
+        assert host.version == "2.1"
+
+    def test_version_no_telemetry(self):
+        host = data.Host("home", "192.168.86.201")
+        assert host.version == ""
+
+    def test_local_ips(self):
+        host = data.Host("home", "192.168.86.201")
+        host.attach_telemetry(self._make_telemetry(local_ips=["10.0.0.1", "10.0.0.2"]))
+        assert host.local_ips == ["10.0.0.1", "10.0.0.2"]
+
+    def test_local_ips_empty_no_telemetry(self):
+        host = data.Host("home", "192.168.86.201")
+        assert host.local_ips == []
+
+    def test_errors_includes_offline_status(self):
+        host = data.Host("home", "192.168.86.201")
+        host.attach_telemetry(self._make_telemetry(status="offline"))
+        assert any("offline" in e.lower() for e in host.errors)
+
+
+class TestFleetAggregates:
+    def _make_host_with_telemetry(self, name, status="online", disk=30.0, mem=50.0, services=None):
+        host = data.Host(name, f"10.0.0.{hash(name) % 255}")
+        host.attach_telemetry(data.HostTelemetry(
+            node_id=name, last_ip=host.ip, local_ips=[host.ip],
+            first_seen="2026-04-01T00:00:00", last_seen="2026-04-07T00:00:00",
+            uptime_seconds=86400.0,
+            services=services or ["vm:100:router"],
+            disk_usage_pct=disk, memory_usage_pct=mem,
+            version="1.0", status=status,
+        ))
+        return host
+
+    def test_online_count(self):
+        fleet = data.Fleet([
+            self._make_host_with_telemetry("a", status="online"),
+            self._make_host_with_telemetry("b", status="offline"),
+            self._make_host_with_telemetry("c", status="online"),
+        ])
+        assert fleet.online_count == 2
+        assert fleet.offline_count == 1
+
+    def test_has_telemetry(self):
+        h1 = self._make_host_with_telemetry("a")
+        h2 = data.Host("b", "10.0.0.2")
+        fleet = data.Fleet([h1, h2])
+        assert fleet.has_telemetry is True
+
+    def test_no_telemetry(self):
+        fleet = data.Fleet([data.Host("a", "10.0.0.1")])
+        assert fleet.has_telemetry is False
+
+    def test_total_guests(self):
+        fleet = data.Fleet([
+            self._make_host_with_telemetry("a", services=["vm:100:router", "ct:101:vpn"]),
+            self._make_host_with_telemetry("b", services=["ct:102:dns"]),
+        ])
+        assert fleet.total_guests == 3
+        assert fleet.running_guests == 3
+
+    def test_avg_disk_pct(self):
+        fleet = data.Fleet([
+            self._make_host_with_telemetry("a", disk=40.0),
+            self._make_host_with_telemetry("b", disk=60.0),
+        ])
+        assert fleet.avg_disk_pct == 50.0
+
+    def test_avg_memory_pct(self):
+        fleet = data.Fleet([
+            self._make_host_with_telemetry("a", mem=30.0),
+            self._make_host_with_telemetry("b", mem=70.0),
+        ])
+        assert fleet.avg_memory_pct == 50.0
+
+    def test_worst_disk(self):
+        fleet = data.Fleet([
+            self._make_host_with_telemetry("a", disk=30.0),
+            self._make_host_with_telemetry("b", disk=90.0),
+        ])
+        assert fleet.worst_disk is not None
+        assert fleet.worst_disk.name == "b"
+
+    def test_worst_memory(self):
+        fleet = data.Fleet([
+            self._make_host_with_telemetry("a", mem=80.0),
+            self._make_host_with_telemetry("b", mem=40.0),
+        ])
+        assert fleet.worst_memory is not None
+        assert fleet.worst_memory.name == "a"
+
+    def test_worst_disk_none_without_telemetry(self):
+        fleet = data.Fleet([data.Host("a", "10.0.0.1")])
+        assert fleet.worst_disk is None
+        assert fleet.worst_memory is None
+
+    def test_health_score_all_online_low_usage(self):
+        fleet = data.Fleet([
+            self._make_host_with_telemetry("a", disk=20.0, mem=20.0),
+            self._make_host_with_telemetry("b", disk=20.0, mem=20.0),
+        ])
+        assert fleet.health_score == 100
+
+    def test_health_score_all_offline(self):
+        fleet = data.Fleet([
+            self._make_host_with_telemetry("a", status="offline", disk=0.0, mem=0.0),
+        ])
+        assert fleet.health_score == 0
+
+    def test_health_score_no_telemetry(self):
+        fleet = data.Fleet([data.Host("a", "10.0.0.1")])
+        assert fleet.health_score == 100
+
+    def test_get_host_found(self):
+        fleet = data.Fleet([
+            self._make_host_with_telemetry("home"),
+            self._make_host_with_telemetry("ai"),
+        ])
+        h = fleet.get_host("ai")
+        assert h is not None
+        assert h.name == "ai"
+
+    def test_get_host_not_found(self):
+        fleet = data.Fleet([self._make_host_with_telemetry("home")])
+        assert fleet.get_host("nonexistent") is None
+
+
+class TestBuildFleetWithTelemetry:
+    @staticmethod
+    def _recent_iso():
+        """Return a naive ISO timestamp matching _compute_node_status expectations."""
+        from datetime import datetime
+        return datetime.now().isoformat()
+
+    def test_wires_telemetry_from_nodes_json(self, tmp_path):
+        """build_fleet loads nodes.json and attaches to matching hosts."""
+        import json
+
+        env = {"PRIMARY_HOST": "192.168.86.201"}
+        now = self._recent_iso()
+
+        nodes_data = [{
+            "node_id": "home-host",
+            "hostname": "home",
+            "last_ip": "192.168.86.201",
+            "local_ips": ["192.168.86.201"],
+            "first_seen": "2026-04-01T00:00:00",
+            "last_seen": now,
+            "uptime_seconds": 86400.0,
+            "services": ["vm:100:openwrt", "ct:102:pihole"],
+            "disk_usage_pct": 55.0,
+            "memory_usage_pct": 68.0,
+            "version": "1.5",
+            "status": "online",
+            "container_health": None,
+        }]
+        (tmp_path / "nodes.json").write_text(json.dumps(nodes_data))
+
+        fleet = data.build_fleet(env, tmp_path)
+        home = next((h for h in fleet.hosts if h.name == "home"), None)
+        assert home is not None
+        assert home.telemetry is not None
+        assert home.online is True
+        assert home.disk_pct == 55.0
+        assert home.guest_count == 2
+
+    def test_no_nodes_json_still_works(self, tmp_path):
+        """build_fleet works without nodes.json — hosts just have no telemetry."""
+        env = {"PRIMARY_HOST": "192.168.86.201"}
+        fleet = data.build_fleet(env, tmp_path)
+        home = next((h for h in fleet.hosts if h.name == "home"), None)
+        assert home is not None
+        assert home.telemetry is None
+        assert home.online is False
+        assert home.guest_count == 0
+
+    def test_unmatched_node_not_wired(self, tmp_path):
+        """Nodes that don't match any configured host are ignored."""
+        import json
+
+        env = {"PRIMARY_HOST": "192.168.86.201"}
+        nodes_data = [{
+            "node_id": "unknown-node", "hostname": "unknown",
+            "last_ip": "10.0.0.99", "local_ips": [],
+            "first_seen": "", "last_seen": "",
+            "uptime_seconds": 0, "services": [],
+            "disk_usage_pct": 0, "memory_usage_pct": 0,
+            "version": "", "status": "online",
+            "container_health": None,
+        }]
+        (tmp_path / "nodes.json").write_text(json.dumps(nodes_data))
+
+        fleet = data.build_fleet(env, tmp_path)
+        for h in fleet.hosts:
+            assert h.name != "unknown"
+
+    def test_node_id_match_fallback(self, tmp_path):
+        """build_fleet matches by node_id when hostname differs."""
+        import json
+
+        env = {"PRIMARY_HOST": "192.168.86.201"}
+        now = self._recent_iso()
+
+        nodes_data = [{
+            "node_id": "home",
+            "hostname": "home-custom-hostname",
+            "last_ip": "192.168.86.201",
+            "local_ips": ["192.168.86.201"],
+            "first_seen": "2026-04-01T00:00:00",
+            "last_seen": now,
+            "uptime_seconds": 3600.0,
+            "services": ["vm:100:openwrt"],
+            "disk_usage_pct": 30.0,
+            "memory_usage_pct": 40.0,
+            "version": "1.0",
+            "status": "online",
+            "container_health": None,
+        }]
+        (tmp_path / "nodes.json").write_text(json.dumps(nodes_data))
+
+        fleet = data.build_fleet(env, tmp_path)
+        home = next((h for h in fleet.hosts if h.name == "home"), None)
+        assert home is not None
+        assert home.telemetry is not None
+        assert home.online is True
+
+
+# ── Host telemetry property edge cases ───────────────────────────────
+
+
+class TestHostTelemetryEdgeCases:
+    """Test Host properties missed in the main TestHostWithTelemetry suite."""
+
+    def _make_telemetry(self, **overrides):
+        defaults = dict(
+            node_id="host1", last_ip="10.0.0.1",
+            local_ips=["10.0.0.1"], first_seen="2026-04-01T00:00:00",
+            last_seen="2026-04-07T10:00:00", uptime_seconds=86400.0,
+            services=["vm:100:router"],
+            disk_usage_pct=45.0, memory_usage_pct=62.0, version="1.0",
+            status="online",
+        )
+        defaults.update(overrides)
+        return data.HostTelemetry(**defaults)
+
+    def test_uptime_seconds_with_telemetry(self):
+        host = data.Host("a", "10.0.0.1")
+        host.attach_telemetry(self._make_telemetry(uptime_seconds=7200.0))
+        assert host.uptime_seconds == 7200.0
+
+    def test_uptime_seconds_no_telemetry(self):
+        host = data.Host("a", "10.0.0.1")
+        assert host.uptime_seconds == 0.0
+
+    def test_last_seen_with_telemetry(self):
+        host = data.Host("a", "10.0.0.1")
+        host.attach_telemetry(self._make_telemetry(last_seen="2026-04-07T10:00:00"))
+        assert host.last_seen == "2026-04-07T10:00:00"
+
+    def test_last_seen_no_telemetry(self):
+        host = data.Host("a", "10.0.0.1")
+        assert host.last_seen == ""
+
+    def test_last_seen_relative_no_telemetry(self):
+        host = data.Host("a", "10.0.0.1")
+        assert host.last_seen_relative == "never"
+
+    def test_extensions_with_telemetry(self):
+        host = data.Host("a", "10.0.0.1")
+        ch = data.ContainerHealth(
+            container_id="ct-101",
+            systemd_services={"pihole-FTL": "running"},
+            listening_ports=[53, 80],
+            ready=True,
+            extensions={"network": {"interfaces": ["eth0"]}, "dns": {"upstream": "8.8.8.8"}},
+        )
+        host.attach_telemetry(self._make_telemetry(container_health=ch))
+        exts = host.extensions
+        assert "network" in exts
+        assert "dns" in exts
+
+    def test_extensions_no_telemetry(self):
+        host = data.Host("a", "10.0.0.1")
+        assert host.extensions == {}
+
+    def test_extensions_no_container_health(self):
+        host = data.Host("a", "10.0.0.1")
+        host.attach_telemetry(self._make_telemetry())
+        assert host.extensions == {}
+
+    def test_guest_running_false(self):
+        g = data.GuestInfo(vmid="100", name="vm", vm_type="vm", running=False)
+        assert g.running is False
+
+    def test_running_guests_counts_only_running(self):
+        host = data.Host("a", "10.0.0.1")
+        host.attach_telemetry(self._make_telemetry(services=["vm:100:router", "ct:101:dns"]))
+        host._guests[1] = data.GuestInfo(vmid="101", name="dns", vm_type="ct", running=False)
+        assert host.guest_count == 2
+        assert host.running_guests == 1
+
+    def test_errors_no_telemetry(self):
+        host = data.Host("a", "10.0.0.1")
+        assert host.errors == []
+
+    def test_errors_healthy_online(self):
+        host = data.Host("a", "10.0.0.1")
+        host.attach_telemetry(self._make_telemetry(status="online"))
+        assert host.errors == []
+        assert host.healthy is True
+
+    def test_status_reachable_no_heartbeat(self):
+        host = data.Host("a", "10.0.0.1")
+        host.reachable = True
+        assert host.status == "reachable"
+        assert host.online is False
+
+    def test_status_unreachable(self):
+        host = data.Host("a", "10.0.0.1")
+        host.reachable = False
+        assert host.status == "unreachable"
+        assert host.online is False
+
+    def test_status_unknown_not_probed(self):
+        host = data.Host("a", "10.0.0.1")
+        assert host.reachable is None
+        assert host.status == "unknown"
+
+    def test_errors_unreachable(self):
+        host = data.Host("a", "10.0.0.1")
+        host.reachable = False
+        assert any("unreachable" in e.lower() for e in host.errors)
+
+    def test_errors_reachable_no_errors(self):
+        host = data.Host("a", "10.0.0.1")
+        host.reachable = True
+        assert host.errors == []
+
+    def test_warnings_reachable_no_heartbeat(self):
+        host = data.Host("a", "10.0.0.1")
+        host.reachable = True
+        assert len(host.warnings) == 1
+        assert "heartbeat" in host.warnings[0].lower()
+
+    def test_warnings_online_no_warnings(self):
+        host = data.Host("a", "10.0.0.1")
+        host.attach_telemetry(self._make_telemetry(status="online"))
+        assert host.warnings == []
+
+    def test_warnings_unreachable_no_warnings(self):
+        host = data.Host("a", "10.0.0.1")
+        host.reachable = False
+        assert host.warnings == []
+
+    def test_telemetry_overrides_reachable(self):
+        """Telemetry status takes priority over reachable probe."""
+        host = data.Host("a", "10.0.0.1")
+        host.reachable = True
+        host.attach_telemetry(self._make_telemetry(status="online"))
+        assert host.status == "online"
+
+    def test_registered_with_telemetry(self):
+        host = data.Host("a", "10.0.0.1")
+        host.attach_telemetry(self._make_telemetry(status="online"))
+        assert host.registered is True
+
+    def test_not_registered_without_telemetry(self):
+        host = data.Host("a", "10.0.0.1")
+        assert host.registered is False
+
+    def test_registered_retains_last_known_state(self):
+        """Stale/offline hosts still have their last-known services and metrics."""
+        host = data.Host("a", "10.0.0.1")
+        host.attach_telemetry(self._make_telemetry(
+            status="offline",
+            services=["vm:100:router", "ct:101:vpn"],
+            disk_usage_pct=45.0,
+            version="2.0",
+        ))
+        assert host.registered is True
+        assert host.status == "offline"
+        assert host.guest_count == 2
+        assert host.disk_pct == 45.0
+        assert host.version == "2.0"
+
+
+class TestFleetReachability:
+    """Fleet-level reachability aggregates."""
+
+    def test_reachable_count_with_probed_hosts(self):
+        h1 = data.Host("a", "10.0.0.1")
+        h1.reachable = True
+        h2 = data.Host("b", "10.0.0.2")
+        h2.reachable = False
+        h3 = data.Host("c", "10.0.0.3")
+        h3.reachable = True
+        fleet = data.Fleet([h1, h2, h3])
+        assert fleet.reachable_count == 2
+
+    def test_reachable_count_includes_online_hosts(self):
+        h1 = data.Host("a", "10.0.0.1")
+        h1.attach_telemetry(data.HostTelemetry(
+            node_id="a", last_ip="10.0.0.1", local_ips=[], first_seen="",
+            last_seen="", uptime_seconds=0, services=[], disk_usage_pct=0,
+            memory_usage_pct=0, version="", status="online",
+        ))
+        h2 = data.Host("b", "10.0.0.2")
+        h2.reachable = True
+        fleet = data.Fleet([h1, h2])
+        assert fleet.reachable_count == 2
+
+    def test_registered_count(self):
+        h1 = data.Host("a", "10.0.0.1")
+        h1.attach_telemetry(data.HostTelemetry(
+            node_id="a", last_ip="10.0.0.1", local_ips=[], first_seen="",
+            last_seen="", uptime_seconds=0, services=[], disk_usage_pct=0,
+            memory_usage_pct=0, version="", status="offline",
+        ))
+        h2 = data.Host("b", "10.0.0.2")
+        h3 = data.Host("c", "10.0.0.3")
+        h3.attach_telemetry(data.HostTelemetry(
+            node_id="c", last_ip="10.0.0.3", local_ips=[], first_seen="",
+            last_seen="", uptime_seconds=0, services=[], disk_usage_pct=0,
+            memory_usage_pct=0, version="", status="online",
+        ))
+        fleet = data.Fleet([h1, h2, h3])
+        assert fleet.registered_count == 2
+
+    def test_fleet_warnings_aggregate(self):
+        h1 = data.Host("a", "10.0.0.1")
+        h1.reachable = True
+        h2 = data.Host("b", "10.0.0.2")
+        h2.reachable = True
+        fleet = data.Fleet([h1, h2])
+        assert len(fleet.warnings) == 2
+        assert all("heartbeat" in w.lower() for w in fleet.warnings)
+
+
+class TestRegisteredNationalHosts:
+    """National units retain last-known state across sessions."""
+
+    def test_offline_registered_host_retains_metrics(self):
+        """A unit that heartbeated days ago keeps its last-known data."""
+        host = data.Host("remote-001", "203.0.113.50")
+        host.attach_telemetry(data.HostTelemetry(
+            node_id="remote-001", last_ip="203.0.113.50",
+            local_ips=["192.168.1.100"], first_seen="2026-03-01T00:00:00",
+            last_seen="2026-03-15T00:00:00",
+            uptime_seconds=86400.0, services=["ct:101:vpn", "ct:102:pihole"],
+            disk_usage_pct=42.5, memory_usage_pct=68.3,
+            version="1.5", status="offline",
+        ))
+        assert host.registered is True
+        assert host.status == "offline"
+        assert host.guest_count == 2
+        assert host.disk_pct == 42.5
+        assert host.memory_pct == 68.3
+        assert host.version == "1.5"
+
+    def test_unregistered_host_behind_nat_shows_unknown(self):
+        """New national unit behind NAT — no probe, no heartbeat."""
+        host = data.Host("remote-002", "")
+        assert host.registered is False
+        assert host.status == "unknown"
+        assert host.guest_count == 0
+
+    def test_fleet_mixed_registered_and_unregistered(self):
+        h1 = data.Host("local", "192.168.86.201")
+        h1.reachable = True
+        h2 = data.Host("remote-001", "203.0.113.50")
+        h2.attach_telemetry(data.HostTelemetry(
+            node_id="remote-001", last_ip="203.0.113.50",
+            local_ips=[], first_seen="", last_seen="",
+            uptime_seconds=0, services=[], disk_usage_pct=0,
+            memory_usage_pct=0, version="", status="offline",
+        ))
+        h3 = data.Host("remote-002", "")
+        fleet = data.Fleet([h1, h2, h3])
+        assert fleet.registered_count == 1
+        assert fleet.reachable_count == 1
+        assert fleet.host_count == 3
+
+
+class TestVpnIpModel:
+    """VPN IP wiring through Host and probing fallback."""
+
+    def test_host_vpn_ip_default_empty(self):
+        host = data.Host("a", "10.0.0.1")
+        assert host.vpn_ip == ""
+
+    def test_host_vpn_ip_set(self):
+        host = data.Host("a", "10.0.0.1", vpn_ip="10.8.0.1")
+        assert host.vpn_ip == "10.8.0.1"
+
+    def test_reachable_ip_prefers_primary_when_reachable(self):
+        host = data.Host("a", "192.168.1.1", vpn_ip="10.8.0.1")
+        host.reachable = True
+        assert host.reachable_ip == "192.168.1.1"
+
+    def test_reachable_ip_falls_back_to_vpn(self):
+        host = data.Host("a", "192.168.1.1", vpn_ip="10.8.0.1")
+        host.reachable = False
+        assert host.reachable_ip == "10.8.0.1"
+
+    def test_reachable_ip_vpn_only(self):
+        host = data.Host("a", "", vpn_ip="10.8.0.1")
+        assert host.reachable_ip == "10.8.0.1"
+
+    def test_reachable_ip_no_vpn_no_primary(self):
+        host = data.Host("a", "")
+        assert host.reachable_ip == ""
+
+    def test_reachable_ip_lan_host_prefers_vpn(self):
+        """LAN hosts can't be TCP-probed; VPN bypasses the router."""
+        host = data.Host("mesh1", "10.10.10.210", is_lan=True, vpn_ip="10.8.0.5")
+        assert host.reachable_ip == "10.8.0.5"
+
+    def test_host_info_vpn_ip(self):
+        info = data.HostInfo(
+            name="remote", ip="1.2.3.4", env_var="REMOTE_HOST",
+            wol_capable=True, vpn_ip="10.8.0.10",
+        )
+        assert info.vpn_ip == "10.8.0.10"
+
+    def test_get_known_hosts_reads_vpn_env(self):
+        env = {
+            "PRIMARY_HOST": "192.168.86.201",
+            "HOME_VPN_IP": "10.8.0.1",
+        }
+        hosts = data.get_known_hosts(env)
+        home = next(h for h in hosts if h.name == "home")
+        assert home.vpn_ip == "10.8.0.1"
+
+    def test_get_known_hosts_no_vpn_env(self):
+        env = {"PRIMARY_HOST": "192.168.86.201"}
+        hosts = data.get_known_hosts(env)
+        home = next(h for h in hosts if h.name == "home")
+        assert home.vpn_ip == ""
+
+    def test_detail_stat_shows_vpn(self):
+        """VPN IP field is displayed in node detail header."""
+        host = data.Host("a", "10.0.0.1", vpn_ip="10.8.0.1")
+        assert host.vpn_ip == "10.8.0.1"
+
+
+class TestKickstartCallhome:
+    """kickstart_callhome function tests."""
+
+    def test_no_reachable_ip(self):
+        host = data.Host("a", "")
+        result = data.kickstart_callhome(host)
+        assert not result.success
+        assert "No reachable IP" in result.message
+
+    def test_ssh_failure(self, monkeypatch):
+        host = data.Host("a", "10.0.0.1")
+        host.reachable = True
+
+        def _fake_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="ssh", timeout=15)
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        result = data.kickstart_callhome(host)
+        assert not result.success
+        assert "SSH failed" in result.message
+
+    def test_no_running_containers(self, monkeypatch):
+        host = data.Host("a", "10.0.0.1")
+        host.reachable = True
+
+        call_count = 0
+
+        def _fake_run(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout="", stderr=""
+            )
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        result = data.kickstart_callhome(host)
+        assert result.success
+        assert result.restarted == 0
+        assert "No running containers" in result.message
+
+    def test_restart_containers(self, monkeypatch):
+        host = data.Host("a", "10.0.0.1")
+        host.reachable = True
+
+        call_count = 0
+
+        def _fake_run(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return subprocess.CompletedProcess(
+                    args=args, returncode=0,
+                    stdout="101 running\n102 running\n103 stopped\n",
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout="", stderr=""
+            )
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        result = data.kickstart_callhome(host)
+        assert result.success
+        assert result.restarted == 2
+        assert "2/2" in result.message
+
+    def test_uses_vpn_ip_when_primary_unreachable(self, monkeypatch):
+        host = data.Host("a", "1.2.3.4", vpn_ip="10.8.0.5")
+        host.reachable = False
+
+        captured_cmds: list[list[str]] = []
+
+        def _fake_run(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            captured_cmds.append(cmd)
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="", stderr=""
+            )
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        data.kickstart_callhome(host)
+        assert any("10.8.0.5" in str(cmd) for cmd in captured_cmds)
+
+
+class TestFleetAggregateExtras:
+    """Additional Fleet aggregate tests."""
+
+    def _make_host(self, name, status="online", disk=30.0, mem=50.0, services=None):
+        host = data.Host(name, f"10.0.0.{hash(name) % 255}")
+        host.attach_telemetry(data.HostTelemetry(
+            node_id=name, last_ip=host.ip, local_ips=[host.ip],
+            first_seen="2026-04-01T00:00:00", last_seen="2026-04-07T00:00:00",
+            uptime_seconds=86400.0,
+            services=services or ["vm:100:router"],
+            disk_usage_pct=disk, memory_usage_pct=mem,
+            version="1.0", status=status,
+        ))
+        return host
+
+    def test_total_services_alias(self):
+        fleet = data.Fleet([
+            self._make_host("a", services=["vm:100:r", "ct:101:w"]),
+        ])
+        assert fleet.total_services == fleet.total_guests
+        assert fleet.total_services == 2
+
+    def test_health_score_mixed_online_offline(self):
+        fleet = data.Fleet([
+            self._make_host("a", status="online", disk=20.0, mem=20.0),
+            self._make_host("b", status="offline", disk=0.0, mem=0.0),
+        ])
+        score = fleet.health_score
+        assert 0 < score < 100
+
+    def test_last_deploy_sorted_by_timestamp(self):
+        """Fleet.last_deploy returns most recent by timestamp, not insertion order."""
+        h1 = data.Host("a", "10.0.0.1")
+        h1.deploys.append(data.DeployRecord(
+            timestamp="2026-04-07T12:00:00", exit_code=0, tags=["infra"],
+            env_file="test.env", duration_seconds=120,
+        ))
+        h2 = data.Host("b", "10.0.0.2")
+        h2.deploys.append(data.DeployRecord(
+            timestamp="2026-04-06T12:00:00", exit_code=2, tags=["openwrt"],
+            env_file="test.env", duration_seconds=60,
+        ))
+        fleet = data.Fleet([h2, h1])
+        assert fleet.last_deploy is not None
+        assert fleet.last_deploy.exit_code == 0
+        assert "2026-04-07" in fleet.last_deploy.timestamp
+
+
+class TestExitCodeHelpers:
+    """Tests for exit_code_label() and exit_code_color()."""
+
+    def test_success_label(self):
+        assert data.exit_code_label(0) == "success"
+
+    def test_failure_label_known(self):
+        label = data.exit_code_label(2)
+        assert "failed" in label
+        assert "unreachable" in label.lower() or "task" in label.lower()
+
+    def test_failure_label_unknown(self):
+        label = data.exit_code_label(42)
+        assert "failed" in label
+        assert "unknown" in label
+
+    def test_color_success(self):
+        assert data.exit_code_color(0) == "green"
+
+    def test_color_failure(self):
+        assert data.exit_code_color(2) == "red"
+        assert data.exit_code_color(4) == "red"
+        assert data.exit_code_color(99) == "red"
+
+
 # ── Image management ─────────────────────────────────────────────────
 
 
@@ -604,7 +1721,8 @@ class TestAppConfigure:
         from scripts.webui.app import parse_args
         args = parse_args([])
         assert args.env is None
-        assert args.port == 9001
+        expected_port = int(os.environ.get("WEBUI_PORT", "52500"))
+        assert args.port == expected_port
         assert args.host == "127.0.0.1"
 
     def test_parse_args_custom(self):
@@ -1126,6 +2244,52 @@ class TestCheckFleetReadiness:
         result = data.check_fleet_readiness(tmp_path, ["wireguard-home"])
         assert result["all_ready"] is True
         assert result["services"]["wireguard-home"]["ready"] is True
+
+    def test_finds_nested_containers_in_3tier_relay(self, tmp_path):
+        """Fleet readiness finds services nested inside Manager relay payloads."""
+        checkin = data.NodeCheckin(
+            node_id="home", hostname="home",
+            container_health=data.ContainerHealth(
+                container_id="home",
+                systemd_services={},
+                listening_ports=[],
+                ready=True,
+                extensions={
+                    "containers": {
+                        "pihole": {"ready": True, "disk_pct": 34, "mem_pct": 12},
+                        "rsyslog": {"ready": True, "disk_pct": 52, "mem_pct": 37},
+                    }
+                },
+            ),
+            local_ips=["192.168.86.201"], uptime_seconds=99000,
+            services=[], disk_usage_pct=50, memory_usage_pct=30,
+            version="1.0",
+        )
+        data.register_checkin(tmp_path, checkin, "192.168.86.201")
+        result = data.check_fleet_readiness(tmp_path, ["pihole", "rsyslog", "home"])
+        assert result["all_ready"] is True
+        assert result["ready_count"] == 3
+        assert result["services"]["pihole"]["ready"] is True
+        assert result["services"]["rsyslog"]["ready"] is True
+        assert result["services"]["home"]["ready"] is True
+
+    def test_nested_container_not_ready(self, tmp_path):
+        """Nested container with ready=False reports not ready."""
+        checkin = data.NodeCheckin(
+            node_id="home", hostname="home",
+            container_health=data.ContainerHealth(
+                container_id="home", ready=True,
+                systemd_services={}, listening_ports=[],
+                extensions={"containers": {"pihole": {"ready": False}}},
+            ),
+            local_ips=["192.168.86.201"], uptime_seconds=99000,
+            services=[], disk_usage_pct=50, memory_usage_pct=30,
+            version="1.0",
+        )
+        data.register_checkin(tmp_path, checkin, "192.168.86.201")
+        result = data.check_fleet_readiness(tmp_path, ["pihole"])
+        assert result["all_ready"] is False
+        assert result["services"]["pihole"]["ready"] is False
 
 
 class TestCheckFleetStaleness:
@@ -1773,48 +2937,15 @@ class TestFormatNodeStatus:
     def test_offline(self):
         assert "Offline" in data.format_node_status("offline")
 
+    def test_reachable(self):
+        assert "Reachable" in data.format_node_status("reachable")
 
-class TestFleetSummary:
-    def test_empty_list(self):
-        text, level = data.fleet_summary([])
-        assert level == "info"
-        assert "No nodes" in text
+    def test_unreachable(self):
+        assert "Unreachable" in data.format_node_status("unreachable")
 
-    def test_all_online(self):
-        now = "2026-01-01T00:00:00"
-        nodes = [
-            data.RegisteredNode(
-                node_id=f"n{i}", hostname=f"h{i}", last_ip="1.2.3.4",
-                local_ips=[], first_seen=now, last_seen=now,
-                uptime_seconds=100, services=[], disk_usage_pct=0,
-                memory_usage_pct=0, version="", status="online",
-            )
-            for i in range(3)
-        ]
-        text, level = data.fleet_summary(nodes)
-        assert level == "success"
-        assert "All 3" in text
+    def test_unknown(self):
+        assert "Unknown" in data.format_node_status("unknown")
 
-    def test_mixed_status(self):
-        now = "2026-01-01T00:00:00"
-        nodes = [
-            data.RegisteredNode(
-                node_id="a", hostname="a", last_ip="1.2.3.4",
-                local_ips=[], first_seen=now, last_seen=now,
-                uptime_seconds=100, services=[], disk_usage_pct=0,
-                memory_usage_pct=0, version="", status="online",
-            ),
-            data.RegisteredNode(
-                node_id="b", hostname="b", last_ip="1.2.3.5",
-                local_ips=[], first_seen=now, last_seen=now,
-                uptime_seconds=100, services=[], disk_usage_pct=0,
-                memory_usage_pct=0, version="", status="offline",
-            ),
-        ]
-        text, level = data.fleet_summary(nodes)
-        assert level == "warning"
-        assert "1 online" in text
-        assert "1 offline" in text
 
 
 # ── Metric history ───────────────────────────────────────────────────
@@ -2206,6 +3337,38 @@ class TestThemeConstants:
         assert ".subtle-btn" in theme.GLOBAL_STYLES
 
 
+class TestThemeStatusColor:
+    """Tests for theme.status_color semantic color mapping."""
+
+    def test_online_green(self):
+        from scripts.webui import theme
+        assert theme.status_color("online") == theme.COLOR_SUCCESS
+
+    def test_stale_warning(self):
+        from scripts.webui import theme
+        assert theme.status_color("stale") == theme.COLOR_WARNING
+
+    def test_reachable_warning(self):
+        from scripts.webui import theme
+        assert theme.status_color("reachable") == theme.COLOR_WARNING
+
+    def test_offline_error(self):
+        from scripts.webui import theme
+        assert theme.status_color("offline") == theme.COLOR_ERROR
+
+    def test_unreachable_error(self):
+        from scripts.webui import theme
+        assert theme.status_color("unreachable") == theme.COLOR_ERROR
+
+    def test_unknown_disabled(self):
+        from scripts.webui import theme
+        assert theme.status_color("unknown") == theme.TEXT_DISABLED
+
+    def test_fallback_disabled(self):
+        from scripts.webui import theme
+        assert theme.status_color("bogus") == theme.TEXT_DISABLED
+
+
 class TestThemeSidebarBreakpoint:
     """Verify the left drawer breakpoint fix (Finding 1 from manual testing).
 
@@ -2219,3 +3382,767 @@ class TestThemeSidebarBreakpoint:
         from scripts.webui import theme
         source = inspect.getsource(theme.nav_sidebar)
         assert 'breakpoint=0' in source or "breakpoint=0" in source
+
+
+# ── Host Registry (M0 domain classes) ────────────────────────────────
+
+
+class TestHostBucket:
+    """HostBucket.classify_ip returns correct bucket for IP ranges."""
+
+    def test_test_unit_201(self):
+        assert data.HostBucket.classify_ip("192.168.86.201") == "test"
+
+    def test_test_unit_230(self):
+        assert data.HostBucket.classify_ip("192.168.86.230") == "test"
+
+    def test_test_unit_255(self):
+        assert data.HostBucket.classify_ip("192.168.86.255") == "test"
+
+    def test_lab_unit_low(self):
+        assert data.HostBucket.classify_ip("10.0.0.5") == "lab"
+
+    def test_lab_unit_30(self):
+        assert data.HostBucket.classify_ip("192.168.86.30") == "lab"
+
+    def test_lab_unit_100_series(self):
+        assert data.HostBucket.classify_ip("192.168.86.150") == "lab"
+
+    def test_lab_unit_199(self):
+        assert data.HostBucket.classify_ip("192.168.86.199") == "lab"
+
+    def test_invalid_ip_returns_default(self):
+        assert data.HostBucket.classify_ip("garbage") == data.HostBucket.DEFAULT
+
+    def test_empty_ip_returns_default(self):
+        assert data.HostBucket.classify_ip("") == data.HostBucket.DEFAULT
+
+
+class TestHostRecord:
+    """HostRecord dataclass creation and field defaults."""
+
+    def test_minimal_creation(self):
+        r = data.HostRecord(name="test-host", ip="1.2.3.4")
+        assert r.name == "test-host"
+        assert r.ip == "1.2.3.4"
+        assert r.mac == ""
+        assert r.bucket == ""
+        assert r.source == "manual"
+        assert r.wol_capable is True
+        assert r.is_lan is False
+
+    def test_full_creation(self):
+        r = data.HostRecord(
+            name="home", ip="192.168.86.201", mac="aa:bb:cc:dd:ee:ff",
+            bucket="test", source="env", is_lan=False, wol_capable=True,
+            vpn_ip="10.99.0.1", first_seen="2026-01-01", last_seen="2026-01-02",
+        )
+        assert r.bucket == "test"
+        assert r.vpn_ip == "10.99.0.1"
+
+
+class TestHostRegistry:
+    """HostRegistry CRUD, upsert, and persistence."""
+
+    def test_empty_registry(self, tmp_path):
+        reg = data.HostRegistry(tmp_path)
+        assert reg.all() == []
+
+    def test_register_new_host(self, tmp_path):
+        reg = data.HostRegistry(tmp_path)
+        r = reg.register("home", "192.168.86.201", source="env")
+        assert r.name == "home"
+        assert r.ip == "192.168.86.201"
+        assert r.bucket == "test"
+        assert r.first_seen != ""
+        assert len(reg.all()) == 1
+
+    def test_upsert_by_name_preserves_immutable(self, tmp_path):
+        reg = data.HostRegistry(tmp_path)
+        r1 = reg.register("home", "1.2.3.4", bucket="lab", source="env")
+        r2 = reg.register("home", "5.6.7.8")
+        assert r2.ip == "5.6.7.8"
+        assert r2.bucket == "lab"
+        assert r2.source == "env"
+        assert r2.first_seen == r1.first_seen
+        assert len(reg.all()) == 1
+
+    def test_upsert_by_mac(self, tmp_path):
+        reg = data.HostRegistry(tmp_path)
+        reg.register("home", "1.2.3.4", mac="aa:bb:cc:dd:ee:ff")
+        r2 = reg.register("renamed", "9.8.7.6", mac="aa:bb:cc:dd:ee:ff")
+        assert r2.name == "home"
+        assert r2.ip == "9.8.7.6"
+        assert len(reg.all()) == 1
+
+    def test_mac_takes_precedence(self, tmp_path):
+        """MAC match wins over name match when both exist."""
+        reg = data.HostRegistry(tmp_path)
+        reg.register("alpha", "1.1.1.1", mac="aa:bb:cc:dd:ee:ff")
+        reg.register("beta", "2.2.2.2")
+        r = reg.register("beta", "3.3.3.3", mac="aa:bb:cc:dd:ee:ff")
+        assert r.name == "alpha"
+        assert r.ip == "3.3.3.3"
+        assert len(reg.all()) == 2
+
+    def test_json_round_trip(self, tmp_path):
+        reg = data.HostRegistry(tmp_path)
+        reg.register("a", "1.1.1.1", mac="aa:bb:cc:dd:ee:ff", bucket="test")
+        reg.register("b", "2.2.2.2", is_lan=True, wol_capable=False)
+        reg2 = data.HostRegistry(tmp_path)
+        hosts = reg2.all()
+        assert len(hosts) == 2
+        a = reg2.find_by_name("a")
+        assert a is not None
+        assert a.mac == "aa:bb:cc:dd:ee:ff"
+        assert a.bucket == "test"
+        b = reg2.find_by_name("b")
+        assert b is not None
+        assert b.is_lan is True
+        assert b.wol_capable is False
+
+    def test_find_by_mac(self, tmp_path):
+        reg = data.HostRegistry(tmp_path)
+        reg.register("x", "1.2.3.4", mac="AA:BB:CC:DD:EE:FF")
+        assert reg.find_by_mac("aa:bb:cc:dd:ee:ff") is not None
+        assert reg.find_by_mac("") is None
+        assert reg.find_by_mac("11:22:33:44:55:66") is None
+
+    def test_find_by_name(self, tmp_path):
+        reg = data.HostRegistry(tmp_path)
+        reg.register("alpha", "1.1.1.1")
+        assert reg.find_by_name("alpha") is not None
+        assert reg.find_by_name("nonexistent") is None
+
+    def test_corrupted_json_handled(self, tmp_path):
+        (tmp_path / "registry.json").write_text("not-json!!!")
+        reg = data.HostRegistry(tmp_path)
+        assert reg.all() == []
+
+    def test_update_vpn_ip(self, tmp_path):
+        reg = data.HostRegistry(tmp_path)
+        reg.register("home", "1.2.3.4")
+        r = reg.register("home", "1.2.3.4", vpn_ip="10.99.0.1")
+        assert r.vpn_ip == "10.99.0.1"
+
+
+class TestHostRegistrySeedFromEnv:
+    """HostRegistry.seed_from_env reads _HOST_MAP + TEST_UNITS."""
+
+    def test_seeds_from_host_map(self, tmp_path):
+        env = {
+            "PRIMARY_HOST": "192.168.86.201",
+            "AI_HOST": "192.168.86.220",
+            "MESH_2_HOST": "192.168.86.211",
+        }
+        reg = data.HostRegistry(tmp_path)
+        reg.seed_from_env(env)
+        hosts = reg.all()
+        names = [h.name for h in hosts]
+        assert "home" in names
+        assert "ai" in names
+        assert "mesh2" in names
+        assert "mesh1" in names
+
+    def test_seeds_test_units(self, tmp_path):
+        env = {
+            "PRIMARY_HOST": "192.168.86.201",
+            "TEST_UNITS": "192.168.86.201,192.168.86.230",
+        }
+        reg = data.HostRegistry(tmp_path)
+        reg.seed_from_env(env)
+        test_hosts = [h for h in reg.all() if h.bucket == "test"]
+        assert len(test_hosts) >= 2
+
+    def test_seed_idempotent(self, tmp_path):
+        env = {
+            "PRIMARY_HOST": "192.168.86.201",
+            "TEST_UNITS": "192.168.86.230",
+        }
+        reg = data.HostRegistry(tmp_path)
+        reg.seed_from_env(env)
+        count1 = len(reg.all())
+        reg.seed_from_env(env)
+        count2 = len(reg.all())
+        assert count1 == count2
+
+    def test_skips_test_unit_with_same_ip_as_host(self, tmp_path):
+        """TEST_UNITS entry with same IP as PRIMARY_HOST is not duplicated."""
+        env = {
+            "PRIMARY_HOST": "192.168.86.201",
+            "TEST_UNITS": "192.168.86.201",
+        }
+        reg = data.HostRegistry(tmp_path)
+        reg.seed_from_env(env)
+        records_with_ip = [r for r in reg.all() if r.ip == "192.168.86.201"]
+        assert len(records_with_ip) == 1
+
+
+class TestExtractPrimaryMac:
+    """extract_primary_mac picks correct MAC from heartbeat extensions."""
+
+    def test_picks_first_real_mac(self):
+        ext = {
+            "network": {
+                "interfaces": [
+                    {"name": "lo", "mac": "00:00:00:00:00:00"},
+                    {"name": "eth0", "mac": "aa:bb:cc:dd:ee:ff"},
+                    {"name": "eth1", "mac": "11:22:33:44:55:66"},
+                ],
+            },
+        }
+        assert data.extract_primary_mac(ext) == "aa:bb:cc:dd:ee:ff"
+
+    def test_skips_loopback(self):
+        ext = {
+            "network": {
+                "interfaces": [
+                    {"name": "lo", "mac": "00:00:00:00:00:00"},
+                ],
+            },
+        }
+        assert data.extract_primary_mac(ext) == ""
+
+    def test_skips_fe_prefix(self):
+        ext = {
+            "network": {
+                "interfaces": [
+                    {"name": "veth0", "mac": "fe:01:02:03:04:05"},
+                    {"name": "eth0", "mac": "aa:bb:cc:dd:ee:ff"},
+                ],
+            },
+        }
+        assert data.extract_primary_mac(ext) == "aa:bb:cc:dd:ee:ff"
+
+    def test_empty_extensions(self):
+        assert data.extract_primary_mac({}) == ""
+
+    def test_no_interfaces(self):
+        ext = {"network": {}}
+        assert data.extract_primary_mac(ext) == ""
+
+    def test_nested_data_format(self):
+        ext = {
+            "network": {
+                "data": {
+                    "interfaces": [
+                        {"name": "eth0", "mac": "11:22:33:44:55:66"},
+                    ],
+                },
+            },
+        }
+        assert data.extract_primary_mac(ext) == "11:22:33:44:55:66"
+
+
+class TestContainerHeartbeatIsolation:
+    """Heartbeats update nodes.json telemetry but NEVER the HostRegistry.
+
+    The HostRegistry contains physical host identities only — seeded from
+    env vars, manual registration, or TEST_UNITS. Container heartbeats
+    must not create host entries; they are tracked in nodes.json and
+    surfaced as guests of their parent host.
+    """
+
+    def test_container_checkin_does_not_pollute_registry(self, tmp_path):
+        """Container heartbeat updates nodes.json but NOT HostRegistry."""
+        reg = data.HostRegistry(tmp_path)
+        reg.register("home", "192.168.86.201", source="env")
+        initial_count = len(reg.all())
+
+        checkin = data.NodeCheckin(
+            node_id="pihole", hostname="pihole",
+            local_ips=["10.10.10.10"], uptime_seconds=3600,
+            services=[], disk_usage_pct=34, memory_usage_pct=12,
+            version="1.0",
+        )
+        data.register_checkin(tmp_path, checkin, "10.10.10.10")
+
+        fresh = data.HostRegistry(tmp_path)
+        assert len(fresh.all()) == initial_count
+        assert fresh.find_by_name("pihole") is None
+        nodes = data.load_node_registry(tmp_path)
+        assert any(n.hostname == "pihole" for n in nodes)
+
+    def test_multiple_container_heartbeats_never_grow_registry(self, tmp_path):
+        """Repeated container heartbeats must not create registry entries."""
+        reg = data.HostRegistry(tmp_path)
+        reg.register("home", "192.168.86.201", source="env")
+        initial_count = len(reg.all())
+
+        for name in ["wireguard", "pihole", "netdata", "rsyslog", "jellyfin"]:
+            checkin = data.NodeCheckin(
+                node_id=name, hostname=name,
+                local_ips=[f"10.10.10.{hash(name) % 200}"],
+                uptime_seconds=100, services=[],
+                disk_usage_pct=20, memory_usage_pct=30, version="1.0",
+            )
+            data.register_checkin(tmp_path, checkin, f"10.10.10.{hash(name) % 200}")
+
+        fresh = data.HostRegistry(tmp_path)
+        assert len(fresh.all()) == initial_count
+
+    def test_build_fleet_excludes_container_heartbeats(self, tmp_path):
+        """Fleet hosts come from HostRegistry only, not container heartbeats."""
+        for name in ["pihole", "wireguard", "netdata"]:
+            checkin = data.NodeCheckin(
+                node_id=name, hostname=name,
+                local_ips=["10.10.10.10"], uptime_seconds=100,
+                services=[], disk_usage_pct=20, memory_usage_pct=30,
+                version="1.0",
+            )
+            data.register_checkin(tmp_path, checkin, "10.10.10.10")
+
+        env = {"PRIMARY_HOST": "192.168.86.201"}
+        fleet = data.build_fleet(env, tmp_path)
+        host_names = [h.name for h in fleet.hosts]
+        assert "pihole" not in host_names
+        assert "wireguard" not in host_names
+        assert "netdata" not in host_names
+        assert "home" in host_names
+
+    def test_registry_only_grows_from_env_or_manual(self, tmp_path):
+        """HostRegistry entries come from env or manual form, never heartbeats."""
+        reg = data.HostRegistry(tmp_path)
+        env = {"PRIMARY_HOST": "192.168.86.201"}
+        reg.seed_from_env(env)
+        env_count = len(reg.all())
+
+        checkin = data.NodeCheckin(
+            node_id="netdata", hostname="netdata",
+            local_ips=["10.10.10.21"], uptime_seconds=100,
+            services=[], disk_usage_pct=62, memory_usage_pct=53,
+            version="1.0",
+        )
+        data.register_checkin(tmp_path, checkin, "10.10.10.21")
+        assert len(data.HostRegistry(tmp_path).all()) == env_count
+
+    def test_host_level_heartbeat_does_not_create_registry_entry(self, tmp_path):
+        """Even host-mode heartbeats should not auto-create registry entries."""
+        checkin = data.NodeCheckin(
+            node_id="unknown-host", hostname="unknown-host",
+            local_ips=["192.168.86.250"], uptime_seconds=3600,
+            services=["vm:100:openwrt"], disk_usage_pct=45,
+            memory_usage_pct=60, version="2.0",
+        )
+        data.register_checkin(tmp_path, checkin, "192.168.86.250")
+
+        reg = data.HostRegistry(tmp_path)
+        assert reg.find_by_name("unknown-host") is None
+        nodes = data.load_node_registry(tmp_path)
+        assert any(n.hostname == "unknown-host" for n in nodes)
+
+
+class TestHostRegistryConstants:
+    """New Labels/ApiRoutes constants for M3."""
+
+    def test_add_host_label(self):
+        assert data.Labels.ADD_HOST == "Add Host"
+
+    def test_register_label(self):
+        assert data.Labels.REGISTER == "Register"
+
+    def test_bucket_labels(self):
+        assert data.Labels.BUCKET_TEST == "Test Units"
+        assert data.Labels.BUCKET_LAB == "Lab Units"
+        assert data.Labels.BUCKET_PRODUCTION == "Production"
+
+    def test_host_register_api_route(self):
+        assert data.ApiRoutes.HOST_REGISTER == "/api/hosts/register"
+
+
+# ── Manager relay tests ──────────────────────────────────────────────
+
+
+class TestManagerContainerCheckin:
+    """Verify the Manager's /api/checkin stores container heartbeats."""
+
+    def setup_method(self):
+        from scripts.webui import manager
+        manager.init(lambda n: "10.10.10.1")
+        manager.clear_container_checkins()
+
+    def teardown_method(self):
+        from scripts.webui import manager
+        manager.reset()
+
+    def test_container_checkin_stored_in_memory(self):
+        from scripts.webui import manager
+        checkins = manager.get_container_checkins()
+        assert len(checkins) == 0
+        checkins["pihole"] = {
+            "payload": {"hostname": "pihole", "disk_usage_pct": 34},
+            "received_at": "2026-04-07T12:00:00",
+        }
+        assert len(manager.get_container_checkins()) == 1
+        assert "pihole" in manager.get_container_checkins()
+
+    def test_multiple_containers_stored_independently(self):
+        from scripts.webui import manager
+        checkins = manager.get_container_checkins()
+        checkins["pihole"] = {
+            "payload": {"hostname": "pihole"},
+            "received_at": "2026-04-07T12:00:00",
+        }
+        checkins["wireguard"] = {
+            "payload": {"hostname": "wireguard"},
+            "received_at": "2026-04-07T12:00:01",
+        }
+        assert len(manager.get_container_checkins()) == 2
+
+    def test_reset_clears_container_checkins(self):
+        from scripts.webui import manager
+        manager.get_container_checkins()["test"] = {"payload": {}, "received_at": ""}
+        assert len(manager.get_container_checkins()) == 1
+        manager.reset()
+        assert len(manager.get_container_checkins()) == 0
+
+
+class TestManagerRelayPayload:
+    """Verify relay payload construction matches SuperManager expectations."""
+
+    def test_relay_builds_host_level_payload(self):
+        from scripts.webui import manager
+        container_checkins = {
+            "pihole": {
+                "payload": {
+                    "hostname": "pihole",
+                    "disk_usage_pct": 34,
+                    "memory_usage_pct": 12,
+                    "container_health": {"ready": True},
+                },
+                "received_at": "2026-04-07T12:00:00",
+            },
+            "wireguard": {
+                "payload": {
+                    "hostname": "wireguard",
+                    "disk_usage_pct": 52,
+                    "memory_usage_pct": 20,
+                    "container_health": {"ready": True},
+                },
+                "received_at": "2026-04-07T12:00:01",
+            },
+        }
+        host_metrics = {
+            "disk_usage_pct": 45,
+            "memory_usage_pct": 60,
+            "uptime_seconds": 86400,
+            "services": ["ct:102:pihole:running", "ct:101:wireguard:running"],
+        }
+
+        payload = manager.build_relay_payload(
+            host_name="home",
+            host_ip="192.168.86.201",
+            host_metrics=host_metrics,
+            container_checkins=container_checkins,
+        )
+
+        assert payload["node_id"] == "home"
+        assert payload["hostname"] == "home"
+        assert payload["local_ips"] == ["192.168.86.201"]
+        assert payload["disk_usage_pct"] == 45
+        assert payload["memory_usage_pct"] == 60
+        assert payload["uptime_seconds"] == 86400
+        assert len(payload["services"]) == 2
+        ct_health = payload["container_health"]
+        assert ct_health["container_id"] == "home"
+        assert ct_health["ready"] is True
+        containers = ct_health["extensions"]["containers"]
+        assert "pihole" in containers
+        assert containers["pihole"]["ready"] is True
+        assert containers["pihole"]["disk_pct"] == 34
+        assert "wireguard" in containers
+        assert containers["wireguard"]["ready"] is True
+
+    def test_relay_payload_empty_containers(self):
+        from scripts.webui import manager
+        payload = manager.build_relay_payload(
+            host_name="ai",
+            host_ip="192.168.86.220",
+            host_metrics={"disk_usage_pct": 30, "memory_usage_pct": 40,
+                          "uptime_seconds": 3600, "services": []},
+            container_checkins={},
+        )
+        assert payload["node_id"] == "ai"
+        assert payload["container_health"]["extensions"]["containers"] == {}
+        assert payload["services"] == []
+
+    def test_relay_payload_no_host_ip(self):
+        from scripts.webui import manager
+        payload = manager.build_relay_payload(
+            host_name="mesh1",
+            host_ip="",
+            host_metrics={"disk_usage_pct": 0, "memory_usage_pct": 0,
+                          "uptime_seconds": 0, "services": []},
+            container_checkins={},
+        )
+        assert payload["local_ips"] == []
+
+
+class TestManagerRelayPost:
+    """Verify relay POST behavior."""
+
+    def test_relay_skips_when_no_management_server(self):
+        from scripts.webui import manager
+        assert manager._get_management_server() == ""
+
+    def test_post_to_supermanager_handles_connection_error(self):
+        from scripts.webui import manager
+        result = manager._post_to_supermanager(
+            "http://192.0.2.1:99999/api/checkin",
+            {"node_id": "test"},
+        )
+        assert result is False
+
+    def test_post_to_supermanager_success(self):
+        """Verify POST builds correct request (mock the urlopen)."""
+        from scripts.webui import manager
+        from unittest.mock import MagicMock, patch as _patch
+        mock_response = MagicMock()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        with _patch("scripts.webui.manager.urllib.request.urlopen", return_value=mock_response) as mock_open:
+            result = manager._post_to_supermanager(
+                "http://localhost:52525/api/checkin",
+                {"node_id": "home", "hostname": "home"},
+                token="test-token",
+            )
+            assert result is True
+            call_args = mock_open.call_args
+            req = call_args[0][0]
+            assert req.full_url == "http://localhost:52525/api/checkin"
+            assert req.get_header("Content-type") == "application/json"
+            assert req.get_header("X-callhome-token") == "test-token"
+
+    def test_post_without_token_omits_header(self):
+        """POST without token must not include the auth header."""
+        from scripts.webui import manager
+        from unittest.mock import MagicMock, patch as _patch
+        mock_response = MagicMock()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        with _patch("scripts.webui.manager.urllib.request.urlopen", return_value=mock_response) as mock_open:
+            manager._post_to_supermanager(
+                "http://localhost:52525/api/checkin",
+                {"node_id": "test"},
+            )
+            req = mock_open.call_args[0][0]
+            assert not req.has_header("X-callhome-token")
+
+
+class TestManagerPublicKeyRetrieval:
+    """Verify _get_callhome_public_key reads from storage then env."""
+
+    def test_returns_empty_when_no_storage_no_env(self):
+        from scripts.webui import manager
+        from unittest.mock import patch as _patch
+        with _patch.dict("os.environ", {}, clear=True):
+            key = manager._get_callhome_public_key()
+            assert key == "" or key is not None
+
+    def test_reads_from_env_when_set(self):
+        from scripts.webui import manager
+        from unittest.mock import patch as _patch
+        with _patch.dict("os.environ", {"CALLHOME_PUBLIC_KEY": "env-key-123"}):
+            key = manager._get_callhome_public_key()
+            assert key == "env-key-123"
+
+
+class TestThreeTierDataFlow:
+    """End-to-end data flow: container heartbeat → relay payload → SM format.
+
+    Validates the 3-tier invariant: containers NEVER appear directly
+    on the SuperManager. Only host-level payloads from Managers appear.
+    """
+
+    def setup_method(self):
+        from scripts.webui import manager
+        manager.init(lambda n: "10.10.10.1")
+        manager.clear_container_checkins()
+
+    def teardown_method(self):
+        from scripts.webui import manager
+        manager.reset()
+
+    def test_container_heartbeats_nested_under_host(self):
+        """Container data must be in extensions.containers, not top-level."""
+        from scripts.webui import manager
+        checkins = manager.get_container_checkins()
+        checkins["pihole"] = {
+            "payload": {
+                "hostname": "pihole",
+                "disk_usage_pct": 34,
+                "memory_usage_pct": 12,
+                "uptime_seconds": 3600,
+                "container_health": {
+                    "container_id": "pihole",
+                    "ready": True,
+                    "systemd_services": {"pihole-FTL": "active"},
+                    "listening_ports": [53, 80],
+                    "extensions": {},
+                },
+            },
+            "received_at": "2026-04-08T12:00:00",
+        }
+        checkins["wireguard"] = {
+            "payload": {
+                "hostname": "wireguard",
+                "disk_usage_pct": 20,
+                "memory_usage_pct": 8,
+                "container_health": {"ready": True},
+            },
+            "received_at": "2026-04-08T12:00:05",
+        }
+
+        payload = manager.build_relay_payload(
+            host_name="home",
+            host_ip="192.168.86.201",
+            host_metrics={"disk_usage_pct": 50, "memory_usage_pct": 30,
+                          "uptime_seconds": 99000, "services": []},
+            container_checkins=checkins,
+        )
+
+        assert payload["hostname"] == "home"
+        assert payload["node_id"] == "home"
+        assert payload["local_ips"] == ["192.168.86.201"]
+        assert payload["disk_usage_pct"] == 50
+        assert payload["memory_usage_pct"] == 30
+
+        containers = payload["container_health"]["extensions"]["containers"]
+        assert "pihole" in containers
+        assert "wireguard" in containers
+        assert containers["pihole"]["ready"] is True
+        assert containers["pihole"]["disk_pct"] == 34
+        assert containers["wireguard"]["ready"] is True
+
+    def test_relay_payload_is_valid_node_checkin(self):
+        """Relay payload must be a valid NodeCheckin for /api/checkin."""
+        from scripts.webui import manager
+        payload = manager.build_relay_payload(
+            host_name="mesh2",
+            host_ip="192.168.86.211",
+            host_metrics={"disk_usage_pct": 40, "memory_usage_pct": 20,
+                          "uptime_seconds": 5000, "services": ["ct:401:kiosk:running"]},
+            container_checkins={},
+        )
+
+        required_keys = {"node_id", "hostname", "local_ips", "uptime_seconds",
+                         "disk_usage_pct", "memory_usage_pct", "container_health"}
+        assert required_keys.issubset(payload.keys())
+        assert payload["container_health"]["container_id"] == "mesh2"
+        assert payload["container_health"]["ready"] is True
+
+    def test_no_container_leaks_to_top_level(self):
+        """Container names must NOT appear as top-level hostname/node_id."""
+        from scripts.webui import manager
+        checkins = manager.get_container_checkins()
+        checkins["pihole"] = {
+            "payload": {"hostname": "pihole", "container_health": {"ready": True}},
+            "received_at": "now",
+        }
+
+        payload = manager.build_relay_payload(
+            host_name="home",
+            host_ip="192.168.86.201",
+            host_metrics={"disk_usage_pct": 0, "memory_usage_pct": 0,
+                          "uptime_seconds": 0, "services": []},
+            container_checkins=checkins,
+        )
+
+        assert payload["hostname"] == "home", "Container name must not leak to top-level"
+        assert payload["node_id"] == "home"
+        assert "pihole" not in payload["hostname"]
+
+    def test_manager_api_checkin_stores_container_data(self):
+        """Simulates POST to Manager /api/checkin from a container."""
+        from scripts.webui import manager
+        from starlette.testclient import TestClient
+        from starlette.applications import Starlette
+        from starlette.routing import Route
+
+        test_app = Starlette(routes=[
+            Route("/api/checkin", manager.handle_container_checkin, methods=["POST"]),
+        ])
+
+        manager.clear_container_checkins()
+        client = TestClient(test_app)
+        resp = client.post("/api/checkin", json={
+            "hostname": "rsyslog",
+            "node_id": "rsyslog",
+            "disk_usage_pct": 52,
+            "memory_usage_pct": 37,
+            "container_health": {
+                "container_id": "rsyslog",
+                "ready": True,
+                "systemd_services": {"rsyslog": "active"},
+                "listening_ports": [514],
+                "extensions": {},
+            },
+        })
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+
+        checkins = manager.get_container_checkins()
+        assert "rsyslog" in checkins
+        assert checkins["rsyslog"]["payload"]["disk_usage_pct"] == 52
+
+    def test_manager_api_checkin_rejects_empty_hostname(self):
+        """POST with no hostname must return 400."""
+        from scripts.webui import manager
+        from starlette.testclient import TestClient
+        from starlette.applications import Starlette
+        from starlette.routing import Route
+
+        test_app = Starlette(routes=[
+            Route("/api/checkin", manager.handle_container_checkin, methods=["POST"]),
+        ])
+        client = TestClient(test_app)
+        resp = client.post("/api/checkin", json={"disk_usage_pct": 10})
+        assert resp.status_code == 400
+
+    def test_full_roundtrip_container_to_relay(self):
+        """Full pipeline: container checkin → store → build relay → verify nesting."""
+        from scripts.webui import manager
+        from starlette.testclient import TestClient
+        from starlette.applications import Starlette
+        from starlette.routing import Route
+
+        test_app = Starlette(routes=[
+            Route("/api/checkin", manager.handle_container_checkin, methods=["POST"]),
+        ])
+
+        manager.clear_container_checkins()
+        client = TestClient(test_app)
+
+        client.post("/api/checkin", json={
+            "hostname": "pihole",
+            "node_id": "pihole",
+            "disk_usage_pct": 34,
+            "memory_usage_pct": 12,
+            "container_health": {"container_id": "pihole", "ready": True},
+        })
+        client.post("/api/checkin", json={
+            "hostname": "wireguard",
+            "node_id": "wireguard",
+            "disk_usage_pct": 20,
+            "memory_usage_pct": 8,
+            "container_health": {"container_id": "wireguard", "ready": True},
+        })
+
+        payload = manager.build_relay_payload(
+            host_name="home",
+            host_ip="192.168.86.201",
+            host_metrics={"disk_usage_pct": 50, "memory_usage_pct": 30,
+                          "uptime_seconds": 5000, "services": []},
+            container_checkins=manager.get_container_checkins(),
+        )
+
+        assert payload["hostname"] == "home"
+        assert payload["node_id"] == "home"
+        assert "pihole" not in payload["hostname"]
+        assert "wireguard" not in payload["hostname"]
+
+        containers = payload["container_health"]["extensions"]["containers"]
+        assert len(containers) == 2
+        assert containers["pihole"]["ready"] is True
+        assert containers["pihole"]["disk_pct"] == 34
+        assert containers["wireguard"]["ready"] is True

@@ -532,16 +532,31 @@ class TestBatmanOriginatorParsing:
 
 
 class TestCollectBatmanMetricsReal:
-    """Batman collector tests against real hardware."""
+    """Batman collector tests against real hardware.
+
+    These tests require bridge containers to be provisioned (wrapper scripts
+    are deployed by openwrt_bridge_lxc and removed during molecule cleanup).
+    """
 
     @pytest.fixture()
     def env(self):
         return _load_test_env()
 
+    @staticmethod
+    def _wrapper_exists(ip: str) -> bool:
+        """Check if batman_trigger.sh wrapper is deployed on the host."""
+        ok, _ = _ssh_exec(ip, "test -x /usr/local/bin/batman_trigger.sh", timeout=5)
+        return ok
+
     def test_batman_status_from_bridge_1(self, env):
         """Batman status is queryable on bridge-1."""
         ip = env.get("BRIDGE_1_HOST", "")
         assert ip, "BRIDGE_1_HOST not set"
+        if not self._wrapper_exists(ip):
+            pytest.skip(
+                "batman_trigger.sh wrapper not deployed on bridge-1 "
+                "(run molecule converge to provision bridge containers)"
+            )
         result = collect_batman_metrics(ip)
         assert result.success, (
             f"collect_batman_metrics failed on bridge-1 ({ip}): {result.error}. "
@@ -554,6 +569,11 @@ class TestCollectBatmanMetricsReal:
         """Batman status is queryable on bridge-2."""
         ip = env.get("BRIDGE_2_HOST", "")
         assert ip, "BRIDGE_2_HOST not set"
+        if not self._wrapper_exists(ip):
+            pytest.skip(
+                "batman_trigger.sh wrapper not deployed on bridge-2 "
+                "(run molecule converge to provision bridge containers)"
+            )
         result = collect_batman_metrics(ip)
         assert result.success, f"collect_batman_metrics failed on bridge-2: {result.error}"
         assert "active" in result.data

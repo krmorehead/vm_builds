@@ -24,8 +24,9 @@ from pathlib import Path
 from nicegui import app, ui
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
-if str(_SCRIPT_DIR.parent.parent) not in sys.path:
-    sys.path.insert(0, str(_SCRIPT_DIR.parent.parent))
+_PROJECT_ROOT = _SCRIPT_DIR.parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from scripts.webui import manager  # noqa: E402
 from scripts.webui.data import load_kiosk_config  # noqa: E402
@@ -41,13 +42,14 @@ def _build_node_resolver(config: dict) -> Callable[[str], str | None]:
     return resolver
 
 
+_kiosk_config: dict = {}
+
+
 def create_app(config_path: Path | None = None) -> None:
     """Register pages, init manager, mount API endpoints."""
+    global _kiosk_config
     urls = load_kiosk_config(config_path)
-
-    app.storage.general["management_server"] = urls.get("MANAGEMENT_SERVER", "")
-    app.storage.general["mesh_key"] = urls.get("MESH_KEY", "")
-    app.storage.general["host_ip"] = urls.get("HOST_IP", "")
+    _kiosk_config = urls
 
     manager.init(_build_node_resolver(urls))
     manager.register_api(app)
@@ -91,9 +93,10 @@ def create_app(config_path: Path | None = None) -> None:
 
     @ui.page("/containers")
     async def kiosk_containers() -> None:
+        from scripts.webui.data import Fleet
         with theme.kiosk_page_shell("containers"):
             ui.add_head_html(theme.HOVER_CARD_STYLES)
-            await _render_containers()
+            await _render_containers(Fleet([]))
 
     from scripts.webui.pages import launch, viewer
     launch.register()
@@ -113,7 +116,15 @@ def main() -> None:
     config_path = Path(args.config) if args.config else None
     create_app(config_path=config_path)
 
-    app.on_startup(manager.start_poller)
+    def _on_startup() -> None:
+        app.storage.general["management_server"] = _kiosk_config.get("MANAGEMENT_SERVER", "")
+        app.storage.general["callhome_public_key"] = _kiosk_config.get("CALLHOME_PUBLIC_KEY", "")
+        app.storage.general["mesh_key"] = _kiosk_config.get("MESH_KEY", "")
+        app.storage.general["host_ip"] = _kiosk_config.get("HOST_IP", "")
+        app.storage.general["host_name"] = _kiosk_config.get("HOST_NAME", "")
+        manager.start_poller()
+
+    app.on_startup(_on_startup)
 
     storage_secret = os.environ.get("WEBUI_STORAGE_SECRET") or secrets.token_hex(32)
     ui.run(

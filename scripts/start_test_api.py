@@ -24,7 +24,7 @@ sys.path.insert(0, str(project_root))
 
 from build import start_api_server, API_PORT  # noqa: E402
 
-RELAY_PORT = API_PORT + 1
+RELAY_PORT = API_PORT + 1  # tunnel relay on port+1, always one above the API
 
 
 def _cleanup_stale(state: Path, primary_host: str) -> None:

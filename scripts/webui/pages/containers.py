@@ -1,7 +1,8 @@
 """Container & VM management page — list, start, stop, restart guests.
 
-Provides a real-time view of all LXC containers and QEMU VMs on the
-Proxmox host. The manager SSHes to the host and runs pct/qm commands.
+Shows all LXC containers and QEMU VMs. Uses Fleet domain objects for
+heartbeat-based guest info and falls back to the Manager API for real-time
+pct/qm guest lists when available.
 """
 
 from __future__ import annotations
@@ -9,8 +10,8 @@ from __future__ import annotations
 import httpx
 from nicegui import ui
 
-from scripts.webui import theme
-from scripts.webui.data import get_api_base_url
+from scripts.webui import data, theme
+from scripts.webui.data import Fleet, Labels, PageTitles, get_api_base_url
 
 
 async def _fetch_guests() -> list[dict]:
@@ -20,7 +21,7 @@ async def _fetch_guests() -> list[dict]:
             resp = await client.get(f"{get_api_base_url()}/api/guests", timeout=15)
             if resp.status_code == 200:
                 return resp.json().get("guests", [])
-    except Exception:
+    except (httpx.HTTPError, OSError):
         pass
     return []
 
@@ -33,7 +34,7 @@ async def _guest_action(vmid: str, action: str) -> dict:
                 f"{get_api_base_url()}/api/guests/{vmid}/{action}", timeout=30,
             )
             return resp.json()
-    except Exception as exc:
+    except (httpx.HTTPError, OSError) as exc:
         return {"success": False, "error": str(exc)}
 
 
@@ -42,7 +43,7 @@ def _status_color(status: str) -> str:
     if status_lower == "running":
         return theme.COLOR_SUCCESS
     if status_lower == "stopped":
-        return theme.COLOR_ERROR
+        return theme.TEXT_SECONDARY
     return theme.COLOR_WARNING
 
 
@@ -50,11 +51,11 @@ def _type_icon(guest_type: str) -> str:
     return "dns" if guest_type == "lxc" else "computer"
 
 
-async def _render_containers() -> None:
+async def _render_containers(fleet: Fleet) -> None:
     """Render the container management dashboard."""
     with ui.column().classes("w-full max-w-[1200px] mx-auto px-6 py-6 gap-5"):
         theme.page_header(
-            "Containers & VMs",
+            PageTitles.CONTAINERS,
             "Manage all guests on this Proxmox host",
         )
 
@@ -64,6 +65,9 @@ async def _render_containers() -> None:
                 "on this Proxmox host. You can start, stop, or restart any "
                 "guest from here. Changes take effect immediately."
             )
+
+        if fleet.has_telemetry and fleet.total_guests > 0:
+            _fleet_guest_summary(fleet)
 
         guest_container = ui.column().classes("w-full gap-3")
 
@@ -105,10 +109,31 @@ async def _render_containers() -> None:
                     ).classes("text-xs").style(f"color: {theme.TEXT_DISABLED}")
 
         ui.button(
-            "Refresh", icon="refresh", on_click=refresh,
+            Labels.REFRESH, icon="refresh", on_click=refresh,
         ).classes("outline-btn")
 
         await refresh()
+
+
+def _fleet_guest_summary(fleet: Fleet) -> None:
+    """Show aggregate guest counts from heartbeat telemetry."""
+    with ui.card().classes("w-full"):
+        with ui.row().classes("items-center gap-3"):
+            ui.icon("widgets").classes("text-lg").style(f"color: {theme.ACCENT}")
+            theme.card_title("Fleet Guest Overview")
+        with ui.row().classes("gap-6 mt-2"):
+            theme.stat_value(str(fleet.total_guests), "Total Guests")
+            vms = sum(len(h.vms) for h in fleet.hosts)
+            cts = sum(len(h.containers) for h in fleet.hosts)
+            theme.stat_value(str(vms), "VMs")
+            theme.stat_value(str(cts), "Containers")
+        if fleet.host_count > 1:
+            with ui.row().classes("gap-4 mt-2 flex-wrap"):
+                for h in fleet.hosts:
+                    if h.guest_count > 0:
+                        ui.label(f"{h.name}: {h.guest_count}").classes(
+                            "text-xs font-mono"
+                        ).style(f"color: {theme.TEXT_SECONDARY}")
 
 
 def _render_guest_card(guest: dict, refresh_callback) -> None:
@@ -183,6 +208,12 @@ async def _do_action(vmid: str, action: str, refresh_callback) -> None:
 def register() -> None:
     @ui.page("/containers")
     async def containers_page() -> None:
+        from scripts.webui.app import get_state_dir, load_active_env
+
+        state_dir = get_state_dir()
+        env = load_active_env()
+        fleet = data.build_fleet(env, state_dir)
+
         with theme.page_shell("containers"):
             ui.add_head_html(theme.HOVER_CARD_STYLES)
-            await _render_containers()
+            await _render_containers(fleet)

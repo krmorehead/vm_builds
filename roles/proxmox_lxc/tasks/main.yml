@@ -178,7 +178,12 @@
 - name: Start container
   ansible.builtin.command:
     cmd: pct start {{ lxc_ct_id }}
-  when: not lxc_exists | bool
+  register: _lxc_start
+  changed_when: _lxc_start.rc == 0
+  failed_when: false
+  when: >-
+    (not lxc_exists | bool)
+    or ('stopped' in (_lxc_status.stdout | default('')))
 
 # ── Minimal bootstrap wait (pct exec needs a running init) ─────
 # A single quick check ensures pct exec works before we push files.
@@ -208,16 +213,23 @@
 - name: Install callhome agent and configure heartbeat
   ansible.builtin.shell:
     cmd: |
+      set -o pipefail
       if ! pct exec {{ lxc_ct_id }} -- test -d /opt/callhome; then
         exit 0
       fi
       pct push {{ lxc_ct_id }} /tmp/callhome_agent.py /opt/callhome/callhome.py
       pct exec {{ lxc_ct_id }} -- chmod +x /opt/callhome/callhome.py
+      KIOSK_IP=$(pct config {{ kiosk_ct_id }} 2>/dev/null | grep -oP 'ip=\K[^/]+' | head -1)
+      if [ -n "$KIOSK_IP" ]; then
+        TARGET="http://${KIOSK_IP}:{{ kiosk_manager_port | default('9001') }}"
+      else
+        TARGET="{{ callhome_server }}"
+      fi
       pct exec {{ lxc_ct_id }} -- bash -c \
-        'printf "CALLHOME_SERVER=%s\nCALLHOME_PUBLIC_KEY=%s\n" \
-        "{{ callhome_server }}" "{{ callhome_public_key }}" \
+        "printf 'CALLHOME_SERVER=%s\nCALLHOME_PUBLIC_KEY=%s\n' \
+        '$TARGET' '{{ callhome_public_key }}' \
         > /etc/default/callhome; \
-        systemctl restart callhome.service 2>/dev/null || true'
+        systemctl restart callhome.service 2>/dev/null || true"
     executable: /bin/bash
   changed_when: true
   failed_when: false
@@ -228,25 +240,9 @@
 # ready (confirms systemd services up + networking). Falls back to
 # pct exec polling when the API is not configured.
 
-- name: Wait for container readiness via API
-  ansible.builtin.uri:
-    url: "{{ callhome_server }}/api/container/{{ lxc_ct_hostname }}/ready"
-    return_content: true
-  register: _ct_api_ready
-  delegate_to: localhost
-  retries: 12
-  delay: 5
-  until: (_ct_api_ready.json.ready | default(false)) | bool
-  failed_when: false
-  when:
-    - callhome_server | default('') | length > 0
-    - lxc_ct_ostype != 'unmanaged'
-
 - name: Set API readiness result
   ansible.builtin.set_fact:
-    _ct_ready_via_api: >-
-      {{ (callhome_server | default('') | length > 0)
-         and (_ct_api_ready.json.ready | default(false)) | bool }}
+    _ct_ready_via_api: false
 
 - name: Wait for container networking (pct exec fallback)
   ansible.builtin.shell:

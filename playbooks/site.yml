@@ -1,4 +1,70 @@
 ---
+# ── Phase 0a: Ensure heartbeat API server is running ───────────
+# In molecule test, cleanup removes .state/callhome_url but prepare
+# may be skipped. This play detects a missing API and starts one.
+
+- name: Ensure heartbeat API server is running
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Check if API server state file exists
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../.state/callhome_url"
+      register: _callhome_state
+
+    - name: Start API server if not running
+      ansible.builtin.command:
+        cmd: "{{ playbook_dir }}/../.venv/bin/python3 {{ playbook_dir }}/../scripts/start_test_api.py"
+      environment:
+        MOLECULE_PROJECT_DIRECTORY: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') | default('', true) }}"
+      register: _api_start
+      changed_when: true
+      when:
+        - not _callhome_state.stat.exists
+        - lookup('env', 'MOLECULE_PROJECT_DIRECTORY') | length > 0
+
+    - name: Report API server status
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'API server started: ' + _api_start.stdout | default('')
+             if _api_start is not skipped
+             else 'API server already running' }}
+
+# ── Phase 0b: Start heartbeat watchdog ─────────────────────────
+# Background process polls /api/fleet/stale every second.
+# Kills ansible-playbook the instant any previously-healthy service
+# stops heartbeating. No grace period, no waiting for end-of-run.
+
+- name: Start heartbeat watchdog
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Launch watchdog in background
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          CALLHOME_URL=$(cat "{{ playbook_dir }}/../.state/callhome_url" 2>/dev/null || echo "")
+          if [ -z "$CALLHOME_URL" ]; then
+            echo "No callhome_url — watchdog skipped"
+            exit 0
+          fi
+          SERVICES="{{ fleet_monitored_services | join(',') }}"
+          PARENT_PID=$PPID
+          nohup "{{ playbook_dir }}/../scripts/heartbeat_watchdog.sh" \
+            "$CALLHOME_URL" "$PARENT_PID" "$SERVICES" 60 \
+            >> "{{ playbook_dir }}/../.state/watchdog.log" 2>&1 &
+          echo "$!" > "{{ playbook_dir }}/../.state/watchdog.pid"
+          echo "Watchdog started (PID $!) monitoring $CALLHOME_URL services=$SERVICES — will kill PID $PARENT_PID on stale heartbeat"
+        executable: /bin/bash
+      register: _watchdog_start
+      changed_when: true
+
+    - name: Report watchdog status
+      ansible.builtin.debug:
+        msg: "{{ _watchdog_start.stdout }}"
+
 # ── Phase 1: Primary host (directly reachable) ──────────────────
 
 - name: Back up primary Proxmox hosts
@@ -23,6 +89,29 @@
   gather_facts: true
   tags: [infra]
   pre_tasks:
+    - name: Disable PVE enterprise repo (requires subscription)
+      ansible.builtin.command:
+        cmd: mv /etc/apt/sources.list.d/pve-enterprise.sources /etc/apt/sources.list.d/pve-enterprise.sources.disabled
+      args:
+        removes: /etc/apt/sources.list.d/pve-enterprise.sources
+
+    - name: Disable Ceph enterprise repo (requires subscription)
+      ansible.builtin.command:
+        cmd: mv /etc/apt/sources.list.d/ceph.sources /etc/apt/sources.list.d/ceph.sources.disabled
+      args:
+        removes: /etc/apt/sources.list.d/ceph.sources
+
+    - name: Add Proxmox no-subscription repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/pve-no-subscription.sources
+        mode: "0644"
+        content: |
+          Types: deb
+          URIs: http://download.proxmox.com/debian/pve
+          Suites: {{ ansible_facts['distribution_release'] }}
+          Components: pve-no-subscription
+          Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+
     - name: Check clock skew
       ansible.builtin.shell:
         cmd: |
@@ -112,6 +201,29 @@
   gather_facts: true
   tags: [lan-satellite, infra]
   pre_tasks:
+    - name: Disable PVE enterprise repo (requires subscription)
+      ansible.builtin.command:
+        cmd: mv /etc/apt/sources.list.d/pve-enterprise.sources /etc/apt/sources.list.d/pve-enterprise.sources.disabled
+      args:
+        removes: /etc/apt/sources.list.d/pve-enterprise.sources
+
+    - name: Disable Ceph enterprise repo (requires subscription)
+      ansible.builtin.command:
+        cmd: mv /etc/apt/sources.list.d/ceph.sources /etc/apt/sources.list.d/ceph.sources.disabled
+      args:
+        removes: /etc/apt/sources.list.d/ceph.sources
+
+    - name: Add Proxmox no-subscription repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/pve-no-subscription.sources
+        mode: "0644"
+        content: |
+          Types: deb
+          URIs: http://download.proxmox.com/debian/pve
+          Suites: {{ ansible_facts['distribution_release'] }}
+          Components: pve-no-subscription
+          Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+
     - name: Check clock skew
       ansible.builtin.shell:
         cmd: |
@@ -307,9 +419,7 @@
       ansible.builtin.uri:
         url: >-
           {{ callhome_server }}/api/fleet/ready?services={{
-            ['pihole', 'rsyslog', 'netdata', 'wireguard',
-             'homeassistant', 'jellyfin', 'kodi', 'moonlight',
-             'kiosk', 'gaming'] | join(',')
+            fleet_ready_services | join(',')
           }}
         return_content: true
       register: _pre_configure_ready
@@ -358,7 +468,7 @@
     - rsyslog_configure
 
 - name: Configure Netdata
-  hosts: monitoring_nodes
+  hosts: netdata
   gather_facts: false
   tags: [monitoring]
   roles:
@@ -429,6 +539,44 @@
   roles:
     - gaming_lxc_configure
 
+# ── Attach display-exclusive hookscripts (post-configure) ────────
+# Hookscripts are deployed by kiosk_lxc but not attached until after
+# all configure plays finish. Attaching during provisioning would stop
+# DRI containers (Kodi, Moonlight, Kiosk) when the Desktop VM starts,
+# breaking their configure plays.
+
+- name: Attach display-exclusive hookscripts
+  hosts: desktop_nodes
+  gather_facts: false
+  tags: [kiosk, desktop, media, moonlight]
+  tasks:
+    - name: Check display-exclusive hookscript exists
+      ansible.builtin.stat:
+        path: /var/lib/vz/snippets/display-exclusive.sh
+      register: _hookscript_exists
+
+    - name: Attach hookscript to display containers
+      ansible.builtin.command:
+        cmd: pct set {{ item }} --hookscript local:snippets/display-exclusive.sh
+      loop:
+        - "{{ kiosk_ct_id }}"
+        - "{{ kodi_ct_id }}"
+        - "{{ moonlight_ct_id }}"
+      loop_control:
+        label: "CT {{ item }}"
+      register: _attach_ct
+      failed_when: false
+      changed_when: _attach_ct.rc == 0
+      when: _hookscript_exists.stat.exists | default(false)
+
+    - name: Attach hookscript to Desktop VM
+      ansible.builtin.command:
+        cmd: qm set {{ desktop_vm_id }} --hookscript local:snippets/display-exclusive.sh
+      register: _attach_vm
+      failed_when: false
+      changed_when: _attach_vm.rc == 0
+      when: _hookscript_exists.stat.exists | default(false)
+
 # ── Heartbeat circuit breaker (post-configure) ──────────────────
 # All configure plays have run. Verify that every container that was
 # healthy at the Phase 3b gate is still heartbeating. If any
@@ -443,19 +591,7 @@
     - name: Run heartbeat staleness check
       ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/fleet_heartbeat_gate.yml"
       vars:
-        gate_services:
-          - pihole
-          - rsyslog
-          - netdata
-          - wireguard
-          - homeassistant
-          - jellyfin
-          - kodi
-          - moonlight
-          - kiosk
-          - gaming
-          - openwrt-mesh
-          - openwrt-bridge
+        gate_services: "{{ fleet_monitored_services }}"
         gate_max_age_seconds: 180
       when: callhome_server | default('') | length > 0
 
@@ -466,21 +602,38 @@
   gather_facts: false
   tags: [kiosk, pihole, monitoring, homeassistant, media, moonlight, wireguard, gaming, mesh-wifi, bridge]
   tasks:
+    - name: Detect kiosk container IP for local Manager
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct config {{ kiosk_ct_id }} 2>/dev/null | grep -oP 'ip=\K[^/]+' | head -1
+        executable: /bin/bash
+      register: _kiosk_ip_result
+      changed_when: false
+      failed_when: false
+
     - name: Write callhome config to each running container
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          CALLHOME_SERVER="{{ callhome_server }}"
+          KIOSK_IP="{{ _kiosk_ip_result.stdout | default('') | trim }}"
+          KIOSK_CTID="{{ kiosk_ct_id }}"
+          if [ -n "$KIOSK_IP" ]; then
+            CALLHOME_TARGET="http://${KIOSK_IP}:{{ kiosk_manager_port | default('9001') }}"
+          else
+            CALLHOME_TARGET="{{ callhome_server }}"
+          fi
           CALLHOME_KEY="{{ callhome_public_key }}"
           for ctid in $(pct list 2>/dev/null | awk 'NR>1 && $2=="running" {print $1}'); do
+            # Skip the kiosk container — it IS the Manager
+            [ "$ctid" = "$KIOSK_CTID" ] && continue
             # Debian containers (Python callhome agent + systemd)
             pct exec "$ctid" -- bash -c "
               [ -d /opt/callhome ] || exit 0
               cat > /etc/default/callhome << EOF
-          CALLHOME_SERVER=$CALLHOME_SERVER
+          CALLHOME_SERVER=$CALLHOME_TARGET
           CALLHOME_PUBLIC_KEY=$CALLHOME_KEY
           EOF
-              [ -f /opt/kiosk/config.json ] && echo 'CALLHOME_CONFIG_FILES=/opt/kiosk/config.json' >> /etc/default/callhome
               PROBES=''
               [ -x /usr/bin/jellyfin ] && PROBES='http://127.0.0.1:8096'
               [ -f /usr/share/netdata/web/index.html ] && PROBES='http://127.0.0.1:19999'
@@ -496,7 +649,7 @@
               [ -d /opt/callhome ] && exit 0
               CT_HOSTNAME=\$(hostname 2>/dev/null || echo unknown)
               cat > /etc/default/callhome << EOF
-          CALLHOME_SERVER=$CALLHOME_SERVER
+          CALLHOME_SERVER=$CALLHOME_TARGET
           CALLHOME_PUBLIC_KEY=$CALLHOME_KEY
           CALLHOME_CONTAINER=\$CT_HOSTNAME
           EOF

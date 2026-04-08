@@ -203,19 +203,6 @@
 
 # ── Hookscript attachment ──────────────────────────────────────────
 
-- name: Check if display-exclusive hookscript exists
-  ansible.builtin.stat:
-    path: /var/lib/vz/snippets/display-exclusive.sh
-  register: _hookscript_check
-
-- name: Attach display-exclusive hookscript
-  ansible.builtin.command:
-    cmd: >-
-      qm set {{ desktop_vm_id }}
-      --hookscript local:snippets/display-exclusive.sh
-  changed_when: true
-  when: _hookscript_check.stat.exists | default(false)
-
 # ── Start VM and discover IP ──────────────────────────────────────
 
 - name: Start Desktop VM

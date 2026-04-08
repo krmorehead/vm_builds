@@ -13,6 +13,7 @@ from urllib.parse import unquote
 from nicegui import ui
 
 from scripts.webui import theme
+from scripts.webui.data import Labels, Routes
 
 
 def register() -> None:
@@ -42,7 +43,7 @@ def register() -> None:
         bar_bg = f"background: {theme.BG_CARD}; border-bottom: 1px solid {theme.BORDER};"
         with ui.element("div").classes("viewer-bar").style(bar_bg + " opacity: 0.85;"):
             ui.button(
-                icon="home", on_click=lambda: ui.navigate.to("/hub"),
+                icon="home", on_click=lambda: ui.navigate.to(Routes.HUB),
             ).props("flat dense round").style(f"color: {theme.ACCENT}")
             ui.label(title).classes("text-sm font-medium").style(
                 f"color: {theme.TEXT_PRIMARY}"
@@ -69,6 +70,6 @@ def register() -> None:
                     f"color: {theme.TEXT_SECONDARY}"
                 )
                 ui.button(
-                    "Back to Hub", icon="home",
-                    on_click=lambda: ui.navigate.to("/hub"),
+                    Labels.BACK_TO_HUB, icon="home",
+                    on_click=lambda: ui.navigate.to(Routes.HUB),
                 ).classes("action-btn mt-4")

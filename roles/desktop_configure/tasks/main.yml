@@ -95,13 +95,23 @@
   become: true
   when: callhome_server | default('') | length > 0
 
+- name: Check if callhome service exists
+  ansible.builtin.command:
+    cmd: systemctl list-unit-files callhome.service
+  register: _callhome_unit
+  changed_when: false
+  failed_when: false
+  become: true
+
 - name: Start callhome service
   ansible.builtin.systemd:
     name: callhome
     state: restarted
     enabled: true
   become: true
-  when: callhome_server | default('') | length > 0
+  when:
+    - callhome_server | default('') | length > 0
+    - "'callhome.service' in _callhome_unit.stdout"
 
 # ── Include session polish ─────────────────────────────────────────
 

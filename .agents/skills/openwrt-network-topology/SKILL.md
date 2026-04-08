@@ -49,3 +49,9 @@ description: OpenWrt bridge ordering and WAN detection patterns. Use when managi
     - After Phase 2, clean up bootstrap IP entirely
 
 11. Previous bug: excluded `vmbr0` and tried connecting through `vmbr1` (which had no IP in OpenWrt's default config).
+
+12. On re-runs (VM already configured), the bootstrap IP `192.168.1.1` no longer exists — the VM's LAN is on 10.10.10.1. The `openwrt_vm` role MUST probe the configured LAN IP first and skip bootstrap if reachable.
+
+13. OpenWrt LXC containers (bridge, mesh) boot with the default LAN IP 192.168.1.1 on br-lan. On WAN-bridged hosts, this IP is on the same L2 segment as the router VM's bootstrap target. The bridge LXC role MUST override the default LAN IP to the Proxmox-assigned container IP during provisioning.
+
+14. Previous bug: Bridge LXC containers on bridge-1 and bridge-2 had 192.168.1.1 on the WAN bridge. When the openwrt_vm role added 192.168.1.2/24 to vmbr0 and SSHed to 192.168.1.1, it connected to the bridge container (1 eth interface) instead of the VM (3 interfaces). The configure role then failed with "No LAN devices found."

@@ -40,6 +40,12 @@ Use when running molecule tests, implementing TDD workflow, diagnosing test fail
 18. ALWAYS use default values for hardware-dependent variables (igpu_render_device) to prevent test failures
 19. ALWAYS validate generated env file paths exist before relying on dynamic network configuration
 
+**Scalable UI Testing (NiceGUI web UI):**
+20. NEVER hardcode UI strings in tests. Import `Routes`, `PageTitles`, `Labels`, `ApiRoutes` from `scripts.webui.data`
+21. ALWAYS derive test data from production data structures (`data.DISPLAY_APPS`, `data.HUB_SERVICES`, `data.NAV_SECTIONS`) instead of repeating labels
+22. When adding a new page/button/label: add the constant to `data.py` first, then use it in both the page module and tests
+23. Previous bug: 26 tests broke when hub section names changed because tests hardcoded strings. Now all derive from `data.HUB_SERVICES` sections
+
 ## Patterns
 
 TDD iteration pattern:
@@ -175,6 +181,19 @@ Previous catastrophe: Agent dismissed ai unreachable THREE TIMES in one
 session. Ran 4 hours of tests that could never validate the actual feature
 (streaming from ai). The root cause was `modprobe -r amdgpu` from an earlier
 session. Physical power-on required 3000 miles away.
+
+## Theme/UI helper test coverage
+
+When adding new theme helpers (e.g., `status_color`, `status_dot`), ALWAYS
+add corresponding unit tests in `test_webui_data.py`. Theme helpers map
+semantic strings to colors — if the mapping is wrong, the entire UI has
+wrong color semantics (red for healthy, grey for errors, etc.).
+
+Previous bug: `theme.status_color` was added with mappings for `online`,
+`stale`, `reachable`, `offline`, `unreachable`, `unknown`, but no unit tests
+existed. During manual testing, the `unknown` status was colored red (error)
+instead of grey (neutral), making normal unprobed hosts look broken. Adding
+7 tests caught the mapping table error immediately.
 
 ## Anti-patterns
 

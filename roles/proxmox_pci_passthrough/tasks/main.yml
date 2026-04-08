@@ -53,11 +53,23 @@
 # ── Firmware verification and auto-install ────────────────────
 # If lspci shows a WiFi controller but no PHYs appeared,
 # firmware is likely missing. Install and reload for Intel WiFi.
+# On Proxmox VE, pve-firmware already bundles Intel WiFi firmware.
+# Installing the standalone firmware-iwlwifi package conflicts
+# with pve-firmware (apt tries to remove proxmox-ve meta-package).
 
-- name: Check if firmware-iwlwifi is installed
+- name: Check if WiFi firmware is already available
   ansible.builtin.shell:
-    cmd: dpkg -l firmware-iwlwifi 2>/dev/null | grep -c '^ii' || echo 0
-  register: _fw_iwlwifi_installed
+    cmd: |
+      set -o pipefail
+      if dpkg -l pve-firmware 2>/dev/null | grep -q '^ii'; then
+        echo "pve-firmware"
+      elif dpkg -l firmware-iwlwifi 2>/dev/null | grep -q '^ii'; then
+        echo "firmware-iwlwifi"
+      else
+        echo "none"
+      fi
+    executable: /bin/bash
+  register: _fw_provider
   changed_when: false
   when:
     - (_early_phy_count.stdout | default('0') | trim | int) == 0
@@ -74,7 +86,7 @@
     - (_early_phy_count.stdout | default('0') | trim | int) == 0
     - (wifi_ifaces_raw.stdout_lines | default([])) | length == 0
     - _wifi_pci_controllers.stdout is search('Intel')
-    - (_fw_iwlwifi_installed.stdout | default('0') | trim | int) == 0
+    - (_fw_provider.stdout | default('none') | trim) == 'none'
 
 - name: Fix DNS to use gateway if external DNS is unreachable
   ansible.builtin.copy:
@@ -88,7 +100,7 @@
     - (_early_phy_count.stdout | default('0') | trim | int) == 0
     - (wifi_ifaces_raw.stdout_lines | default([])) | length == 0
     - _wifi_pci_controllers.stdout is search('Intel')
-    - (_fw_iwlwifi_installed.stdout | default('0') | trim | int) == 0
+    - (_fw_provider.stdout | default('none') | trim) == 'none'
     - _fw_dns_check.rc | default(0) != 0
 
 - name: Install firmware-iwlwifi for Intel WiFi
@@ -101,7 +113,7 @@
     - (_early_phy_count.stdout | default('0') | trim | int) == 0
     - (wifi_ifaces_raw.stdout_lines | default([])) | length == 0
     - _wifi_pci_controllers.stdout is search('Intel')
-    - (_fw_iwlwifi_installed.stdout | default('0') | trim | int) == 0
+    - (_fw_provider.stdout | default('none') | trim) == 'none'
 
 - name: Install iw tool for WiFi PHY management
   ansible.builtin.apt:
@@ -518,7 +530,8 @@
       WiFi PCI device found ({{ _wifi_pci_controllers.stdout | trim }})
       but no PHY appeared in /sys/class/ieee80211/ on {{ inventory_hostname }}.
       Check dmesg | grep iwlwifi for firmware load errors.
-      Install firmware: apt install firmware-iwlwifi
+      On Proxmox VE, pve-firmware provides Intel WiFi firmware.
+      On bare Debian: apt install firmware-iwlwifi
   when:
     - (_wifi_pci_controllers.stdout_lines | default([])) | length > 0
     - (_wifi_phy_count_raw.stdout | default('0') | trim | int) == 0

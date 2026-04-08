@@ -10,7 +10,7 @@ from __future__ import annotations
 from nicegui import ui
 
 from scripts.webui import theme
-from scripts.webui.data import format_uptime, get_router_node
+from scripts.webui.data import Labels, PageTitles, format_uptime, get_router_node
 from scripts.webui.heartbeat import signal_quality
 
 
@@ -29,7 +29,7 @@ def _router_content() -> None:
     cache = get_metric_cache()
     router_node = get_router_node()
 
-    theme.page_header("Router", "OpenWrt router status and management")
+    theme.page_header(PageTitles.ROUTER, "OpenWrt router status and management")
     with ui.row().classes("items-center gap-1"):
         theme.help_tooltip(
             "This shows your OpenWrt router's status. WAN is your internet connection. "
@@ -75,7 +75,7 @@ def _router_content() -> None:
 
     with ui.row().classes("gap-3 mt-4"):
         ui.button(
-            "Refresh Now", icon="refresh", on_click=_refresh,
+            Labels.REFRESH_NOW, icon="refresh", on_click=_refresh,
         ).classes("outline-btn")
 
 

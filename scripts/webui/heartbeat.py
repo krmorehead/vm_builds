@@ -14,7 +14,7 @@ import re
 import subprocess
 import threading
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 
@@ -210,7 +210,7 @@ def collect_wifi_metrics(ip: str) -> HeartbeatCache:
         "radio": {},
     }
 
-    ok, metrics_out = _ssh_exec(ip, "wifi_setup.sh metrics 2>/dev/null")
+    ok, metrics_out = _ssh_exec(ip, "/usr/local/bin/wifi_setup.sh metrics 2>/dev/null")
     if ok and "PHY=" in metrics_out:
         data["script_status"] = _parse_key_value(metrics_out)
         data["raw_metrics"] = metrics_out[:2000]
@@ -641,7 +641,7 @@ def _parse_batman_interfaces(output: str) -> list[dict]:
 def collect_batman_metrics(ip: str) -> HeartbeatCache:
     """Collect batman-adv status from a node via SSH."""
     now = datetime.now().isoformat(timespec="seconds")
-    ok, raw = _ssh_exec(ip, "batman_trigger.sh status", timeout=10)
+    ok, raw = _ssh_exec(ip, "/usr/local/bin/batman_trigger.sh status", timeout=10)
     if not ok:
         return HeartbeatCache(
             node_id="", metric_type="batman",

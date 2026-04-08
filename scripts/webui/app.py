@@ -7,6 +7,7 @@ When imported by the NiceGUI test plugin, pages are registered at module level.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import os
 import secrets
@@ -28,6 +29,11 @@ from scripts.webui.pages import (
 
 
 def _resolve_env_path() -> Path:
+    """Resolve the env file: CLI --env > ENV_FILE env var > .env > test.env."""
+    from_env = os.environ.get("ENV_FILE")
+    if from_env:
+        p = Path(from_env)
+        return p if p.is_absolute() else PROJECT_ROOT / p
     env = PROJECT_ROOT / ".env"
     if env.exists():
         return env
@@ -217,6 +223,7 @@ def register_api() -> None:
                 "node_id": n.node_id,
                 "hostname": n.hostname,
                 "last_ip": n.last_ip,
+                "local_ips": n.local_ips,
                 "status": n.status,
                 "last_seen": n.last_seen,
                 "uptime_seconds": n.uptime_seconds,
@@ -359,7 +366,38 @@ def register_api() -> None:
             "services": services,
         })
 
-    import asyncio as _asyncio  # noqa: E402 — used by SSE endpoint
+    async def _api_host_register(request: StarletteRequest) -> JSONResponse:
+        """Manual host registration endpoint."""
+        try:
+            body = await request.json()
+            name = body.get("name", "").strip()
+            ip = body.get("ip", "").strip()
+            if not name or not ip:
+                return JSONResponse(
+                    {"error": "name and ip are required"},
+                    status_code=400,
+                )
+            state_dir = get_state_dir()
+            registry = data.HostRegistry(state_dir)
+            rec = registry.register(
+                name,
+                ip,
+                mac=body.get("mac", "").strip(),
+                bucket=body.get("bucket", ""),
+                vpn_ip=body.get("vpn_ip", "").strip(),
+                source="manual",
+            )
+            return JSONResponse({
+                "status": "ok",
+                "name": rec.name,
+                "ip": rec.ip,
+                "bucket": rec.bucket,
+            })
+        except (_json.JSONDecodeError, TypeError) as exc:
+            return JSONResponse(
+                {"error": f"Invalid payload: {exc}"},
+                status_code=400,
+            )
 
     app.routes.insert(0, Route("/api/checkin", _api_checkin, methods=["POST"]))
     app.routes.insert(0, Route("/api/nodes", _api_nodes, methods=["GET"]))
@@ -374,6 +412,7 @@ def register_api() -> None:
     app.routes.insert(0, Route("/api/timeline/start", _api_timeline_start, methods=["POST"]))
     app.routes.insert(0, Route("/api/timeline/stop", _api_timeline_stop, methods=["POST"]))
     app.routes.insert(0, Route("/api/timeline/current", _api_timeline_current, methods=["GET"]))
+    app.routes.insert(0, Route("/api/hosts/register", _api_host_register, methods=["POST"]))
 
     manager.register_api(app)
 
@@ -388,8 +427,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--port",
         type=int,
-        default=9001,
-        help="Port to serve on (default: 9001)",
+        default=int(os.environ.get("WEBUI_PORT", "52500")),
+        help="Port to serve on (default: env WEBUI_PORT or 52500)",
     )
     parser.add_argument(
         "--host",
@@ -402,6 +441,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="API-only mode: bind 0.0.0.0, skip browser open, no UI pages",
     )
     return parser.parse_args(argv)
+
+
+def _write_callhome_url(port: int) -> None:
+    """Write .state/callhome_url so containers know where to heartbeat.
+
+    This runs on every app startup — whether headless or GUI — ensuring
+    the callhome URL always points to the running instance.
+    """
+    from build import get_controller_ip
+    url = f"http://{get_controller_ip()}:{port}"
+    state_dir = Path(app.storage.general.get("state_dir", str(PROJECT_ROOT / ".state")))
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "callhome_url").write_text(url)
+    logging.getLogger(__name__).info("Callhome URL: %s", url)
 
 
 def _start_heartbeat_poller() -> None:
@@ -418,6 +471,7 @@ def main(argv: list[str] | None = None) -> None:
     if not args.headless:
         register_pages()
     register_api()
+    _write_callhome_url(args.port)
     app.on_startup(_start_heartbeat_poller)
     storage_secret = os.environ.get("WEBUI_STORAGE_SECRET") or secrets.token_hex(32)
     bind_host = "0.0.0.0" if args.headless else args.host

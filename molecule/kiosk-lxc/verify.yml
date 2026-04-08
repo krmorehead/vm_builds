@@ -13,7 +13,7 @@
   tasks:
     - name: Query kiosk readiness from API
       ansible.builtin.uri:
-        url: "http://127.0.0.1:{{ lookup('env', 'CALLHOME_API_PORT') | default('8088', true) }}/api/container/kiosk/ready"
+        url: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}/api/container/kiosk/ready"
         return_content: true
       register: _container_api
       failed_when: false

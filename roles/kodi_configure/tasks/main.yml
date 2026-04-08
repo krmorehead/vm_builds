@@ -1,4 +1,31 @@
 ---
+# ── Ensure container is running ──────────────────────────────────
+# The display-exclusive hookscript stops DRI-sharing containers when the
+# Desktop VM grabs the iGPU. Restart the container if stopped.
+
+- name: Check Kodi container status
+  ansible.builtin.command:
+    cmd: pct status {{ kodi_ct_id }}
+  register: _kodi_ct_status
+  changed_when: false
+  failed_when: false
+
+- name: Start Kodi container if stopped
+  ansible.builtin.command:
+    cmd: pct start {{ kodi_ct_id }}
+  when: "'stopped' in (_kodi_ct_status.stdout | default(''))"
+  changed_when: true
+
+- name: Wait for Kodi container to be ready
+  ansible.builtin.command:
+    cmd: pct exec {{ kodi_ct_id }} -- ls /
+  register: _kodi_ready
+  retries: 10
+  delay: 3
+  until: _kodi_ready.rc == 0
+  changed_when: false
+  when: "'stopped' in (_kodi_ct_status.stdout | default(''))"
+
 # ── Verify Kodi packages are available ───────────────────────────
 
 - name: Verify Kodi packages installed in container

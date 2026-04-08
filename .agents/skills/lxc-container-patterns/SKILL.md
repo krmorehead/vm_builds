@@ -55,6 +55,8 @@ When working with LXC containers, load these skills IMMEDIATELY:
 
 2. The `proxmox_lxc` role handles: template upload, `pct create`, networking, device bind mounts, auto-start, container start, readiness wait, and `add_host` registration.
 
+3. The "Start container" task MUST start containers that exist but are stopped, not only newly created containers. Use `'stopped' in (_lxc_status.stdout | default(''))` as an additional condition alongside `not lxc_exists`. Previous bug: `molecule converge` (idempotent re-run) found kiosk containers in "stopped" state on ai/mesh2. The start task was gated only on `not lxc_exists`, so it skipped the start. "Wait for container init" then failed with "container '401' not running!".
+
 ## LXC Readiness and Connection
 
 3. For readiness: use `ls /` not `hostname` (BusyBox containers may lack it). For OpenWrt LXC: use `--ostype unmanaged`.
@@ -185,7 +187,17 @@ When working with LXC containers, load these skills IMMEDIATELY:
 
 47. Apply device config atomically: stop container → append config → start container. Gate on whether the entries already exist to make tasks idempotent.
 
-48. Previous bug: Jellyfin and Kodi containers failed with `lxc.hook.pre-start` exit code 32 when using Proxmox `-mp` mounts for `/dev/dri`. Fix: switched to privileged containers with `lxc.mount.entry` directives appended directly to the LXC config file.
+48. NEVER use `echo "..." >> /etc/pve/lxc/<CTID>.conf` to append to LXC config files. pmxcfs (Proxmox cluster filesystem) rejects in-place append with "File exists" error. ALWAYS use read-modify-write: `cp` to `/tmp`, modify there, `cp` back.
+
+49. Previous bug: `lxc_device_passthrough.yml` used `echo >> $lxc_conf` to append mount entries. This worked on some hosts but failed on ai and mesh2 with "File exists" because pmxcfs doesn't support POSIX append. Fix: copy to /tmp, append there, copy back.
+
+50. Previous bug: Jellyfin and Kodi containers failed with `lxc.hook.pre-start` exit code 32 when using Proxmox `-mp` mounts for `/dev/dri`. Fix: switched to privileged containers with `lxc.mount.entry` directives appended directly to the LXC config file.
+
+## VA-API in Headless LXC Containers
+
+52. ALWAYS use `vainfo --display drm` when running vainfo inside headless LXC containers. Plain `vainfo` tries to connect to an X server (DISPLAY env var), which doesn't exist in headless containers. The `--display drm` flag uses the DRM render node directly.
+
+53. Previous bug: `jellyfin_configure` ran `pct exec {{ ct_id }} -- vainfo` without `--display drm`. Failed with "error: can't connect to X server!" on every run. Fix: added `--display drm` and `failed_when: false`.
 
 ## File Deployment via copy + pct push
 
@@ -216,6 +228,12 @@ When working with LXC containers, load these skills IMMEDIATELY:
     ```
 
 51. Previous bug: `pct exec {{ ct_id }} -- bash -c 'cat > /etc/jellyfin/network.xml << "NETWORK_EOF" ...'` via `ansible.builtin.command` with `>-` folded scalar collapsed newlines. Bash received `cat > file << "EOF" content EOF` on a single line and failed with `syntax error near unexpected token '<'`. Fix: use `ansible.builtin.copy` to write to host temp, then `pct push` into container.
+
+## Configure Play Target Rules
+
+54. **Non-Docker LXC configure plays** MUST target the dynamic group (e.g., `netdata`, `pihole`, `rsyslog`) with `pct_remote` connection. The `pct_remote` plugin handles all commands inside the container transparently.
+
+55. Previous bug: `netdata_configure` targeted `monitoring_nodes` (Proxmox hosts) instead of the `netdata` dynamic group. All commands (`command`, `template`, `systemd`) ran on the HOST, not inside the container. The role checked `/etc/netdata` on the Proxmox host (doesn't exist) and failed. Fix: changed `site.yml` to `hosts: netdata`.
 
 ## Docker-in-LXC Configuration Patterns
 
@@ -287,3 +305,15 @@ When working with LXC containers, load these skills IMMEDIATELY:
 36. For unattended install, pre-seed `/etc/pihole/pihole.toml` with at least `dns.upstreams` before running the installer. Use `PIHOLE_SKIP_OS_CHECK=true` in LXC containers.
 
 37. Previous bug: Configure role set `resolv.conf` to `127.0.0.1`, then ran `pihole -g`. Gravity hung because FTL's DNS wasn't fully initialized.
+
+## Display-Exclusive Hookscript and DRI-Sharing Containers
+
+38. When the Desktop VM holds the iGPU via PCI passthrough (`--hostpci0`), DRI devices (`/dev/dri/renderD*`) are not available on the Proxmox host. Containers that bind-mount DRI devices (Kodi, Kiosk, Moonlight, Jellyfin) lose GPU access. Graphical services (Kodi) cannot start and report `inactive`.
+
+39. Configure roles for DRI-sharing containers MUST include a defensive "ensure container is running" guard: check `pct status`, start if stopped, wait for readiness via `pct exec -- ls /`. This handles re-runs where hookscripts have already stopped the container.
+
+40. Verify assertions for DRI-sharing services MUST skip `systemctl is-active` checks when the Desktop VM is running. The service legitimately can't start without GPU access.
+
+41. When detecting render group GID from `/dev/dri/renderD*`, use `failed_when: false` and fall back to a cached `igpu_render_gid` fact from `proxmox_igpu`. The Desktop VM holding the iGPU makes the DRI device unavailable on the host.
+
+42. Previous bug: `kiosk_configure` ran `stat -c '%g' /dev/dri/renderD*` but the Desktop VM held the iGPU via passthrough. No DRI devices existed on the host. Fix: made detection non-fatal with fallback to cached fact.

@@ -5,6 +5,7 @@ from __future__ import annotations
 from nicegui import ui
 
 from scripts.webui import data, theme
+from scripts.webui.data import Labels, PageTitles
 
 
 def register() -> None:
@@ -17,7 +18,7 @@ def register() -> None:
         editing: dict[str, str | None] = {"key": None}
 
         with theme.page_shell("environment"):
-            theme.page_header("Environment", f"Managing: {env_path.name}")
+            theme.page_header(PageTitles.ENVIRONMENT, f"Managing: {env_path.name}")
 
             status_label = ui.label("").classes("text-sm")
             table = ui.table(
@@ -39,9 +40,9 @@ def register() -> None:
                 )
 
             with ui.row().classes("gap-3"):
-                ui.button("Validate", icon="check_circle", on_click=lambda: _refresh_table()).classes("outline-btn")
-                ui.button("Save", icon="save", on_click=lambda: _save_env()).classes("action-btn")
-                ui.button("Create .env", icon="add", on_click=lambda: _create_env()).classes("outline-btn")
+                ui.button(Labels.VALIDATE, icon="check_circle", on_click=lambda: _refresh_table()).classes("outline-btn")
+                ui.button(Labels.SAVE, icon="save", on_click=lambda: _save_env()).classes("action-btn")
+                ui.button(Labels.CREATE_ENV, icon="add", on_click=lambda: _create_env()).classes("outline-btn")
 
             def _load_from_file() -> None:
                 if env_path.exists():

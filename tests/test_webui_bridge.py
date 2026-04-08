@@ -21,6 +21,7 @@ from nicegui import app as nicegui_app, ui
 from nicegui.testing import user_simulation
 
 from scripts.webui import data, manager
+from scripts.webui.data import Labels, PageTitles, Routes
 from scripts.webui.pages import bridge, containers, launch, mesh, router, viewer
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -51,44 +52,44 @@ async def infra_ctx(tmp_path: Path, env_file: str = "complete.env"):
 class TestBridgePage:
     async def test_bridge_page_loads(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/bridge")
-            await user.should_see("WiFi Bridge")
+            await user.open(Routes.BRIDGE)
+            await user.should_see(PageTitles.BRIDGE)
 
     async def test_bridge_shows_both_nodes(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/bridge")
+            await user.open(Routes.BRIDGE)
             await user.should_see("Bridge 1")
             await user.should_see("Bridge 2")
 
     async def test_bridge_shows_not_linked_when_no_data(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/bridge")
+            await user.open(Routes.BRIDGE)
             await user.should_see("not linked")
 
     async def test_bridge_shows_deploy_button(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/bridge")
-            await user.should_see("Deploy Bridge")
+            await user.open(Routes.BRIDGE)
+            await user.should_see(Labels.DEPLOY_BRIDGE)
 
     async def test_bridge_shows_refresh_button(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/bridge")
-            await user.should_see("Refresh Now")
+            await user.open(Routes.BRIDGE)
+            await user.should_see(Labels.REFRESH_NOW)
 
     async def test_bridge_shows_traffic_card(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/bridge")
+            await user.open(Routes.BRIDGE)
             await user.should_see("Traffic")
 
     async def test_bridge_shows_restart_button(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/bridge")
-            await user.should_see("Restart WiFi")
+            await user.open(Routes.BRIDGE)
+            await user.should_see(Labels.RESTART_WIFI)
 
     async def test_bridge_shows_repair_button(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/bridge")
-            await user.should_see("Force Re-pair")
+            await user.open(Routes.BRIDGE)
+            await user.should_see(Labels.FORCE_REPAIR)
 
 
 # ── Mesh page tests ──────────────────────────────────────────────────
@@ -97,41 +98,41 @@ class TestBridgePage:
 class TestMeshPage:
     async def test_mesh_page_loads(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/mesh")
-            await user.should_see("Mesh Network")
+            await user.open(Routes.MESH)
+            await user.should_see(PageTitles.MESH)
 
     async def test_mesh_shows_topology(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/mesh")
+            await user.open(Routes.MESH)
             await user.should_see("Topology")
 
     async def test_mesh_shows_ap_node(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/mesh")
+            await user.open(Routes.MESH)
             await user.should_see("home")
             await user.should_see("WDS AP")
 
     async def test_mesh_shows_sta_nodes(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/mesh")
+            await user.open(Routes.MESH)
             await user.should_see("mesh1")
             await user.should_see("mesh2")
 
     async def test_mesh_shows_refresh_button(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/mesh")
-            await user.should_see("Refresh Now")
+            await user.open(Routes.MESH)
+            await user.should_see(Labels.REFRESH_NOW)
 
     async def test_mesh_shows_batman_section(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/mesh")
+            await user.open(Routes.MESH)
             await user.should_see("Batman Mode")
 
     async def test_mesh_shows_batman_buttons(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/mesh")
-            await user.should_see("Enable Batman")
-            await user.should_see("Disable Batman")
+            await user.open(Routes.MESH)
+            await user.should_see(Labels.ENABLE_BATMAN)
+            await user.should_see(Labels.DISABLE_BATMAN)
 
 
 # ── Router page tests ────────────────────────────────────────────────
@@ -140,42 +141,42 @@ class TestMeshPage:
 class TestRouterPage:
     async def test_router_page_loads(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/router")
+            await user.open(Routes.ROUTER)
             await user.should_see("Router")
 
     async def test_router_shows_wan_card(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/router")
+            await user.open(Routes.ROUTER)
             await user.should_see("WAN")
 
     async def test_router_shows_lan_card(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/router")
+            await user.open(Routes.ROUTER)
             await user.should_see("LAN")
 
     async def test_router_shows_firewall_card(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/router")
+            await user.open(Routes.ROUTER)
             await user.should_see("Firewall")
 
     async def test_router_shows_wifi_card(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/router")
+            await user.open(Routes.ROUTER)
             await user.should_see("WiFi (WDS AP)")
 
     async def test_router_shows_system_card(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/router")
+            await user.open(Routes.ROUTER)
             await user.should_see("System")
 
     async def test_router_shows_refresh_button(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/router")
-            await user.should_see("Refresh Now")
+            await user.open(Routes.ROUTER)
+            await user.should_see(Labels.REFRESH_NOW)
 
     async def test_router_shows_disconnected_when_no_data(self, tmp_path):
         async with infra_ctx(tmp_path) as user:
-            await user.open("/router")
+            await user.open(Routes.ROUTER)
             await user.should_see("Not reachable")
 
 
@@ -203,17 +204,17 @@ async def viewer_ctx(tmp_path: Path, env_file: str = "complete.env"):
 class TestViewerPage:
     async def test_viewer_page_loads(self, tmp_path):
         async with viewer_ctx(tmp_path) as user:
-            await user.open("/view?url=http://example.com&title=Test%20App")
+            await user.open(f"{Routes.VIEW}?url=http://example.com&title=Test%20App")
             await user.should_see("Test App")
 
     async def test_viewer_shows_no_url(self, tmp_path):
         async with viewer_ctx(tmp_path) as user:
-            await user.open("/view")
-            await user.should_see("No URL configured")
+            await user.open(Routes.VIEW)
+            await user.should_see(Labels.NO_URL)
 
     async def test_viewer_has_home_button(self, tmp_path):
         async with viewer_ctx(tmp_path) as user:
-            await user.open("/view?url=http://example.com&title=TestApp")
+            await user.open(f"{Routes.VIEW}?url=http://example.com&title=TestApp")
             await user.should_see("TestApp")
 
 
@@ -223,17 +224,17 @@ class TestViewerPage:
 class TestContainersPage:
     async def test_containers_page_loads(self, tmp_path):
         async with viewer_ctx(tmp_path) as user:
-            await user.open("/containers")
-            await user.should_see("Containers & VMs")
+            await user.open(Routes.CONTAINERS)
+            await user.should_see(PageTitles.CONTAINERS)
 
     async def test_containers_shows_refresh_button(self, tmp_path):
         async with viewer_ctx(tmp_path) as user:
-            await user.open("/containers")
+            await user.open(Routes.CONTAINERS)
             await user.should_see("Refresh")
 
     async def test_containers_shows_help_tooltip(self, tmp_path):
         async with viewer_ctx(tmp_path) as user:
-            await user.open("/containers")
+            await user.open(Routes.CONTAINERS)
             await user.should_see("Manage all guests")
 
 
@@ -261,51 +262,51 @@ async def launch_ctx(tmp_path: Path, env_file: str = "complete.env"):
 class TestLaunchPage:
     async def test_launch_page_loads_with_vmid(self, tmp_path):
         async with launch_ctx(tmp_path) as user:
-            await user.open("/launch?vmid=302&title=Moonlight&url_key=MOONLIGHT_URL")
+            await user.open(f"{Routes.LAUNCH}?vmid=302&title=Moonlight&url_key=MOONLIGHT_URL")
             await user.should_see("Moonlight")
 
     async def test_launch_page_shows_description(self, tmp_path):
         async with launch_ctx(tmp_path) as user:
-            await user.open("/launch?vmid=302&title=Moonlight&url_key=MOONLIGHT_URL")
+            await user.open(f"{Routes.LAUNCH}?vmid=302&title=Moonlight&url_key=MOONLIGHT_URL")
             await user.should_see("takes over this display")
 
     async def test_launch_page_shows_launch_button(self, tmp_path):
         async with launch_ctx(tmp_path) as user:
-            await user.open("/launch?vmid=302&title=Moonlight&url_key=MOONLIGHT_URL")
+            await user.open(f"{Routes.LAUNCH}?vmid=302&title=Moonlight&url_key=MOONLIGHT_URL")
             await user.should_see("Launch Moonlight")
 
     async def test_launch_page_no_vmid_shows_error(self, tmp_path):
         async with launch_ctx(tmp_path) as user:
-            await user.open("/launch")
-            await user.should_see("No VMID configured")
+            await user.open(Routes.LAUNCH)
+            await user.should_see(Labels.NO_VMID)
 
     async def test_launch_page_no_vmid_shows_back_button(self, tmp_path):
         async with launch_ctx(tmp_path) as user:
-            await user.open("/launch")
-            await user.should_see("Back to Hub")
+            await user.open(Routes.LAUNCH)
+            await user.should_see(Labels.BACK_TO_HUB)
 
     async def test_launch_page_kodi(self, tmp_path):
         async with launch_ctx(tmp_path) as user:
-            await user.open("/launch?vmid=301&title=Kodi&url_key=KODI_URL")
+            await user.open(f"{Routes.LAUNCH}?vmid=301&title=Kodi&url_key=KODI_URL")
             await user.should_see("Kodi")
             await user.should_see("Launch Kodi")
 
     async def test_launch_page_desktop(self, tmp_path):
         async with launch_ctx(tmp_path) as user:
-            await user.open("/launch?vmid=400&title=Desktop&url_key=DESKTOP_URL")
+            await user.open(f"{Routes.LAUNCH}?vmid=400&title=Desktop&url_key=DESKTOP_URL")
             await user.should_see("Desktop")
             await user.should_see("Launch Desktop")
 
     async def test_launch_page_shows_explanation(self, tmp_path):
         async with launch_ctx(tmp_path) as user:
-            await user.open("/launch?vmid=302&title=Moonlight&url_key=MOONLIGHT_URL")
+            await user.open(f"{Routes.LAUNCH}?vmid=302&title=Moonlight&url_key=MOONLIGHT_URL")
             await user.should_see("How does this work?")
 
     async def test_launch_page_has_home_button(self, tmp_path):
         """The kiosk nav bar home button should be present."""
         async with launch_ctx(tmp_path) as user:
-            await user.open("/launch?vmid=302&title=Moonlight&url_key=MOONLIGHT_URL")
-            await user.should_see("Home Hub")
+            await user.open(f"{Routes.LAUNCH}?vmid=302&title=Moonlight&url_key=MOONLIGHT_URL")
+            await user.should_see(Labels.HOME_HUB)
 
 
 # ── Viewer robustness tests ──────────────────────────────────────────
@@ -324,17 +325,17 @@ class TestViewerRobustness:
     async def test_viewer_with_empty_title(self, tmp_path):
         """Empty title defaults to 'App'."""
         async with viewer_ctx(tmp_path) as user:
-            await user.open("/view?url=http://example.com")
+            await user.open(f"{Routes.VIEW}?url=http://example.com")
             await user.should_see("App")
 
     async def test_viewer_no_url_has_back_button(self, tmp_path):
         async with viewer_ctx(tmp_path) as user:
-            await user.open("/view")
-            await user.should_see("Back to Hub")
+            await user.open(Routes.VIEW)
+            await user.should_see(Labels.BACK_TO_HUB)
 
     async def test_viewer_with_url_shows_title(self, tmp_path):
         async with viewer_ctx(tmp_path) as user:
-            await user.open("/view?url=http://10.10.10.1&title=Router")
+            await user.open(f"{Routes.VIEW}?url=http://10.10.10.1&title=Router")
             await user.should_see("Router")
 
 
@@ -396,15 +397,15 @@ class TestKioskNavigationFlows:
     async def test_viewer_back_to_hub_flow(self, tmp_path):
         """Viewer page should have a home icon button that returns to hub."""
         async with viewer_ctx(tmp_path) as user:
-            await user.open("/view?url=http://example.com&title=Test")
+            await user.open(f"{Routes.VIEW}?url=http://example.com&title=Test")
             await user.should_see("Test")
             await user.should_see(ui.button)
 
     async def test_launch_back_to_hub_flow(self, tmp_path):
         """Launch page should have a home button."""
         async with launch_ctx(tmp_path) as user:
-            await user.open("/launch?vmid=302&title=Moonlight&url_key=MOONLIGHT_URL")
-            await user.should_see("Home Hub")
+            await user.open(f"{Routes.LAUNCH}?vmid=302&title=Moonlight&url_key=MOONLIGHT_URL")
+            await user.should_see(Labels.HOME_HUB)
 
     async def test_all_display_apps_have_launch_pages(self, tmp_path):
         """Each display app should render correctly on the launch page."""
@@ -427,26 +428,26 @@ class TestLaunchStateTransitions:
 
     async def test_launch_button_present_when_vmid_set(self, tmp_path):
         async with launch_ctx(tmp_path) as user:
-            await user.open("/launch?vmid=302&title=Moonlight&url_key=MOONLIGHT_URL")
+            await user.open(f"{Routes.LAUNCH}?vmid=302&title=Moonlight&url_key=MOONLIGHT_URL")
             await user.should_see("Launch Moonlight")
 
     async def test_launch_button_absent_when_no_vmid(self, tmp_path):
         """Without VMID, no launch button should appear."""
         async with launch_ctx(tmp_path) as user:
-            await user.open("/launch")
+            await user.open(Routes.LAUNCH)
             await user.should_not_see("Launch")
 
     async def test_unknown_url_key_uses_fallback_icon(self, tmp_path):
         """Unknown url_key should still render with a fallback rocket icon."""
         async with launch_ctx(tmp_path) as user:
-            await user.open("/launch?vmid=999&title=Unknown&url_key=NONEXISTENT")
+            await user.open(f"{Routes.LAUNCH}?vmid=999&title=Unknown&url_key=NONEXISTENT")
             await user.should_see("Unknown")
             await user.should_see("Launch Unknown")
 
     async def test_launch_page_url_decodes_title(self, tmp_path):
         """URL-encoded titles should render decoded."""
         async with launch_ctx(tmp_path) as user:
-            await user.open("/launch?vmid=400&title=Desktop%20VM&url_key=DESKTOP_URL")
+            await user.open(f"{Routes.LAUNCH}?vmid=400&title=Desktop%20VM&url_key=DESKTOP_URL")
             await user.should_see("Desktop VM")
             await user.should_see("Launch Desktop VM")
 
@@ -460,18 +461,18 @@ class TestViewerBarStructure:
     async def test_viewer_with_url_has_open_button(self, tmp_path):
         """When URL is set, 'open in new' button should be present."""
         async with viewer_ctx(tmp_path) as user:
-            await user.open("/view?url=http://example.com&title=Test")
+            await user.open(f"{Routes.VIEW}?url=http://example.com&title=Test")
             await user.should_see("Test")
 
     async def test_viewer_without_url_no_open_button(self, tmp_path):
         """When no URL, the 'open in new' button should NOT be present."""
         async with viewer_ctx(tmp_path) as user:
-            await user.open("/view")
-            await user.should_see("No URL configured")
-            await user.should_see("Back to Hub")
+            await user.open(Routes.VIEW)
+            await user.should_see(Labels.NO_URL)
+            await user.should_see(Labels.BACK_TO_HUB)
 
     async def test_viewer_preserves_special_chars_in_title(self, tmp_path):
         """Titles with special characters should render safely."""
         async with viewer_ctx(tmp_path) as user:
-            await user.open("/view?url=http://example.com&title=Pi-hole%20Admin")
+            await user.open(f"{Routes.VIEW}?url=http://example.com&title=Pi-hole%20Admin")
             await user.should_see("Pi-hole Admin")

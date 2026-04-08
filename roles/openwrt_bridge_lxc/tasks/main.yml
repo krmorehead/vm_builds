@@ -201,6 +201,27 @@
     lxc_ct_gateway: "{{ _bridge_ct_gateway }}"
     lxc_ct_nameserver: "8.8.8.8"
 
+# ── Override default OpenWrt LAN IP ─────────────────────────────
+# OpenWrt images boot with 192.168.1.1 on br-lan, which collides
+# with the router VM's bootstrap address on the same L2 segment.
+# Set the LAN IP to match the Proxmox-assigned container IP.
+
+- name: Set OpenWrt LAN IP to match container assignment
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct exec {{ bridge_ct_id }} -- sh -c '
+        uci set network.lan.ipaddr="{{ _bridge_ct_ip }}"
+        uci set network.lan.netmask="255.255.255.0"
+        uci set network.lan.gateway="{{ _bridge_ct_gateway }}"
+        uci set network.lan.proto="static"
+        uci delete network.lan.ip6assign 2>/dev/null
+        uci commit network
+        /etc/init.d/network restart
+      '
+    executable: /bin/bash
+  changed_when: true
+
 # ── Configure callhome agent (OpenWrt / cron-based) ─────────
 # callhome.sh and crontab are baked into the image.
 # Write the server URL so heartbeats start immediately.

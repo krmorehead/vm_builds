@@ -14,8 +14,8 @@ from nicegui import ui
 
 from scripts.webui import theme
 from scripts.webui.data import (
-    DISPLAY_APPS, INTERNAL_PAGES, HubService, get_hub_services,
-    load_kiosk_config,
+    DISPLAY_APPS, INTERNAL_PAGES, HubService, PageTitles, Routes,
+    get_hub_services, load_kiosk_config,
 )
 
 
@@ -28,7 +28,7 @@ def render_hub(urls: dict[str, str] | None = None) -> None:
     current_section = ""
 
     with ui.column().classes("w-full max-w-[1200px] mx-auto px-6 py-6 gap-5"):
-        theme.page_header("Home Hub", "Entertainment, settings & monitoring")
+        theme.page_header(PageTitles.HUB, "Entertainment, settings & monitoring")
 
         for svc in services:
             if svc.section != current_section:

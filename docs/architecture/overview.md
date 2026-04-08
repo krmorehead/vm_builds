@@ -457,14 +457,14 @@ site.yml (current — phased for multi-node)
 │
 ├── Phase 1: Primary hosts (proxmox:!lan_hosts — directly reachable)
 │   ├── Play 0:  proxmox:!lan_hosts  [backup]     proxmox_backup, deploy_stamp
-│   ├── Play 1:  proxmox:!lan_hosts  [infra]      pre_tasks: NTP clock sync; proxmox_bridges, proxmox_pci_passthrough, proxmox_igpu, deploy_stamp
+│   ├── Play 1:  proxmox:!lan_hosts  [infra]      pre_tasks: NTP clock sync, disable enterprise repos; proxmox_bridges, proxmox_pci_passthrough, proxmox_igpu, deploy_stamp
 │   ├── Play 2:  router_nodes        [openwrt]    openwrt_vm, deploy_stamp
 │   └── Play 3:  openwrt             [openwrt]    openwrt_configure
 │
 ├── Phase 2: LAN satellites (reachable after OpenWrt creates the LAN)
 │   ├── Play 4:  router_nodes        [lan-satellite]  bootstrap_lan_host (loop lan_hosts)
 │   ├── Play 5:  lan_hosts           [lan-satellite]  proxmox_backup, deploy_stamp
-│   └── Play 6:  lan_hosts           [lan-satellite]  pre_tasks: NTP clock sync; proxmox_bridges, proxmox_pci_passthrough, proxmox_igpu, deploy_stamp
+│   └── Play 6:  lan_hosts           [lan-satellite]  pre_tasks: NTP clock sync, disable enterprise repos; proxmox_bridges, proxmox_pci_passthrough, proxmox_igpu, deploy_stamp
 │
 ├── Phase 3a: Service provisioning (containers start and boot in parallel)
 │   ├── Play 7:  dns_nodes           [pihole]        pihole_lxc, deploy_stamp
@@ -480,6 +480,8 @@ site.yml (current — phased for multi-node)
 │   ├── Play 17: desktop_nodes       [desktop]       desktop_vm, deploy_stamp
 │   ├── Play 18: desktop_nodes       [kiosk]         kiosk_lxc, deploy_stamp
 │   └── Play 19: proxmox             [callhome-config] Configure callhome on all running containers
+│       Containers point to local Manager (kiosk LXC, port 9001).
+│       Manager relays host-level heartbeat UP to the SuperManager.
 │
 ├── Phase 3b: Fleet readiness gate
 │   └── Play 20: localhost            [multi-tag]     Query /api/fleet/ready for all services
@@ -499,6 +501,11 @@ site.yml (current — phased for multi-node)
 │   ├── Play 30: openwrt_bridge      [bridge]        openwrt_bridge_configure
 │   ├── Play 31: desktop             [desktop]       desktop_configure
 │   └── Play 32: desktop_nodes       [kiosk]         kiosk_configure
+│
+├── Phase 3c: Post-configure hookscript attachment
+│   └── Play 33: desktop_nodes       [kiosk,desktop,media,moonlight]  Attach display-exclusive hookscript
+│       Deferred from provisioning so DRI-sharing containers (Kodi, Kiosk,
+│       Moonlight) are fully configured before the hookscript can stop them.
 │
 ├── Phase 3d: Heartbeat circuit breaker (post-configure)
 │   └── Play 33: localhost            [multi-tag]     Query /api/fleet/stale

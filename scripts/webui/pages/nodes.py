@@ -1,8 +1,7 @@
-"""Fleet Nodes page — comprehensive fleet monitoring dashboard.
+"""Fleet Nodes page — overview + per-host detail views.
 
-Shows fleet health overview, per-node status cards with resource gauges,
-alerts panel, service matrix, and metric history sparklines.
-Live-updates via periodic timer refresh.
+The list page shows all hosts from the Fleet domain object with live
+telemetry. Each card is clickable to open a Proxmox-inspired detail view.
 """
 
 from __future__ import annotations
@@ -10,25 +9,27 @@ from __future__ import annotations
 from nicegui import ui
 
 from scripts.webui import data, theme
+from scripts.webui.data import Fleet, Host, HostBucket, Labels, PageTitles, Routes
 
 
 def register() -> None:
     @ui.page("/nodes")
     def nodes_page() -> None:
-        from scripts.webui.app import get_state_dir
+        from scripts.webui.app import get_state_dir, load_active_env
 
         state_dir = get_state_dir()
+        env = load_active_env()
 
         with theme.page_shell("nodes"):
-            theme.page_header("Fleet Nodes", "Real-time fleet health and service monitoring")
+            theme.page_header(PageTitles.NODES, "Real-time fleet health and service monitoring")
 
             with ui.column().classes("w-full gap-4") as live_container:
                 pass
 
-            _render_live_content(live_container, state_dir)
+            _render_live_content(live_container, env, state_dir)
 
             auto_refresh = ui.timer(
-                5.0, lambda: _render_live_content(live_container, state_dir)
+                5.0, lambda: _render_live_content(live_container, env, state_dir)
             )
 
             with ui.row().classes("items-center gap-3 mt-2"):
@@ -36,58 +37,85 @@ def register() -> None:
                     auto_refresh, "active"
                 )
 
+    @ui.page("/nodes/{hostname}")
+    def node_detail_page(hostname: str) -> None:
+        from scripts.webui.app import get_state_dir, load_active_env
 
-def _render_live_content(container: ui.column, state_dir: data.Path) -> None:
-    """Re-render the entire live content area (health, alerts, nodes, matrix, table)."""
+        state_dir = get_state_dir()
+        env = load_active_env()
+
+        with theme.page_shell("nodes"):
+            with ui.column().classes("w-full gap-4") as detail_container:
+                pass
+
+            _render_detail(detail_container, hostname, env, state_dir)
+
+            auto_refresh = ui.timer(
+                5.0, lambda: _render_detail(detail_container, hostname, env, state_dir)
+            )
+            with ui.row().classes("items-center gap-3 mt-2"):
+                ui.switch("Auto-refresh (5s)", value=True).bind_value(
+                    auto_refresh, "active"
+                )
+
+
+# ── Fleet list page ──────────────────────────────────────────────────
+
+
+def _render_live_content(
+    container: ui.column,
+    env: dict[str, str],
+    state_dir: data.Path,
+) -> None:
     container.clear()
     with container:
-        nodes_list = data.load_node_registry(state_dir)
-        health = data.compute_fleet_health(nodes_list)
-        alerts = data.compute_alerts(nodes_list)
+        fleet = data.build_fleet(env, state_dir)
+        nodes = data.load_node_registry(state_dir)
+        alerts = data.compute_alerts(nodes)
 
-        _health_banner(health)
+        _health_banner(fleet)
 
         if alerts:
             _alerts_panel(alerts)
 
-        theme.section_label("Node Status")
-        _node_cards(nodes_list, state_dir)
+        theme.section_label(Labels.NODE_STATUS)
+        _node_cards_by_bucket(fleet, state_dir)
 
-        if any(n.services for n in nodes_list):
-            theme.section_label("Service Matrix")
-            _service_matrix(nodes_list)
+        if fleet.total_guests > 0:
+            theme.section_label(Labels.SERVICE_MATRIX)
+            _service_matrix(nodes)
 
         theme.section_label("Node Details")
-        _detail_table(nodes_list)
+        _detail_table(fleet)
 
 
-# ── Health banner ────────────────────────────────────────────────────
-
-
-def _health_banner(health: data.FleetHealth) -> None:
-    score_color = theme.health_score_color(health.health_score)
+def _health_banner(fleet: Fleet) -> None:
+    score = fleet.health_score
+    score_color = theme.health_score_color(score)
     with ui.card().classes("w-full"):
         with ui.row().classes("w-full items-center justify-between flex-wrap gap-4"):
             with ui.row().classes("items-center gap-4"):
                 ui.circular_progress(
-                    value=health.health_score / 100,
+                    value=score / 100,
                     show_value=False,
                     size="lg",
                 ).props(f'color="{score_color}" thickness=0.2')
                 with ui.column().classes("gap-0"):
-                    ui.label("Fleet Health").classes("text-lg font-semibold").style(
+                    ui.label(Labels.FLEET_HEALTH).classes("text-lg font-semibold").style(
                         f"color: {theme.TEXT_PRIMARY}"
                     )
-                    ui.label(f"Score: {health.health_score}/100").classes(
+                    ui.label(f"Score: {score}/100").classes(
                         "text-sm font-mono"
                     ).style(f"color: {score_color}")
 
             with ui.row().classes("gap-8 flex-wrap"):
-                theme.stat_value(str(health.online_nodes), "Online")
-                theme.stat_value(str(health.total_nodes), "Total")
-                theme.stat_value(str(health.total_services), "Services")
+                theme.stat_value(str(fleet.online_count), "Online")
+                if not fleet.has_telemetry and fleet.reachable_count > 0:
+                    theme.stat_value(str(fleet.reachable_count), "Reachable")
+                theme.stat_value(str(fleet.host_count), "Total")
+                theme.stat_value(str(fleet.total_guests), "Guests")
 
-        if health.total_nodes > 0:
+        if fleet.has_telemetry:
             ui.separator().classes("my-2").style(f"background: {theme.ACCENT_DIM}")
             with ui.row().classes("w-full gap-6 flex-wrap"):
                 with ui.column().classes("flex-1 min-w-[200px] gap-1"):
@@ -95,28 +123,30 @@ def _health_banner(health: data.FleetHealth) -> None:
                         f"color: {theme.TEXT_SECONDARY}"
                     )
                     theme.metric_bar(
-                        "avg", health.avg_disk_pct,
-                        data.usage_level(health.avg_disk_pct),
+                        "avg", fleet.avg_disk_pct,
+                        data.usage_level(fleet.avg_disk_pct),
                     )
-                    if health.worst_disk_pct > 0:
+                    wd = fleet.worst_disk
+                    if wd and wd.disk_pct > 0:
                         ui.label(
-                            f"Worst: {health.worst_disk_node} ({health.worst_disk_pct:.0f}%)"
+                            f"Worst: {wd.name} ({wd.disk_pct:.0f}%)"
                         ).classes("text-xs").style(
-                            f"color: {theme.usage_color(data.usage_level(health.worst_disk_pct))}"
+                            f"color: {theme.usage_color(data.usage_level(wd.disk_pct))}"
                         )
                 with ui.column().classes("flex-1 min-w-[200px] gap-1"):
                     ui.label("Fleet Memory").classes("text-xs uppercase tracking-wider").style(
                         f"color: {theme.TEXT_SECONDARY}"
                     )
                     theme.metric_bar(
-                        "avg", health.avg_memory_pct,
-                        data.usage_level(health.avg_memory_pct),
+                        "avg", fleet.avg_memory_pct,
+                        data.usage_level(fleet.avg_memory_pct),
                     )
-                    if health.worst_memory_pct > 0:
+                    wm = fleet.worst_memory
+                    if wm and wm.memory_pct > 0:
                         ui.label(
-                            f"Worst: {health.worst_memory_node} ({health.worst_memory_pct:.0f}%)"
+                            f"Worst: {wm.name} ({wm.memory_pct:.0f}%)"
                         ).classes("text-xs").style(
-                            f"color: {theme.usage_color(data.usage_level(health.worst_memory_pct))}"
+                            f"color: {theme.usage_color(data.usage_level(wm.memory_pct))}"
                         )
 
 
@@ -155,62 +185,144 @@ def _alert_row(alert: data.NodeAlert) -> None:
         ui.label(alert.message).classes("text-sm").style(f"color: {color}")
 
 
-# ── Node cards ───────────────────────────────────────────────────────
+# ── Node cards (grouped by bucket) ───────────────────────────────────
+
+_BUCKET_LABELS: dict[str, str] = {
+    HostBucket.TEST: Labels.BUCKET_TEST,
+    HostBucket.LAB: Labels.BUCKET_LAB,
+    HostBucket.PRODUCTION: Labels.BUCKET_PRODUCTION,
+}
+
+_BUCKET_ORDER = [HostBucket.PRODUCTION, HostBucket.LAB, HostBucket.TEST]
 
 
-def _node_cards(nodes: list[data.RegisteredNode], state_dir: data.Path) -> None:
-    if not nodes:
-        ui.label("No nodes registered yet").classes("text-sm").style(
+def _node_cards_by_bucket(fleet: Fleet, state_dir: data.Path) -> None:
+    if not fleet.hosts:
+        ui.label("No hosts configured").classes("text-sm").style(
             f"color: {theme.TEXT_SECONDARY}"
         )
         return
-    with ui.row().classes("w-full gap-4 flex-wrap"):
-        for node in nodes:
-            _single_node_card(node, state_dir)
+
+    _add_host_form(state_dir)
+
+    buckets_present = {h.bucket or HostBucket.DEFAULT for h in fleet.hosts}
+    ordered = [b for b in _BUCKET_ORDER if b in buckets_present]
+    uncategorized = buckets_present - set(_BUCKET_ORDER)
+    ordered.extend(sorted(uncategorized))
+
+    for bucket in ordered:
+        hosts = fleet.hosts_by_bucket(bucket)
+        if not hosts:
+            continue
+        label = _BUCKET_LABELS.get(bucket, bucket.title())
+        ui.label(f"{label} ({len(hosts)})").classes(
+            "text-xs uppercase tracking-wider font-bold mt-4"
+        ).style(f"color: {theme.ACCENT}")
+        with ui.row().classes("w-full gap-4 flex-wrap"):
+            for host in hosts:
+                _single_node_card(host, state_dir)
 
 
-def _single_node_card(node: data.RegisteredNode, state_dir: data.Path) -> None:
-    with ui.card().classes("flex-1 min-w-[260px] max-w-[380px]"):
+def _add_host_form(state_dir: data.Path) -> None:
+    """Collapsible inline form for manual host registration."""
+    with ui.expansion(Labels.ADD_HOST, icon="add_circle_outline").classes(
+        "w-full mb-2"
+    ):
+        name_input = ui.input("Hostname", placeholder="e.g. edge-01").classes("w-64")
+        ip_input = ui.input("IP Address", placeholder="e.g. 192.168.1.100").classes("w-64")
+        mac_input = ui.input("MAC (optional)", placeholder="aa:bb:cc:dd:ee:ff").classes("w-64")
+        vpn_input = ui.input("VPN IP (optional)", placeholder="e.g. 10.99.0.5").classes("w-64")
+        bucket_select = ui.select(
+            options={
+                "": "Auto-detect from IP",
+                HostBucket.TEST: Labels.BUCKET_TEST,
+                HostBucket.LAB: Labels.BUCKET_LAB,
+                HostBucket.PRODUCTION: Labels.BUCKET_PRODUCTION,
+            },
+            value="",
+            label="Bucket",
+        ).classes("w-64")
+        result_label = ui.label("").classes("text-xs mt-1")
+        result_label.set_visibility(False)
+
+        async def _submit() -> None:
+            name = name_input.value.strip() if name_input.value else ""
+            ip = ip_input.value.strip() if ip_input.value else ""
+            if not name or not ip:
+                result_label.text = "Name and IP are required"
+                result_label.style(f"color: {theme.COLOR_ERROR}")
+                result_label.set_visibility(True)
+                return
+            registry = data.HostRegistry(state_dir)
+            rec = registry.register(
+                name,
+                ip,
+                mac=mac_input.value.strip() if mac_input.value else "",
+                bucket=bucket_select.value or "",
+                vpn_ip=vpn_input.value.strip() if vpn_input.value else "",
+                source="manual",
+            )
+            result_label.text = f"Registered {rec.name} ({rec.bucket}) at {rec.ip}"
+            result_label.style(f"color: {theme.COLOR_SUCCESS}")
+            result_label.set_visibility(True)
+            name_input.value = ""
+            ip_input.value = ""
+            mac_input.value = ""
+            vpn_input.value = ""
+
+        ui.button(Labels.REGISTER, icon="add", on_click=_submit).classes(
+            "action-btn mt-2"
+        ).props("dense")
+
+
+def _single_node_card(host: Host, state_dir: data.Path) -> None:
+    with ui.card().classes(
+        "flex-1 min-w-[260px] max-w-[380px] cursor-pointer hover:brightness-110"
+    ).on("click", lambda _, n=host.name: ui.navigate.to(f"/nodes/{n}")):
         with ui.row().classes("items-center gap-2 w-full"):
-            theme.status_dot(node.status)
-            ui.label(node.hostname).classes("text-base font-semibold font-mono").style(
+            theme.status_dot(host.status)
+            ui.label(host.name).classes("text-base font-semibold font-mono").style(
                 f"color: {theme.TEXT_PRIMARY}"
             )
             ui.space()
-            if node.version:
-                ui.badge(f"v{node.version}", color="blue").props("outline dense")
+            if host.version:
+                ui.badge(f"v{host.version}", color="blue").props("outline dense")
 
         with ui.row().classes("gap-4 mt-1"):
-            ui.label(node.last_ip or "no IP").classes("text-xs font-mono").style(
+            ui.label(host.ip or "no IP").classes("text-xs font-mono").style(
                 f"color: {theme.TEXT_SECONDARY}"
             )
-            ui.label(data.format_uptime(node.uptime_seconds)).classes("text-xs").style(
-                f"color: {theme.TEXT_SECONDARY}"
+            if host.vpn_ip:
+                ui.label(f"VPN {host.vpn_ip}").classes("text-xs font-mono").style(
+                    f"color: {theme.ACCENT_DIM}"
+                )
+            if host.registered:
+                ui.label(host.uptime).classes("text-xs").style(
+                    f"color: {theme.TEXT_SECONDARY}"
+                )
+            ui.label(host.last_seen_relative).classes("text-xs").style(
+                f"color: {theme.TEXT_DISABLED}"
             )
-            ui.label(data.format_last_seen_relative(node.last_seen)).classes(
-                "text-xs"
-            ).style(f"color: {theme.TEXT_DISABLED}")
+        if host.status == "reachable":
+            ui.label("SSH up · no heartbeat").classes("text-xs").style(
+                f"color: {theme.COLOR_WARNING}"
+            )
 
         ui.separator().classes("my-2").style(f"background: {theme.ACCENT_DIM}")
 
-        theme.metric_bar(
-            "Disk", node.disk_usage_pct,
-            data.usage_level(node.disk_usage_pct),
-        )
-        theme.metric_bar(
-            "Mem", node.memory_usage_pct,
-            data.usage_level(node.memory_usage_pct),
-        )
+        theme.metric_bar("Disk", host.disk_pct, data.usage_level(host.disk_pct))
+        theme.metric_bar("Mem", host.memory_pct, data.usage_level(host.memory_pct))
 
-        svc_count = len(node.services)
-        svc_text = f"{svc_count} service{'s' if svc_count != 1 else ''} running"
+        svc_count = host.guest_count
+        svc_text = f"{svc_count} guest{'s' if svc_count != 1 else ''} running"
         ui.label(svc_text).classes("text-xs mt-1").style(
             f"color: {theme.COLOR_SUCCESS if svc_count > 0 else theme.TEXT_DISABLED}"
         )
 
-        history = data.load_metric_history(state_dir, node.node_id, max_entries=30)
-        if len(history) >= 2:
-            _sparkline(history)
+        if host.telemetry:
+            history = data.load_metric_history(state_dir, host.telemetry.node_id, max_entries=30)
+            if len(history) >= 2:
+                _sparkline(history)
 
 
 def _sparkline(history: list[data.MetricSnapshot]) -> None:
@@ -225,14 +337,14 @@ def _sparkline(history: list[data.MetricSnapshot]) -> None:
                 "type": "line", "data": disk_data,
                 "smooth": True, "symbol": "none",
                 "lineStyle": {"width": 1.5, "color": theme.ACCENT},
-                "areaStyle": {"color": f"rgba(20, 184, 166, 0.08)"},
+                "areaStyle": {"color": "rgba(20, 184, 166, 0.08)"},
                 "name": "Disk",
             },
             {
                 "type": "line", "data": mem_data,
                 "smooth": True, "symbol": "none",
                 "lineStyle": {"width": 1.5, "color": theme.COLOR_INFO},
-                "areaStyle": {"color": f"rgba(96, 165, 250, 0.08)"},
+                "areaStyle": {"color": "rgba(96, 165, 250, 0.08)"},
                 "name": "Mem",
             },
         ],
@@ -271,17 +383,13 @@ def _service_matrix(nodes: list[data.RegisteredNode]) -> None:
                 row[h] = "\u2014"
         rows.append(row)
 
-    ui.table(
-        columns=columns,
-        rows=rows,
-        row_key="service",
-    ).classes("w-full")
+    ui.table(columns=columns, rows=rows, row_key="service").classes("w-full")
 
 
 # ── Detail table ─────────────────────────────────────────────────────
 
 
-def _detail_table(nodes: list[data.RegisteredNode]) -> ui.table:
+def _detail_table(fleet: Fleet) -> None:
     table = ui.table(
         columns=[
             {"name": "hostname", "label": "Hostname", "field": "hostname", "align": "left", "sortable": True},
@@ -290,7 +398,7 @@ def _detail_table(nodes: list[data.RegisteredNode]) -> ui.table:
             {"name": "uptime", "label": "Uptime", "field": "uptime", "align": "center"},
             {"name": "disk", "label": "Disk", "field": "disk", "align": "center"},
             {"name": "memory", "label": "Memory", "field": "memory", "align": "center"},
-            {"name": "services", "label": "Services", "field": "services", "align": "left"},
+            {"name": "guests", "label": "Guests", "field": "guests", "align": "center"},
             {"name": "version", "label": "Version", "field": "version", "align": "center"},
             {"name": "last_seen", "label": "Last Seen", "field": "last_seen", "align": "center"},
         ],
@@ -300,20 +408,297 @@ def _detail_table(nodes: list[data.RegisteredNode]) -> ui.table:
     ).classes("w-full")
 
     rows: list[dict] = []
-    for n in nodes:
+    for h in fleet.hosts:
         rows.append({
-            "hostname": n.hostname,
-            "ip": n.last_ip or "--",
-            "status": data.format_node_status(n.status),
-            "uptime": data.format_uptime(n.uptime_seconds),
-            "disk": f"{n.disk_usage_pct}%" if n.disk_usage_pct else "--",
-            "memory": f"{n.memory_usage_pct}%" if n.memory_usage_pct else "--",
-            "services": ", ".join(n.services) if n.services else "--",
-            "version": n.version or "--",
-            "last_seen": n.last_seen or "--",
+            "hostname": h.name,
+            "ip": h.ip or "--",
+            "status": data.format_node_status(h.status),
+            "uptime": h.uptime,
+            "disk": f"{h.disk_pct:.0f}%" if h.disk_pct > 0 else "--",
+            "memory": f"{h.memory_pct:.0f}%" if h.memory_pct > 0 else "--",
+            "guests": str(h.guest_count) if h.telemetry else "--",
+            "version": h.version or "--",
+            "last_seen": h.last_seen_relative,
         })
     table.rows = rows
-    return table
 
 
-# ── Refresh (kept for programmatic triggers) ────────────────────────
+# ── Per-host detail page ─────────────────────────────────────────────
+
+
+def _render_detail(
+    container: ui.column,
+    hostname: str,
+    env: dict[str, str],
+    state_dir: data.Path,
+) -> None:
+    container.clear()
+    with container:
+        fleet = data.build_fleet(env, state_dir)
+        host = fleet.get_host(hostname)
+
+        with ui.row().classes("items-center gap-2"):
+            ui.button(icon="arrow_back", on_click=lambda: ui.navigate.to(Routes.NODES)).props(
+                "flat round dense"
+            ).style(f"color: {theme.TEXT_SECONDARY}")
+            ui.label(PageTitles.NODE_DETAIL).classes("text-lg font-semibold").style(
+                f"color: {theme.TEXT_PRIMARY}"
+            )
+
+        if not host:
+            ui.label(f"Host '{hostname}' not found").classes("text-sm").style(
+                f"color: {theme.COLOR_ERROR}"
+            )
+            return
+
+        _detail_header(host)
+        _detail_resources(host)
+        _detail_guests(host)
+        _detail_network(host)
+        _detail_deploy_history(host)
+        _detail_extensions(host)
+
+        if host.telemetry:
+            history = data.load_metric_history(state_dir, host.telemetry.node_id, max_entries=60)
+            if len(history) >= 2:
+                _detail_sparklines(history)
+
+
+def _detail_header(host: Host) -> None:
+    with ui.card().classes("w-full"):
+        with ui.row().classes("w-full items-center justify-between flex-wrap gap-4"):
+            with ui.row().classes("items-center gap-3"):
+                theme.status_dot(host.status)
+                ui.label(host.name).classes("text-xl font-bold font-mono").style(
+                    f"color: {theme.TEXT_PRIMARY}"
+                )
+            with ui.row().classes("items-center gap-2"):
+                if host.version:
+                    ui.badge(f"v{host.version}", color="blue").props("outline")
+                if host.is_lan:
+                    ui.badge("LAN", color="blue").props("outline")
+                if not host.wol_capable:
+                    ui.badge("No WoL", color="orange").props("outline")
+                if host.healthy:
+                    ui.badge("Healthy", color="green").props("outline")
+                else:
+                    ui.badge("Unhealthy", color="red").props("outline")
+
+        if host.status == "reachable":
+            ui.label("SSH reachable — no callhome heartbeat").classes(
+                "text-xs mt-1"
+            ).style(f"color: {theme.COLOR_WARNING}")
+
+        for warn in host.warnings:
+            ui.label(warn).classes("text-xs mt-1").style(f"color: {theme.COLOR_WARNING}")
+        for err in host.errors:
+            ui.label(err).classes("text-xs mt-1").style(f"color: {theme.COLOR_ERROR}")
+
+        with ui.row().classes("gap-6 mt-2 flex-wrap"):
+            _detail_stat("IP", host.ip)
+            if host.vpn_ip:
+                _detail_stat("VPN", host.vpn_ip)
+            _detail_stat("Status", host.status.title())
+            _detail_stat("Uptime", host.uptime)
+            _detail_stat("Last Seen", host.last_seen_relative)
+            _detail_stat("Guests", str(host.guest_count))
+
+        can_kickstart = host.reachable or host.vpn_ip
+        if can_kickstart and not host.online:
+            _kickstart_button(host)
+
+
+def _kickstart_button(host: Host) -> None:
+    """Button to SSH into a host and restart callhome on its containers."""
+    result_label = ui.label("").classes("text-xs mt-1")
+    result_label.set_visibility(False)
+
+    async def _do_kickstart() -> None:
+        btn.disable()
+        spinner.set_visibility(True)
+        result_label.set_visibility(False)
+
+        import asyncio
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, data.kickstart_callhome, host,
+        )
+
+        spinner.set_visibility(False)
+        btn.enable()
+        result_label.set_visibility(True)
+        if result.success:
+            result_label.text = result.message
+            result_label.style(f"color: {theme.COLOR_SUCCESS}")
+            if result.errors:
+                for err in result.errors:
+                    ui.label(err).classes("text-xs").style(
+                        f"color: {theme.COLOR_WARNING}"
+                    )
+        else:
+            result_label.text = result.message
+            result_label.style(f"color: {theme.COLOR_ERROR}")
+
+    with ui.row().classes("items-center gap-2 mt-2"):
+        btn = ui.button(
+            "Kickstart Heartbeat",
+            icon="restart_alt",
+            on_click=_do_kickstart,
+        ).classes("action-btn").props("dense")
+        spinner = ui.spinner(size="sm")
+        spinner.set_visibility(False)
+        via = host.vpn_ip if host.vpn_ip and not (host.reachable and host.ip) else host.ip
+        ui.label(f"via {via}").classes("text-xs").style(
+            f"color: {theme.TEXT_DISABLED}"
+        )
+
+
+def _detail_stat(label: str, value: str) -> None:
+    with ui.column().classes("gap-0"):
+        ui.label(label).classes("text-xs uppercase tracking-wider").style(
+            f"color: {theme.TEXT_SECONDARY}"
+        )
+        ui.label(value).classes("text-sm font-mono font-medium").style(
+            f"color: {theme.TEXT_PRIMARY}"
+        )
+
+
+def _detail_resources(host: Host) -> None:
+    if not host.telemetry:
+        return
+    with ui.card().classes("w-full"):
+        theme.card_title("Resources")
+        with ui.row().classes("w-full gap-6 flex-wrap"):
+            with ui.column().classes("flex-1 min-w-[200px] gap-1"):
+                ui.label("Disk Usage").classes("text-xs uppercase tracking-wider").style(
+                    f"color: {theme.TEXT_SECONDARY}"
+                )
+                theme.metric_bar("Disk", host.disk_pct, data.usage_level(host.disk_pct))
+            with ui.column().classes("flex-1 min-w-[200px] gap-1"):
+                ui.label("Memory Usage").classes("text-xs uppercase tracking-wider").style(
+                    f"color: {theme.TEXT_SECONDARY}"
+                )
+                theme.metric_bar("Memory", host.memory_pct, data.usage_level(host.memory_pct))
+
+
+def _detail_guests(host: Host) -> None:
+    if not host.guests:
+        return
+    with ui.card().classes("w-full"):
+        theme.card_title(f"Guests ({host.guest_count})")
+        table = ui.table(
+            columns=[
+                {"name": "vmid", "label": "VMID", "field": "vmid", "align": "left", "sortable": True},
+                {"name": "name", "label": "Name", "field": "name", "align": "left"},
+                {"name": "type", "label": "Type", "field": "type", "align": "center"},
+                {"name": "status", "label": "Status", "field": "status", "align": "center"},
+            ],
+            rows=[{
+                "vmid": g.vmid,
+                "name": g.name,
+                "type": g.vm_type.upper(),
+                "status": "Running" if g.running else "Stopped",
+            } for g in sorted(host.guests, key=lambda g: int(g.vmid) if g.vmid.isdigit() else 0)],
+            row_key="vmid",
+        ).classes("w-full")
+        return table
+
+
+def _detail_network(host: Host) -> None:
+    ext_net = host.extensions.get("network", {})
+    local_ips = host.local_ips
+    if not ext_net and not local_ips:
+        return
+    with ui.card().classes("w-full"):
+        theme.card_title("Network")
+        if local_ips:
+            for ip in local_ips:
+                ui.label(ip).classes("text-sm font-mono").style(
+                    f"color: {theme.TEXT_PRIMARY}"
+                )
+        if ext_net:
+            ifaces = ext_net.get("interfaces", [])
+            if ifaces:
+                ui.separator().classes("my-2").style(f"background: {theme.ACCENT_DIM}")
+                for iface in ifaces:
+                    iface_name = iface if isinstance(iface, str) else iface.get("name", "")
+                    if iface_name:
+                        ui.label(iface_name).classes("text-xs font-mono").style(
+                            f"color: {theme.TEXT_SECONDARY}"
+                        )
+
+
+def _detail_deploy_history(host: Host) -> None:
+    if not host.deploys:
+        return
+    with ui.card().classes("w-full"):
+        theme.card_title("Deploy History")
+        recent = host.deploys[-10:][::-1]
+        with ui.column().classes("gap-1"):
+            for r in recent:
+                color = data.exit_code_color(r.exit_code)
+                label = data.exit_code_label(r.exit_code)
+                with ui.row().classes("items-center gap-2"):
+                    ui.badge(label, color=color)
+                    ui.label(", ".join(r.tags)).classes("text-sm").style(
+                        f"color: {theme.TEXT_PRIMARY}"
+                    )
+                    ui.label(f"{r.timestamp}  ·  {r.duration_seconds}s").classes(
+                        "text-xs"
+                    ).style(f"color: {theme.TEXT_DISABLED}")
+
+
+def _detail_extensions(host: Host) -> None:
+    exts = host.extensions
+    if not exts:
+        return
+    with ui.card().classes("w-full"):
+        theme.card_title("Extensions")
+        for ext_name, ext_data in exts.items():
+            if ext_name == "network":
+                continue
+            with ui.expansion(ext_name, icon="extension").classes("w-full"):
+                if isinstance(ext_data, dict):
+                    for k, v in ext_data.items():
+                        ui.label(f"{k}: {v}").classes("text-sm font-mono").style(
+                            f"color: {theme.TEXT_PRIMARY}"
+                        )
+                else:
+                    ui.label(str(ext_data)).classes("text-sm font-mono").style(
+                        f"color: {theme.TEXT_PRIMARY}"
+                    )
+
+
+def _detail_sparklines(history: list[data.MetricSnapshot]) -> None:
+    with ui.card().classes("w-full"):
+        theme.card_title("Resource History")
+        disk_data = [s.disk_usage_pct for s in history]
+        mem_data = [s.memory_usage_pct for s in history]
+        ui.echart({
+            "grid": {"top": 20, "bottom": 25, "left": 40, "right": 20},
+            "xAxis": {"type": "category", "show": False, "data": list(range(len(history)))},
+            "yAxis": {"type": "value", "min": 0, "max": 100, "axisLabel": {"formatter": "{value}%"}},
+            "legend": {
+                "data": ["Disk", "Memory"],
+                "textStyle": {"color": theme.TEXT_SECONDARY, "fontSize": 11},
+            },
+            "series": [
+                {
+                    "type": "line", "data": disk_data, "name": "Disk",
+                    "smooth": True, "symbol": "none",
+                    "lineStyle": {"width": 2, "color": theme.ACCENT},
+                    "areaStyle": {"color": "rgba(20, 184, 166, 0.12)"},
+                },
+                {
+                    "type": "line", "data": mem_data, "name": "Memory",
+                    "smooth": True, "symbol": "none",
+                    "lineStyle": {"width": 2, "color": theme.COLOR_INFO},
+                    "areaStyle": {"color": "rgba(96, 165, 250, 0.12)"},
+                },
+            ],
+            "tooltip": {
+                "trigger": "axis",
+                "backgroundColor": "rgba(10, 22, 44, 0.9)",
+                "borderColor": theme.ACCENT_DIM,
+                "textStyle": {"color": theme.TEXT_PRIMARY, "fontSize": 11},
+            },
+        }).classes("w-full h-48")

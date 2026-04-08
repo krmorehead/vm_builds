@@ -54,6 +54,30 @@ description: Proxmox system safety operations and hardware detection patterns. U
 
 15. WiFi NICs must be excluded from bridge creation — they're passed through via PCIe, not bridged.
 
+## Missing DRI Devices Recovery
+
+17. Between test cycles, after VM passthrough, or hookscript operations, the iGPU can lack `/dev/dri` nodes even though the native driver module is loaded. Two causes: (a) device bound to vfio-pci, (b) device unbound from native driver but module still loaded (PCI rescan alone won't re-bind).
+
+18. `proxmox_igpu` MUST check `/dev/dri/renderD128` existence BEFORE device detection. If missing: unbind from whatever driver holds the device, clear driver_override, PCI rescan, then EXPLICITLY bind to the native driver (`echo PCI_ADDR > /sys/bus/pci/drivers/i915/bind`). PCI rescan alone does NOT auto-bind when the module is already loaded.
+
+19. Previous bug: `molecule converge` (no cleanup) after a passthrough test left the iGPU without DRI nodes on `home`. `proxmox_igpu` saw `i915` in `lsmod`, skipped recovery, then hard-failed on "DRI devices missing." Explicit driver bind after PCI rescan is the fix.
+
+## Proxmox firmware package conflicts
+
+20. On Proxmox VE, `pve-firmware` bundles all Intel/AMD firmware including iwlwifi. NEVER install standalone `firmware-iwlwifi` — it conflicts with `pve-firmware` and triggers the Proxmox apt hook to block removal of the `proxmox-ve` meta-package.
+
+21. `proxmox_pci_passthrough` MUST check for `pve-firmware` before attempting to install `firmware-iwlwifi`. If `pve-firmware` is present, skip the install — the firmware is already available.
+
+22. Previous bug: `firmware-iwlwifi` install failed on mesh1, bridge-1, bridge-2, and home with `pve-apt-hook returned error code (1)`. All hosts had `pve-firmware` installed, which already provides iwlwifi firmware.
+
+## Enterprise Repository Management
+
+23. Proxmox enterprise repo disabling MUST happen in `pre_tasks` of infrastructure plays, BEFORE any role that calls `apt update`. The `proxmox_pci_passthrough` role needs `apt` for firmware packages and runs before `proxmox_igpu`.
+
+24. NEVER put repo management inside a role that isn't the FIRST role in the play. If any earlier role needs `apt`, the repos won't be ready.
+
+25. Previous bug: Enterprise repo disabling was inside `proxmox_igpu` (third role in infra play). `proxmox_pci_passthrough` (second role) ran `apt update` for firmware packages and failed with 401 Unauthorized on `mesh2`. Fix: moved to `pre_tasks` of both infra plays in `site.yml`.
+
 ## Package Name Verification
 
 16. NEVER assume a package name is correct without checking. Package names vary between Debian releases, architectures, and distributions. ALWAYS verify with `apt-cache search <keyword>` or `apt list <name>`.
@@ -85,6 +109,24 @@ description: Proxmox system safety operations and hardware detection patterns. U
 27. Previous bug: PCI rescan after vfio-pci unbind did NOT auto-bind the native driver when the module was already loaded. DRI devices (`/dev/dri/renderD128`) did not reappear. Fix: explicitly bind to the native driver after rescan (`echo PCI_ADDR > /sys/bus/pci/drivers/i915/bind`). The cleanup and hookscript post-stop both must do explicit rebinding, not rely on auto-binding.
 
 27. Cleanup MUST match deployment scope. If the role uses sysfs-only binding (no modprobe configs), cleanup MUST NOT remove modprobe config files. Cleanup MUST also remove hookscript state files from `/run/gpu-passthrough/` and the hookscript itself from `/var/lib/vz/snippets/`.
+
+## Hookscript Attachment Ordering
+
+28. Display-exclusive hookscripts that stop DRI-sharing containers MUST NOT be attached during provisioning. Attaching during `kiosk_lxc` (Phase 2.5) causes the hookscript to fire when `desktop_vm` starts in Phase 3, stopping all DRI containers (Kodi, Moonlight, Kiosk) before their configure plays run.
+
+29. Pattern: deploy the hookscript FILE in the provisioning role, attach it to containers/VMs in a dedicated play AFTER all configure plays finish. This ensures all containers are configured before the hookscript can stop them.
+
+30. Configure roles for DRI-sharing containers should include a defensive "ensure container is running" guard at the top (check `pct status`, start if stopped, wait for readiness). This handles re-runs where hookscripts may already be attached from a previous cycle.
+
+31. Previous bug: `kiosk_lxc` deployed AND attached the display-exclusive hookscript during Phase 2.5. When `desktop_vm` started in Phase 3, the hookscript's `pre-start(400)` stopped Kodi (301), Moonlight (302), and Kiosk (401). `Configure Kodi` then failed with "container '301' not running!" Fix: split hookscript deployment (provisioning) from attachment (post-configure play).
+
+32. Verify assertions for DRI-sharing containers (Kodi, Kiosk, Moonlight) MUST skip `systemctl is-active` checks when the Desktop VM is running. The Desktop VM holds the iGPU via PCI passthrough, making DRI devices unavailable to containers. Graphical services (Kodi) legitimately report `inactive` without GPU access. Check `qm status desktop_vm_id` and gate the service-active assertion.
+
+33. Previous bug: Kodi container was `running` but `systemctl is-active kodi` returned `inactive` during verify. Root cause: Desktop VM held the iGPU, DRI devices absent from container. Fix: added `"'running' not in (_desktop_status.stdout | default(''))"` condition to the Kodi service-active assertion.
+
+34. Not all services run as systemd daemons. Moonlight-embedded is an on-demand streaming client binary (`/usr/local/bin/moonlight`), not a persistent service. Verify assertions for such services should check binary existence and config deployment, NOT `systemctl is-active`.
+
+35. Previous bug: Moonlight verify assertion checked `systemctl is-active moonlight` but there IS no `moonlight.service` — moonlight-embedded is compiled from source as a CLI binary with no systemd unit file. The assertion always failed. Fix: changed to check binary existence and config file presence.
 
 ## Host Recoverability
 

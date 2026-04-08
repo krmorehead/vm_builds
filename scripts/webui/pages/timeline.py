@@ -5,6 +5,7 @@ from __future__ import annotations
 from nicegui import ui
 
 from scripts.webui import data, theme
+from scripts.webui.data import PageTitles
 
 
 def register() -> None:
@@ -15,7 +16,7 @@ def register() -> None:
         state_dir = get_state_dir()
 
         with theme.page_shell("timeline"):
-            theme.page_header("Deploy Timeline", "Per-service provisioning and readiness timing")
+            theme.page_header(PageTitles.TIMELINE, "Per-service provisioning and readiness timing")
 
             active = data.get_active_timeline()
             if active:
