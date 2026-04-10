@@ -20,6 +20,7 @@ set -euo pipefail
 #
 # Usage: ./build-images.sh [--clean] [--host <proxmox-ip>] [--only <target>]
 #                          [--parallel] [--hosts <ip1>,<ip2>,...]
+#                          [--force] [--bump <target> <major|minor|patch>]
 #   --clean          Remove cached Image Builder before downloading fresh copy
 #   --host <ip>      Proxmox host for remote image builds. Required for remote-built templates.
 #   --only <target>  Build only the specified target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, kiosk, moonlight, gaming, sunshine, desktop).
@@ -27,6 +28,12 @@ set -euo pipefail
 #                    Reads host IPs from PRIMARY_HOST, AI_HOST, MESH_2_HOST env vars.
 #   --hosts <ips>    Comma-separated list of Proxmox host IPs for parallel builds.
 #                    Implies --parallel.
+#   --force          Rebuild even if image exists (auto-bumps patch version).
+#   --bump T L       Bump version for target T by level L before building.
+#                    L is one of: major, minor, patch.
+#
+# Image versions are tracked in images/manifest.json (committed to git).
+# Filenames include the semver: pihole-1.0.0-debian-12-amd64.tar.zst
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGES_DIR="$(cd "${SCRIPT_DIR}/../images" && pwd)"
@@ -42,30 +49,25 @@ IB_URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARG
 MESH_FILES_DIR="${SCRIPT_DIR}/image-builder/files-mesh-lxc"
 ROUTER_FILES_DIR="${SCRIPT_DIR}/image-builder/files-router-vm"
 
-MESH_OUTPUT_NAME="openwrt-mesh-lxc-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}-rootfs.tar.gz"
-ROUTER_OUTPUT_NAME="openwrt-router-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}-combined.img.gz"
+# Output names are computed from the image manifest (see init_output_names)
 
 # Shared Debian base template for all Debian-based LXC builds
 DEBIAN_BASE_TEMPLATE="debian-12-standard_12.12-1_amd64.tar.zst"
 
 # Pi-hole LXC template (built remotely on Proxmox via pct create/exec/vzdump)
-PIHOLE_OUTPUT_NAME="pihole-debian-12-amd64.tar.zst"
 PIHOLE_BUILD_VMID=998
 
 # rsyslog LXC template (built remotely on Proxmox via pct create/exec/vzdump)
-RSYSLOG_OUTPUT_NAME="rsyslog-debian-12-amd64.tar.zst"
 RSYSLOG_BUILD_VMID=997
 
 # Gaming LXC template (built remotely on Proxmox — Fedora base with Sunshine + dsda-doom)
 GAMING_FEDORA_VERSION="41"
 GAMING_BASE_ROOTFS="fedora-${GAMING_FEDORA_VERSION}-default-amd64.tar.xz"
 GAMING_LXC_IMAGE_URL="https://images.linuxcontainers.org/images/fedora/${GAMING_FEDORA_VERSION}/amd64/default"
-GAMING_OUTPUT_NAME="gaming-fedora-amd64.tar.zst"
 GAMING_BUILD_VMID=990
 
 # Desktop VM image (built remotely on Proxmox: cloud-init boot → apt install desktops → export disk)
 DESKTOP_BASE_IMAGE="debian-12-generic-amd64.qcow2"
-DESKTOP_OUTPUT_NAME="desktop-debian-12-amd64.qcow2"
 DESKTOP_BUILD_VMID=991
 
 # Remote Proxmox host (set via --host flag)
@@ -76,6 +78,11 @@ SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o Connect
 PARALLEL_MODE=false
 PARALLEL_HOSTS=()
 CLEAN_MODE=false
+FORCE_BUILD=false
+declare -A BUMP_TARGETS
+
+# Image version manifest
+MANIFEST_FILE="${IMAGES_DIR}/manifest.json"
 
 # ── Package lists ────────────────────────────────────────────────────
 
@@ -212,12 +219,135 @@ cleanup_lxc_build() {
 
 check_deps() {
     local missing=()
-    for cmd in wget tar make zstd; do
+    for cmd in wget tar make zstd jq; do
         command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
     if (( ${#missing[@]} > 0 )); then
         die "Missing required tools: ${missing[*]}. Install them first."
     fi
+}
+
+# ── Image manifest helpers ────────────────────────────────────────────
+
+manifest_version() {
+    jq -r ".images.${1}.version" "$MANIFEST_FILE"
+}
+
+manifest_filename() {
+    jq -r ".images.${1}.filename" "$MANIFEST_FILE"
+}
+
+compute_filename() {
+    local target="$1" version="$2"
+    case "$target" in
+        mesh)          echo "openwrt-mesh-lxc-${version}-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}-rootfs.tar.gz" ;;
+        router)        echo "openwrt-router-${version}-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}-combined.img.gz" ;;
+        pihole)        echo "pihole-${version}-debian-12-amd64.tar.zst" ;;
+        rsyslog)       echo "rsyslog-${version}-debian-12-amd64.tar.zst" ;;
+        jellyfin)      echo "jellyfin-${version}-debian-12-amd64.tar.zst" ;;
+        netdata)       echo "netdata-${version}-debian-12-amd64.tar.zst" ;;
+        wireguard)     echo "wireguard-${version}-debian-12-amd64.tar.zst" ;;
+        homeassistant) echo "homeassistant-${version}-debian-12-amd64.tar.zst" ;;
+        kodi)          echo "kodi-${version}-debian-12-amd64.tar.zst" ;;
+        moonlight)     echo "moonlight-${version}-debian-12-amd64.tar.zst" ;;
+        kiosk)         echo "kiosk-${version}-debian-12-amd64.tar.zst" ;;
+        gaming)        echo "gaming-${version}-fedora-amd64.tar.zst" ;;
+        sunshine)      echo "sunshine-${version}-win11-amd64.qcow2" ;;
+        desktop)       echo "desktop-${version}-debian-12-amd64.qcow2" ;;
+        *)             die "Unknown target for filename: $target" ;;
+    esac
+}
+
+bump_version() {
+    local version="$1" level="$2"
+    local major minor patch
+    IFS='.' read -r major minor patch <<< "$version"
+    case "$level" in
+        major) echo "$((major + 1)).0.0" ;;
+        minor) echo "${major}.$((minor + 1)).0" ;;
+        patch) echo "${major}.${minor}.$((patch + 1))" ;;
+        *)     die "Invalid bump level: $level (use major, minor, or patch)" ;;
+    esac
+}
+
+update_manifest() {
+    local target="$1" version="$2" filename="$3" sha256="$4" built_at="$5"
+    local tmp
+    tmp=$(mktemp)
+    jq --arg t "$target" --arg v "$version" --arg f "$filename" \
+       --arg s "$sha256" --arg ts "$built_at" \
+       '.images[$t] = {version: $v, filename: $f, sha256: $s, built_at: $ts}' \
+       "$MANIFEST_FILE" > "$tmp" && mv "$tmp" "$MANIFEST_FILE"
+}
+
+should_skip_build() {
+    local target="$1" output="$2"
+    if [[ -f "$output" ]] && [[ "$FORCE_BUILD" != true ]]; then
+        local label
+        label="$(echo "${target:0:1}" | tr '[:lower:]' '[:upper:]')${target:1}"
+        log "${label} image v$(manifest_version "$target") exists: $(basename "$output")"
+        log "  Use --force to rebuild or --bump $target <major|minor|patch> to version-bump."
+        return 0
+    fi
+    return 1
+}
+
+finalize_build() {
+    local target="$1" output="$2"
+    local sha256 version filename built_at
+    sha256=$(sha256sum "$output" | awk '{print $1}')
+    version=$(manifest_version "$target")
+    filename=$(basename "$output")
+    built_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    update_manifest "$target" "$version" "$filename" "$sha256" "$built_at"
+    log "Manifest updated: ${target} v${version}"
+}
+
+init_output_names() {
+    if [[ ! -f "$MANIFEST_FILE" ]]; then
+        die "Image manifest not found: ${MANIFEST_FILE}
+  This file tracks image versions. It should exist at images/manifest.json."
+    fi
+
+    # Apply explicit version bumps (--bump target level)
+    for target in "${!BUMP_TARGETS[@]}"; do
+        local level="${BUMP_TARGETS[$target]}"
+        local cur new_ver new_file
+        cur=$(manifest_version "$target")
+        new_ver=$(bump_version "$cur" "$level")
+        new_file=$(compute_filename "$target" "$new_ver")
+        update_manifest "$target" "$new_ver" "$new_file" "" ""
+        log "Bumped ${target}: ${cur} -> ${new_ver}"
+    done
+
+    # --force without explicit --bump: auto-bump patch
+    if [[ "$FORCE_BUILD" == true ]]; then
+        for target in "${VALID_TARGETS[@]}"; do
+            if should_build "$target" && [[ -z "${BUMP_TARGETS[$target]:-}" ]]; then
+                local cur new_ver new_file
+                cur=$(manifest_version "$target")
+                new_ver=$(bump_version "$cur" "patch")
+                new_file=$(compute_filename "$target" "$new_ver")
+                update_manifest "$target" "$new_ver" "$new_file" "" ""
+                log "Auto-bumped ${target}: ${cur} -> ${new_ver} (--force)"
+            fi
+        done
+    fi
+
+    MESH_OUTPUT_NAME=$(manifest_filename mesh)
+    ROUTER_OUTPUT_NAME=$(manifest_filename router)
+    PIHOLE_OUTPUT_NAME=$(manifest_filename pihole)
+    RSYSLOG_OUTPUT_NAME=$(manifest_filename rsyslog)
+    JELLYFIN_OUTPUT_NAME=$(manifest_filename jellyfin)
+    NETDATA_OUTPUT_NAME=$(manifest_filename netdata)
+    WIREGUARD_OUTPUT_NAME=$(manifest_filename wireguard)
+    HOMEASSISTANT_OUTPUT_NAME=$(manifest_filename homeassistant)
+    KODI_OUTPUT_NAME=$(manifest_filename kodi)
+    KIOSK_OUTPUT_NAME=$(manifest_filename kiosk)
+    MOONLIGHT_OUTPUT_NAME=$(manifest_filename moonlight)
+    GAMING_OUTPUT_NAME=$(manifest_filename gaming)
+    SUNSHINE_OUTPUT_NAME=$(manifest_filename sunshine)
+    DESKTOP_OUTPUT_NAME=$(manifest_filename desktop)
 }
 
 download_imagebuilder() {
@@ -238,11 +368,7 @@ download_imagebuilder() {
 
 build_mesh_lxc() {
     local output="${IMAGES_DIR}/${MESH_OUTPUT_NAME}"
-    if [[ -f "$output" ]]; then
-        log "Mesh LXC rootfs already exists at ${output}"
-        log "  Delete it and re-run to rebuild."
-        return
-    fi
+    should_skip_build "mesh" "$output" && return
 
     log "Building mesh LXC rootfs..."
     local ib_dir="${BUILD_DIR}/${IB_NAME}"
@@ -268,17 +394,14 @@ build_mesh_lxc() {
 
     mkdir -p "$IMAGES_DIR"
     cp "$rootfs" "${IMAGES_DIR}/${MESH_OUTPUT_NAME}"
-    log "Mesh LXC rootfs: ${IMAGES_DIR}/${MESH_OUTPUT_NAME}"
-    log "  Size: $(du -h "${IMAGES_DIR}/${MESH_OUTPUT_NAME}" | cut -f1)"
+    finalize_build "mesh" "$output"
+    log "Mesh LXC rootfs: ${output}"
+    log "  Size: $(du -h "$output" | cut -f1)"
 }
 
 build_router_vm() {
     local output="${IMAGES_DIR}/${ROUTER_OUTPUT_NAME}"
-    if [[ -f "$output" ]]; then
-        log "Router VM image already exists at ${output}"
-        log "  Delete it and re-run to rebuild."
-        return
-    fi
+    should_skip_build "router" "$output" && return
 
     log "Building router VM image..."
     local ib_dir="${BUILD_DIR}/${IB_NAME}"
@@ -310,8 +433,9 @@ build_router_vm() {
 
     mkdir -p "$IMAGES_DIR"
     cp "$combined" "${IMAGES_DIR}/${ROUTER_OUTPUT_NAME}"
-    log "Router VM image: ${IMAGES_DIR}/${ROUTER_OUTPUT_NAME}"
-    log "  Size: $(du -h "${IMAGES_DIR}/${ROUTER_OUTPUT_NAME}" | cut -f1)"
+    finalize_build "router" "$output"
+    log "Router VM image: ${output}"
+    log "  Size: $(du -h "$output" | cut -f1)"
 }
 
 cleanup_pihole_build() { cleanup_lxc_build "${PIHOLE_BUILD_VMID}"; }
@@ -322,11 +446,7 @@ build_pihole_lxc() {
     local output="${IMAGES_DIR}/${PIHOLE_OUTPUT_NAME}"
     local vmid="${PIHOLE_BUILD_VMID}"
 
-    if [[ -f "$output" ]]; then
-        log "Pi-hole template already exists at ${output}"
-        log "  Delete it and re-run to rebuild."
-        return
-    fi
+    should_skip_build "pihole" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "Pi-hole build requires --host <proxmox-ip>. Example:
@@ -442,6 +562,7 @@ TOML_EOF
 
     trap - EXIT
 
+    finalize_build "pihole" "$output"
     log "Pi-hole LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
@@ -454,11 +575,7 @@ build_rsyslog_lxc() {
     local output="${IMAGES_DIR}/${RSYSLOG_OUTPUT_NAME}"
     local vmid="${RSYSLOG_BUILD_VMID}"
 
-    if [[ -f "$output" ]]; then
-        log "rsyslog template already exists at ${output}"
-        log "  Delete it and re-run to rebuild."
-        return
-    fi
+    should_skip_build "rsyslog" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "rsyslog build requires --host <proxmox-ip>. Example:
@@ -610,12 +727,12 @@ ROTATE_EOF
 
     trap - EXIT
 
+    finalize_build "rsyslog" "$output"
     log "rsyslog LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
 
 # Jellyfin LXC template (built remotely on Proxmox via pct create/exec/vzdump)
-JELLYFIN_OUTPUT_NAME="jellyfin-debian-12-amd64.tar.zst"
 JELLYFIN_BUILD_VMID=995
 
 cleanup_jellyfin_build() { cleanup_lxc_build "${JELLYFIN_BUILD_VMID}"; }
@@ -626,11 +743,7 @@ build_jellyfin_lxc() {
     local output="${IMAGES_DIR}/${JELLYFIN_OUTPUT_NAME}"
     local vmid="${JELLYFIN_BUILD_VMID}"
 
-    if [[ -f "$output" ]]; then
-        log "Jellyfin template already exists at ${output}"
-        log "  Delete it and re-run to rebuild."
-        return
-    fi
+    should_skip_build "jellyfin" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "Jellyfin build requires --host <proxmox-ip>. Example:
@@ -780,12 +893,12 @@ JELLYFIN_EOF
 
     trap - EXIT
 
+    finalize_build "jellyfin" "$output"
     log "Jellyfin LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
 
 # Netdata LXC template (built remotely on Proxmox via pct create/exec/vzdump)
-NETDATA_OUTPUT_NAME="netdata-debian-12-amd64.tar.zst"
 NETDATA_BUILD_VMID=996
 
 cleanup_netdata_build() { cleanup_lxc_build "${NETDATA_BUILD_VMID}"; }
@@ -796,11 +909,7 @@ build_netdata_lxc() {
     local output="${IMAGES_DIR}/${NETDATA_OUTPUT_NAME}"
     local vmid="${NETDATA_BUILD_VMID}"
 
-    if [[ -f "$output" ]]; then
-        log "Netdata template already exists at ${output}"
-        log "  Delete it and re-run to rebuild."
-        return
-    fi
+    should_skip_build "netdata" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "Netdata build requires --host <proxmox-ip>. Example:
@@ -966,28 +1075,24 @@ OVERRIDE_EOF
 
     trap - EXIT
 
+    finalize_build "netdata" "$output"
     log "Netdata LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
 
 # WireGuard LXC template (built remotely on Proxmox via pct create/exec/vzdump)
-WIREGUARD_OUTPUT_NAME="wireguard-debian-12-amd64.tar.zst"
 WIREGUARD_BUILD_VMID=989
 
 # Kodi LXC template (built remotely on Proxmox via pct create/exec/vzdump)
-KODI_OUTPUT_NAME="kodi-debian-12-amd64.tar.zst"
 KODI_BUILD_VMID=993
 
 # Kiosk LXC template (built remotely on Proxmox via pct create/exec/vzdump)
-KIOSK_OUTPUT_NAME="kiosk-debian-12-amd64.tar.zst"
 KIOSK_BUILD_VMID=992
 
 # Moonlight LXC template (built remotely on Proxmox via pct create/exec/vzdump)
-MOONLIGHT_OUTPUT_NAME="moonlight-debian-12-amd64.tar.zst"
 MOONLIGHT_BUILD_VMID=988
 
 # Home Assistant LXC template (built remotely on Proxmox via pct create/exec/vzdump)
-HOMEASSISTANT_OUTPUT_NAME="homeassistant-debian-12-amd64.tar.zst"
 HOMEASSISTANT_BUILD_VMID=994
 
 cleanup_kodi_build() { cleanup_lxc_build "${KODI_BUILD_VMID}"; }
@@ -998,11 +1103,7 @@ build_kodi_lxc() {
     local output="${IMAGES_DIR}/${KODI_OUTPUT_NAME}"
     local vmid="${KODI_BUILD_VMID}"
 
-    if [[ -f "$output" ]]; then
-        log "Kodi template already exists at ${output}"
-        log "  Delete it and re-run to rebuild."
-        return
-    fi
+    should_skip_build "kodi" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "Kodi build requires --host <proxmox-ip>. Example:
@@ -1172,6 +1273,7 @@ SETTINGS_EOF
 
     trap - EXIT
 
+    finalize_build "kodi" "$output"
     log "Kodi LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
@@ -1184,11 +1286,7 @@ build_kiosk_lxc() {
     local output="${IMAGES_DIR}/${KIOSK_OUTPUT_NAME}"
     local vmid="${KIOSK_BUILD_VMID}"
 
-    if [[ -f "$output" ]]; then
-        log "Kiosk template already exists at ${output}"
-        log "  Delete it and re-run to rebuild."
-        return
-    fi
+    should_skip_build "kiosk" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "Kiosk build requires --host <proxmox-ip>. Example:
@@ -1404,6 +1502,7 @@ DISPLAY_EOF
 
     trap - EXIT
 
+    finalize_build "kiosk" "$output"
     log "Kiosk LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
@@ -1416,11 +1515,7 @@ build_moonlight_lxc() {
     local output="${IMAGES_DIR}/${MOONLIGHT_OUTPUT_NAME}"
     local vmid="${MOONLIGHT_BUILD_VMID}"
 
-    if [[ -f "$output" ]]; then
-        log "Moonlight template already exists at ${output}"
-        log "  Delete it and re-run to rebuild."
-        return
-    fi
+    should_skip_build "moonlight" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "Moonlight build requires --host <proxmox-ip>. Example:
@@ -1575,6 +1670,7 @@ build_moonlight_lxc() {
 
     trap - EXIT
 
+    finalize_build "moonlight" "$output"
     log "Moonlight LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
@@ -1589,11 +1685,7 @@ build_wireguard_lxc() {
     local output="${IMAGES_DIR}/${WIREGUARD_OUTPUT_NAME}"
     local vmid="${WIREGUARD_BUILD_VMID}"
 
-    if [[ -f "$output" ]]; then
-        log "WireGuard template already exists at ${output}"
-        log "  Delete it and re-run to rebuild."
-        return
-    fi
+    should_skip_build "wireguard" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "WireGuard build requires --host <proxmox-ip>. Example:
@@ -1713,6 +1805,7 @@ SYSCTL_EOF
 
     trap - EXIT
 
+    finalize_build "wireguard" "$output"
     log "WireGuard LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
@@ -1723,11 +1816,7 @@ build_homeassistant_lxc() {
     local output="${IMAGES_DIR}/${HOMEASSISTANT_OUTPUT_NAME}"
     local vmid="${HOMEASSISTANT_BUILD_VMID}"
 
-    if [[ -f "$output" ]]; then
-        log "Home Assistant template already exists at ${output}"
-        log "  Delete it and re-run to rebuild."
-        return
-    fi
+    should_skip_build "homeassistant" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "Home Assistant build requires --host <proxmox-ip>. Example:
@@ -1882,6 +1971,7 @@ DOCKER_EOF
 
     trap - EXIT
 
+    finalize_build "homeassistant" "$output"
     log "Home Assistant LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
@@ -1894,11 +1984,7 @@ build_gaming_lxc() {
     local output="${IMAGES_DIR}/${GAMING_OUTPUT_NAME}"
     local vmid="${GAMING_BUILD_VMID}"
 
-    if [[ -f "$output" ]]; then
-        log "Gaming template already exists at ${output}"
-        log "  Delete it and re-run to rebuild."
-        return
-    fi
+    should_skip_build "gaming" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "Gaming build requires --host <proxmox-ip>. Example:
@@ -2151,6 +2237,7 @@ PEOF
 
     trap - EXIT
 
+    finalize_build "gaming" "$output"
     log "Gaming LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
@@ -2176,11 +2263,7 @@ build_desktop_vm() {
     local output="${IMAGES_DIR}/${DESKTOP_OUTPUT_NAME}"
     local vmid="${DESKTOP_BUILD_VMID}"
 
-    if [[ -f "$output" ]]; then
-        log "Desktop VM image already exists at ${output}"
-        log "  Delete it and re-run to rebuild."
-        return
-    fi
+    should_skip_build "desktop" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "Desktop build requires --host <proxmox-ip>. Example:
@@ -2434,6 +2517,7 @@ CALLHOME_EOF
 
     trap - EXIT
 
+    finalize_build "desktop" "$output"
     log "Desktop VM image: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
@@ -2441,7 +2525,6 @@ CALLHOME_EOF
 # Sunshine VM image (built remotely on Proxmox: ISO boot → unattended install → export)
 SUNSHINE_ISO="Tiny11-2026-03-15.iso"
 SUNSHINE_VIRTIO_ISO="virtio-win.iso"
-SUNSHINE_OUTPUT_NAME="sunshine-win11-amd64.qcow2"
 SUNSHINE_BUILD_VMID=989
 SUNSHINE_ANSWER_DIR="${SCRIPT_DIR}/../roles/gaming_vm/files"
 
@@ -2463,11 +2546,7 @@ build_sunshine_vm() {
     local output="${IMAGES_DIR}/${SUNSHINE_OUTPUT_NAME}"
     local vmid="${SUNSHINE_BUILD_VMID}"
 
-    if [[ -f "$output" ]]; then
-        log "Sunshine VM image already exists at ${output}"
-        log "  Delete it and re-run to rebuild."
-        return
-    fi
+    should_skip_build "sunshine" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "Sunshine build requires --host <proxmox-ip>. Example:
@@ -2677,6 +2756,7 @@ build_sunshine_vm() {
 
     trap - EXIT
 
+    finalize_build "sunshine" "$output"
     log "Sunshine VM image: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
@@ -2738,6 +2818,10 @@ parallel_build() {
     local -a pids=() labels=() log_files=()
     local -a propagate=()
     [[ "$CLEAN_MODE" == true ]] && propagate+=(--clean)
+    # Children must NOT re-bump or re-force; the parent already applied
+    # bumps and force-bumps to the manifest in init_output_names.
+    # Children just need to read the manifest and build.
+    
 
     # Launch local builds (mesh, router) in background
     if [[ ${#local_targets[@]} -gt 0 ]]; then
@@ -2791,7 +2875,6 @@ parallel_build() {
         done
         log ""
         log "Full logs in: ${log_dir}/"
-        rm -rf "$log_dir"
         return 1
     fi
 
@@ -2831,9 +2914,24 @@ while [[ $# -gt 0 ]]; do
             PARALLEL_MODE=true
             shift 2
             ;;
+        --force)
+            FORCE_BUILD=true
+            shift
+            ;;
+        --bump)
+            [[ -n "${2:-}" ]] || die "--bump requires <target> <major|minor|patch>"
+            [[ -n "${3:-}" ]] || die "--bump requires <target> <major|minor|patch>"
+            case "$3" in
+                major|minor|patch) ;;
+                *) die "Invalid bump level '$3'. Must be one of: major, minor, patch" ;;
+            esac
+            BUMP_TARGETS["$2"]="$3"
+            shift 3
+            ;;
         *)
             die "Unknown argument: $1
 Usage: $0 [--host <ip>] [--only <target>] [--clean] [--parallel] [--hosts <ip1>,<ip2>,...]
+         [--force] [--bump <target> <major|minor|patch>]
   Targets: mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, kiosk, moonlight, gaming, sunshine, desktop"
             ;;
     esac
@@ -2851,6 +2949,13 @@ Hint: use 'router' (not 'openwrt') for the OpenWrt router VM image."
     done
 fi
 
+for t in "${!BUMP_TARGETS[@]}"; do
+    if ! printf '%s\n' "${VALID_TARGETS[@]}" | grep -qx "$t"; then
+        die "Unknown bump target: '$t'
+Valid targets: ${VALID_TARGETS[*]}"
+    fi
+done
+
 should_build() {
     [[ ${#BUILD_TARGETS[@]} -eq 0 ]] && return 0
     local target
@@ -2861,6 +2966,7 @@ should_build() {
 }
 
 check_deps
+init_output_names
 
 # ── Parallel dispatch ────────────────────────────────────────────────
 if [[ "$PARALLEL_MODE" == true ]]; then

@@ -35,6 +35,7 @@
     lxc_ct_bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
     lxc_ct_unprivileged: "{{ kodi_ct_unprivileged }}"
     lxc_ct_features: "{{ kodi_ct_features }}"
+    lxc_ct_image_version: "{{ kodi_image_version }}"
 
 # ── Device passthrough via lxc.mount.entry + cgroup allowlists ───
 

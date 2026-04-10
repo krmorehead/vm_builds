@@ -12,8 +12,9 @@ __pycache__/
 *.pyc
 *.pyo
 
-# VM disk images
+# VM disk images (manifest.json is version-tracked)
 images/
+!images/manifest.json
 *.img
 *.qcow2
 *.raw

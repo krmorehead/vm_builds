@@ -39,6 +39,7 @@
     lxc_ct_unprivileged: "{{ gaming_ct_unprivileged }}"
     lxc_ct_features: "{{ gaming_ct_features }}"
     lxc_ct_skip_debian_cleanup: true
+    lxc_ct_image_version: "{{ gaming_image_version }}"
 
 # ── Device passthrough via lxc.mount.entry + cgroup allowlists ───
 

@@ -68,89 +68,74 @@ proxmox_lxc_default_template: debian-12-standard_12.12-1_amd64.tar.zst
 proxmox_lxc_template_storage: local
 proxmox_lxc_template_path: images/debian-12-standard_12.12-1_amd64.tar.zst
 
+# ── Image version manifest ──────────────────────────────────────
+# Single source of truth for image versions. Updated by build-images.sh.
+# Template names and paths are derived from this manifest so they stay
+# in sync with the versioned filenames produced by the build script.
+_image_manifest: "{{ lookup('file', project_root + '/images/manifest.json') | from_json }}"
+
 # ── OpenWrt LXC (mesh satellite nodes) ────────────────────────────
-# Custom image built by build-images.sh: no firewall, WiFi drivers baked in.
-# Run ./build-images.sh before first deploy.
-openwrt_lxc_template: openwrt-mesh-lxc-24.10.0-x86-64-rootfs.tar.gz
-openwrt_lxc_template_path: images/openwrt-mesh-lxc-24.10.0-x86-64-rootfs.tar.gz
+openwrt_lxc_template: "{{ _image_manifest.images.mesh.filename }}"
+openwrt_lxc_template_path: "images/{{ _image_manifest.images.mesh.filename }}"
+openwrt_lxc_image_version: "{{ _image_manifest.images.mesh.version }}"
 
 # ── Pi-hole LXC ──────────────────────────────────────────────────
-# Custom image built by build-images.sh: Debian 12 + Pi-hole pre-installed.
-# Run ./build-images.sh before first deploy.
-pihole_lxc_template: pihole-debian-12-amd64.tar.zst
-pihole_lxc_template_path: images/pihole-debian-12-amd64.tar.zst
+pihole_lxc_template: "{{ _image_manifest.images.pihole.filename }}"
+pihole_lxc_template_path: "images/{{ _image_manifest.images.pihole.filename }}"
+pihole_image_version: "{{ _image_manifest.images.pihole.version }}"
 pihole_ct_ip_offset: 10
 
 # ── rsyslog LXC ─────────────────────────────────────────────────
-# Custom image built by build-images.sh: Debian 12 + rsyslog pre-configured
-# for TCP log reception, spool directory, and logrotate.
-# Run ./build-images.sh before first deploy.
-rsyslog_lxc_template: rsyslog-debian-12-amd64.tar.zst
-rsyslog_lxc_template_path: images/rsyslog-debian-12-amd64.tar.zst
-rsyslog_ct_ip_offset: 12
+rsyslog_lxc_template: "{{ _image_manifest.images.rsyslog.filename }}"
+rsyslog_lxc_template_path: "images/{{ _image_manifest.images.rsyslog.filename }}"
+rsyslog_image_version: "{{ _image_manifest.images.rsyslog.version }}"
+rsyslog_ct_ip_offset: 30
 
 # ── Netdata LXC ─────────────────────────────────────────────────
-# Custom image built by build-images.sh: Debian 12 + Netdata pre-installed
-# with dbengine retention, /host/proc and /host/sys paths pre-configured.
-# Run ./build-images.sh before first deploy.
-netdata_lxc_template: netdata-debian-12-amd64.tar.zst
-netdata_lxc_template_path: images/netdata-debian-12-amd64.tar.zst
-netdata_ct_ip_offset: 21
+netdata_lxc_template: "{{ _image_manifest.images.netdata.filename }}"
+netdata_lxc_template_path: "images/{{ _image_manifest.images.netdata.filename }}"
+netdata_image_version: "{{ _image_manifest.images.netdata.version }}"
+netdata_ct_ip_offset: 40
 bridge_ct_ip_offset: 27
 
 # ── Home Assistant LXC ──────────────────────────────────────────
-# Custom image built by build-images.sh: Debian 12 + Docker CE pre-installed
-# with HA container pre-pulled. Docker-in-LXC requires nesting=1 feature.
-# Run ./build-images.sh before first deploy.
-homeassistant_lxc_template: homeassistant-debian-12-amd64.tar.zst
-homeassistant_lxc_template_path: images/homeassistant-debian-12-amd64.tar.zst
+homeassistant_lxc_template: "{{ _image_manifest.images.homeassistant.filename }}"
+homeassistant_lxc_template_path: "images/{{ _image_manifest.images.homeassistant.filename }}"
+homeassistant_image_version: "{{ _image_manifest.images.homeassistant.version }}"
 homeassistant_ct_ip_offset: 14
 
 # ── Jellyfin LXC ────────────────────────────────────────────────
-# Custom image built by build-images.sh: Debian 12 + Jellyfin + VA-API drivers
-# baked in for hardware transcoding. iGPU device passthrough required.
-# Run ./build-images.sh before first deploy.
-jellyfin_lxc_template: jellyfin-debian-12-amd64.tar.zst
-jellyfin_lxc_template_path: images/jellyfin-debian-12-amd64.tar.zst
+jellyfin_lxc_template: "{{ _image_manifest.images.jellyfin.filename }}"
+jellyfin_lxc_template_path: "images/{{ _image_manifest.images.jellyfin.filename }}"
+jellyfin_image_version: "{{ _image_manifest.images.jellyfin.version }}"
 jellyfin_ct_ip_offset: 15
 jellyfin_media_path: /mnt/media
 
 # ── Kodi LXC ───────────────────────────────────────────────────
-# Custom image built by build-images.sh: Debian 12 + kodi-standalone + kodi-gbm
-# + Mesa VA-API drivers + libcec baked in. GBM/DRM direct rendering.
-# Run ./build-images.sh before first deploy.
-kodi_lxc_template: kodi-debian-12-amd64.tar.zst
-kodi_lxc_template_path: images/kodi-debian-12-amd64.tar.zst
+kodi_lxc_template: "{{ _image_manifest.images.kodi.filename }}"
+kodi_lxc_template_path: "images/{{ _image_manifest.images.kodi.filename }}"
+kodi_image_version: "{{ _image_manifest.images.kodi.version }}"
 kodi_ct_ip_offset: 16
 
 # ── Moonlight LXC ────────────────────────────────────────────
-# Custom image built by build-images.sh: Debian 12 + moonlight-embedded
-# + VA-API drivers (Intel + AMD) baked in. DRM/KMS display output.
-# Run ./build-images.sh before first deploy.
-moonlight_lxc_template: moonlight-debian-12-amd64.tar.zst
-moonlight_lxc_template_path: images/moonlight-debian-12-amd64.tar.zst
+moonlight_lxc_template: "{{ _image_manifest.images.moonlight.filename }}"
+moonlight_lxc_template_path: "images/{{ _image_manifest.images.moonlight.filename }}"
+moonlight_image_version: "{{ _image_manifest.images.moonlight.version }}"
 moonlight_ct_ip_offset: 17
 
 # ── Kiosk LXC (custom dashboard on physical display) ─────────────
-# Custom image built by build-images.sh --only kiosk: Cage Wayland
-# compositor + Chromium kiosk + Mesa VA-API drivers (Intel + AMD).
-# Displays a local dashboard as the default idle screen.
-# Run ./build-images.sh --only kiosk before first deploy.
-kiosk_lxc_template: kiosk-debian-12-amd64.tar.zst
-kiosk_lxc_template_path: images/kiosk-debian-12-amd64.tar.zst
-kiosk_ct_ip_offset: 19
+kiosk_lxc_template: "{{ _image_manifest.images.kiosk.filename }}"
+kiosk_lxc_template_path: "images/{{ _image_manifest.images.kiosk.filename }}"
+kiosk_image_version: "{{ _image_manifest.images.kiosk.version }}"
+kiosk_ct_ip_offset: 20
 
 # ── Desktop VM (Debian 12 + KDE/GNOME baked image) ───────────────
-# Custom image built by build-images.sh --only desktop: KDE Plasma,
-# GNOME, SDDM, and shared applications pre-installed. GPU drivers
-# installed at configure time (host-dependent).
-# Base: images/debian-12-generic-amd64.qcow2 (still needed for builds).
-desktop_image_path: images/desktop-debian-12-amd64.qcow2
+desktop_image_path: "images/{{ _image_manifest.images.desktop.filename }}"
+desktop_image_version: "{{ _image_manifest.images.desktop.version }}"
 
 # ── OpenWrt Router (VM) ──────────────────────────────────────────
-# Custom image built by build-images.sh: mesh/security/DNS packages baked in.
-# Run ./build-images.sh before first deploy.
-openwrt_image_path: images/openwrt-router-24.10.0-x86-64-combined.img.gz
+openwrt_image_path: "images/{{ _image_manifest.images.router.filename }}"
+openwrt_image_version: "{{ _image_manifest.images.router.version }}"
 openwrt_vm_id: 100
 openwrt_vm_name: openwrt-router
 openwrt_vm_memory: 512
@@ -158,11 +143,9 @@ openwrt_vm_cores: 2
 openwrt_vm_disk_size: 512M
 
 # ── WireGuard LXC ─────────────────────────────────────────────────
-# Custom image built by build-images.sh: Debian 12 + wireguard-tools,
-# iptables, iptables-persistent, sysctl ip_forward pre-configured.
-# Run ./build-images.sh before first deploy.
-wireguard_lxc_template: wireguard-debian-12-amd64.tar.zst
-wireguard_lxc_template_path: images/wireguard-debian-12-amd64.tar.zst
+wireguard_lxc_template: "{{ _image_manifest.images.wireguard.filename }}"
+wireguard_lxc_template_path: "images/{{ _image_manifest.images.wireguard.filename }}"
+wireguard_image_version: "{{ _image_manifest.images.wireguard.version }}"
 
 # ── Network Tier (100-199) ───────────────────────────────────────
 wireguard_ct_id: 101
@@ -188,18 +171,14 @@ netdata_ct_id: 500
 rsyslog_ct_id: 501
 
 # ── Gaming LXC (Sunshine host) ───────────────────────────────────
-# Custom image built by build-images.sh: Fedora + Sunshine + dsda-doom +
-# Mesa VA-API/Vulkan + Xorg headless + PipeWire. GPU render device
-# sharing (NOT PCI passthrough) — safe on AMD APU single-GPU hosts.
-# Run ./build-images.sh --only gaming before first deploy.
-gaming_lxc_template: gaming-fedora-amd64.tar.zst
-gaming_lxc_template_path: images/gaming-fedora-amd64.tar.zst
+gaming_lxc_template: "{{ _image_manifest.images.gaming.filename }}"
+gaming_lxc_template_path: "images/{{ _image_manifest.images.gaming.filename }}"
+gaming_image_version: "{{ _image_manifest.images.gaming.version }}"
 gaming_ct_ip_offset: 18
 
 # ── Windows VM (general-purpose, not active for gaming) ──────────
-# Pre-built Windows 11 image with Sunshine, virtio drivers, QEMU GA,
-# and dsda-doom baked in. Retained as a general Windows build option.
-gaming_image_path: images/sunshine-win11-amd64.qcow2
+gaming_image_path: "images/{{ _image_manifest.images.sunshine.filename }}"
+sunshine_image_version: "{{ _image_manifest.images.sunshine.version }}"
 
 # ── Gaming (600-699) ─────────────────────────────────────────────
 gaming_vm_id: 600

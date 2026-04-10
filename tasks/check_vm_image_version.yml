@@ -1,0 +1,64 @@
+---
+# Shared image version check for VMs.
+# Compares the deployed version (from qm config description) against
+# the manifest version. If they differ, the VM is destroyed so it can
+# be recreated from the new image.
+#
+# Required variables (set via include_tasks vars:):
+#   image_version_vm_id       — VM ID
+#   image_version_expected    — version from the manifest (e.g., "1.0.0")
+#   image_version_service     — human-readable name for log messages
+
+- name: "Read VM description for version — {{ image_version_service }}"
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      qm config {{ image_version_vm_id }} | grep '^description:' | sed 's/^description: //'
+    executable: /bin/bash
+  register: _vm_description
+  changed_when: false
+  failed_when: false
+
+- name: "Extract deployed version — {{ image_version_service }}"
+  ansible.builtin.set_fact:
+    _vm_deployed_version: >-
+      {{ (_vm_description.stdout | default('') | regex_search('image_version=([0-9.]+)', '\1'))
+         | default([''], true) | first }}
+
+- name: "Set VM version match flag — {{ image_version_service }}"
+  ansible.builtin.set_fact:
+    _vm_version_match: "{{ _vm_deployed_version == image_version_expected }}"
+
+- name: "VM version status — {{ image_version_service }}"
+  ansible.builtin.debug:
+    msg: >-
+      {{ image_version_service }}: deployed={{ _vm_deployed_version | default('unknown') }},
+      manifest={{ image_version_expected }},
+      {{ 'up-to-date' if _vm_version_match | bool else 'OUTDATED — will rebuild' }}
+
+- name: "Stop outdated VM — {{ image_version_service }}"
+  ansible.builtin.command:
+    cmd: qm stop {{ image_version_vm_id }}
+  changed_when: true
+  failed_when: false
+  when: not _vm_version_match | bool
+
+- name: "Wait for VM to reach stopped state — {{ image_version_service }}"
+  ansible.builtin.command:
+    cmd: qm status {{ image_version_vm_id }}
+  register: _vm_stop_status
+  retries: 12
+  delay: 5
+  until: "'stopped' in _vm_stop_status.stdout"
+  changed_when: false
+  when: not _vm_version_match | bool
+
+- name: "Destroy outdated VM — {{ image_version_service }}"
+  ansible.builtin.command:
+    cmd: qm destroy {{ image_version_vm_id }} --purge
+  changed_when: true
+  when: not _vm_version_match | bool
+
+- name: "Set VM rebuild flag — {{ image_version_service }}"
+  ansible.builtin.set_fact:
+    _vm_version_rebuild: "{{ not _vm_version_match | bool }}"

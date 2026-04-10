@@ -10,6 +10,30 @@
   ansible.builtin.set_fact:
     vm_exists: "{{ vm_status.rc == 0 }}"
 
+- name: Reset VM version rebuild flag
+  ansible.builtin.set_fact:
+    _vm_version_rebuild: false
+
+# ── Image version check (auto-rebuild on version mismatch) ──────
+
+- name: Check image version on existing VM
+  ansible.builtin.include_tasks:
+    file: "{{ role_path }}/../../tasks/check_vm_image_version.yml"
+  vars:
+    image_version_vm_id: "{{ openwrt_vm_id }}"
+    image_version_expected: "{{ openwrt_image_version }}"
+    image_version_service: "OpenWrt Router"
+  when:
+    - vm_exists | bool
+    - openwrt_image_version | default('') | length > 0
+
+- name: Clear existence flag after version-triggered rebuild
+  ansible.builtin.set_fact:
+    vm_exists: "false"
+  when:
+    - _vm_version_rebuild is defined
+    - _vm_version_rebuild | bool
+
 # ── Verify custom image exists ─────────────────────────────────────
 
 - name: Resolve OpenWrt image source path
@@ -170,6 +194,14 @@
       --onboot 1
       --startup order={{ openwrt_vm_startup_order }}
   changed_when: true
+
+- name: Stamp image version on VM description
+  ansible.builtin.command:
+    cmd: >-
+      qm set {{ openwrt_vm_id }}
+      --description "image_version={{ openwrt_image_version }}"
+  changed_when: true
+  when: openwrt_image_version | default('') | length > 0
 
 # ── WiFi PCIe passthrough ──────────────────────────────────────
 

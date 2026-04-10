@@ -10,6 +10,30 @@
   ansible.builtin.set_fact:
     _desktop_vm_exists: "{{ _desktop_vm_status.rc == 0 }}"
 
+- name: Reset VM version rebuild flag
+  ansible.builtin.set_fact:
+    _vm_version_rebuild: false
+
+# ── Image version check (auto-rebuild on version mismatch) ──────
+
+- name: Check image version on existing Desktop VM
+  ansible.builtin.include_tasks:
+    file: "{{ role_path }}/../../tasks/check_vm_image_version.yml"
+  vars:
+    image_version_vm_id: "{{ desktop_vm_id }}"
+    image_version_expected: "{{ desktop_image_version }}"
+    image_version_service: "Desktop VM"
+  when:
+    - _desktop_vm_exists | bool
+    - desktop_image_version | default('') | length > 0
+
+- name: Clear existence flag after version-triggered rebuild
+  ansible.builtin.set_fact:
+    _desktop_vm_exists: "false"
+  when:
+    - _vm_version_rebuild is defined
+    - _vm_version_rebuild | bool
+
 # ── Verify custom image exists ─────────────────────────────────────
 
 - name: Resolve Desktop image source path
@@ -200,6 +224,14 @@
     path: "{{ _desktop_tmp_upload | default('') }}"
     state: absent
   when: _desktop_tmp_upload is defined and _desktop_tmp_upload | length > 0
+
+- name: Stamp image version on VM description
+  ansible.builtin.command:
+    cmd: >-
+      qm set {{ desktop_vm_id }}
+      --description "image_version={{ desktop_image_version }}"
+  changed_when: true
+  when: desktop_image_version | default('') | length > 0
 
 # ── Hookscript attachment ──────────────────────────────────────────
 

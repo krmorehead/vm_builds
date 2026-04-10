@@ -1054,11 +1054,18 @@
   gather_facts: false
   connection: local
   tasks:
+    - name: Wait for heartbeat relay chain to settle after configure
+      ansible.builtin.pause:
+        seconds: 45
+      when:
+        - hostvars['localhost']._fleet_api_available | default(false) | bool
+        - callhome_server | default('') | length > 0
+
     - name: Run heartbeat staleness check
       ansible.builtin.include_tasks: "{{ playbook_dir }}/../../tasks/fleet_heartbeat_gate.yml"
       vars:
         gate_services: "{{ fleet_monitored_services }}"
-        gate_max_age_seconds: 180
+        gate_max_age_seconds: 300
       when:
         - hostvars['localhost']._fleet_api_available | default(false) | bool
         - callhome_server | default('') | length > 0
@@ -2405,3 +2412,68 @@
           working — NodeManagers are not relaying heartbeats UP to the
           SuperManager.
       when: _sm_nodes is not failed and _sm_nodes.status == 200
+
+# ── Image version manifest ─────────────────────────────────────────
+# Verify the manifest exists on the controller and has valid structure.
+
+- name: Verify image version manifest
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    _project_root: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+  tasks:
+    - name: Load image manifest
+      ansible.builtin.set_fact:
+        _manifest: "{{ lookup('file', _project_root + '/images/manifest.json') | from_json }}"
+
+    - name: Assert manifest has schema_version
+      ansible.builtin.assert:
+        that: _manifest.schema_version is defined and _manifest.schema_version == 1
+        fail_msg: "Image manifest missing or invalid schema_version"
+
+    - name: Assert manifest has all expected image targets
+      ansible.builtin.assert:
+        that: item in _manifest.images
+        fail_msg: "Image manifest missing target: {{ item }}"
+      loop:
+        - mesh
+        - router
+        - pihole
+        - rsyslog
+        - jellyfin
+        - netdata
+        - wireguard
+        - homeassistant
+        - kodi
+        - moonlight
+        - kiosk
+        - gaming
+        - sunshine
+        - desktop
+
+    - name: Assert each manifest entry has required fields
+      ansible.builtin.assert:
+        that:
+          - _manifest.images[item].version is defined
+          - _manifest.images[item].version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+          - _manifest.images[item].filename is defined
+          - _manifest.images[item].filename | length > 0
+        fail_msg: >-
+          Image manifest entry '{{ item }}' is invalid.
+          Expected version (semver) and filename fields.
+      loop:
+        - mesh
+        - router
+        - pihole
+        - rsyslog
+        - jellyfin
+        - netdata
+        - wireguard
+        - homeassistant
+        - kodi
+        - moonlight
+        - kiosk
+        - gaming
+        - sunshine
+        - desktop

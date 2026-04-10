@@ -36,6 +36,7 @@
     lxc_ct_nameserver: "{{ _lxc_net_nameserver }}"
     lxc_ct_features: "{{ rsyslog_ct_features }}"
     lxc_ct_bridge: "{{ _lxc_net_bridge }}"
+    lxc_ct_image_version: "{{ rsyslog_image_version }}"
 
 - name: Export rsyslog static IP for downstream roles
   ansible.builtin.set_fact:

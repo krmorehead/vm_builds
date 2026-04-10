@@ -53,6 +53,7 @@
     lxc_ct_unprivileged: "{{ jellyfin_ct_unprivileged }}"
     lxc_ct_features: "{{ jellyfin_ct_features }}"
     lxc_ct_mount_entries: "{{ _jellyfin_mount_entries }}"
+    lxc_ct_image_version: "{{ jellyfin_image_version }}"
 
 # ── Device passthrough via lxc.mount.entry + cgroup allowlist ────
 

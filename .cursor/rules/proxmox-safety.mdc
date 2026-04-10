@@ -221,8 +221,10 @@ alwaysApply: true
 - The `proxmox_bridges` role creates `vmbr_ct` on WAN hosts with NAT rules. `tasks/lxc_wan_or_lan_network.yml` assigns private IPs.
 - Services needing inbound connections on WAN hosts (e.g., WireGuard UDP 51820) use host-level DNAT rules in their provisioning role.
 - OpenWrt mesh/bridge LXC containers are excluded from NAT — they need L2 access for WiFi bridging and stay on the WAN bridge.
-- LAN allocation: .1 OpenWrt, .2 Proxmox mgmt, .3-.6 WireGuard (offset 3, indexed, 4 nodes), .10 Pi-hole, .12 rsyslog, .14 Home Assistant, .15 Jellyfin, .16 Kodi, .17 Moonlight, .18 Gaming, .19 Kiosk, .21-.24 Netdata (offset 21, indexed, 4 nodes).
+- LAN allocation: .1 OpenWrt, .2 Proxmox mgmt, .3-.6 WireGuard (offset 3, indexed, 4 nodes), .10 Pi-hole, .14 Home Assistant, .15 Jellyfin, .16 Kodi, .17 Moonlight, .18 Gaming, .20-.25 Kiosk (offset 20, indexed, 6 nodes), .30-.33 rsyslog (offset 30, indexed, 4 nodes), .40-.43 Netdata (offset 40, indexed, 4 nodes).
+- CRITICAL: Ansible sorts group members ALPHABETICALLY, not by inventory file order. The `offset + groups[flavor_group].index(hostname)` formula uses this sorted order. All indexed offset ranges MUST be spaced to avoid overlap with each other and with fixed offsets.
 - Previous bug: Netdata at offset 13 with per-host indexing produced `.14` on `home`, colliding with Home Assistant's fixed offset 14. Fixed by moving Netdata to offset 21.
+- Previous bug (2026-04-10): With alphabetical sorting, kiosk_nodes index of home=3 and monitoring_nodes index of home=1 produced kiosk(19+3=.22) and netdata(21+1=.22) — same IP on same host. rsyslog(12+2=.14) on mesh1 collided with homeassistant(.14) on home across the shared LAN. Fixed by spacing indexed services into non-overlapping blocks: kiosk offset 20, rsyslog offset 30, netdata offset 40.
 - Previous bug (2026-04-09): WAN containers shared the 192.168.86.x broadcast domain with household devices. The offset+base+index formula produced cross-service and device collisions (.172, .173, .174, .220). Replaced with per-host NAT bridge (10.99.x.x) that eliminates all collision risk.
 
 ## Dynamic inventory and failed hosts

@@ -69,6 +69,7 @@ class ApiRoutes:
     GUEST_ACTION = "/api/guests/{vmid}/{action}"
     WIFI_MODE = "/api/wifi/mode/{node}/{mode}"
     WIFI_STATUS = "/api/wifi/status/{node}"
+    WIFI_STATUS_ALL = "/api/wifi/status"
     BATMAN_ENABLE = "/api/batman/enable"
     BATMAN_DISABLE = "/api/batman/disable"
     BATMAN_STATUS = "/api/batman/status"
@@ -2167,9 +2168,9 @@ def check_container_ready(state_dir: Path, container_id: str) -> dict:
                     "ready": recent and ct.get("ready", False),
                     "status": "running" if ct.get("ready") else "degraded",
                     "last_seen": ct.get("last_seen", n.last_seen),
-                    "systemd_services": {},
-                    "listening_ports": [],
-                    "extensions": {},
+                    "systemd_services": ct.get("systemd_services", {}),
+                    "listening_ports": ct.get("listening_ports", []),
+                    "extensions": ct.get("extensions", {}),
                     "host": n.hostname,
                 }
     return {

@@ -34,6 +34,7 @@
     lxc_ct_gateway: "{{ _lan_gateway }}"
     lxc_ct_nameserver: "{{ _lan_gateway }}"
     lxc_ct_bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
+    lxc_ct_image_version: "{{ pihole_image_version }}"
 
 - name: Export Pi-hole static IP for downstream roles
   ansible.builtin.set_fact:

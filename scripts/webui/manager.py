@@ -176,15 +176,16 @@ class BaseManager:
         containers_summary: dict[str, dict] = {}
         for ct_name, ct_data in container_checkins.items():
             payload = ct_data.get("payload", {})
+            ch = payload.get("container_health", {}) or {}
             containers_summary[ct_name] = {
-                "ready": bool(
-                    payload.get("container_health", {}).get("ready", False)
-                    if payload.get("container_health") else False
-                ),
+                "ready": bool(ch.get("ready", False)),
                 "disk_pct": payload.get("disk_usage_pct", 0),
                 "mem_pct": payload.get("memory_usage_pct", 0),
                 "uptime": payload.get("uptime_seconds", 0),
                 "last_seen": ct_data.get("received_at", ""),
+                "systemd_services": ch.get("systemd_services", {}),
+                "listening_ports": ch.get("listening_ports", []),
+                "extensions": ch.get("extensions", {}),
             }
         return {
             "node_id": host_name,
@@ -261,19 +262,28 @@ class BaseManager:
         if self._management_server:
             asyncio.create_task(self._relay_heartbeat())
 
+    def _store_container_checkin(self, body: dict) -> str:
+        """Store a container heartbeat in _container_checkins.
+
+        Returns the hostname/node_id of the container.
+        """
+        hostname = body.get("hostname", body.get("node_id", ""))
+        if hostname:
+            self._container_checkins[hostname] = {
+                "payload": body,
+                "received_at": datetime.now().isoformat(),
+            }
+        return hostname
+
     async def handle_container_checkin(self, request: Any) -> Any:
         from starlette.responses import JSONResponse as _JSONResp
         try:
             body = await request.json()
         except (ValueError, TypeError, _json.JSONDecodeError):
             return _JSONResp({"error": "Invalid JSON"}, status_code=400)
-        hostname = body.get("hostname", body.get("node_id", ""))
+        hostname = self._store_container_checkin(body)
         if not hostname:
             return _JSONResp({"error": "Missing hostname/node_id"}, status_code=400)
-        self._container_checkins[hostname] = {
-            "payload": body,
-            "received_at": datetime.now().isoformat(),
-        }
         return _JSONResp({"status": "ok"})
 
 
@@ -611,13 +621,20 @@ class ClusterManager(NodeManager):
         host_metrics: dict,
         container_checkins: dict[str, dict],
     ) -> dict:
-        """Build relay payload that includes child Manager fleet data."""
+        """Build relay payload that includes child Manager fleet data.
+
+        The ClusterManager aggregates child NodeManager heartbeats and
+        relays them UP to the SuperManager.  Each child's container data
+        (systemd_services, listening_ports, extensions) is forwarded so
+        the SuperManager has full per-container visibility.
+        """
         payload = super().build_relay_payload(
             host_name, host_ip, host_metrics, container_checkins,
         )
         fleet_summary: dict[str, dict] = {}
         for nid, entry in self._fleet_nodes.items():
             p = entry.get("payload", {})
+            ch = p.get("container_health", {}) or {}
             fleet_summary[nid] = {
                 "hostname": p.get("hostname", nid),
                 "local_ips": p.get("local_ips", []),
@@ -625,6 +642,8 @@ class ClusterManager(NodeManager):
                 "memory_usage_pct": p.get("memory_usage_pct", 0),
                 "uptime_seconds": p.get("uptime_seconds", 0),
                 "last_seen": entry.get("received_at", ""),
+                "services": p.get("services", []),
+                "container_health": ch,
             }
         payload["cluster_nodes"] = fleet_summary
         return payload
@@ -791,7 +810,15 @@ class ClusterManager(NodeManager):
 
         if include_fleet_storage:
             async def _api_cluster_checkin(request: StarletteRequest) -> JSONResponse:
-                """Accept heartbeats from child Managers."""
+                """Accept heartbeats from child Managers or local containers.
+
+                Distinguishes child NodeManager relays from direct container
+                heartbeats: a relay includes ``services`` (from ``pct list`` /
+                ``qm list`` on the host) or ``cluster_nodes``.  Plain container
+                heartbeats lack these and should be routed to the container
+                checkin handler (``_container_checkins``) so they appear in
+                ``extensions.containers`` during the upstream relay.
+                """
                 try:
                     body = await request.json()
                 except (ValueError, TypeError, _json.JSONDecodeError):
@@ -799,7 +826,15 @@ class ClusterManager(NodeManager):
                 node_id = body.get("node_id", body.get("hostname", ""))
                 if not node_id:
                     return JSONResponse({"error": "Missing node_id/hostname"}, status_code=400)
-                cluster.register_child_checkin(body)
+                is_manager_relay = bool(
+                    body.get("services")
+                    or body.get("cluster_nodes")
+                    or node_id in (cluster._child_managers or {})
+                )
+                if is_manager_relay:
+                    cluster.register_child_checkin(body)
+                else:
+                    cluster._store_container_checkin(body)
                 return JSONResponse({"status": "ok", "node_id": node_id})
 
             async def _api_cluster_nodes(request: StarletteRequest) -> JSONResponse:
@@ -957,6 +992,37 @@ class ClusterManager(NodeManager):
                     status[k.strip().lower()] = v.strip()
             return JSONResponse({"node_id": node_id, **status})
 
+        async def _api_wifi_status_all(request: StarletteRequest) -> JSONResponse:
+            """Aggregate WiFi status across all nodes with mesh/bridge containers."""
+            from scripts.webui.data import get_bridge_nodes, get_mesh_nodes
+            targets: dict[str, int] = {}
+            for bn in get_bridge_nodes():
+                targets[bn["node_id"]] = _BRIDGE_CT_ID
+            ap_node, sta_nodes = get_mesh_nodes()
+            for n in [ap_node, *sta_nodes]:
+                if n not in targets:
+                    targets[n] = _MESH_CT_ID
+            results: dict[str, dict] = {}
+            for node_id, ct_id in targets.items():
+                ip = cluster.resolve_node_ip(node_id)
+                if not ip:
+                    results[node_id] = {"error": f"Unknown node: {node_id}"}
+                    continue
+                cmd = f"pct exec {ct_id} -- /usr/sbin/wifi_setup.sh status"
+                ok, out = await asyncio.to_thread(
+                    heartbeat._ssh_exec, ip, cmd, timeout=10,
+                )
+                if not ok:
+                    results[node_id] = {"error": out[:200]}
+                    continue
+                status: dict[str, str] = {}
+                for line in out.strip().splitlines():
+                    if "=" in line:
+                        k, _, v = line.partition("=")
+                        status[k.strip().lower()] = v.strip()
+                results[node_id] = status
+            return JSONResponse(results)
+
         # ── Cluster event endpoint ───────────────────────────────
 
         async def _api_cluster_events(request: StarletteRequest) -> JSONResponse:
@@ -995,6 +1061,9 @@ class ClusterManager(NodeManager):
         ))
         starlette_app.routes.insert(0, Route(
             "/api/wifi/mode/{node}/{mode}", _api_wifi_mode, methods=["POST"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/wifi/status", _api_wifi_status_all, methods=["GET"],
         ))
         starlette_app.routes.insert(0, Route(
             "/api/wifi/status/{node}", _api_wifi_status, methods=["GET"],

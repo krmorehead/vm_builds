@@ -42,3 +42,7 @@ lxc_ct_ostype: ""
 
 # Storage pool
 lxc_ct_storage: "{{ proxmox_storage | default('local-lvm') }}"
+
+# Image version stamp written to /etc/image_version inside the container.
+# Set by the consuming role from the manifest (e.g., pihole_image_version).
+lxc_ct_image_version: ""

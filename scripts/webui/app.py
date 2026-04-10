@@ -159,6 +159,31 @@ def _get_callhome_private_key() -> str:
     return ""
 
 
+def _merge_cluster_containers(state_dir: Path, checkin_node_id: str, cluster_nodes: dict) -> None:
+    """Merge child NodeManager containers into the parent's extensions.
+
+    Instead of promoting each child to a top-level node (which would violate
+    the 4-tier model), we fold all children's ``containers`` data into the
+    parent ClusterManager's ``container_health.extensions.containers``.
+
+    This way, ``check_container_ready`` finds any container in the cluster
+    by searching the parent's nested ``extensions.containers`` — no 4-tier
+    violation, full per-container visibility.
+    """
+    nodes = data.load_node_registry(state_dir)
+    parent = next((n for n in nodes if n.node_id == checkin_node_id), None)
+    if not parent or not parent.container_health:
+        return
+    existing_containers = parent.container_health.extensions.get("containers", {})
+    for _nid, child in cluster_nodes.items():
+        ch = child.get("container_health", {}) or {}
+        child_containers = ch.get("extensions", {}).get("containers", {})
+        for ct_name, ct_data in child_containers.items():
+            existing_containers[ct_name] = ct_data
+    parent.container_health.extensions["containers"] = existing_containers
+    data._save_node_registry(state_dir, nodes)
+
+
 def register_api() -> None:
     """Register REST endpoints (call-home + heartbeat via manager).
 
@@ -222,6 +247,10 @@ def register_api() -> None:
         mgr = manager.get_instance()
         if isinstance(mgr, manager.ClusterManager):
             mgr.register_child_checkin(body)
+
+        cluster_nodes = body.get("cluster_nodes", {})
+        if cluster_nodes and isinstance(cluster_nodes, dict):
+            _merge_cluster_containers(state_dir, node.node_id, cluster_nodes)
 
         return JSONResponse({
             "status": "ok",

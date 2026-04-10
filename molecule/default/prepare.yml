@@ -4,22 +4,25 @@
   connection: local
   gather_facts: false
   vars:
-    images_dir: "{{ playbook_dir }}/../../images"
-    required_images:
-      - openwrt-mesh-lxc-24.10.0-x86-64-rootfs.tar.gz
-      - openwrt-router-24.10.0-x86-64-combined.img.gz
-      - pihole-debian-12-amd64.tar.zst
-      - rsyslog-debian-12-amd64.tar.zst
-      - jellyfin-debian-12-amd64.tar.zst
-      - netdata-debian-12-amd64.tar.zst
-      - wireguard-debian-12-amd64.tar.zst
-      - homeassistant-debian-12-amd64.tar.zst
-      - kodi-debian-12-amd64.tar.zst
-      - moonlight-debian-12-amd64.tar.zst
-      - kiosk-debian-12-amd64.tar.zst
-      - gaming-fedora-amd64.tar.zst
-      - desktop-debian-12-amd64.qcow2
+    _project_root: "{{ playbook_dir }}/../.."
+    images_dir: "{{ _project_root }}/images"
+    _manifest: "{{ lookup('file', _project_root + '/images/manifest.json') | from_json }}"
+    _optional_images:
+      - sunshine
+    required_images: >-
+      {{ _manifest.images | dict2items
+         | rejectattr('key', 'in', _optional_images)
+         | map(attribute='value.filename') | list }}
   tasks:
+    - name: Verify manifest.json exists and is valid
+      ansible.builtin.assert:
+        that:
+          - _manifest.schema_version is defined
+          - _manifest.images | length > 0
+        fail_msg: >-
+          images/manifest.json is missing or invalid.
+          This file tracks image versions. It should be committed to git.
+
     - name: Check which images exist
       ansible.builtin.stat:
         path: "{{ images_dir }}/{{ item }}"
@@ -56,6 +59,11 @@
   vars:
     _project_root: "{{ playbook_dir }}/../.."
   tasks:
+    - name: Clear stale nodes.json from previous runs
+      ansible.builtin.file:
+        path: "{{ _project_root }}/.state/nodes.json"
+        state: absent
+
     - name: Detect controller IP and start API server
       ansible.builtin.command:
         cmd: "{{ _project_root }}/.venv/bin/python3 {{ _project_root }}/scripts/start_test_api.py"

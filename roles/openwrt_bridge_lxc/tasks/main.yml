@@ -240,6 +240,7 @@
     lxc_ct_ip: "{{ _bridge_ct_ip }}/{{ _bridge_ct_cidr }}"
     lxc_ct_gateway: "{{ _bridge_ct_gateway }}"
     lxc_ct_nameserver: "8.8.8.8"
+    lxc_ct_image_version: "{{ openwrt_lxc_image_version }}"
 
 # ── POST-PROVISION SAFETY GATE ──────────────────────────────────
 # Verify the ACTUAL container config matches what we intended.

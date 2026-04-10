@@ -180,6 +180,7 @@
     lxc_ct_ip: "{{ _mesh_ct_ip }}/{{ _mesh_cidr }}"
     lxc_ct_gateway: "{{ _mesh_gateway }}"
     lxc_ct_nameserver: "{{ _mesh_nameserver }}"
+    lxc_ct_image_version: "{{ openwrt_lxc_image_version }}"
 
 # ── Configure callhome agent (OpenWrt / cron-based) ─────────
 # callhome.sh and crontab are baked into the image.

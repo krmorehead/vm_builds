@@ -251,7 +251,18 @@ Registered by ClusterManager.register_api() (in addition to NodeManager):
 - `POST /api/cluster/events` — receive events from SuperManager/external
 
 When `include_fleet_storage=True` (kiosk_server.py ClusterManager):
-- `POST /api/checkin` — accept heartbeats from child Managers
+- `POST /api/checkin` — accept heartbeats from child Managers AND
+  local containers. The handler distinguishes between them:
+  - **Manager relay**: has `services` (from `pct list`), `cluster_nodes`,
+    or `node_id` in `_child_managers`. Stored in `_fleet_nodes` →
+    relayed in `cluster_nodes`.
+  - **Container heartbeat**: lacks these fields. Stored in
+    `_container_checkins` → relayed in
+    `container_health.extensions.containers`.
+  - Previous bug (2026-04-10): ALL heartbeats went to `_fleet_nodes`,
+    promoting containers to top-level `cluster_nodes` entries. The
+    SuperManager then registered them as independent fleet members
+    (4-tier violation). Fixed by checking payload shape.
 - `GET /api/nodes` — all nodes in this cluster
 - `GET /api/fleet/ready` — cluster-scoped readiness gate
 
