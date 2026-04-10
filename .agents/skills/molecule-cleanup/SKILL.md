@@ -71,13 +71,13 @@ Every host MUST have `wol_capable` in host_vars (true/false). Cleanup code MUST 
 
 NEVER include non-WoL hosts in `scripts/wol.sh`. Unit tests enforce this via `tests/test_wol.py`.
 
-## File parity
+## Unified cleanup (single source of truth)
 
-When a role writes a file, add to ALL cleanup paths:
-- `molecule/default/cleanup.yml` (test cleanup — primary)
-- `molecule/default/cleanup_lan_host.yml` (test cleanup — LAN)
-- `tasks/cleanup_lan_host.yml` (production cleanup — LAN)
-- `playbooks/cleanup.yml` (production cleanup — primary)
+`playbooks/cleanup.yml` is the ONE cleanup playbook for all contexts (molecule, CLI, SuperManager). `molecule/default/cleanup.yml` is a one-line `import_playbook`. There is only ONE cleanup to maintain.
+
+When a role writes a file, add to these cleanup paths:
+- `playbooks/cleanup.yml` (unified cleanup — primary hosts)
+- `tasks/cleanup_lan_host.yml` (shared LAN host cleanup — included by unified cleanup)
 
 Current managed files:
 - Host config: `ansible-bridges.conf`, `ansible-proxmox-lan.conf`, `ansible-temp-lan.conf`
@@ -116,15 +116,19 @@ Stale containers from a previous converge are NEVER recreated by `proxmox_lxc` �
 
 ```yaml
 # Play 1: LAN hosts (while OpenWrt + bridges still exist)
-- name: Clean up LAN satellite hosts
+- name: Selective LAN satellite cleanup
   hosts: router_nodes
   tasks:
-    - ansible.builtin.include_tasks: cleanup_lan_host.yml
+    - ansible.builtin.include_tasks: ../tasks/cleanup_lan_host.yml
       loop: "{{ groups['lan_hosts'] | default([]) }}"
 
 # Play 2: Primary hosts (destroys OpenWrt, bridges)
-- name: Clean reset primary Proxmox hosts
+- name: Selective service cleanup on primary hosts
   hosts: proxmox:!lan_hosts
+
+# Play 3: Test control plane (conditioned on MOLECULE_PROJECT_DIRECTORY)
+- name: Test control plane teardown
+  hosts: localhost
 ```
 
 Previous bug: LAN host cleanup ran AFTER primary cleanup. OpenWrt (gateway to mesh1) was already destroyed. SSH to mesh1 at 10.10.10.210 failed (no route). The stale rsyslog container on mesh1 survived with an outdated logrotate config. Reconverge reused the stale container. The logrotate verify assertion failed on every test cycle until the cleanup ordering was fixed.

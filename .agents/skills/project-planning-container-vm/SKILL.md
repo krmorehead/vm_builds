@@ -36,7 +36,7 @@ description: Container and VM planning constraints and capability requirements. 
 
 10. If the service uses static IPs computed from an offset, verify the offset is defined in `group_vars/all.yml` and doesn't collide with existing allocations.
 
-11. Current allocations: WireGuard 3–6, Pi-hole 10, rsyslog 12, Netdata 13, HA 14, Jellyfin 15, MeshWiFi 20. WAN offsets add +200.
+11. Current allocations: WireGuard 3, Pi-hole 10, rsyslog 12, HA 14, Jellyfin 15, Kodi 16, Moonlight 17, Gaming 18, Kiosk 19, Netdata 21. WAN hosts use per-host NAT subnets (10.99.x.x) — offsets just need to be unique per host.
 
 ## WiFi PHY Requirements for Containers
 

@@ -217,10 +217,11 @@ user.find(Labels.START_DEPLOY).click()
   with LAN IPs (10.10.10.x) instead of being grouped under their physical
   host. Fixed by removing the `HostRegistry.register()` call from
   `register_checkin()`.
-- 3-tier architecture: Container -> Manager -> SuperManager. Containers
-  heartbeat to their local Manager. Managers aggregate and relay to the
-  SuperManager. NEVER let containers POST directly to the SuperManager's
-  `/api/checkin` in the final architecture.
+- 4-tier architecture: Container → NodeManager → ClusterManager → SuperManager.
+  Containers heartbeat to their local NodeManager. NodeManagers aggregate and
+  relay to their ClusterManager. ClusterManagers relay to the SuperManager.
+  NEVER let containers POST directly to the SuperManager's `/api/checkin`
+  in the final architecture.
 - NEVER hardcode ports. Use `WEBUI_PORT` env var (default 52500). Ports in the
   ephemeral range (32768-60999) can collide with outbound connections. Choose a
   port in the firewall's allowed range and set it in `.env`/`test.env`.

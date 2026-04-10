@@ -38,3 +38,33 @@
     lxc_ct_template: "{{ wireguard_ct_template }}"
     lxc_ct_template_path: "{{ wireguard_ct_template_path }}"
     lxc_ct_bridge: "{{ _lxc_net_bridge }}"
+
+# ── Port forwarding for WireGuard on NAT bridge (WAN hosts only) ──
+# WireGuard needs inbound UDP 51820 from the internet. With NAT,
+# the container is on a private subnet — DNAT forwards traffic.
+
+- name: Add DNAT rule for WireGuard VPN (WAN hosts)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      WAN_IF="{{ proxmox_wan_bridge }}"
+      CT_IP="{{ _lxc_net_ip }}"
+      if ! iptables -t nat -C PREROUTING -i "$WAN_IF" -p udp --dport 51820 -j DNAT --to-destination "$CT_IP:51820" 2>/dev/null; then
+        iptables -t nat -A PREROUTING -i "$WAN_IF" -p udp --dport 51820 -j DNAT --to-destination "$CT_IP:51820"
+      fi
+    executable: /bin/bash
+  when: not (_lxc_net_on_lan | bool)
+  changed_when: true
+
+- name: Add FORWARD rule for WireGuard DNAT traffic (WAN hosts)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      WAN_IF="{{ proxmox_wan_bridge }}"
+      CT_BR="{{ proxmox_container_bridge }}"
+      if ! iptables -C FORWARD -i "$WAN_IF" -o "$CT_BR" -p udp --dport 51820 -j ACCEPT 2>/dev/null; then
+        iptables -A FORWARD -i "$WAN_IF" -o "$CT_BR" -p udp --dport 51820 -j ACCEPT
+      fi
+    executable: /bin/bash
+  when: not (_lxc_net_on_lan | bool)
+  changed_when: true

@@ -46,8 +46,9 @@ This rule activates when opening or editing any `project_plan.md` in
    plays. State whether the new tag runs during normal converge or is opt-in.
 10. **Shared tags**: if a tag is shared with another service (e.g.,
     `[monitoring]`), document this is intentional and the implication.
-11. **Cleanup parity**: files deployed by roles must appear in BOTH cleanup
-    playbooks. Rollback tags must appear in `playbooks/cleanup.yml`.
+11. **Cleanup coverage**: files deployed by roles must appear in
+    `playbooks/cleanup.yml` (the unified cleanup). Rollback tags must
+    appear in `playbooks/cleanup.yml`. There is only ONE cleanup to check.
 12. **Architecture doc consistency**: verify plays, tags, and resources
     match `overview.md`, `roles.md`, `build-profiles.md`, and `roadmap.md`.
 
@@ -56,10 +57,10 @@ This rule activates when opening or editing any `project_plan.md` in
     service supports. If the flavor group spans LAN and WAN hosts,
     specify the branching strategy (bridge, subnet, gateway, DNS).
 14. **Container IP offset**: verify the offset is defined in
-    `group_vars/all.yml` and doesn't collide with existing allocations
-    (WireGuard 3–6, Pi-hole 10, rsyslog 12, Netdata 13, HA 14,
-    Jellyfin 15, MeshWiFi 20). Check WAN offset (+200) against
-    physical host IPs.
+    `group_vars/all.yml` and doesn't collide with existing allocations.
+    WAN hosts use NAT bridge (10.99.x.x) — offsets just need to be
+    unique per host. LAN hosts share 10.10.10.x — verify no LAN
+    offset+index collisions across services.
 15. **Milestone consolidation**: provisioning + site.yml integration
     should be one milestone. Blocked stubs should be deferred to
     downstream projects, not kept as dead code.

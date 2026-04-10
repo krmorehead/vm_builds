@@ -6,12 +6,32 @@ This is an Ansible project that automates VM and LXC container provisioning on P
 
 **ANY unreachable host is a 5-alarm emergency. FULL STOP.**
 
-- When `pytest tests/` reports a host unreachable, or `molecule` shows `unreachable=1`: STOP ALL WORK.
+- When `pytest tests/` reports a host unreachable, `molecule` shows `unreachable=1`, OR SSH returns "Permission denied": STOP ALL WORK.
 - Investigate cause IMMEDIATELY. Check terminal history for `modprobe -r`, GPU operations, `shutdown`.
 - NEVER dismiss as "pre-existing." NEVER continue development. NEVER say "not caused by our changes."
+- NEVER "skip this host and build the next one." ALL hosts must be healthy before ANY work proceeds.
 - For `wol_capable: false` hosts (`ai`): physical power-on required. No remote recovery. Report this to the user immediately.
 - Do NOT validate features against a substitute host when the actual target is down. If `ai` runs Sunshine and `ai` is unreachable, Moonlight verification is IMPOSSIBLE.
-- This protocol exists because an agent dismissed `ai` unreachable THREE TIMES in one session, wasting 4 hours and leaving a host 3000 miles away permanently severed from the network.
+
+### Mandatory fleet health checks
+
+Run SSH connectivity checks to ALL hosts at these mandatory checkpoints:
+1. **Session start** — before beginning any work
+2. **After every build/deploy/converge** — check ALL hosts, not just the target
+3. **Before proceeding to next host** — in multi-host operations
+4. **Every 30 minutes** — during long sessions
+
+Any of these are SHOW STOPPERS (not just EHOSTUNREACH):
+- SSH "Permission denied" (authentication failure = lost access)
+- SSH connection refused or timed out
+- Proxmox API (port 8006) connection refused
+- SuperManager showing 0% disk AND 0% memory (Manager can't SSH to host)
+- Ansible `unreachable=1` in any play recap
+
+### Previous catastrophes
+
+1. (2026-03-23): Agent dismissed ai unreachable THREE TIMES over 4 hours. Wasted entire session. ai required physical power-on 3000 miles away.
+2. (2026-04-08): ai SSH auth failed mid-session. Agent continued building 4 other hosts individually instead of stopping. User had to explicitly call out the show stopper. The "skip and continue" instinct is ALWAYS wrong.
 
 ## Critical Work Management Rules
 
@@ -127,8 +147,8 @@ This tree organizes all skills by domain area to help agents quickly find releva
 - **lxc-container-patterns** — LXC container provisioning and configuration patterns
 - **windows-vm-patterns** — Windows 11 VM provisioning, iGPU PCI passthrough, QEMU Guest Agent, PowerShell configuration
 
-### **Fleet Management & Runtime Operations**
-- **manager-api-pattern** — Manager API vs SSH decision framework, container-side script pattern (wifi_setup.sh, batman_trigger.sh), subscription model, fleet readiness gate
+### **Fleet Management & Runtime Operations (4-Tier Architecture)**
+- **manager-api-pattern** — 4-tier Manager hierarchy (SuperManager → ClusterManager → NodeManager → container scripts), event-driven batman/bridge propagation, fleet readiness gate, container-side script pattern (wifi_setup.sh, batman_trigger.sh), subscription model, cluster definition and inter-manager communication
 
 ### **Learning & Development**
 - **learn-from-mistakes** — Update skills and rules when encountering new issues to prevent recurrence
@@ -207,6 +227,7 @@ pytest tests/ -v
 
 **MANDATORY: Anti-Fake-Test Doctrine**
 - NEVER mock `probe_host`, network connectivity, or hardware detection against hosts you control
+- NEVER mock SSH commands (`_ssh_exec`, subprocess SSH calls) that trigger real operations on real nodes you own
 - NEVER write tests that check YAML string content instead of running the actual code
 - NEVER write a test that would pass identically if all infrastructure were offline
   (unless it tests pure Python logic like string parsing or command construction)
@@ -215,10 +236,17 @@ pytest tests/ -v
   machines are down, the tests are lying.
 - When a test mocks something, ask: "Would removing this mock make the test catch real problems?"
   If yes, remove the mock and test the real thing.
+- Every `patch()` or `monkeypatch` call MUST have an inline comment with TWO parts:
+  (1) WHY this mock is necessary (what side effect it prevents), and
+  (2) HOW the test still genuinely validates the feature despite the mock.
+  If you cannot write both sentences, the mock is unjustified — remove it.
 - Previous catastrophe: `TestResolveProxmoxHost` mocked `probe_host` with fake IPs.
   All 5 tests passed while `ai` was crashed and all WAN hosts were unreachable.
   Nobody knew until manual inspection. Those tests were deleted and replaced with
   `TestInfrastructureHealth` that probes real hosts from test.env.
+- Previous catastrophe: Batman API tests mocked `heartbeat._ssh_exec` — the exact
+  SSH call that triggers batman on real nodes. Tests passed while batman mode was
+  completely broken. The mock hid the real failure for an entire test cycle.
 
 **MANDATORY: Environment Validation**
 - ALWAYS run `set -a && source test.env && set +a` before ANY molecule commands
@@ -285,7 +313,8 @@ pytest tests/ -v
 - NEVER assume PRIMARY_HOST is only reachability path
 
 ### Cleanup Completeness
-- When ANY role deploys files, ALWAYS add to cleanup in BOTH `molecule/default/cleanup.yml` AND `playbooks/cleanup.yml`
+- `playbooks/cleanup.yml` is the SINGLE unified cleanup for all contexts (molecule, CLI, SuperManager). `molecule/default/cleanup.yml` is a one-line import.
+- When ANY role deploys files, add to `playbooks/cleanup.yml` only — there is ONE cleanup to maintain
 - Cleanup removes ONLY files playbook deployed, NEVER operator-created credentials
 - Remove generated env files: `test.env.generated`, `.env.generated`
 - Use explicit VMID destruction, NEVER iterate `qm list`/`pct list`
@@ -355,14 +384,20 @@ For async patterns: @.agents/skills/async-job-patterns
 - UX principles (human-intuitive design): @.agents/skills/webui-ux-principles
 - Manual testing procedures: @.agents/skills/webui-manual-testing
 
-**Runtime Operations & Fleet Management (3-tier hierarchy):**
+**Runtime Operations & Fleet Management (4-tier hierarchy):**
 - Manager API pattern: @.agents/skills/manager-api-pattern
-- Tier 1 (Super Manager): UI pages → HTTP only → Manager API (NEVER SSH)
-- Tier 2 (Manager): REST endpoints → SSH → container-side scripts
-- Tier 3 (Container scripts): `wifi_setup.sh`, `batman_trigger.sh` (baked into image, self-contained)
+- Tier 1 (SuperManager / `app.py`): Global fleet view, nodes.json, deploy orchestration
+- Tier 2 (ClusterManager / `kiosk_server.py` on router node): Subnet-scoped fleet,
+  event broadcast DOWN to child Managers, relay UP to SuperManager.
+  A cluster = one household's network (all nodes on 10.10.10.x LAN).
+- Tier 3 (NodeManager / `kiosk_server.py` per host): Local container ops only,
+  relays heartbeats UP. NEVER iterates other hosts.
+- Tier 4 (Container scripts): `wifi_setup.sh`, `batman_trigger.sh`, `callhome.py`
+  (baked into image, self-contained, KEY=value output)
 - Fleet readiness: `/api/fleet/ready` gate in verify.yml, `_fleet_api_ready` dual-path pattern
 - Ansible owns initial deploy; Manager owns runtime (status, mode switching, toggling)
 - NEVER embed inline shell in manager endpoints — use container-side scripts
+- NEVER put fleet-level ops (batman_fleet, get_mesh_nodes) on NodeManager — ClusterManager only
 
 When working in specific directories or on particular tasks, load the relevant directory AGENTS.md or skill file for detailed guidance.
 

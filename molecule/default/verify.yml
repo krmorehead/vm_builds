@@ -1,10 +1,10 @@
 ---
-# ── Play 0: 3-tier architecture gate ─────────────────────────────
-# Every Proxmox host MUST be in kiosk_nodes (Manager tier).
-# A host without a Manager cannot participate in the 3-tier heartbeat
-# system (Container -> Manager -> SuperManager). Hard-fail immediately.
+# ── Play 0: 4-tier architecture gate ─────────────────────────────
+# Every Proxmox host MUST be in kiosk_nodes (NodeManager tier).
+# A host without a NodeManager cannot participate in the 4-tier heartbeat
+# system (Container -> NodeManager -> ClusterManager -> SuperManager). Hard-fail immediately.
 
-- name: Verify 3-tier Manager coverage
+- name: Verify 4-tier Manager coverage
   hosts: localhost
   connection: local
   gather_facts: false
@@ -15,8 +15,8 @@
           - item in groups['kiosk_nodes']
         fail_msg: >-
           SHOW STOPPER: {{ item }} is in proxmox but NOT in kiosk_nodes.
-          Every physical host MUST have a Manager (Kiosk LXC) for 3-tier
-          heartbeat (Container -> Manager -> SuperManager). Add {{ item }}
+          Every physical host MUST have a NodeManager (Kiosk LXC) for 4-tier
+          heartbeat (Container -> NodeManager -> ClusterManager -> SuperManager). Add {{ item }}
           to kiosk_nodes in inventory/hosts.yml and molecule inventory.
       loop: "{{ groups['proxmox'] }}"
 
@@ -69,6 +69,100 @@
         msg: >-
           IOMMU {{ 'active' if (iommu_verify.stdout | int) > 0
           else 'not active (no WiFi passthrough)' }}
+
+    # ── Container NAT bridge (WAN hosts only) ───────────────────────
+
+    - name: Determine if host should have container NAT bridge
+      ansible.builtin.set_fact:
+        _verify_needs_ct_bridge: >-
+          {{ 'router_nodes' not in group_names and 'lan_hosts' not in group_names }}
+
+    - name: Check container bridge exists (WAN hosts)
+      ansible.builtin.command:
+        cmd: ip link show vmbr_ct
+      register: _ct_bridge_check
+      changed_when: false
+      failed_when: false
+      when: _verify_needs_ct_bridge | bool
+
+    - name: Assert container bridge exists on WAN hosts
+      ansible.builtin.assert:
+        that: _ct_bridge_check.rc == 0
+        fail_msg: >-
+          Container NAT bridge (vmbr_ct) not found on WAN host {{ inventory_hostname }}.
+          The proxmox_bridges role should create it for non-LAN hosts.
+      when: _verify_needs_ct_bridge | bool
+
+    - name: Get container bridge IP (WAN hosts)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ip -4 addr show vmbr_ct | grep -oP 'inet \K[0-9./]+'
+        executable: /bin/bash
+      register: _ct_bridge_ip
+      changed_when: false
+      when:
+        - _verify_needs_ct_bridge | bool
+        - _ct_bridge_check.rc == 0
+
+    - name: Assert container bridge has correct subnet IP
+      ansible.builtin.assert:
+        that:
+          - "'10.99.' + (container_subnet_id | string) + '.1/24' == _ct_bridge_ip.stdout | trim"
+        fail_msg: >-
+          Container bridge IP mismatch. Expected 10.99.{{ container_subnet_id }}.1/24,
+          got {{ _ct_bridge_ip.stdout | trim }}
+      when:
+        - _verify_needs_ct_bridge | bool
+        - _ct_bridge_check.rc == 0
+
+    - name: Check iptables MASQUERADE rule for container subnet (WAN hosts)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          iptables -t nat -S POSTROUTING | grep -c '10\.99\.{{ container_subnet_id }}\.0/24.*MASQUERADE'
+        executable: /bin/bash
+      register: _nat_rule_check
+      changed_when: false
+      failed_when: false
+      when: _verify_needs_ct_bridge | bool
+
+    - name: Assert MASQUERADE rule exists on WAN hosts
+      ansible.builtin.assert:
+        that: (_nat_rule_check.stdout | int) > 0
+        fail_msg: >-
+          Missing iptables MASQUERADE rule for container subnet
+          10.99.{{ container_subnet_id }}.0/24 on {{ inventory_hostname }}
+      when: _verify_needs_ct_bridge | bool
+
+    - name: Check IP forwarding is enabled (WAN hosts)
+      ansible.builtin.command:
+        cmd: sysctl -n net.ipv4.ip_forward
+      register: _ip_fwd_check
+      changed_when: false
+      when: _verify_needs_ct_bridge | bool
+
+    - name: Assert IP forwarding is enabled on WAN hosts
+      ansible.builtin.assert:
+        that: _ip_fwd_check.stdout | trim == "1"
+        fail_msg: "IP forwarding not enabled on {{ inventory_hostname }}"
+      when: _verify_needs_ct_bridge | bool
+
+    - name: Assert container bridge does NOT exist on LAN hosts
+      ansible.builtin.command:
+        cmd: ip link show vmbr_ct
+      register: _ct_bridge_lan_check
+      changed_when: false
+      failed_when: false
+      when: not (_verify_needs_ct_bridge | bool)
+
+    - name: Assert no container bridge on LAN hosts
+      ansible.builtin.assert:
+        that: _ct_bridge_lan_check.rc != 0
+        fail_msg: >-
+          Container NAT bridge (vmbr_ct) found on LAN host {{ inventory_hostname }}.
+          LAN hosts should NOT have a container bridge — they use OpenWrt LAN.
+      when: not (_verify_needs_ct_bridge | bool)
 
     # ── iGPU detection (Intel or AMD) ──────────────────────────────
 
@@ -1280,6 +1374,36 @@
           - "'nesting=1' in wg_ct_cfg.stdout"
         fail_msg: "WireGuard container {{ wireguard_ct_id }} config incorrect on {{ inventory_hostname }}"
 
+    - name: Assert WireGuard on WAN hosts uses NAT bridge (not household subnet)
+      ansible.builtin.assert:
+        that:
+          - wg_ct_cfg.stdout is search('vmbr_ct')
+          - wg_ct_cfg.stdout is search('10\\.99\\.')
+        fail_msg: >-
+          WireGuard container on WAN host {{ inventory_hostname }} should use
+          vmbr_ct (NAT bridge) with 10.99.x.x IP, not the household subnet.
+          Got: {{ wg_ct_cfg.stdout | regex_search('net0:.*') }}
+      when: "'router_nodes' not in group_names and 'lan_hosts' not in group_names"
+
+    - name: Assert WireGuard DNAT rule exists (WAN hosts)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          iptables -t nat -S PREROUTING | grep -c 'dport 51820.*DNAT'
+        executable: /bin/bash
+      register: _wg_dnat_check
+      changed_when: false
+      failed_when: false
+      when: "'router_nodes' not in group_names and 'lan_hosts' not in group_names"
+
+    - name: Assert WireGuard DNAT rule present
+      ansible.builtin.assert:
+        that: (_wg_dnat_check.stdout | int) > 0
+        fail_msg: >-
+          Missing WireGuard DNAT rule on WAN host {{ inventory_hostname }}.
+          UDP 51820 should be forwarded to the WireGuard container.
+      when: "'router_nodes' not in group_names and 'lan_hosts' not in group_names"
+
     - name: Query WireGuard extensions from API
       ansible.builtin.uri:
         url: "{{ _api_base }}/api/container/wireguard/ready"
@@ -2018,7 +2142,7 @@
           Kiosk container {{ kiosk_ct_id }} is stopped but Desktop VM is not running —
           expected either Kiosk running or Kiosk stopped due to display-exclusive hookscript
 
-    - name: Check Kiosk services, NiceGUI files, and 3-tier config (single pct exec)
+    - name: Check Kiosk services, NiceGUI files, and 4-tier config (single pct exec)
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ kiosk_ct_id }} -- /bin/sh -c '
@@ -2042,7 +2166,7 @@
       changed_when: false
       when: not (_api_ready | bool)
 
-    - name: Assert Kiosk services enabled, files present, and 3-tier configured
+    - name: Assert Kiosk services enabled, files present, and 4-tier configured
       ansible.builtin.assert:
         that:
           - "'DISPLAY_SVC=enabled' in _kiosk_health.stdout"
@@ -2089,7 +2213,7 @@
         _kiosk_config_keys: "{{ (_kiosk_config.stdout | from_json).keys() | list }}"
       when: _kiosk_config_keys is not defined
 
-    - name: Assert kiosk config has all service URL and 3-tier keys
+    - name: Assert kiosk config has all service URL and 4-tier keys
       ansible.builtin.assert:
         that:
           - "'DESKTOP_URL' in _kiosk_config_keys"
@@ -2191,12 +2315,47 @@
         that: "'gaming_lxc' in stamp.plays"
         fail_msg: "deploy_stamp missing gaming_lxc entry on {{ inventory_hostname }}"
 
-# ── Play 14: 3-tier heartbeat integrity ──────────────────────────
-# Verifies the 3-tier data flow: Container → Manager → SuperManager.
+# ── Play 13b: Container NAT networking regression check ───────────
+# Verify that NO NAT-eligible container on WAN hosts has a 192.168.86.x IP.
+# All WAN containers should use 10.99.{host_id}.{offset} via NAT bridge.
+# OpenWrt bridge (CT 104) and mesh (CT 103) are excluded — they need
+# L2 WAN access for WiFi bridging and are intentionally on the WAN bridge.
+
+- name: Verify no WAN containers use household subnet IPs
+  hosts: proxmox:!router_nodes:!lan_hosts
+  gather_facts: false
+  tasks:
+    - name: List NAT-eligible container IPs on this host
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          for ctid in $(pct list 2>/dev/null | awk 'NR>1 {print $1}'); do
+            # Skip OpenWrt mesh (103) and bridge (104) — they use L2 WAN access
+            [ "$ctid" = "103" ] || [ "$ctid" = "104" ] && continue
+            ip=$(pct config "$ctid" 2>/dev/null | grep 'net0:' | grep -oP 'ip=\K[^/,]+' || true)
+            [ -n "$ip" ] && echo "$ctid=$ip"
+          done
+        executable: /bin/bash
+      register: _ct_ips
+      changed_when: false
+      failed_when: false
+
+    - name: Assert no NAT-eligible container uses 192.168.86.x (household subnet)
+      ansible.builtin.assert:
+        that: "'192.168.86.' not in _ct_ips.stdout"
+        fail_msg: >-
+          REGRESSION: Container(s) on WAN host {{ inventory_hostname }} have
+          192.168.86.x IPs (household subnet). All WAN containers (except
+          mesh/bridge which need L2 access) should use 10.99.x.x via the NAT
+          bridge. Found: {{ _ct_ips.stdout_lines | select('search', '192.168.86') | list }}
+      when: _ct_ips.stdout | length > 0
+
+# ── Play 14: 4-tier heartbeat integrity ──────────────────────────
+# Verifies the 4-tier data flow: Container → NodeManager → ClusterManager → SuperManager.
 # Only physical hosts should appear on the SuperManager. Container
 # names (pihole, wireguard, etc.) must NOT appear as top-level nodes.
 
-- name: Verify 3-tier heartbeat integrity
+- name: Verify 4-tier heartbeat integrity
   hosts: localhost
   connection: local
   gather_facts: false
@@ -2232,9 +2391,9 @@
       ansible.builtin.assert:
         that: item not in (_sm_hostnames | default([]))
         fail_msg: >-
-          3-TIER VIOLATION: {{ item }} appears as a top-level node on the
+          4-TIER VIOLATION: {{ item }} appears as a top-level node on the
           SuperManager. Containers must NEVER send heartbeats directly to
-          the SuperManager — they must go through their local Manager.
+          the SuperManager — they must go through their local NodeManager.
       loop: "{{ _container_names }}"
       when: _sm_hostnames is defined and _sm_hostnames | length > 0
 
@@ -2242,7 +2401,7 @@
       ansible.builtin.assert:
         that: _sm_hostnames | default([]) | length > 0
         fail_msg: >-
-          No hosts registered on SuperManager. The 3-tier relay is not
-          working — Managers are not relaying heartbeats UP to the
+          No hosts registered on SuperManager. The 4-tier relay is not
+          working — NodeManagers are not relaying heartbeats UP to the
           SuperManager.
       when: _sm_nodes is not failed and _sm_nodes.status == 200

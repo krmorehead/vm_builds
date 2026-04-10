@@ -544,8 +544,10 @@ class TestCollectBatmanMetricsReal:
 
     @staticmethod
     def _wrapper_exists(ip: str) -> bool:
-        """Check if batman_trigger.sh wrapper is deployed on the host."""
-        ok, _ = _ssh_exec(ip, "test -x /usr/local/bin/batman_trigger.sh", timeout=5)
+        """Check if batman_trigger.sh exists inside the bridge container."""
+        ok, _ = _ssh_exec(
+            ip, "pct exec 104 -- test -x /usr/sbin/batman_trigger.sh", timeout=5,
+        )
         return ok
 
     def test_batman_status_from_bridge_1(self, env):

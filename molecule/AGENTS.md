@@ -93,7 +93,9 @@ When adding a new feature: write the verify assertion that checks the feature wo
 
 ## Service-Specific Cleanup (CRITICAL)
 
-Molecule cleanup destroys **only** known project VMs/containers by **explicit VMID**. **NEVER** iterate `qm list` / `pct list` to destroy ALL resources on a host.
+`molecule/default/cleanup.yml` is a one-line import of `playbooks/cleanup.yml` — the **unified cleanup playbook**. There is ONE cleanup to maintain. When adding a new service, add its VMID to `playbooks/cleanup.yml` only.
+
+Cleanup destroys **only** known project VMs/containers by **explicit VMID**. **NEVER** iterate `qm list` / `pct list` to destroy ALL resources on a host.
 
 **Rules:**
 - Images are built once via `build-images.sh` and cached on each Proxmox host
@@ -101,6 +103,7 @@ Molecule cleanup destroys **only** known project VMs/containers by **explicit VM
 - Each service owns its own lifecycle: provision, configure, verify, cleanup
 - Per-feature scenarios create and destroy only their own container/VM
 - The full integration test (`molecule test`) creates all services from cached images, verifies they work together, then cleans up each service by VMID
+- Test control plane teardown (API server, watchdog, tunnel) is in the unified cleanup, conditioned on `MOLECULE_PROJECT_DIRECTORY` env var
 
 **Adding a new feature:** run only the per-feature scenario. The full integration test is reserved for CI and final proof.
 
@@ -185,6 +188,8 @@ it provides false confidence.
 **Rules:**
 - NEVER mock `probe_host`, network connectivity, or hardware detection against
   hosts you control. We own 6 nodes at known IPs. Probe the REAL hosts.
+- NEVER mock SSH commands (`_ssh_exec`, `subprocess.run` with SSH) that trigger
+  real operations on real nodes you own. If the command fails, the test MUST fail.
 - NEVER write pytest tests that only read YAML files and check string content.
   That's a linter pretending to be a test. Write an actual linter (like
   `test_host_safety.py`) or test real behavior via Molecule.
@@ -194,6 +199,10 @@ it provides false confidence.
 - Mocking is ONLY justified for side effects you can't control: `subprocess.run`
   (don't run ansible-playbook), `shutil.which` (binary detection), filesystem
   isolation (tmp_path for error-path testing).
+- Every `patch()` or `monkeypatch` call MUST have an inline comment with TWO parts:
+  (1) WHY this mock is necessary (what side effect it prevents), and
+  (2) HOW the test still genuinely validates the feature despite the mock.
+  If you cannot write both sentences, the mock is unjustified — remove it.
 
 **How to detect a fake test:**
 1. Does it mock the very thing it claims to verify? → FAKE

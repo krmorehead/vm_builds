@@ -109,9 +109,7 @@ configure_radios() {
         uci set "wireless.${radio}.country=${country}"
         uci set "wireless.${radio}.band=${band}"
         uci set "wireless.${radio}.htmode=${htmode}"
-        if [ "$channel" != "auto" ]; then
-            uci set "wireless.${radio}.channel=${channel}"
-        fi
+        uci set "wireless.${radio}.channel=${channel}"
     done
 }
 
@@ -148,7 +146,7 @@ create_wds_iface() {
 # ── Subcommands ──────────────────────────────────────────────────
 
 do_configure() {
-    local mode="" ssid="" key="" encryption="sae" channel="auto" country="US"
+    local mode="" ssid="" key="" encryption="sae" channel="auto" country="US" band=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -158,6 +156,7 @@ do_configure() {
             --encryption) encryption="$2"; shift 2 ;;
             --channel)    channel="$2"; shift 2 ;;
             --country)    country="$2"; shift 2 ;;
+            --band)       band="$2"; shift 2 ;;
             *) die "Unknown option: $1" ;;
         esac
     done
@@ -172,8 +171,9 @@ do_configure() {
 
     check_mode_support "$phy" "$mode"
 
-    local band
-    band=$(detect_band)
+    if [ -z "$band" ]; then
+        band=$(detect_band)
+    fi
 
     ensure_radio_sections >/dev/null
     configure_radios "$band" "$country" "$channel"

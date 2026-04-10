@@ -113,11 +113,61 @@ When working with LXC containers, load these skills IMMEDIATELY:
 
 ## Per-Host IP Indexing
 
-18. When a service deploys to multiple Proxmox hosts, each container needs a unique IP. Use the host's index in its flavor group: `offset + groups['<flavor>'].index(inventory_hostname)`.
+18. When a service deploys to multiple LAN hosts, each container needs a unique IP on the shared OpenWrt LAN. Use the host's index in its flavor group: `offset + groups['<flavor>'].index(inventory_hostname)`.
 
-19. WAN IPs add +200 to the base offset. ALWAYS check that WAN IPs don't collide with any host's management IP.
+19. WAN hosts use private NAT subnets (10.99.{container_subnet_id}.0/24) via `vmbr_ct` bridge. Container IPs use just the service offset (no group indexing). Collisions are impossible — each host has its own /24.
 
-20. Previous bug: rsyslog_ct_ip_offset=11 produced WAN IP .211, colliding with mesh2's host IP.
+20. Previous bug: WAN containers shared the household subnet (192.168.86.x). The offset+base+index formula produced IP collisions with host IPs and household devices. Replaced with per-host NAT bridges.
+
+## DNAT for Inbound Connections on NAT Containers
+
+22a. WAN host containers live on private NAT subnets (10.99.x.x) that are
+unreachable from the LAN or other hosts. When a container needs to accept
+inbound connections from outside the host, add DNAT rules in the
+provisioning role (`<type>_lxc/tasks/main.yml`):
+
+```yaml
+- name: Add DNAT rule for service port (WAN hosts)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      WAN_IF="{{ proxmox_wan_bridge }}"
+      CT_IP="{{ _lxc_net_ip }}"
+      if ! iptables -t nat -C PREROUTING -i "$WAN_IF" -p tcp --dport 9001 \
+           -j DNAT --to-destination "$CT_IP:9001" 2>/dev/null; then
+        iptables -t nat -A PREROUTING -i "$WAN_IF" -p tcp --dport 9001 \
+                 -j DNAT --to-destination "$CT_IP:9001"
+      fi
+    executable: /bin/bash
+  when: not (_lxc_net_on_lan | bool)
+  changed_when: true
+
+- name: Add FORWARD rule for DNAT traffic (WAN hosts)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      CT_IP="{{ _lxc_net_ip }}"
+      if ! iptables -C FORWARD -d "$CT_IP" -p tcp --dport 9001 \
+           -j ACCEPT 2>/dev/null; then
+        iptables -A FORWARD -d "$CT_IP" -p tcp --dport 9001 -j ACCEPT
+      fi
+    executable: /bin/bash
+  when: not (_lxc_net_on_lan | bool)
+  changed_when: true
+```
+
+Key points:
+- Gate on `not (_lxc_net_on_lan | bool)` — LAN containers are directly
+  reachable and don't need DNAT.
+- Use `-C` (check) before `-A` (append) for idempotency.
+- BOTH `PREROUTING DNAT` and `FORWARD ACCEPT` rules are needed.
+- Services currently using DNAT: Manager API (port 9001, kiosk_lxc),
+  WireGuard (UDP 51820, wireguard_lxc).
+
+Previous bug (2026-04-09): Cluster Manager on home (LAN) couldn't reach
+child Managers on WAN hosts (ai, mesh2, bridge-1, bridge-2). Their kiosk
+containers were on 10.99.x.19 — unreachable from the LAN. DNAT rules
+forwarding port 9001 from the host IP to the container IP fixed it.
 
 ## Dynamic Inventory and Failed Hosts
 

@@ -116,6 +116,8 @@ yamllint roles/<service>_*/ molecule/<scenario>/
 | UNREACHABLE hosts | SSH or host connectivity | Validate with `ansible home -m ping` first |
 | Container template failures | Missing nesting=1 or cgroup | Load `lxc-container-patterns` early |
 | Docker access fails | Wrong execution context | Use `service_nodes` host, not container group |
+| SSH auth intermittently fails + host key oscillates | IP address conflict (container on another host has same IP) | Check `pct config` on all hosts for IP conflicts before investigating hardware |
+| SSH "Permission denied" on freshly installed host | Another device/container answering on the same IP | Run `arp -n` and verify WAN containers use NAT bridge (10.99.x.x), not the household subnet |
 
 ## Development Workflow Integration
 
@@ -129,3 +131,28 @@ yamllint roles/<service>_*/ molecule/<scenario>/
 7. Continue with small iterations
 
 **Result**: Catch issues in minutes instead of hours of debugging.
+
+## Manual testing means REAL testing
+
+"Manual testing" is NOT viewing a UI populated with fabricated data. It is
+exercising every interactive feature against real infrastructure and verifying
+the real operation completed on real hardware.
+
+**NEVER fabricate data to make a UI look correct during manual testing:**
+- NEVER `curl -X POST /api/checkin` to create fake nodes
+- NEVER script fake heartbeats to populate a dashboard
+- NEVER claim "testing passed" after only viewing pages without clicking anything
+
+**ALWAYS test against real infrastructure:**
+- Start real services on real hosts (deploy with `molecule converge` if needed)
+- Let real heartbeats flow from real containers
+- Click every button, toggle, and action on the page
+- Verify the real outcome on the real hardware (SSH, pct exec, API query)
+
+Fabricated test data is mocking with extra steps. It proves the UI can render
+JSON — not that the system works.
+
+Previous catastrophe (2026-04-09): Agent curled fake heartbeats into the
+Cluster Manager, viewed the dashboard, never clicked batman toggle or any
+other feature, and declared "manual testing complete." Every feature was
+untested. The dashboard looked pretty because it was fed fabricated data.

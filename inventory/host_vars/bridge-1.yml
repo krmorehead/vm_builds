@@ -3,3 +3,4 @@ ansible_host: "{{ lookup('env', 'BRIDGE_1_HOST') }}"
 pci_passthrough_allow_reboot: true
 wol_capable: true
 wifi_role: ap
+container_subnet_id: 5

@@ -156,6 +156,54 @@ When a manual test reveals an issue:
    bucket on first load (no manual registration needed).
 7. After manual testing, run `pytest tests/ -v` to confirm automated tests
    still pass — manual fixes sometimes break automated expectations.
+8. NEVER fabricate heartbeat data with curl/scripts to simulate real nodes.
+   Use the REAL physical test machines with REAL heartbeats from REAL
+   containers. Fabricated data is the same anti-pattern as mocking — it
+   produces a pretty dashboard that proves nothing about whether the
+   system actually works.
+9. ALWAYS actually engage interactive features during testing. Viewing
+   a page is NOT testing it. Click the batman toggle. Click Restart WiFi.
+   Click bridge mode switch. Verify the REAL operation ran on the REAL
+   hardware by checking the REAL output.
+10. NEVER claim "manual testing complete" after only viewing pages.
+    Every button, toggle, and action on the page must be exercised against
+    real infrastructure. If an action can't be tested because infrastructure
+    is missing, that is a test failure — not a skip.
+
+### Cluster Manager testing (4-tier)
+
+When testing the Cluster Manager (`kiosk_server.py --config` with
+`IS_CLUSTER_MANAGER=true`):
+
+- The Cluster Manager runs on the router node (home). Its child Managers
+  are the 5 other nodes: mesh1, mesh2, ai, bridge-1, bridge-2.
+- Child Managers must be REAL kiosk_server instances running on REAL
+  hosts, heartbeating to the Cluster Manager. NEVER simulate heartbeats
+  with curl.
+- Batman mode testing: enable batman from the Cluster Manager GUI. Verify
+  the event was broadcast to ALL child Managers. Verify each child Manager
+  executed batman_trigger.sh on its local containers. Check batman status
+  on every node.
+- Bridge/WiFi testing: restart WiFi, switch AP/STA modes, verify the
+  operations ran on the actual bridge containers.
+- If kiosk containers are not deployed on the test hosts, deploy them
+  first with `molecule converge` — do NOT fake the data.
+
+## Manual Testing Playbooks
+
+Step-by-step runbooks with exact commands for each test scenario are in
+`docs/manual-testing-playbooks.md`. The playbooks cover:
+
+- Kiosk container health checks (all 6 hosts)
+- Cluster Manager fleet verification (API queries)
+- Batman mode enable/disable/status (with verification on real containers)
+- WiFi status on mesh/bridge containers
+- Guest management via Manager API
+- Child Manager direct communication
+- End-to-end heartbeat chain (Container → Manager → Cluster Manager)
+
+ALWAYS use the playbooks for manual testing. They contain the exact commands
+to run against real infrastructure — no improvisation needed.
 
 ## Previous bugs found by manual testing
 

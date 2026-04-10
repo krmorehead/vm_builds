@@ -23,6 +23,6 @@ description: OpenWrt encrypted DNS and mesh configuration patterns. Use when set
 ## Container Networking Pattern
 
 5. Container networking follows host topology:
-   - LAN hosts (`router_nodes`, `lan_hosts`) → OpenWrt LAN subnet, LAN bridge
-   - WAN hosts → `proxmox_wan_bridge`, `ansible_default_ipv4` subnet, DNS `8.8.8.8`
-   - IP offset +200 for WAN containers to avoid collisions with LAN containers
+   - LAN hosts (`router_nodes`, `lan_hosts`) → OpenWrt LAN subnet (10.10.10.x), LAN bridge
+   - WAN hosts → private NAT bridge (`vmbr_ct`), 10.99.{host_id}.{offset}/24, DNS `8.8.8.8`
+   - WAN containers are isolated on per-host /24 subnets — no IP collision risk

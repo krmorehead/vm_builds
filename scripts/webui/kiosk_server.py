@@ -46,12 +46,23 @@ _kiosk_config: dict = {}
 
 
 def create_app(config_path: Path | None = None) -> None:
-    """Register pages, init manager, mount API endpoints."""
+    """Register pages, init manager, mount API endpoints.
+
+    NodeManager by default (per-host scope). Set IS_CLUSTER_MANAGER=true
+    in config.json to get ClusterManager (subnet-scoped fleet view).
+    """
     global _kiosk_config
     urls = load_kiosk_config(config_path)
     _kiosk_config = urls
 
-    manager.init(_build_node_resolver(urls))
+    is_cluster = str(urls.get("IS_CLUSTER_MANAGER", "")).lower() in ("true", "1", "yes")
+    mgr_class = manager.ClusterManager if is_cluster else manager.NodeManager
+
+    manager.init(
+        _build_node_resolver(urls),
+        config=urls,
+        manager_class=mgr_class,
+    )
     manager.register_api(app)
 
     from scripts.webui import theme
@@ -64,10 +75,10 @@ def create_app(config_path: Path | None = None) -> None:
         ui.add_head_html(theme.HOVER_CARD_STYLES)
         render_hub(urls=urls)
 
-    # Kiosk-specific page wrappers use kiosk_page_shell() instead of
-    # page_shell() so the slim home-button bar appears instead of the
-    # full sidebar (which has Dashboard / Deploy / Services links that
-    # don't exist on the kiosk server).
+    if is_cluster:
+        from scripts.webui.pages import cluster_dashboard
+        cluster_dashboard.register()
+
     from scripts.webui.pages.bridge import _bridge_content
     from scripts.webui.pages.containers import _render_containers
     from scripts.webui.pages.mesh import _mesh_content
@@ -117,11 +128,6 @@ def main() -> None:
     create_app(config_path=config_path)
 
     def _on_startup() -> None:
-        app.storage.general["management_server"] = _kiosk_config.get("MANAGEMENT_SERVER", "")
-        app.storage.general["callhome_public_key"] = _kiosk_config.get("CALLHOME_PUBLIC_KEY", "")
-        app.storage.general["mesh_key"] = _kiosk_config.get("MESH_KEY", "")
-        app.storage.general["host_ip"] = _kiosk_config.get("HOST_IP", "")
-        app.storage.general["host_name"] = _kiosk_config.get("HOST_NAME", "")
         manager.start_poller()
 
     app.on_startup(_on_startup)

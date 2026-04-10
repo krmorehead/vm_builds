@@ -31,9 +31,31 @@ description: Image management and local storage patterns for VM and LXC images. 
 
 7. NEVER commit images to git. The `images/` directory is listed in `.gitignore`. Document the expected image filename and download URL in role defaults and in `docs/architecture/`.
 
+## NEVER Patch Running Containers (CRITICAL)
+
+8. When a container is missing a package, binary, or config baked into the
+   image: NEVER install/fix it on the running container via `pct exec`,
+   `apt install`, `opkg install`, or manual file edits.
+
+   ALWAYS follow this workflow:
+   1. Update the build script (`build-images.sh`) or image source files
+   2. Rebuild the image: `./build-images.sh --only <target>`
+   3. Redeploy: `molecule converge` (or `molecule test` for clean state)
+
+   Runtime patches are fragile — they're lost on container recreation, not
+   tracked in version control, and create drift between the image definition
+   and the running state. The image IS the source of truth.
+
+   Previous bug (2026-04-09): Router VM was missing `openssl-util` and
+   `batman_trigger.sh`. Initial instinct was to `opkg install` on the
+   running VM. The correct fix: add `openssl-util` to `ROUTER_PACKAGES`
+   in `build-images.sh`, rebuild the router image, and redeploy via
+   `molecule converge`. Same bug occurred earlier with mesh containers
+   missing `openssl-util` — same fix pattern.
+
 ## Custom Images via Image Builder
 
-8. `build-images.sh` uses the OpenWrt Image Builder to create pre-configured images with packages pre-installed and UCI defaults baked in. This eliminates runtime `opkg install` and resolves firewall/networking conflicts in LXC containers.
+9. `build-images.sh` uses the OpenWrt Image Builder to create pre-configured images with packages pre-installed and UCI defaults baked in. This eliminates runtime `opkg install` and resolves firewall/networking conflicts in LXC containers.
 
 9. Per the project's "Bake, don't configure at runtime" principle, custom images are REQUIRED. Provision roles verify the image exists and hard-fail with an actionable message if missing:
 

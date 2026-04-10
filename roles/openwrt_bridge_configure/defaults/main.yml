@@ -2,7 +2,8 @@
 openwrt_bridge_ssid: "bridge-dedicated"
 openwrt_bridge_key: "{{ lookup('env', 'MESH_KEY') | default('changeme', true) }}"
 openwrt_bridge_encryption: sae
-openwrt_bridge_preferred_band: "5g"
-openwrt_bridge_htmode: "HE80"
-openwrt_bridge_channel: auto
+# 2.4GHz: AX210 self-managed regulatory blocks 5GHz AP mode (PASSIVE-SCAN).
+# Channel 11: non-overlapping with mesh (channel 1).
+openwrt_bridge_band: "2g"
+openwrt_bridge_channel: "11"
 openwrt_bridge_country: "US"

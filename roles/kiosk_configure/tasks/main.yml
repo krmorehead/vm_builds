@@ -75,6 +75,22 @@
 # containers for metric collection. Uses static_ip facts exported
 # by provision roles plus the OpenWrt router gateway.
 
+- name: Build child Manager IP map (LAN hosts use container IP, WAN hosts use host IP with DNAT)
+  ansible.builtin.set_fact:
+    _child_manager_ips: >-
+      {{ _child_manager_ips | default({})
+         | combine({item:
+             hostvars[item]['kiosk_static_ip']
+             if ('router_nodes' in hostvars[item].get('group_names', [])
+                 or 'lan_hosts' in hostvars[item].get('group_names', []))
+             else hostvars[item]['ansible_host']
+         })
+      }}
+  loop: "{{ groups.get('kiosk_nodes', []) | difference([inventory_hostname]) }}"
+  when: >-
+    item in hostvars
+    and (hostvars[item]['kiosk_static_ip'] | default('')) | length > 0
+
 - name: Build node IP map from topology facts
   ansible.builtin.set_fact:
     _kiosk_node_ips: >-
@@ -165,6 +181,9 @@
       MESH_KEY: "{{ lookup('env', 'MESH_KEY') | default('', true) }}"
       HOST_IP: "{{ ansible_host }}"
       HOST_NAME: "{{ inventory_hostname }}"
+      IS_CLUSTER_MANAGER: "{{ 'true' if inventory_hostname in groups.get('router_nodes', []) else 'false' }}"
+      CHILD_MANAGER_IPS: >-
+        {{ _child_manager_ips | default({}) }}
       NODE_IPS: >-
         {{ _kiosk_node_ips | default({}) }}
 
@@ -205,42 +224,7 @@
     - { src: "{{ project_root }}/scripts/webui/pages/viewer.py", dest: "pages/viewer.py" }
     - { src: "{{ project_root }}/scripts/webui/pages/launch.py", dest: "pages/launch.py" }
     - { src: "{{ project_root }}/scripts/webui/pages/containers.py", dest: "pages/containers.py" }
-
-- name: Clean old layout and create project-mirrored directory structure
-  ansible.builtin.shell:
-    cmd: |
-      pct exec {{ kiosk_ct_id }} -- bash -c '
-        rm -rf /opt/kiosk/webui /opt/kiosk/scripts
-        mkdir -p /opt/kiosk/scripts/webui/pages
-        touch /opt/kiosk/scripts/__init__.py
-      '
-    executable: /bin/bash
-  changed_when: true
-
-- name: Push build.py into container
-  ansible.builtin.command:
-    cmd: pct push {{ kiosk_ct_id }} /tmp/kiosk_build.py /opt/kiosk/build.py
-  changed_when: true
-
-- name: Push webui files into container
-  ansible.builtin.command:
-    cmd: pct push {{ kiosk_ct_id }} /tmp/kiosk_webui/{{ item.dest }} /opt/kiosk/scripts/webui/{{ item.dest }}
-  changed_when: true
-  loop:
-    - { dest: "__init__.py" }
-    - { dest: "theme.py" }
-    - { dest: "data.py" }
-    - { dest: "heartbeat.py" }
-    - { dest: "manager.py" }
-    - { dest: "kiosk_server.py" }
-    - { dest: "pages/__init__.py" }
-    - { dest: "pages/hub.py" }
-    - { dest: "pages/bridge.py" }
-    - { dest: "pages/mesh.py" }
-    - { dest: "pages/router.py" }
-    - { dest: "pages/viewer.py" }
-    - { dest: "pages/launch.py" }
-    - { dest: "pages/containers.py" }
+    - { src: "{{ project_root }}/scripts/webui/pages/cluster_dashboard.py", dest: "pages/cluster_dashboard.py" }
 
 - name: Build service URL config JSON
   ansible.builtin.set_fact:
@@ -252,9 +236,35 @@
     dest: /tmp/kiosk_config.json
     mode: "0644"
 
-- name: Push config JSON into container
-  ansible.builtin.command:
-    cmd: pct push {{ kiosk_ct_id }} /tmp/kiosk_config.json /opt/kiosk/config.json
+- name: Create tarball of webui files, build.py, and config on host
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      tar czf /tmp/kiosk_payload.tar.gz \
+        -C /tmp/kiosk_webui . \
+        -C /tmp kiosk_build.py kiosk_config.json
+    executable: /bin/bash
+  changed_when: true
+
+- name: Push tarball into container and extract
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct push {{ kiosk_ct_id }} /tmp/kiosk_payload.tar.gz /tmp/kiosk_payload.tar.gz
+      pct exec {{ kiosk_ct_id }} -- bash -c '
+        rm -rf /opt/kiosk/webui /opt/kiosk/scripts
+        mkdir -p /opt/kiosk/scripts/webui/pages
+        touch /opt/kiosk/scripts/__init__.py
+        tar xzf /tmp/kiosk_payload.tar.gz -C /opt/kiosk/scripts/webui/ \
+          ./__init__.py ./theme.py ./data.py ./heartbeat.py ./manager.py \
+          ./kiosk_server.py ./pages
+        tar xzf /tmp/kiosk_payload.tar.gz -C /opt/kiosk/ \
+          kiosk_build.py kiosk_config.json
+        mv /opt/kiosk/kiosk_build.py /opt/kiosk/build.py
+        mv /opt/kiosk/kiosk_config.json /opt/kiosk/config.json
+        rm -f /tmp/kiosk_payload.tar.gz
+      '
+    executable: /bin/bash
   changed_when: true
 
 - name: Set ownership on kiosk files
@@ -270,6 +280,7 @@
     - /tmp/kiosk_webui
     - /tmp/kiosk_config.json
     - /tmp/kiosk_build.py
+    - /tmp/kiosk_payload.tar.gz
 
 # ── SSH key for host management ──────────────────────────────────
 # The kiosk manager needs SSH access to the Proxmox host to run

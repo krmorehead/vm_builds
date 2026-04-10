@@ -2132,7 +2132,7 @@ def check_container_ready(state_dir: Path, container_id: str) -> dict:
       - It was seen within CONTAINER_READY_SECONDS
       - Its container_health.ready flag is True (if container_health present)
 
-    Also searches nested containers in extensions.containers (3-tier model).
+    Also searches nested containers in extensions.containers (4-tier model).
     """
     nodes = load_node_registry(state_dir)
     for n in nodes:
@@ -2189,9 +2189,9 @@ def check_fleet_readiness(
 
     Matches expected service names against:
     1. Top-level hostname / node_id / container_health.container_id
-    2. Nested containers in extensions.containers (3-tier Manager relay)
+    2. Nested containers in extensions.containers (4-tier Manager relay)
 
-    In the 3-tier model, Managers relay host-level heartbeats that embed
+    In the 4-tier model, NodeManagers relay host-level heartbeats that embed
     container data in ``container_health.extensions.containers``.
     """
     nodes = load_node_registry(state_dir)
@@ -2260,7 +2260,7 @@ def check_fleet_staleness(
       - stale: previously seen but heartbeat expired (circuit breaker trigger)
       - never_seen: no record — still provisioning, not an error
 
-    Also checks nested containers in extensions.containers (3-tier model).
+    Also checks nested containers in extensions.containers (4-tier model).
     Returns ``has_stale: True`` when any service has regressed from healthy
     to stale, signaling that something went wrong mid-run.
     """

@@ -116,9 +116,11 @@ in `dmesg`.
 
 ## SHOW STOPPER: Unreachable host protocol
 
-When ANY host shows `unreachable=1` or fails a connectivity probe:
+When ANY host shows `unreachable=1`, fails a connectivity probe, OR SSH
+authentication is rejected: FULL STOP.
 
 1. **FULL STOP.** Do not continue development. Do not run more tests.
+   Do NOT build other hosts. Do NOT "skip this host and continue."
 2. **Investigate cause.** Check terminal history for `modprobe -r`, GPU ops, shutdown.
 3. **NEVER say "pre-existing."** Every unreachable host was caused by something. Find it.
 4. **Report severity.** For `wol_capable: false` hosts (ai): physical power-on required
@@ -127,12 +129,31 @@ When ANY host shows `unreachable=1` or fails a connectivity probe:
    ai is down, Moonlight verification is IMPOSSIBLE regardless of what passes on home.
 6. **Block the session on recovery.** No further progress is possible until the host is restored.
 
-Previous catastrophe (2026-03-23): Agent dismissed ai unreachable THREE TIMES over
-4 hours. Continued running converge, verify, and cleanup cycles that could never
-validate the actual feature (Moonlight streaming from ai's Sunshine server). Root
-cause: `modprobe -r amdgpu` from an earlier sunshine-vm cleanup. ai required physical
-power-on 3000 miles away. The entire session was wasted. This dismissal pattern is
-the single most expensive failure mode in this project.
+### Mandatory fleet health checks
+
+- **Before any multi-host session:** SSH to ALL hosts to verify connectivity.
+- **After EVERY build/deploy:** SSH to ALL hosts, not just the target. Collateral
+  damage happens — network changes, key corruption, service crashes.
+- **During long sessions:** Re-check all hosts every 30 minutes.
+- SSH "Permission denied" is a SHOW STOPPER. It means you lost management access.
+  Treat it identically to EHOSTUNREACH.
+- Host metrics at 0% in the SuperManager means the Manager can't SSH to its host.
+  Investigate immediately — don't assume "it'll fix itself."
+
+### Previous catastrophes
+
+1. (2026-03-23): Agent dismissed ai unreachable THREE TIMES over 4 hours.
+   Continued running converge, verify, and cleanup cycles that could never
+   validate the actual feature (Moonlight streaming from ai's Sunshine server). Root
+   cause: `modprobe -r amdgpu` from an earlier sunshine-vm cleanup. ai required physical
+   power-on 3000 miles away. The entire session was wasted. This dismissal pattern is
+   the single most expensive failure mode in this project.
+
+2. (2026-04-08): ai SSH auth failed (Permission denied). Instead of FULL STOP,
+   agent continued building mesh1, mesh2, bridge-1, bridge-2 individually.
+   Spent 20+ minutes on other hosts before reporting the issue to the user.
+   Should have stopped IMMEDIATELY at the first SSH failure and reported.
+   The instinct to "skip the broken host and keep working" is ALWAYS WRONG.
 
 ## Anti-fake-test doctrine (CRITICAL)
 

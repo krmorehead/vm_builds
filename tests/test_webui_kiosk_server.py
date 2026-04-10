@@ -146,14 +146,15 @@ class TestKioskCreateApp:
             await user.open(f"{Routes.VIEW}?url=http://example.com&title=Test")
             await user.should_see("Test")
 
-    async def test_create_app_sets_storage_fields(self, tmp_path):
+    async def test_create_app_passes_config_to_manager(self, tmp_path):
         config_path = _write_config(tmp_path, HOME_CONFIG)
         try:
             async with user_simulation():
                 create_app(config_path=config_path)
-                assert nicegui_app.storage.general["management_server"] == HOME_CONFIG["MANAGEMENT_SERVER"]
-                assert nicegui_app.storage.general["host_ip"] == HOME_CONFIG["HOST_IP"]
-                assert nicegui_app.storage.general["mesh_key"] == ""
+                mgr = manager.get_instance()
+                assert mgr.management_server == HOME_CONFIG["MANAGEMENT_SERVER"]
+                assert mgr.host_ip == HOME_CONFIG["HOST_IP"]
+                assert mgr.mesh_key == ""
         finally:
             manager.reset()
 

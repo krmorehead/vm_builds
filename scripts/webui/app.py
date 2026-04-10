@@ -127,9 +127,25 @@ def _validate_callhome_token(token: str) -> bool:
 def _init_manager() -> None:
     """Initialize the shared manager with an env-based node resolver.
 
-    Safe to call multiple times (e.g., from main() and register_api() in tests).
+    app.py runs the SuperManager tier — it uses ClusterManager with
+    full fleet visibility. Config is loaded from the env file and passed
+    explicitly. No fallbacks.
     """
-    manager.init(_env_node_resolver, auth_validator=_validate_callhome_token)
+    env = load_active_env()
+    config = {
+        "HOST_IP": env.get("PRIMARY_HOST", ""),
+        "HOST_NAME": "super",
+        "MANAGEMENT_SERVER": "",
+        "CALLHOME_PUBLIC_KEY": env.get("CALLHOME_PUBLIC_KEY", ""),
+        "MESH_KEY": env.get("MESH_KEY", ""),
+        "CHILD_MANAGER_IPS": env.get("CHILD_MANAGER_IPS", ""),
+    }
+    manager.init(
+        _env_node_resolver,
+        auth_validator=_validate_callhome_token,
+        config=config,
+        manager_class=manager.ClusterManager,
+    )
 
 
 def _get_callhome_private_key() -> str:
@@ -202,6 +218,11 @@ def register_api() -> None:
             else (request.client.host if request.client else "unknown")
         )
         node = data.register_checkin(state_dir, checkin, remote_ip)
+
+        mgr = manager.get_instance()
+        if isinstance(mgr, manager.ClusterManager):
+            mgr.register_child_checkin(body)
+
         return JSONResponse({
             "status": "ok",
             "node_id": node.node_id,
@@ -414,7 +435,7 @@ def register_api() -> None:
     app.routes.insert(0, Route("/api/timeline/current", _api_timeline_current, methods=["GET"]))
     app.routes.insert(0, Route("/api/hosts/register", _api_host_register, methods=["POST"]))
 
-    manager.register_api(app)
+    manager.register_api(app, include_fleet_storage=False)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

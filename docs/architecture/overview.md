@@ -34,6 +34,187 @@ from the CLI.
 
 ---
 
+## 4-Tier Management Architecture
+
+The system uses a 4-tier hierarchy to manage clusters of Proxmox nodes.
+A **cluster** is a single household's network — one router, multiple nodes,
+all converging onto the same LAN subnet (10.10.10.x) via WiFi mesh and
+wired backhaul. The cluster is tightly managed by a single end user.
+The **SuperManager** provides global fleet visibility across all clusters
+(local + remote/national).
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     TIER 1: SuperManager                       │
+│                                                                │
+│  app.py on the operator's workstation                          │
+│  Global fleet view across ALL clusters and national hosts      │
+│  Receives relay heartbeats from every Cluster Manager          │
+│  nodes.json persistent storage, deploy orchestration           │
+│  Port: $WEBUI_PORT (default 52525)                             │
+│                                                                │
+│  ┌───────────────────────┐     ┌────────────────────────────┐  │
+│  │ Cluster "Home Lab"    │     │ National Host "cabin"      │  │
+│  │ (relay from home)     │     │ (single-node cluster,      │  │
+│  │                       │     │  self-relay via WireGuard)  │  │
+│  └───────────┬───────────┘     └────────────────────────────┘  │
+└──────────────┼─────────────────────────────────────────────────┘
+               │ HTTP relay (heartbeat + cluster_nodes summary)
+               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              TIER 2: Cluster Manager                           │
+│                                                                │
+│  kiosk_server.py with IS_CLUSTER_MANAGER=true                  │
+│  Runs on the router node (home) — the node that creates the    │
+│  LAN subnet via OpenWrt                                        │
+│  Subnet-scoped fleet view: sees all nodes in THIS cluster      │
+│  Broadcasts events (batman, bridge-wifi) DOWN to child Mgrs    │
+│  Relays aggregated heartbeats UP to SuperManager               │
+│  Port: 9001 inside kiosk LXC (10.10.10.22)                    │
+│                                                                │
+│  Child Managers: mesh1, ai, mesh2, bridge-1, bridge-2          │
+│  (discovered via CHILD_MANAGER_IPS — kiosk container LAN IPs)  │
+│                                                                │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐          │
+│  │ mesh1    │ │ ai       │ │ bridge-1 │ │ bridge-2 │ ...       │
+│  │ 10.10.22 │ │ 10.10.XX │ │ 10.10.XX │ │ 10.10.XX │          │
+│  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘          │
+└───────┼────────────┼────────────┼────────────┼─────────────────┘
+        │            │            │            │
+        ▼            ▼            ▼            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              TIER 3: Node Manager (per host)                   │
+│                                                                │
+│  kiosk_server.py (default mode, one per Proxmox host)          │
+│  Manages containers on THIS physical host only                 │
+│  Receives container heartbeats, collects host metrics           │
+│  Relays heartbeat UP to Cluster Manager                        │
+│  Executes local batman/wifi ops on containers via pct exec     │
+│  Port: 9001 inside kiosk LXC                                  │
+│                                                                │
+│  NEVER calls get_mesh_nodes() or get_bridge_nodes()            │
+│  NEVER has fleet-level visibility — that's Tier 2+             │
+│                                                                │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐                       │
+│  │ CT 101   │ │ CT 103   │ │ CT 500   │ ...                    │
+│  │ wireguard│ │ mesh-wifi│ │ netdata  │                        │
+│  └────┬─────┘ └────┬─────┘ └────┬─────┘                       │
+└───────┼────────────┼────────────┼──────────────────────────────┘
+        │            │            │
+        ▼            ▼            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              TIER 4: Container-Side Scripts                     │
+│                                                                │
+│  Self-contained tools baked into each container image           │
+│  Located at /usr/sbin/ — called by Ansible AND Manager         │
+│  Output: KEY=value for programmatic parsing                    │
+│  Examples: batman_trigger.sh, wifi_setup.sh, callhome.py       │
+│                                                                │
+│  callhome.py/sh heartbeats UP to the local Node Manager        │
+│  batman_trigger.sh enables/disables batman-adv mesh             │
+│  wifi_setup.sh configures/queries WiFi modes (AP/STA/WDS)      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Cluster = a single household's network
+
+A cluster is defined by a shared LAN subnet created by the OpenWrt router
+on the cluster's **router node**. When fully configured:
+
+1. The router node (home) runs the OpenWrt VM, creating the 10.10.10.x LAN
+2. Wired nodes (mesh1) connect directly to the LAN switch
+3. Wireless nodes (ai, mesh2, bridge-1, bridge-2) join via WiFi mesh/bridge
+4. **All nodes converge onto the same 10.10.10.x subnet**
+
+```mermaid
+graph TD
+    ISP["ISP Router<br/>192.168.86.x"]
+    SW["Switch"]
+    ISP --> SW
+
+    subgraph cluster["Cluster: Home Lab (10.10.10.x LAN)"]
+        HOME["home<br/>Router Node<br/>Cluster Manager<br/>10.10.10.2"]
+        OPENWRT["OpenWrt VM<br/>10.10.10.1<br/>DHCP · Firewall · WDS AP"]
+        HOME --> OPENWRT
+
+        MESH1["mesh1<br/>Wired to switch<br/>10.10.10.210"]
+        AI["ai<br/>WiFi mesh<br/>10.10.10.x"]
+        MESH2["mesh2<br/>WiFi mesh<br/>10.10.10.x"]
+        BR1["bridge-1<br/>WiFi bridge AP<br/>10.10.10.x"]
+        BR2["bridge-2<br/>WiFi bridge STA<br/>10.10.10.x"]
+
+        OPENWRT ---|LAN wired| MESH1
+        OPENWRT -.->|WiFi mesh| AI
+        OPENWRT -.->|WiFi mesh| MESH2
+        OPENWRT -.->|WiFi bridge| BR1
+        BR1 -.->|WiFi bridge| BR2
+    end
+
+    SW --> HOME
+    SW --> AI
+    SW --> MESH2
+    SW --> BR1
+    SW --> BR2
+```
+
+### National / remote hosts
+
+A remote host (e.g., a cabin node shipped nationally) acts as a **single-node
+cluster**. Its kiosk container is both the Node Manager AND the Cluster Manager
+(it has no children). It connects back to the SuperManager via WireGuard VPN
+and relays heartbeats over the tunnel.
+
+### Communication patterns
+
+| Direction | Protocol | Path |
+|-----------|----------|------|
+| Container → Node Manager | HTTP POST `/api/checkin` | callhome agent → local kiosk (localhost or LAN IP) |
+| Node Manager → Cluster Manager | HTTP POST `/api/checkin` | kiosk relay → Cluster Manager kiosk (10.10.10.x) |
+| Cluster Manager → SuperManager | HTTP POST `/api/checkin` | Cluster relay → SuperManager (WAN or VPN IP) |
+| Cluster Manager → Node Manager | HTTP POST `/api/manager/events` | Event broadcast (batman, bridge-wifi) |
+| Cluster Manager → Node Manager | HTTP GET `/api/batman/local/status` | Status query |
+| SuperManager → Cluster Manager | HTTP (future) | Fleet-wide commands |
+
+### Event propagation: batman mode
+
+Batman mode demonstrates the 4-tier event model:
+
+```mermaid
+sequenceDiagram
+    participant UI as Cluster Manager UI
+    participant CM as Cluster Manager (home)
+    participant NM1 as Node Manager (mesh1)
+    participant NM2 as Node Manager (bridge-1)
+    participant CT1 as CT 103 (mesh1)
+    participant CT2 as CT 104 (bridge-1)
+
+    UI->>CM: POST /api/batman/enable
+    CM->>CM: Phase 1: local (router VM + home containers)
+    CM->>NM1: POST /api/manager/events {type:batman, action:enable}
+    CM->>NM2: POST /api/manager/events {type:batman, action:enable}
+    NM1->>CT1: pct exec 103 -- batman_trigger.sh enable <token>
+    NM2->>CT2: pct exec 104 -- batman_trigger.sh enable <token>
+    CT1-->>NM1: BATMAN=active
+    CT2-->>NM2: BATMAN=active
+    NM1-->>CM: {mesh1/mesh-103: {success: true}}
+    NM2-->>CM: {bridge-1/bridge-104: {success: true}}
+    CM-->>UI: {total: N, succeeded: N, results: {...}}
+```
+
+### OOP class hierarchy (manager.py)
+
+```
+BaseManager                     # Auth, node resolution, heartbeat relay
+├── NodeManager                 # Per-host: local container ops, pct exec
+│   └── ClusterManager          # Subnet-scoped: fleet storage, event broadcast,
+│                               # batman_fleet(), child manager discovery
+└── (SuperManager = app.py      # Uses ClusterManager class with
+     using ClusterManager)      # include_fleet_storage=False, separate
+                                # nodes.json persistent storage
+```
+
+---
+
 ## Target Architecture
 
 ### Home Entertainment Box (Primary Build)
@@ -147,7 +328,10 @@ Build Profiles
 │   └── monitoring_nodes   → Netdata, rsyslog
 │
 └── Dedicated WiFi Bridge (bridge-1, bridge-2 — directly reachable)
-    └── bridge_nodes       → WiFi Bridge LXC (transparent L2 WDS AP/STA link)
+    └── bridge_nodes       → WiFi Bridge LXC
+        bridge-1: AP mode, CT eth0 on vmbr0 (extends household network)
+        bridge-2: STA mode, CT eth0 on vmbr1 (backhaul cable to mesh2)
+        NEVER both on vmbr0 — creates L2 broadcast storm loop
 ```
 
 ---
@@ -304,6 +488,8 @@ Home          AI Node          Mesh2       Bridge-1     Bridge-2
 - All 6 nodes run shared infrastructure (backup, bridges, PCI, iGPU)
 - 4 original nodes are in `vpn_nodes` — WireGuard containers deploy on all 4
 - bridge-1 and bridge-2 are in `bridge_nodes` — WiFi Bridge containers deploy on both
+- Bridge backhaul path: LAN → bridge-1 vmbr0 → CT104 br-lan → WiFi AP ~~2.4GHz ch11~~ WiFi STA → CT104 br-lan → bridge-2 vmbr1 → cable → mesh2 vmbr1
+- CRITICAL: bridge-1 CT on vmbr0 (AP, extends LAN), bridge-2 CT on vmbr1 (STA, backhaul output). NEVER both on vmbr0 — L2 loop
 
 ### Logical Layout
 
@@ -319,10 +505,10 @@ Internet
         │   └── OpenWrt Mesh LXC (VMID 103, WDS STA, WiFi PHY namespace move)
         │
         ├── Proxmox Host "bridge-1" (192.168.86.230, directly reachable)
-        │   └── WiFi Bridge LXC (VMID 104, WiFi PHY namespace move, L2 bridge)
+        │   └── WiFi Bridge LXC (VMID 104, AP mode, CT eth0→vmbr0, WiFi→bridge-2)
         │
         ├── Proxmox Host "bridge-2" (192.168.86.231, directly reachable)
-        │   └── WiFi Bridge LXC (VMID 104, WiFi PHY namespace move, L2 bridge, USB NIC backhaul)
+        │   └── WiFi Bridge LXC (VMID 104, STA mode, WiFi→bridge-1, CT eth0→vmbr1→cable→mesh2)
         │
         └── OpenWrt VM on "home" (VMID 100)
             ├── eth0 ← auto-detected WAN bridge (bridge with default route)
@@ -438,10 +624,18 @@ PHY move after container restart, ensuring persistence across host reboots.
 
 ### LXC Container Networking (host topology)
 
-LXC container networking must match host topology:
+LXC container networking uses two modes based on host position:
 
-- **Hosts behind OpenWrt** (`router_nodes`, `lan_hosts`): Containers use the LAN bridge (second bridge) and OpenWrt LAN subnet (gateway from `env_generated_path`).
-- **Hosts directly on WAN** (e.g., `ai`, `mesh2`): Containers use `proxmox_wan_bridge` and the host's WAN subnet (`ansible_default_ipv4.gateway`/prefix). IP offset +200 avoids collisions with LAN containers. DNS: `8.8.8.8`.
+- **LAN hosts** (`router_nodes`, `lan_hosts`): Containers use the OpenWrt
+  LAN bridge and the 10.10.10.x subnet. Gateway is OpenWrt (10.10.10.1).
+- **WAN hosts** (all others, pre-mesh): Containers use a private NAT bridge
+  (`vmbr_ct`) with `10.99.{container_subnet_id}.{offset}` addressing.
+  Host-side MASQUERADE provides outbound internet. No IPs on the household
+  subnet (192.168.86.x). Each host has its own /24 (home=1, mesh1=2, ai=3,
+  mesh2=4, bridge-1=5, bridge-2=6).
+
+Once the WiFi mesh is fully established, all nodes join the 10.10.10.x LAN.
+The NAT bridge is a bootstrap mechanism for pre-mesh connectivity.
 
 ---
 
@@ -480,8 +674,9 @@ site.yml (current — phased for multi-node)
 │   ├── Play 17: desktop_nodes       [desktop]       desktop_vm, deploy_stamp
 │   ├── Play 18: desktop_nodes       [kiosk]         kiosk_lxc, deploy_stamp
 │   └── Play 19: proxmox             [callhome-config] Configure callhome on all running containers
-│       Containers point to local Manager (kiosk LXC, port 9001).
-│       Manager relays host-level heartbeat UP to the SuperManager.
+│       Containers → local Node Manager (kiosk LXC, port 9001).
+│       Node Manager relays heartbeat UP to Cluster Manager.
+│       Cluster Manager aggregates and relays UP to SuperManager.
 │
 ├── Phase 3b: Fleet readiness gate
 │   └── Play 20: localhost            [multi-tag]     Query /api/fleet/ready for all services

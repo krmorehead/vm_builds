@@ -47,15 +47,25 @@ your infrastructure has a real problem.
 
 ## Justified mock patterns
 
+Every `patch()` or `monkeypatch` call MUST include a comment with TWO parts:
+1. WHY this mock is necessary (what side effect it prevents)
+2. HOW the test still genuinely validates the feature despite the mock
+
+If you cannot write both sentences, the mock is unjustified — remove it and
+test the real thing.
+
 ```python
-# JUSTIFIED: prevent pytest from running ansible-playbook
+# JUSTIFIED: prevent pytest from running ansible-playbook (side effect: 5-min
+# playbook run). Test validates command construction, not playbook execution.
 monkeypatch.setattr("subprocess.run", fake_run)
 
-# JUSTIFIED: test "missing binary" error path
+# JUSTIFIED: test "missing binary" error path (side effect: none, but real
+# binary is always present). Test validates the error message, not binary detection.
 monkeypatch.setattr(build, "find_ansible_playbook", lambda: None)
 
 # JUSTIFIED in TestMain ONLY: isolate a different error path
-# (e.g., test "missing playbook" — need to get past probe step)
+# (side effect: TCP probe blocks for 3s per host). Test validates "missing
+# playbook" error, not host reachability — that's tested by TestInfrastructureHealth.
 monkeypatch.setattr(build, "probe_host", lambda *a, **kw: True)
 ```
 

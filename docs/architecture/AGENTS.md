@@ -14,7 +14,8 @@ Instructions:
 ## Essential Skills Reference
 
 **Architecture Patterns:**
-- @.agents/skills/project-structure-rules - Project architecture principles
+- @.agents/skills/project-structure-rules - Project architecture principles, 4-tier hierarchy
+- @.agents/skills/manager-api-pattern - 4-tier Manager hierarchy, cluster definition, event propagation
 - @.agents/skills/vm-lifecycle-architecture - VM lifecycle and service model
 - @.agents/skills/vm-provisioning-patterns - Provisioning architecture patterns
 - @.agents/skills/vm-cleanup-maintenance - Cleanup architecture and maintenance

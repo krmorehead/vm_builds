@@ -66,9 +66,67 @@ rsyslog_ct_id: 501
 gaming_ct_id: 601           # Gaming (opt-in)
 ```
 
+## 4-Tier Management Architecture
+
+The system uses a 4-tier hierarchy to manage clusters of Proxmox nodes:
+
+```
+Tier 1: SuperManager (app.py)
+  │   Global fleet view, nodes.json persistent storage
+  │   Receives relay heartbeats from ALL Cluster Managers
+  │
+Tier 2: ClusterManager (kiosk_server.py, IS_CLUSTER_MANAGER=true)
+  │   Subnet-scoped fleet view (one household's network)
+  │   Broadcasts events DOWN, relays UP to SuperManager
+  │   Fleet-level ops: batman_fleet(), get_mesh_nodes(), bridge/wifi
+  │
+Tier 3: NodeManager (kiosk_server.py, default)
+  │   Per-host container ops ONLY, relays heartbeats UP
+  │   NEVER iterates other hosts, NEVER calls get_mesh_nodes()
+  │
+Tier 4: Container-side scripts (/usr/sbin/)
+      batman_trigger.sh, wifi_setup.sh, callhome.py
+      KEY=value output, called by Ansible AND Manager
+```
+
+### What is a cluster?
+
+A **cluster** = a single household's network. The router node creates a
+LAN subnet (10.10.10.x) via OpenWrt. All nodes (wired + WiFi mesh) converge
+onto this flat subnet. The router node's kiosk is the Cluster Manager.
+Remote/national hosts are single-node clusters (their own Cluster Manager).
+
+### OOP class hierarchy (manager.py)
+
+```
+BaseManager → NodeManager → ClusterManager
+                              (SuperManager = app.py using ClusterManager)
+```
+
+### Communication paths
+
+- Container → NodeManager: `POST /api/checkin` (callhome agent, localhost)
+- NodeManager → ClusterManager: `POST /api/checkin` (heartbeat relay via MANAGEMENT_SERVER)
+- ClusterManager → SuperManager: `POST /api/checkin` (cluster relay via MANAGEMENT_SERVER)
+- ClusterManager → NodeManager: `POST /api/manager/events` (event broadcast via CHILD_MANAGER_IPS)
+
+### WAN host reachability (DNAT)
+
+WAN host kiosk containers live on private NAT subnets (10.99.x.x) that
+are unreachable from the LAN. The `kiosk_lxc` role deploys iptables DNAT
+rules on WAN hosts forwarding port 9001 from the host's WAN bridge to
+the container. This lets the Cluster Manager reach child Managers on WAN
+hosts via the Proxmox host IP (`ansible_host`).
+
+`CHILD_MANAGER_IPS` uses container IPs for LAN hosts (directly reachable)
+and host IPs for WAN hosts (via DNAT). See `manager-api-pattern` skill.
+
 ## Anti-patterns
 
 NEVER explain what Ansible is in project structure rules
 NEVER use proxmox_lxc_default_template - create service-specific template vars
 NEVER split provisioning and configuration into separate milestones
 NEVER add graceful degradation for expected hardware (iGPU, WiFi, IOMMU)
+NEVER put fleet-level operations on NodeManager — ClusterManager only
+NEVER patch running containers — update build scripts, rebuild images, redeploy
+NEVER use raw `ansible-playbook --tags openwrt` without `infra` — bridges undefined

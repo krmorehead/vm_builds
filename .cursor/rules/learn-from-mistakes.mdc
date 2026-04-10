@@ -29,18 +29,60 @@ Trigger: any of these happened during the session:
 
 # SHOW STOPPER: Unreachable host protocol
 
-When ANY host is unreachable: FULL STOP. Do not continue development.
+When ANY host is unreachable OR SSH authentication fails: FULL STOP.
+Do not continue development. Do not build other hosts. Do not "skip and continue."
 
 1. Investigate cause IMMEDIATELY. Check terminal history for destructive ops.
 2. NEVER dismiss as "pre-existing." Every unreachable host was caused by something.
 3. For `wol_capable: false` hosts (ai): physical power-on required. No remote recovery.
 4. Do NOT validate features against a substitute host when the real target is down.
-5. Report severity to the user explicitly. This is a 5-alarm emergency.
+5. Do NOT build other hosts while one is down. ALL hosts must be healthy first.
+6. Report severity to the user explicitly. This is a 5-alarm emergency.
 
-Previous catastrophe: agent dismissed ai unreachable THREE TIMES over 4 hours.
-Ran converge/verify cycles that could never validate Moonlight streaming
-(ai IS the Sunshine server). Wasted entire session. ai required physical
-power-on 3000 miles away.
+## Mandatory connectivity checks
+
+- ALWAYS run an SSH connectivity check to ALL hosts BEFORE starting any
+  multi-host work session.
+- ALWAYS re-check ALL hosts after EVERY build/deploy/converge operation,
+  not just the host you targeted. Collateral damage is real.
+- SSH "Permission denied" is JUST AS MUCH a show stopper as EHOSTUNREACH.
+  Both mean you've lost management access.
+- If a host's Proxmox API (port 8006) stops responding, that's a show
+  stopper too — it indicates service-level failure on the host.
+- NEVER proceed to "build the next host" when any host is inaccessible.
+
+## What counts as "unreachable"
+
+All of these are SHOW STOPPERS:
+- `unreachable=1` in Ansible play recap
+- SSH connection refused or timed out
+- SSH "Permission denied" (authentication failure = lost access)
+- Proxmox API (port 8006) connection refused
+- Host stops responding to ping
+- Host metrics showing 0% for all values (indicates SSH failure from Manager)
+
+## Previous catastrophes
+
+1. (2026-03-23): Agent dismissed ai unreachable THREE TIMES over 4 hours.
+   Continued running converge/verify cycles that could never validate
+   Moonlight streaming (ai IS the Sunshine server). Wasted entire session.
+   ai required physical power-on 3000 miles away.
+
+2. (2026-04-08): Agent ran individual builds on mesh1, mesh2, bridge-1,
+   bridge-2 while ai's SSH authentication was failing. Instead of stopping
+   at the FIRST sign of ai being inaccessible, continued building other
+   hosts for 20+ minutes. Should have FULL STOPPED immediately when ai's
+   SSH failed and reported to the user. The "skip this host and continue"
+   instinct is ALWAYS wrong.
+
+3. (2026-04-09): ai SSH failures were misdiagnosed as USB ethernet link
+   drops. Real cause: kiosk container on bridge-1 had the same IP as ai
+   (192.168.86.220) due to WAN offset+base+index formula on the shared
+   household subnet. SSH alternated between ai and the container. Lesson:
+   when SSH intermittently fails with changing host keys, check ARP and
+   container IPs for address conflicts BEFORE investigating hardware.
+   Permanently fixed by replacing the shared-subnet formula with per-host
+   NAT bridges (10.99.x.x) — containers can never collide with host IPs.
 
 When adding diagnostic tasks during troubleshooting, ALWAYS generalize them
 and make them permanent before closing the issue. Ad-hoc diagnostics that get
@@ -58,6 +100,24 @@ missing drivers, kernel parameters) behind silent skips.
   when IOMMU groups were invalid on mesh1. Root cause was VT-d disabled in
   BIOS — a 30-second fix that was masked for an entire test cycle.
 
+# Strict config — no silent fallback chains
+
+NEVER write try/except chains that resolve config from multiple sources
+and silently return empty strings when all fail. This applies to ALL Python
+code in the project, not just Ansible.
+
+- Required config MUST be passed as constructor parameters or function args.
+- If a required value is missing, raise ValueError immediately at the call
+  site — NOT 5 layers deep when an SSH call gets an empty hostname.
+- NEVER use `os.environ.get("X", "")` as a runtime fallback for config that
+  should have been provided at initialization.
+- The caller (app.py, kiosk_server.py) builds the config dict from ITS
+  source (env file, config.json). The manager receives it and trusts it.
+- Previous bug: `get_host_ip()` in manager.py had a 3-layer fallback
+  (config dict → NiceGUI app.storage → os.environ → ""). When all missed,
+  the empty string caused `ssh root@` which produced "Could not resolve
+  hostname" — a confusing error that hid the real problem (missing config).
+
 # Code custodianship
 
 After completing a feature or fixing a bug, ALWAYS do a custodianship pass:
@@ -68,8 +128,8 @@ After completing a feature or fixing a bug, ALWAYS do a custodianship pass:
    credential. Violation = catastrophic: permanently locks out remote nodes.
 2. **Pipefail audit.** Grep for `ansible.builtin.shell` tasks with `|` and
    verify `set -o pipefail` is present (except BusyBox/OpenWrt targets).
-3. **Cleanup parity.** Diff the removal lists in `molecule/default/cleanup.yml`
-   and `playbooks/cleanup.yml` — they must clean the same files.
+3. **Cleanup coverage.** Verify all deployed files appear in `playbooks/cleanup.yml`
+   (the unified cleanup). `molecule/default/cleanup.yml` is a one-line import.
    Every item in cleanup must be something the playbook itself deployed.
 4. **Doc accuracy.** Check that `docs/architecture/overview.md` role exports
    match actual `set_fact` calls. Check that bridge references use
@@ -87,3 +147,50 @@ task complete until tests pass.
 2. **Run molecule test.** After every code change to roles, playbooks, or molecule config, run `molecule test` against the test machine. See the `ansible-testing` skill for details.
 3. **Update verify.yml.** When adding or changing behavior, ALWAYS add or update corresponding assertions in `molecule/default/verify.yml`.
 4. **No untested merges.** Do not commit or present changes as complete until `molecule test` passes with exit code 0.
+
+# NEVER fabricate test data
+
+"Manual testing" means testing the REAL system against REAL infrastructure.
+It does NOT mean fabricating heartbeats with curl, posting fake check-ins,
+or simulating nodes that don't exist.
+
+- NEVER use `curl -X POST /api/checkin` to create fake nodes during manual testing.
+  Real nodes come from real kiosk_server instances running on real hardware.
+- NEVER claim "manual testing passed" after only VIEWING pages. Every interactive
+  element (batman toggle, WiFi restart, bridge mode switch) must be CLICKED and
+  its effect VERIFIED on the actual hardware.
+- NEVER say "5 child Managers display correctly" when those 5 entries were
+  curl'd into existence moments ago. That is mocking with extra steps.
+- If infrastructure is not deployed (kiosk containers not running), deploy it
+  with `molecule converge`. Do NOT fabricate what the infrastructure would produce.
+- Fabricated data is the SAME anti-pattern as mocking `_ssh_exec` — it produces
+  outputs that look correct while proving nothing about real functionality.
+
+Previous catastrophe (2026-04-09): Agent fabricated 5 fake child Manager
+heartbeats via curl, viewed the fleet dashboard, never clicked any buttons,
+and declared "manual testing complete." Batman mode was never actually tested.
+Bridge WiFi restart was never actually tested. The entire "test" was theater.
+
+# Laziness is NEVER a reason to mock
+
+The ONLY valid reason to mock is: the real operation would cause IRREVERSIBLE
+side effects that take more than 30 seconds to undo. Examples: launching
+ansible-playbook (modifies infrastructure), running build-images.sh (15 min).
+
+Everything else runs for real:
+- SSH to hosts you control → run the real SSH. If it fails, you need to know.
+- `wg show` / `docker info` / `pihole` → run the real binary. If it's not
+  installed, the function returns None naturally. Don't mock what reality
+  already provides.
+- Restarting callhome on containers → recoverable in seconds. Not irreversible.
+- Probing hosts → real TCP probe. Don't mock connectivity.
+- Objects with simple interfaces → write 3 lines of real Python instead of
+  reaching for MagicMock. `class FakeLog: def push(self, text): self.lines.append(text)`
+  is a real object, not a mock.
+
+Previous bug (2026-04-09): Agent rationalized mocking subprocess.run for
+callhome collector tests ("the binary might not be installed"), kickstart
+tests ("might restart a service"), and status_text tests ("can't construct
+NiceGUI element"). Every one of these could be tested for real. The agent
+was writing justification comments for lazy mocks instead of writing real
+tests.

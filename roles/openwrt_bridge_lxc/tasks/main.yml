@@ -67,9 +67,20 @@
       Run: lspci -k | grep -A2 'Network controller'
   when: _wifi_phys | length == 0
 
-# ── Determine container network based on host topology ───────────
-# Bridge-1 (single NIC): container eth0 on proxmox_wan_bridge
-# Bridge-2 (multi-NIC): container eth0 on the USB NIC bridge
+# ── Determine container network based on wifi_role ────────────────
+# AP mode (bridge-1): container eth0 on proxmox_wan_bridge (vmbr0).
+#   Extends the household network over WiFi.
+# STA mode (bridge-2): container eth0 on the backhaul bridge (vmbr1).
+#   Receives WiFi traffic and outputs to the physical cable.
+#
+# CRITICAL: Both ends of the WiFi bridge MUST NOT be on the same L2
+# broadcast domain. If AP and STA containers are both on vmbr0 (same
+# switch), the WiFi link creates a broadcast storm loop that takes
+# down the entire household network.
+
+- name: Resolve wifi_role for this host
+  ansible.builtin.set_fact:
+    _bridge_wifi_role: "{{ wifi_role | default('ap') }}"
 
 - name: Detect USB NICs via sysfs
   ansible.builtin.shell:
@@ -110,7 +121,8 @@
       set -o pipefail
       bridge_name=""
       for br in $(ip -o link show type bridge | awk -F': ' '{print $2}'); do
-        if bridge link show dev {{ item }} master "$br" >/dev/null 2>&1; then
+        output=$(bridge link show dev {{ item }} master "$br" 2>/dev/null)
+        if [ -n "$output" ]; then
           bridge_name="$br"
           break
         fi
@@ -136,10 +148,37 @@
          if _backhaul_usb_nics | length > 0 and _usb_bridge_raw.results | default([]) | length > 0
          else '' }}
 
-- name: Select container bridge (USB backhaul or WAN)
+- name: Fail if STA mode has no backhaul bridge
+  ansible.builtin.fail:
+    msg: >-
+      {{ inventory_hostname }}: wifi_role=sta requires a backhaul bridge
+      (second NIC with a Proxmox bridge). No non-management USB NIC found.
+      STA containers MUST output to a backhaul cable, not the WAN bridge.
+      Putting STA on the WAN bridge creates an L2 broadcast storm loop.
+  when:
+    - _bridge_wifi_role == 'sta'
+    - _backhaul_bridge | length == 0
+
+# SAFETY GATE: STA backhaul bridge MUST NOT be the WAN bridge.
+# If it is, we have a single L2 domain on both ends of the WiFi link,
+# which creates a broadcast storm that takes down the household network.
+- name: "SAFETY GATE: STA backhaul bridge must differ from WAN bridge"
+  ansible.builtin.fail:
+    msg: >-
+      CRITICAL SAFETY VIOLATION on {{ inventory_hostname }}:
+      Backhaul bridge '{{ _backhaul_bridge }}' is the SAME as the WAN bridge
+      '{{ proxmox_wan_bridge }}'. This would create an L2 broadcast storm loop.
+      The STA container MUST be on a different bridge (typically vmbr1 with a
+      dedicated backhaul cable). Check hardware: the USB backhaul NIC must be
+      on a separate bridge from the management NIC.
+  when:
+    - _bridge_wifi_role == 'sta'
+    - _backhaul_bridge == proxmox_wan_bridge
+
+- name: Select container bridge based on wifi_role
   ansible.builtin.set_fact:
     _bridge_ct_bridge: >-
-      {{ _backhaul_bridge if _backhaul_bridge | length > 0
+      {{ _backhaul_bridge if _bridge_wifi_role == 'sta' and _backhaul_bridge | length > 0
          else proxmox_wan_bridge }}
 
 - name: Build bridge node host list
@@ -157,9 +196,10 @@
 - name: Report bridge container assignment
   ansible.builtin.debug:
     msg: >-
-      {{ inventory_hostname }}: bridge LXC IP={{ _bridge_ct_ip }}/{{ _bridge_ct_cidr }}
+      {{ inventory_hostname }}: bridge LXC role={{ _bridge_wifi_role }}
+      IP={{ _bridge_ct_ip }}/{{ _bridge_ct_cidr }}
       gw={{ _bridge_ct_gateway }} bridge={{ _bridge_ct_bridge }}
-      ({{ 'USB backhaul' if _backhaul_bridge | length > 0 else 'WAN bridge' }})
+      ({{ 'backhaul' if _bridge_wifi_role == 'sta' else 'WAN' }})
 
 # ── Verify custom LXC image exists ────────────────────────────────
 
@@ -200,6 +240,40 @@
     lxc_ct_ip: "{{ _bridge_ct_ip }}/{{ _bridge_ct_cidr }}"
     lxc_ct_gateway: "{{ _bridge_ct_gateway }}"
     lxc_ct_nameserver: "8.8.8.8"
+
+# ── POST-PROVISION SAFETY GATE ──────────────────────────────────
+# Verify the ACTUAL container config matches what we intended.
+# If the container ended up on the wrong bridge, stop it and fail
+# before WiFi ever comes up.
+
+- name: "SAFETY GATE: Verify actual container bridge assignment"
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      actual=$(pct config {{ bridge_ct_id }} | grep '^net0' | sed -n 's/.*bridge=\([^,]*\).*/\1/p')
+      echo "$actual"
+    executable: /bin/bash
+  register: _actual_ct_bridge
+  changed_when: false
+
+- name: "SAFETY GATE: Stop container if bridge mismatch (STA on WAN = storm)"
+  ansible.builtin.command:
+    cmd: pct stop {{ bridge_ct_id }}
+  when:
+    - _bridge_wifi_role == 'sta'
+    - _actual_ct_bridge.stdout | trim == proxmox_wan_bridge
+
+- name: "SAFETY GATE: Fail on STA bridge mismatch"
+  ansible.builtin.fail:
+    msg: >-
+      CRITICAL: {{ inventory_hostname }} CT {{ bridge_ct_id }} was created on
+      bridge '{{ _actual_ct_bridge.stdout | trim }}' but wifi_role=sta requires
+      bridge '{{ _backhaul_bridge }}'. Container has been stopped.
+      Expected: {{ _backhaul_bridge }}, Got: {{ _actual_ct_bridge.stdout | trim }}.
+      This would cause an L2 broadcast storm. Investigate proxmox_lxc role.
+  when:
+    - _bridge_wifi_role == 'sta'
+    - _actual_ct_bridge.stdout | trim != (_backhaul_bridge | trim)
 
 # ── Override default OpenWrt LAN IP ─────────────────────────────
 # OpenWrt images boot with 192.168.1.1 on br-lan, which collides
@@ -311,3 +385,74 @@
       exec pct exec {{ bridge_ct_id }} -- /usr/sbin/batman_trigger.sh "$@"
     dest: /usr/local/bin/batman_trigger.sh
     mode: "0755"
+
+# ── Broadcast storm guard ──────────────────────────────────────
+# Lightweight watchdog that monitors broadcast packet rates on the
+# WAN bridge. If the rate exceeds a threshold (storm), it immediately
+# stops the bridge container to break the L2 loop.
+# Runs as a systemd service so it auto-starts with the host.
+
+- name: Deploy broadcast storm guard script
+  ansible.builtin.copy:
+    content: |
+      #!/bin/bash
+      # Broadcast storm guard for WiFi bridge containers.
+      # Monitors WAN bridge broadcast packet rate. If >500 bcast
+      # packets/sec sustained for 3 checks, stop the bridge container.
+      BRIDGE="{{ proxmox_wan_bridge }}"
+      CT_ID="{{ bridge_ct_id }}"
+      THRESHOLD=500
+      STRIKES=0
+      MAX_STRIKES=3
+      INTERVAL=2
+
+      get_bcast_rx() {
+        cat "/sys/class/net/${BRIDGE}/statistics/multicast" 2>/dev/null || echo 0
+      }
+
+      prev=$(get_bcast_rx)
+      while true; do
+        sleep "$INTERVAL"
+        curr=$(get_bcast_rx)
+        rate=$(( (curr - prev) / INTERVAL ))
+        prev=$curr
+        if [ "$rate" -gt "$THRESHOLD" ]; then
+          STRIKES=$((STRIKES + 1))
+          logger -t storm-guard "WARNING: $BRIDGE bcast rate=${rate}/s (strike ${STRIKES}/${MAX_STRIKES})"
+          if [ "$STRIKES" -ge "$MAX_STRIKES" ]; then
+            logger -t storm-guard "CRITICAL: Broadcast storm detected on $BRIDGE (rate=${rate}/s). Stopping CT $CT_ID."
+            pct stop "$CT_ID" 2>/dev/null
+            logger -t storm-guard "CT $CT_ID stopped. Storm guard exiting."
+            exit 1
+          fi
+        else
+          STRIKES=0
+        fi
+      done
+    dest: /usr/local/bin/bridge-storm-guard.sh
+    mode: "0755"
+
+- name: Deploy storm guard systemd service
+  ansible.builtin.copy:
+    content: |
+      [Unit]
+      Description=Broadcast storm guard for WiFi bridge CT {{ bridge_ct_id }}
+      After=network.target
+
+      [Service]
+      Type=simple
+      ExecStart=/usr/local/bin/bridge-storm-guard.sh
+      Restart=on-failure
+      RestartSec=10
+
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/bridge-storm-guard.service
+    mode: "0644"
+
+- name: Enable and start storm guard
+  ansible.builtin.systemd:
+    name: bridge-storm-guard
+    daemon_reload: true
+    enabled: true
+    state: started

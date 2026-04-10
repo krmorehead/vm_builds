@@ -1,13 +1,14 @@
 ---
 # Shared task: compute container networking based on host topology.
 #
-# Hosts behind OpenWrt (router_nodes, lan_hosts) use the OpenWrt LAN subnet.
-# All other hosts use their WAN subnet with a +200 IP offset to avoid collisions.
+# LAN hosts (router_nodes, lan_hosts) use the OpenWrt LAN subnet (10.10.10.x).
+# WAN hosts use a private NAT bridge (10.99.{container_subnet_id}.x) with
+# host-side MASQUERADE — no IPs on the household subnet, no collisions.
 #
 # Required variables (set via include_tasks vars:):
 #   lxc_net_service_name  — human-readable name for debug output
-#   lxc_net_ip_offset     — base IP offset for this service
-#   lxc_net_flavor_group  — inventory group for per-host indexing
+#   lxc_net_ip_offset     — service IP offset (last octet)
+#   lxc_net_flavor_group  — inventory group (used for LAN per-host indexing)
 #
 # Exported facts:
 #   _lxc_net_on_lan     — whether host is behind OpenWrt
@@ -59,15 +60,13 @@
     _lxc_net_bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
   when: _lxc_net_on_lan | bool
 
-- name: "Set container network for WAN — {{ lxc_net_service_name }}"
+- name: "Set container network for NAT bridge — {{ lxc_net_service_name }}"
   ansible.builtin.set_fact:
-    _lxc_net_gateway: "{{ ansible_default_ipv4.gateway }}"
-    _lxc_net_cidr: "{{ ansible_default_ipv4.prefix }}"
-    _lxc_net_ip: >-
-      {{ ansible_default_ipv4.network.split('.')[0:3] | join('.') }}.{{
-         lxc_net_ip_offset + 200 + groups[lxc_net_flavor_group].index(inventory_hostname) }}
+    _lxc_net_gateway: "{{ container_subnet_prefix }}.{{ container_subnet_id }}.1"
+    _lxc_net_cidr: "24"
+    _lxc_net_ip: "{{ container_subnet_prefix }}.{{ container_subnet_id }}.{{ lxc_net_ip_offset }}"
     _lxc_net_nameserver: "8.8.8.8"
-    _lxc_net_bridge: "{{ proxmox_wan_bridge }}"
+    _lxc_net_bridge: "{{ proxmox_container_bridge }}"
   when: not (_lxc_net_on_lan | bool)
 
 - name: "Report container IP — {{ lxc_net_service_name }}"
@@ -76,4 +75,5 @@
       {{ inventory_hostname }}: {{ lxc_net_service_name }}
       IP={{ _lxc_net_ip }}/{{ _lxc_net_cidr }}
       gw={{ _lxc_net_gateway }}
-      ({{ 'OpenWrt LAN' if (_lxc_net_on_lan | bool) else 'WAN subnet' }})
+      bridge={{ _lxc_net_bridge }}
+      ({{ 'OpenWrt LAN' if (_lxc_net_on_lan | bool) else 'NAT bridge' }})

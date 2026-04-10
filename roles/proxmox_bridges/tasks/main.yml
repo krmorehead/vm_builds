@@ -64,6 +64,44 @@
   ansible.builtin.set_fact:
     unbridged_nics: "{{ physical_nics | difference(bridged_nics) | sort | list }}"
 
+# ── Filter out disconnected NICs (no cable) ────────────────────
+# Only create bridges for unbridged NICs that have an active link.
+# Creating bridges for disconnected NICs leaves broken config in
+# ansible-bridges.conf that can prevent PVE services from starting
+# on reboot (NIC name may change or NIC may not initialize).
+# Previous bug: ai had PCIe NIC (r8169) with no cable. Bridge was
+# created for it. On reboot, PVE services failed because the
+# bridge config referenced a NIC that never came up.
+
+- name: Check carrier (link) state for unbridged NICs
+  ansible.builtin.shell:
+    cmd: cat /sys/class/net/{{ item }}/carrier 2>/dev/null || echo 0
+  loop: "{{ unbridged_nics }}"
+  register: _carrier_checks
+  changed_when: false
+  when: unbridged_nics | length > 0
+
+- name: Filter unbridged NICs to those with active link
+  ansible.builtin.set_fact:
+    unbridged_nics: >-
+      {{ _carrier_checks.results | default([])
+         | selectattr('stdout', 'defined')
+         | selectattr('stdout', 'equalto', '1')
+         | map(attribute='item')
+         | sort | list }}
+  when: unbridged_nics | length > 0
+
+- name: Report skipped disconnected NICs
+  ansible.builtin.debug:
+    msg: >-
+      Skipping bridge creation for disconnected NIC(s):
+      {{ (physical_nics | difference(bridged_nics) | sort)
+         | difference(unbridged_nics)
+         | join(', ') }}
+      (no carrier/cable detected)
+  when:
+    - (physical_nics | difference(bridged_nics) | length) > (unbridged_nics | length)
+
 - name: Discover highest existing bridge index
   ansible.builtin.shell:
     cmd: |
@@ -155,3 +193,91 @@
     msg: >-
       WAN bridge={{ proxmox_wan_bridge }},
       all bridges={{ proxmox_all_bridges | join(', ') }}
+
+# ── Container NAT bridge (WAN hosts only) ───────────────────────
+# WAN hosts get a private internal bridge for LXC containers.
+# Containers use 10.99.{container_subnet_id}.0/24 with host-side
+# NAT (MASQUERADE) for outbound traffic. This eliminates IP
+# collisions on the household subnet.
+#
+# LAN hosts (behind OpenWrt) don't need this — their containers
+# are already on the isolated OpenWrt LAN (10.10.10.x).
+
+- name: Determine if host needs container NAT bridge
+  ansible.builtin.set_fact:
+    _needs_container_bridge: >-
+      {{ 'router_nodes' not in group_names and 'lan_hosts' not in group_names }}
+
+- name: Deploy container bridge configuration
+  ansible.builtin.template:
+    src: container-bridge.conf.j2
+    dest: /etc/network/interfaces.d/ansible-container-bridge.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when: _needs_container_bridge | bool
+  register: _container_bridge_deployed
+
+- name: Bring up container bridge
+  ansible.builtin.command:
+    cmd: ifup {{ container_bridge_name }}
+  when:
+    - _needs_container_bridge | bool
+    - _container_bridge_deployed.changed
+  changed_when: true
+  failed_when: false
+
+- name: Enable IP forwarding for container NAT
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: "1"
+    sysctl_set: true
+    state: present
+    reload: true
+  when: _needs_container_bridge | bool
+
+- name: Add iptables MASQUERADE rule for container subnet
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      SUBNET="{{ container_subnet_prefix }}.{{ container_subnet_id }}.0/24"
+      WAN_IF="{{ proxmox_wan_bridge }}"
+      if ! iptables -t nat -C POSTROUTING -s "$SUBNET" -o "$WAN_IF" -j MASQUERADE 2>/dev/null; then
+        iptables -t nat -A POSTROUTING -s "$SUBNET" -o "$WAN_IF" -j MASQUERADE
+      fi
+    executable: /bin/bash
+  when: _needs_container_bridge | bool
+  changed_when: true
+
+- name: Add iptables FORWARD rules for container traffic
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      SUBNET="{{ container_subnet_prefix }}.{{ container_subnet_id }}.0/24"
+      CT_BR="{{ container_bridge_name }}"
+      WAN_IF="{{ proxmox_wan_bridge }}"
+      if ! iptables -C FORWARD -i "$CT_BR" -o "$WAN_IF" -j ACCEPT 2>/dev/null; then
+        iptables -A FORWARD -i "$CT_BR" -o "$WAN_IF" -j ACCEPT
+      fi
+      if ! iptables -C FORWARD -i "$WAN_IF" -o "$CT_BR" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
+        iptables -A FORWARD -i "$WAN_IF" -o "$CT_BR" -m state --state RELATED,ESTABLISHED -j ACCEPT
+      fi
+    executable: /bin/bash
+  when: _needs_container_bridge | bool
+  changed_when: true
+
+- name: Export container bridge fact
+  ansible.builtin.set_fact:
+    proxmox_container_bridge: >-
+      {{ container_bridge_name if (_needs_container_bridge | bool)
+         else (proxmox_all_bridges[1] | default(proxmox_wan_bridge)) }}
+    cacheable: true
+
+- name: Report container bridge setup
+  ansible.builtin.debug:
+    msg: >-
+      container_bridge={{ proxmox_container_bridge }}
+      {{ '(NAT via ' + proxmox_wan_bridge + ', subnet '
+         + container_subnet_prefix + '.' + (container_subnet_id | string) + '.0/24)'
+         if (_needs_container_bridge | bool)
+         else '(OpenWrt LAN bridge, no NAT)' }}

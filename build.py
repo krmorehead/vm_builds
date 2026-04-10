@@ -589,7 +589,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print()
 
-    result = subprocess.run(cmd, env={**os.environ, **env})
+    run_env = {**os.environ, **env}
+    if env_path.name == "test.env":
+        run_env.setdefault("MOLECULE_PROJECT_DIRECTORY", str(PROJECT_ROOT))
+    result = subprocess.run(cmd, env=run_env)
 
     if fleet_monitor:
         fleet_monitor.stop()

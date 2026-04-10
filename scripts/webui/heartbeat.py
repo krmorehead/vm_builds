@@ -639,9 +639,13 @@ def _parse_batman_interfaces(output: str) -> list[dict]:
 
 
 def collect_batman_metrics(ip: str) -> HeartbeatCache:
-    """Collect batman-adv status from a node via SSH."""
+    """Collect batman-adv status from a node via SSH.
+
+    batman_trigger.sh lives inside the bridge LXC container (VMID 104),
+    so we run it via pct exec on the Proxmox host.
+    """
     now = datetime.now().isoformat(timespec="seconds")
-    ok, raw = _ssh_exec(ip, "/usr/local/bin/batman_trigger.sh status", timeout=10)
+    ok, raw = _ssh_exec(ip, "pct exec 104 -- /usr/sbin/batman_trigger.sh status", timeout=10)
     if not ok:
         return HeartbeatCache(
             node_id="", metric_type="batman",

@@ -3,3 +3,4 @@ ansible_host: "{{ lookup('env', 'MESH_2_HOST') }}"
 pci_passthrough_allow_reboot: true
 wol_capable: true
 wifi_role: sta
+container_subnet_id: 4

@@ -131,6 +131,10 @@ def register() -> None:
                 if env_path.exists():
                     loaded = data.load_environment(env_path)
                     env_extra.update(loaded.values)
+                if env_path.name == "test.env":
+                    env_extra.setdefault(
+                        "MOLECULE_PROJECT_DIRECTORY", str(data.PROJECT_ROOT),
+                    )
 
                 def _on_line(text: str) -> None:
                     if text.startswith("PLAY ["):

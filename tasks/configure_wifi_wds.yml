@@ -10,9 +10,11 @@
 #   _wds_wifi_role     — "ap" or "sta"
 #   _wds_country       — regulatory domain (default: US)
 #   _wds_channel       — channel or "auto"
+#   _wds_band          — "2g" or "5g" (optional; auto-detected if omitted)
 #   _wds_mesh_key      — MESH_KEY for batman HMAC (optional)
 #
-# Band detection is automatic (wifi_setup.sh prefers 5GHz when available).
+# Band: explicitly set for bridge containers (AX210 5GHz AP fails).
+# Auto-detected for mesh containers (hardware determines band).
 #
 # WiFi kernel modules MUST be loaded on the HOST before the PHY
 # namespace move. Do NOT modprobe inside the container.
@@ -82,7 +84,8 @@
     --key "{{ _wds_key }}"
     --encryption {{ _wds_encryption | default("sae") }}
     --channel {{ _wds_channel | default("auto") }}
-    --country {{ _wds_country | default("US") }}'
+    --country {{ _wds_country | default("US") }}
+    {{ "--band " ~ _wds_band if _wds_band | default("") | length > 0 else "" }}'
   register: _wds_setup_result
   changed_when: true
   no_log: true

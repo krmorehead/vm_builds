@@ -30,6 +30,14 @@ topology (IPs, bridges, subnets, peer keys).
   in the image.
 - This applies equally to firmware images (OpenWrt), LXC rootfs tarballs,
   VM disk images, and any other deployable artifact.
+- NEVER patch running containers/VMs at runtime (`pct exec ... opkg install`,
+  `ssh ... apt install`, etc.). When a container is missing a package or
+  binary, update `build-images.sh`, rebuild the image, and redeploy via
+  `molecule converge`. Runtime patches are lost on recreation and create
+  drift between the image definition and running state.
+- Previous bug (2026-04-09): Router VM was missing `openssl-util` for
+  batman_trigger.sh. Initial instinct was `opkg install` on the running VM.
+  Correct fix: add to `ROUTER_PACKAGES` in `build-images.sh`, rebuild, redeploy.
 
 ### One path, no fallbacks
 Every deployment scenario has exactly one tested code path. NEVER add
@@ -43,6 +51,18 @@ not set), FAIL with a clear message telling the operator exactly how to fix
 it. This applies to images, hardware detection, network topology, and every
 other dependency.
 
+This rule applies equally to Python code:
+- NEVER chain try/except blocks to resolve config (config → storage →
+  env → default). The caller MUST provide all required values up front.
+- NEVER silently return empty strings for missing required config. Raise
+  ValueError immediately so the error surfaces at the source.
+- Constructor parameters that are required MUST use strict typing with no
+  defaults. If a parameter is optional, make it Optional[T] explicitly.
+- Previous bug: manager.py had 3-layer fallback chains (config dict →
+  app.storage.general → os.environ) for HOST_IP, MESH_KEY, HOST_NAME.
+  Missing values silently propagated as empty strings, causing confusing
+  SSH failures 5 layers deep instead of failing at init time.
+
 ### Follow community standards
 Before writing custom automation, check if the upstream project already has
 an official tool or recommended approach for exactly this use case. Use it.
@@ -54,16 +74,20 @@ most of these problems. Our job is to compose their solutions, not reinvent
 them.
 
 ### Manager-first for runtime operations
-Three strict tiers — no shortcuts between layers:
+Four strict tiers — no shortcuts between layers:
 
-1. **Super Manager** (NiceGUI Web UI pages) — ONLY talks to the Manager
-   via HTTP on `localhost` (default port 9001). NEVER SSHes, NEVER runs
-   shell commands, NEVER imports `heartbeat._ssh_exec`.
-2. **Manager** (`manager.py` REST endpoints) — receives HTTP from the
-   super manager, executes operations via container-side scripts over SSH.
-   Hypervisor ops (`pct`/`qm`) go to the Proxmox host. Heartbeat
-   collectors use container scripts when available.
-3. **Container-side scripts** (baked into image at `/usr/sbin/`) — self-
+1. **SuperManager** (`app.py`) — global fleet view. Aggregates heartbeats
+   from all Cluster Managers. Logs cluster-level events. UI pages ONLY
+   talk to the manager API via HTTP. NEVER SSHes, NEVER runs shell
+   commands, NEVER imports `heartbeat._ssh_exec`.
+2. **ClusterManager** (`kiosk_server.py`, `IS_CLUSTER_MANAGER=true`) —
+   subnet-scoped fleet view. Accepts heartbeats from child NodeManagers.
+   Fleet-level ops (batman across nodes, bridge/wifi across nodes) HERE.
+   Broadcasts events DOWN to NodeManagers. Relays UP to SuperManager.
+3. **NodeManager** (`kiosk_server.py`, default) — per-host container
+   management. Relays heartbeats UP. Receives broadcast events. LOCAL ops
+   only. NEVER calls `get_mesh_nodes()` or `get_bridge_nodes()`.
+4. **Container-side scripts** (baked into image at `/usr/sbin/`) — self-
    contained tools that detect hardware, apply config, and report status.
    Called identically by Ansible (initial deploy) and Manager (runtime).
    Output uses `KEY=value` format for programmatic parsing.
@@ -74,9 +98,9 @@ and fleet health monitoring.
 
 ### INVARIANT: kiosk_nodes = ALL proxmox hosts
 EVERY physical host MUST be in `kiosk_nodes`. A host without a Manager
-(Kiosk LXC) cannot participate in the 3-tier heartbeat system — it is
-invisible to the SuperManager. The verify playbook hard-fails if any
-`proxmox` host is missing from `kiosk_nodes`.
+(Kiosk LXC) cannot participate in the 4-tier heartbeat system — it is
+invisible to the Cluster Manager and SuperManager. The verify playbook
+hard-fails if any `proxmox` host is missing from `kiosk_nodes`.
 
 When adding a new host to `proxmox`, ALWAYS add it to `kiosk_nodes` in
 BOTH `inventory/hosts.yml` AND `molecule/default/molecule.yml`.
@@ -209,6 +233,12 @@ converge/verify, cleanup/rollback) MUST reconstruct the group first.
 Extract reconstruction into `tasks/reconstruct_<type>_group.yml`.
 
 ## Network topology
+
+A **cluster** is a single household's network. The router node creates a
+LAN subnet (10.10.10.x). All nodes converge onto this subnet once the
+WiFi mesh is established.
+
+### Bootstrap (pre-mesh, Ansible provisioning)
 ```
 ISP Router (192.168.86.x supernet)
   |
@@ -226,6 +256,31 @@ Home          AI Node          Mesh2       Bridge-1     Bridge-2
 
 - **home**, **ai**, **mesh2**, **bridge-1**, **bridge-2**: directly reachable on the supernet (no proxy)
 - **mesh1**: behind home's OpenWrt, reachable via ProxyCommand through home
+- WAN hosts use NAT bridges (10.99.x.x) for container networking before mesh
+
+### Operational (post-mesh, all nodes on LAN)
+```
+Cluster "Home Lab" — all nodes on 10.10.10.x
+
+  OpenWrt VM (10.10.10.1) — DHCP, firewall, WDS AP
+  |
+  ├── home (10.10.10.2)     — wired, Cluster Manager
+  ├── mesh1 (10.10.10.210)  — wired via switch
+  ├── ai (10.10.10.x)       — WiFi mesh STA
+  ├── mesh2 (10.10.10.x)    — WiFi mesh STA + wired backhaul via bridge-2
+  ├── bridge-1 (10.10.10.x) — WiFi bridge AP (eth0→vmbr0, WiFi→bridge-2)
+  └── bridge-2 (10.10.10.x) — WiFi bridge STA (WiFi→bridge-1, eth0→vmbr1→cable→mesh2)
+
+  Bridge backhaul path:
+    household LAN → bridge-1 vmbr0 → CT104 br-lan → WiFi AP
+        ~~~~ dedicated 2.4GHz ch11 link ~~~~
+    bridge-2 WiFi STA → CT104 br-lan → vmbr1 → cable → mesh2 vmbr1
+```
+
+CRITICAL: bridge-1 CT on vmbr0 (WAN bridge), bridge-2 CT on vmbr1
+(backhaul bridge). NEVER both on vmbr0 — creates L2 broadcast storm.
+
+All inter-Manager communication uses these LAN IPs directly.
 
 ## Device flavors (inventory groups)
 Hosts belong to child groups under `proxmox` that determine which services they receive.
@@ -240,9 +295,9 @@ Service-specific provision plays target flavor groups.
 - `media_nodes` — Jellyfin, Kodi (home only — media server and player)
 - `streaming_nodes` — Moonlight streaming client (mesh1 — MUST be on a different host than Sunshine server)
 - `desktop_nodes` — Desktop VM (home only — display output host)
-- `kiosk_nodes` — Manager/Kiosk LXC (ALL hosts — MUST equal `proxmox` membership. Every host needs a Manager for 3-tier heartbeat)
+- `kiosk_nodes` — Manager/Kiosk LXC (ALL hosts — MUST equal `proxmox` membership. Every host needs a Manager for 4-tier heartbeat)
 - `gaming_nodes` — Gaming LXC with GPU render device sharing (ai only; uses Fedora + Sunshine + dsda-doom)
-- `bridge_nodes` — Dedicated WiFi Bridge LXC (bridge-1, bridge-2 — transparent L2 WDS AP/STA link)
+- `bridge_nodes` — Dedicated WiFi Bridge LXC (bridge-1 AP, bridge-2 STA — transparent L2 WDS link with wired backhaul to mesh2). AP container on WAN bridge (vmbr0), STA container on backhaul bridge (vmbr1). NEVER both on vmbr0 — causes L2 broadcast storm.
 - `lan_hosts` — Satellite Proxmox nodes behind the OpenWrt router (accessed via ProxyCommand; mesh1 only)
 A host can belong to multiple flavor groups.
 
@@ -312,10 +367,11 @@ All VMIDs defined in `group_vars/all.yml`.
 | `tasks/lxc_device_passthrough.yml` | Shared device passthrough (DRI/ALSA/input bind mounts + cgroups) |
 | `tasks/verify_lxc_template.yml` | Shared pre-flight template existence check (10 LXC roles) |
 | `tasks/lxc_lan_network.yml` | Shared LAN-only container IP computation (5 LXC roles) |
+| `tasks/lxc_wan_or_lan_network.yml` | Shared container networking: LAN hosts use OpenWrt LAN, WAN hosts use NAT bridge (10.99.x.x) |
 | `tasks/bootstrap_lan_host.yml` | Reusable bootstrap for LAN hosts (DHCP lease + API token) |
 | `tasks/cleanup_lan_host.yml` | Reusable per-LAN-host cleanup (SSH from primary host) |
 | `molecule/default/` | Full integration tests (home, mesh1, ai, mesh2, bridge-1, bridge-2 — 6-node) |
-| `molecule/default/cleanup_lan_host.yml` | Per-LAN-host cleanup tasks for test scenarios |
+| `molecule/default/cleanup.yml` | One-line import of `playbooks/cleanup.yml` (unified cleanup) |
 | `molecule/openwrt-*/` | Per-feature scenarios (security, vlans, dns, mesh) |
 | `molecule/wireguard-lxc/` | Per-feature scenario for WireGuard VPN container |
 | `molecule/pihole-lxc/` | Per-feature scenario for Pi-hole DNS container |
@@ -338,18 +394,22 @@ All VMIDs defined in `group_vars/all.yml`.
 | `molecule/mesh1-infra/` | Lightweight infra-only on mesh1 (quick iteration) |
 | `wol.sh` | Wake-on-LAN utility: wake hosts by alias or MAC. Proxied WoL for LAN hosts via PRIMARY_HOST |
 | `scripts/webui.sh` | Interactive Web UI launcher (wraps scripts/webui/app.py) |
-| `scripts/webui/` | NiceGUI-based interactive build menu and kiosk hub (data.py, app.py, pages/). UI constants (`Routes`, `PageTitles`, `Labels`, `ApiRoutes`, `NAV_SECTIONS`) live in `data.py` — shared by page modules and tests |
+| `scripts/webui/` | NiceGUI-based interactive build menu and kiosk hub (data.py, app.py, pages/). UI constants (`Routes`, `PageTitles`, `Labels`, `ApiRoutes`, `NAV_SECTIONS`) live in `data.py` — shared by page modules and tests. `manager.py` provides BaseManager → NodeManager → ClusterManager hierarchy |
+| `scripts/webui/pages/cluster_dashboard.py` | Cluster Manager fleet dashboard (scoped to child Managers). Renders /fleet and /fleet/{node_id} from ClusterManager._fleet_nodes |
 | `scripts/callhome.py` | Call-home client for fleet nodes (Python, stdlib-only). Container + host mode heartbeats with systemd/port health |
 | `scripts/callhome.sh` | Call-home client for BusyBox/OpenWrt nodes (shell, curl/wget). Lightweight alternative to callhome.py |
 | `scripts/image-builder/files-mesh-lxc/usr/sbin/wifi_setup.sh` | Container-side WiFi WDS setup script. configure/switch-mode/status subcommands. Baked into mesh LXC image, callable by Ansible and manager API |
 | `scripts/image-builder/files-mesh-lxc/usr/sbin/batman_trigger.sh` | Container-side batman-adv enable/disable/status script. HMAC-authenticated mutations. Baked into mesh LXC image |
 
 ## Event-driven fleet monitoring (callhome architecture)
-The project uses a 3-tier event-driven architecture:
+The project uses a 4-tier event-driven architecture:
 
-1. **Containers/VMs** heartbeat to their local **Manager** (kiosk_server on each host)
-2. **Managers** aggregate container health and emit to the **SuperManager** (central app.py)
-3. **SuperManager** stores telemetry in `nodes.json` and presents the fleet dashboard
+1. **Containers/VMs** heartbeat to their local **NodeManager** (kiosk_server on each host)
+2. **NodeManagers** aggregate container health and relay UP to their **ClusterManager**
+3. **ClusterManager** (kiosk_server on router node, `IS_CLUSTER_MANAGER=true`) aggregates
+   child NodeManager heartbeats, broadcasts events DOWN, and relays UP to the SuperManager
+4. **SuperManager** (`app.py`) stores telemetry in `nodes.json` and presents the global
+   fleet dashboard. Remote/national hosts act as single-node ClusterManagers.
 
 The `HostRegistry` (`registry.json`) contains PHYSICAL HOST identities only —
 seeded from env vars, manual registration, or TEST_UNITS. Container heartbeats
@@ -394,14 +454,16 @@ collector, implement it in `callhome.py:collect_<name>()`, add it to
 `collect_extensions()`, and query it via `/api/container/{id}/ready`.
 
 ### Configuration flow
-1. `build.py` or `prepare.yml` starts the API server and writes `.state/callhome_url`
-2. Each service's provision+configure plays deploy the container
-3. The "Configure callhome on LXC containers" play in `site.yml` writes
-   `callhome_server`, `callhome_public_key`, and service-specific env vars
-   (e.g., `CALLHOME_CONFIG_FILES` for kiosk) to `/etc/default/callhome`
-   inside each running container and restarts the callhome service
-4. Containers begin heartbeating to the API within seconds
-5. In container mode, heartbeats are sent every interval (no IP-change gate)
+1. `build.py` or `prepare.yml` starts the SuperManager API server, writes `.state/callhome_url`
+2. Each service's provision+configure plays deploy containers
+3. The "Configure callhome on LXC containers" play writes `callhome_server`
+   (pointing to the local Node Manager kiosk), `callhome_public_key`, and
+   service-specific env vars to `/etc/default/callhome` inside each container
+4. `kiosk_configure` writes `MANAGEMENT_SERVER` (pointing to the Cluster
+   Manager), `CHILD_MANAGER_IPS`, and `IS_CLUSTER_MANAGER` to the kiosk's
+   `config.json`. The router node's kiosk becomes the Cluster Manager.
+5. Heartbeat chain: Container → Node Manager → Cluster Manager → SuperManager
+6. In container mode, heartbeats are sent every interval (no IP-change gate)
 
 ### Verify phase: fleet readiness gate + circuit breaker + per-service API queries
 `molecule/default/verify.yml` includes a "Fleet readiness gate" play that
@@ -444,18 +506,22 @@ Fleet readiness matches services by container hostname, node_id, or
 must match the names in the fleet readiness query.
 
 ## National host expectations
-Hosts are built locally, deployed to remote locations, and call home
-over the internet. ALWAYS assume a national host already has a standard
-build from `build-images.sh` — including WireGuard, callhome agent,
-and all service containers. National hosts are NOT bare metal that need
-bootstrapping from scratch.
+Remote/national hosts are single-node clusters. Each national host acts as
+its own Cluster Manager (no children) and relays heartbeats to the
+SuperManager via WireGuard VPN. They are built locally, deployed to remote
+locations, and call home over the internet.
+
+ALWAYS assume a national host already has a standard build from
+`build-images.sh` — including WireGuard, callhome agent, and all service
+containers. National hosts are NOT bare metal that need bootstrapping.
 
 ### Deployment lifecycle
 1. Host is provisioned locally with a full build (all services baked in)
 2. Host is shipped to the remote site and connected to the internet
-3. On first boot, WireGuard connects outbound to the management server
-4. Callhome agent begins heartbeating to the management API
-5. Host is "registered" in `nodes.json` from its first heartbeat
+3. On first boot, WireGuard connects outbound to the SuperManager
+4. Callhome agent begins heartbeating: Container → Node Manager → SuperManager
+   (single-node cluster = Node Manager IS the Cluster Manager)
+5. Host appears in `nodes.json` from its first heartbeat
 
 ### VPN as management plane
 WireGuard provides a persistent, NAT-traversing tunnel to every national
@@ -497,7 +563,7 @@ the primary IP is unreachable. Add new hosts to `_HOST_VPN_MAP` in
 9. Flavor group already in `molecule/default/molecule.yml` platform groups
 10. Create `molecule/<type>-lxc/` per-feature scenario (converge + verify + cleanup)
 11. Extend `molecule/default/verify.yml` with assertions for the new service
-12. Add the VMID to cleanup lists: `molecule/default/cleanup.yml` (`project_ct_ids`), `molecule/default/cleanup_lan_host.yml`, and `tasks/cleanup_lan_host.yml`
+12. Add the VMID to cleanup lists: `playbooks/cleanup.yml` (`project_ct_ids` and `project_vm_ids`) and `tasks/cleanup_lan_host.yml`
 13. Update `docs/architecture/` with a `<type>-build.md`
 14. Add a CHANGELOG entry under `[Unreleased]`
 15. Update `scripts/webui/data.py` `SERVICE_TAGS` with the new service tag, description, category, and target hosts
@@ -514,7 +580,7 @@ the primary IP is unreachable. Add new hosts to `_HOST_VPN_MAP` in
 9. Flavor group already in `molecule/default/molecule.yml` platform groups
 10. Create `molecule/<type>-vm/` per-feature scenario
 11. Extend `molecule/default/verify.yml` with assertions for the new VM
-12. Add the VMID to cleanup lists: `molecule/default/cleanup.yml` (`project_vm_ids`), `molecule/default/cleanup_lan_host.yml`, and `tasks/cleanup_lan_host.yml`
+12. Add the VMID to cleanup lists: `playbooks/cleanup.yml` (`project_ct_ids` and `project_vm_ids`) and `tasks/cleanup_lan_host.yml`
 13. Update `docs/architecture/` with a `<type>-build.md`
 14. Add a CHANGELOG entry under `[Unreleased]`
 15. Update `scripts/webui/data.py` `SERVICE_TAGS` with the new service tag, description, category, and target hosts
@@ -542,13 +608,17 @@ the primary IP is unreachable. Add new hosts to `_HOST_VPN_MAP` in
 - MINIMIZE configure role task count for LXC containers. Base system config that is identical across containers MUST be baked into the image, not deployed via the configure role.
 - Configure roles should ONLY contain host-specific config (IPs, streaming endpoints, passwords, optional features gated on env vars).
 - Previous bug: systemd override deployed via configure role (3 tasks × 4 nodes = 12 pct_remote calls) added ~12 minutes. Moving to image-only saved 38% of per-feature test time.
+- ALWAYS batch file pushes into a single tarball when deploying multiple files into containers. Create tar on the host → single `pct push` → single `pct exec` to extract. Never loop individual `pct push` calls.
+- Previous improvement: kiosk_configure originally ran 14 individual `pct push` calls per host. Batching into a single tarball reduced pct operations from 17 to 2, improving reliability on USB ethernet hosts and reducing configure time.
 
 ## Hardware detection: hard-fail over graceful degradation
 - ALWAYS prefer hard-fail when expected hardware is missing. Graceful degradation masks real problems.
 - iGPU: REQUIRED on every host. `proxmox_igpu` hard-fails if absent. Supports both Intel (i915) and AMD (amdgpu).
 - WiFi + VT-d/IOMMU: REQUIRED for PCI passthrough. `proxmox_pci_passthrough` hard-fails if IOMMU is not active after reboot or if IOMMU groups are invalid.
 - NIC count: OK to handle dynamically — hardware legitimately varies (1 NIC on mesh satellites, 3+ on router nodes). The 2-bridge minimum is gated on `router_nodes` group membership.
+- NIC link state: NEVER create bridges for NICs with no carrier (no cable connected). `proxmox_bridges` checks `carrier` sysfs before bridge creation. Disconnected NICs leave broken config that fails on reboot.
 - Previous bug: `proxmox_pci_passthrough` "gracefully skipped" WiFi passthrough when IOMMU groups were invalid. The real cause was VT-d disabled in BIOS on mesh1. The silent skip masked a fixable BIOS setting for an entire test cycle.
+- Previous bug (2026-04-08): `proxmox_bridges` created a bridge for ai's PCIe NIC (r8169) that had no cable connected. On reboot, the bridge config referenced a NIC that didn't initialize, risking PVE service failures. Note: the SSH instability on ai during this session was separately caused by a kiosk container IP collision (.220) — see WAN container IP collision rule.
 
 ## Baseline workflow
 - The OpenWrt baseline on the primary host is expensive to rebuild (~4 min). Layered scenarios (`mesh1-infra`, `openwrt-security`, etc.) depend on it.
@@ -566,16 +636,19 @@ the primary IP is unreachable. Add new hosts to `_HOST_VPN_MAP` in
 - See `.cursor/skills/ansible-testing/SKILL.md` for full details
 
 ## SHOW STOPPER: Unreachable host protocol
-- When ANY host shows `unreachable=1` or fails a connectivity probe: FULL STOP. Do not continue.
+- When ANY host shows `unreachable=1`, fails a connectivity probe, OR SSH auth is rejected: FULL STOP. Do not continue. Do not build other hosts. Do not "skip and continue."
 - NEVER dismiss as "pre-existing." NEVER say "not caused by our changes." Investigate immediately.
 - For `wol_capable: false` hosts (ai): physical power-on required 3000 miles away. No remote recovery.
 - Do NOT validate features against a substitute host. If ai runs Sunshine/Doom and ai is down, Moonlight verification is IMPOSSIBLE.
-- Previous catastrophe: agent dismissed ai unreachable THREE TIMES over 4 hours, wasting the entire session and leaving ai permanently severed.
+- ALWAYS run SSH checks to ALL hosts after every build/deploy, not just the target.
+- SSH "Permission denied" is a SHOW STOPPER — treat identically to EHOSTUNREACH.
+- Previous catastrophes: (1) agent dismissed ai unreachable THREE TIMES over 4 hours, wasting the entire session. (2) agent continued building 4 other hosts while ai SSH was failing, instead of stopping immediately.
 
-## Cleanup philosophy: service-specific, not scorched-earth
-- Molecule cleanup MUST destroy VMs/containers using **explicit VMIDs** from `group_vars/all.yml`. NEVER iterate `qm list` / `pct list` to destroy ALL resources. Check existence first with `qm status` / `pct status`, then stop + destroy.
-- When adding a new service, add its VMID to the cleanup lists in `molecule/default/cleanup.yml`, `molecule/default/cleanup_lan_host.yml`, `tasks/cleanup_lan_host.yml`, and the per-feature scenario cleanup.
-- Molecule cleanup MUST NOT restore the host config from backup archive. Explicit file removal is sufficient. Backup restore is only for production cleanup behind `[full-restore]` tags.
+## Cleanup philosophy: unified, service-specific, not scorched-earth
+- `playbooks/cleanup.yml` is the SINGLE cleanup playbook for all contexts (molecule, CLI, SuperManager). `molecule/default/cleanup.yml` is a one-line import of it.
+- Cleanup MUST destroy VMs/containers using **explicit VMIDs** from `group_vars/all.yml`. NEVER iterate `qm list` / `pct list` to destroy ALL resources. Check existence first with `qm status` / `pct status`, then stop + destroy.
+- When adding a new service, add its VMID to the cleanup lists in `playbooks/cleanup.yml` (`project_ct_ids`/`project_vm_ids`) and `tasks/cleanup_lan_host.yml`. There is only ONE place now.
+- Cleanup MUST NOT restore the host config from backup archive by default. Explicit file removal is sufficient. Backup restore is opt-in via `--tags restore` or `--tags full-restore`.
 - Previous bug: blanket `qm list` / `pct list` cleanup destroyed non-project resources, forced full rebuild of every VM/container on every test run, and was slower than explicit VMID lookup.
 
 ## Systemd sandboxing in LXC containers

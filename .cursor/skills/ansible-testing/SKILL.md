@@ -152,8 +152,7 @@ Scenario Hierarchy
 ├── molecule/default/              Full integration (home, mesh1, ai, mesh2, bridge-1, bridge-2 — 6-node)
 │   ├── converge.yml               imports site.yml (phased: primary → LAN → services)
 │   ├── verify.yml                 Multi-play: common infra, router, WireGuard, LAN host, mesh LXC
-│   ├── cleanup.yml                Two-play: primary hosts + LAN hosts via SSH
-│   └── cleanup_lan_host.yml       Per-LAN-host cleanup tasks (included by cleanup.yml)
+│   └── cleanup.yml               One-line import of playbooks/cleanup.yml (unified cleanup)
 │
 ├── molecule/openwrt-security/     Per-feature (assumes baseline exists)
 │   ├── converge.yml               runs only security plays via tags
@@ -717,15 +716,14 @@ skips mask fixable problems (wrong BIOS settings, missing drivers).
 - Previous bug: mesh1-infra cleanup removed both authorized_keys and the API token from a LAN satellite node, permanently locking out all SSH and API access.
 
 When a role writes a new file to the Proxmox host, ALWAYS add it to the removal list in:
-- `molecule/default/cleanup.yml` (test cleanup — primary hosts play)
-- `molecule/default/cleanup_lan_host.yml` (test cleanup — LAN hosts tasks)
-- `tasks/cleanup_lan_host.yml` (production cleanup — LAN hosts tasks)
-- `playbooks/cleanup.yml` (production cleanup — primary hosts play)
+- `playbooks/cleanup.yml` (unified cleanup — primary hosts)
+- `tasks/cleanup_lan_host.yml` (shared LAN host cleanup — included by unified cleanup)
+
+`molecule/default/cleanup.yml` is a one-line import of `playbooks/cleanup.yml` — there is only ONE cleanup to maintain.
 
 When a role writes a local state file (e.g., `.state/addresses.json`), ALWAYS add a `delegate_to: localhost` cleanup task to remove it.
 
-**Parity rule:** All cleanup paths MUST remove the same set of files.
-When adding a file to one, ALWAYS add it to all others. Current managed files:
+Current managed files:
 
 - Host config: `ansible-bridges.conf`, `ansible-proxmox-lan.conf` (legacy),
   `ansible-temp-lan.conf` (test workaround)

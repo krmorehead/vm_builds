@@ -53,6 +53,13 @@ fleet_ready_services:
   - kiosk
   - gaming
 
+# ── Container NAT networking ──────────────────────────────────────
+# WAN hosts get a private internal bridge for containers. Each host
+# has container_subnet_id in host_vars. Container IPs are
+# {container_subnet_prefix}.{container_subnet_id}.{offset}.
+container_subnet_prefix: "10.99"
+container_bridge_name: vmbr_ct
+
 # ── Storage ───────────────────────────────────────────────────────
 proxmox_storage: local-lvm
 

@@ -95,7 +95,7 @@ alwaysApply: true
 - Previous bug: mesh1 became UNREACHABLE mid-play during `proxmox_igpu` after 54 successful tasks. Root cause: ControlMaster carrying the ProxyJump tunnel died silently — no keepalives on the jump connection, ControlPersist too short (60s).
 
 ## Cleanup completeness
-- When ANY role deploys a file to the host, ALWAYS add it to the removal list in BOTH `molecule/default/cleanup.yml` AND `playbooks/cleanup.yml`.
+- When ANY role deploys a file to the host, ALWAYS add it to the removal list in `playbooks/cleanup.yml` (the unified cleanup). `molecule/default/cleanup.yml` is a one-line import — there is only ONE cleanup to maintain.
 - Current ansible-managed host files: `ansible-bridges.conf`, `blacklist-wifi.conf`, `vfio-pci.conf`, `pve-no-subscription.sources`.
 - Also clean: `ansible-proxmox-lan.conf` (legacy, superseded by bridges.conf DHCP), `ansible-temp-lan.conf` (test workaround).
 - Enterprise repo renames: restore `pve-enterprise.sources.disabled` → `pve-enterprise.sources` and `ceph.sources.disabled` → `ceph.sources`.
@@ -213,17 +213,17 @@ alwaysApply: true
 - Previous bug: verify task used `curl -sk https://<ip>:47984/` which returned rc=56/28 (TLS client cert required / timeout). Fixed by checking port 47990 with retries.
 
 ## LXC container networking must match host topology
-- NEVER hardcode all containers to use the OpenWrt LAN subnet. Hosts directly on the WAN (not behind OpenWrt) need containers on the WAN subnet with the main router as gateway.
-- Hosts in `router_nodes` or `lan_hosts` → containers use OpenWrt LAN (e.g., 10.10.10.0/24, gateway 10.10.10.1) on the LAN bridge (`proxmox_all_bridges[1]`).
-- All other hosts → containers use `ansible_default_ipv4.gateway/prefix` on the WAN bridge (`proxmox_wan_bridge`).
-- For WAN-connected hosts, offset container IPs by +200 to avoid collisions with LAN containers (e.g., .203 instead of .3).
-- WAN-connected containers MUST use `proxmox_wan_bridge` as their bridge. The default bridge (`proxmox_all_bridges[1]`) is the SECOND bridge, which on multi-NIC WAN hosts is typically connected to a different physical NIC than the management interface.
-- ALWAYS verify IP offsets for new services do not collide with existing services on the same subnet. Services using per-host indexing (offset + group_index) span a RANGE that can collide with single-host offsets. Current LAN allocation: .1 OpenWrt, .2 Proxmox mgmt, .3-.6 WireGuard (offset 3, indexed, 4 nodes), .10 Pi-hole, .12 rsyslog, .14 Home Assistant, .15 Jellyfin, .16 Kodi, .17 Moonlight, .18 Gaming, .19 Kiosk, .21-.24 Netdata (offset 21, indexed, 4 nodes), .27 WiFi Bridge (offset 27, bridge_nodes only on WAN).
-- Previous bug: Netdata at offset 13 with per-host indexing produced `.14` on `home` (index 1 alphabetically), colliding with Home Assistant's fixed offset 14. Both containers claimed 10.10.10.14. Tests passed because `pct exec` bypasses the network, but production ARP would be ambiguous. Fixed by moving Netdata to offset 21.
-- ALWAYS verify WAN IPs (offset + 200 + index) don't collide with host management IPs. Current host IPs: home=.201, ai=.220, mesh2=.211. Avoid offsets that produce .201, .211, or .220 on the WAN.
-- Previous bug: `wireguard-ai` container was on `vmbr1` (connected to `nic0`) but the host's internet was on `vmbr0` (connected to `nic1`). The container had a correct IP and route but zero L2 connectivity to the gateway.
-- Previous bug: Pi-hole at offset 5 collided with WireGuard on mesh1 (offset 3 + vpn_nodes index 2 = 5). Both containers claimed 10.10.10.5 on the same LAN. Tests passed because `pct exec` bypasses the network, but production would have ARP ambiguity. Fixed by moving Pi-hole to offset 10.
-- Previous bug: rsyslog at offset 11 → WAN IP .211 (11 + 200), colliding with mesh2's host IP (192.168.86.211). Fixed by moving to offset 12.
+- Two networking modes based on host position:
+  - **LAN hosts** (`router_nodes` or `lan_hosts`) → containers use OpenWrt LAN (10.10.10.x) on the LAN bridge.
+  - **WAN hosts** (all others) → containers use a private NAT bridge (`vmbr_ct`) with `10.99.{container_subnet_id}.{offset}` addressing. Host-side MASQUERADE provides outbound internet. No IPs on the household subnet (192.168.86.x).
+- Each Proxmox host has `container_subnet_id` in host_vars (home=1, mesh1=2, ai=3, mesh2=4, bridge-1=5, bridge-2=6). WAN containers get IPs like `10.99.3.19` (kiosk on ai).
+- WAN container IPs use ONLY the service offset — no group indexing, no base offset. Collisions are impossible: each host has its own /24, and offsets are unique per host.
+- The `proxmox_bridges` role creates `vmbr_ct` on WAN hosts with NAT rules. `tasks/lxc_wan_or_lan_network.yml` assigns private IPs.
+- Services needing inbound connections on WAN hosts (e.g., WireGuard UDP 51820) use host-level DNAT rules in their provisioning role.
+- OpenWrt mesh/bridge LXC containers are excluded from NAT — they need L2 access for WiFi bridging and stay on the WAN bridge.
+- LAN allocation: .1 OpenWrt, .2 Proxmox mgmt, .3-.6 WireGuard (offset 3, indexed, 4 nodes), .10 Pi-hole, .12 rsyslog, .14 Home Assistant, .15 Jellyfin, .16 Kodi, .17 Moonlight, .18 Gaming, .19 Kiosk, .21-.24 Netdata (offset 21, indexed, 4 nodes).
+- Previous bug: Netdata at offset 13 with per-host indexing produced `.14` on `home`, colliding with Home Assistant's fixed offset 14. Fixed by moving Netdata to offset 21.
+- Previous bug (2026-04-09): WAN containers shared the 192.168.86.x broadcast domain with household devices. The offset+base+index formula produced cross-service and device collisions (.172, .173, .174, .220). Replaced with per-host NAT bridge (10.99.x.x) that eliminates all collision risk.
 
 ## Dynamic inventory and failed hosts
 - ALWAYS use `ansible_play_hosts` (not `ansible_play_hosts_all`) in `add_host` loops that register containers. `ansible_play_hosts_all` includes hosts that failed in earlier plays, leading to phantom container registrations for containers that were never created.
@@ -294,11 +294,11 @@ alwaysApply: true
 - Previous bug: `$AllowedSender TCP, 10.0.0.0/8, ...` was used for access control. This is a deprecated legacy directive that shouldn't be mixed with new-style RainerScript config. On a private-subnet LXC container, network topology provides access control.
 
 ## LXC container IP allocation
-- ALWAYS use per-host indexing (`offset + groups['flavor_group'].index(inventory_hostname)`) for LXC service IPs when the service can deploy to multiple hosts. Without indexing, two hosts on the same subnet get the same container IP.
-- ALWAYS verify WAN container IPs (offset + 200 + index) don't collide with any host's management IP. Current host IPs: home=.201, mesh1=.210 (LAN), ai=.220, mesh2=.211.
-- Current WAN-safe allocation: Pi-hole offset=10 (.210 collides with mesh1 but mesh1 is LAN-only, so WAN .210 is safe), rsyslog offset=12 (.212 safe), WireGuard offset=3+index (.203-.206 safe).
-- Previous bug: rsyslog_ct_ip_offset=11 → WAN IP .211, colliding with mesh2's host IP (192.168.86.211). Fixed by changing to offset 12.
+- **WAN hosts**: containers use `10.99.{container_subnet_id}.{offset}` on the NAT bridge (`vmbr_ct`). No group indexing needed — each host has its own /24.
+- **LAN hosts**: containers use `10.10.10.{offset + group_index}` on the OpenWrt LAN bridge. Per-host indexing is still needed because all LAN containers share one subnet.
+- When adding a new LXC service, just assign a unique offset in `group_vars/all.yml`. The offset alone determines the WAN IP — no collision checks needed.
 - Verify tasks MUST query the actual IP from `pct config` (not recompute) because per-host index depends on group composition which varies between per-feature and E2E scenarios.
+- Previous bug (2026-04-09): WAN containers used `offset + 200 + group_index` on 192.168.86.x, producing collisions with host IPs and household devices. The entire formula was replaced with per-host NAT subnets.
 
 ## OpenWrt BusyBox compatibility
 - NEVER use `pgrep` on OpenWrt — it may not exist in BusyBox. Use `/etc/init.d/<service> status` or `ps | grep -c '[p]rocess'` instead.
@@ -330,6 +330,31 @@ alwaysApply: true
 - Previous bug: E2E cleanup ran `modprobe -r amdgpu` on `ai` (single AMD GPU, USB ethernet). Kernel panicked, host crashed. Required physical power-on. Fix: replaced all GPU `modprobe -r` with sysfs unbind + PCI rescan. Now safe on any host.
 - Previous bug: `ai` was listed in `wol.sh` with its PCIe NIC MAC, but `ai` is connected via USB ethernet only. WoL was impossible.
 
+## Mandatory fleet connectivity checks
+
+ALWAYS verify SSH connectivity to ALL hosts at these checkpoints:
+1. **Session start:** Before beginning any work, SSH to every host.
+2. **After every build/deploy/converge:** Check ALL hosts, not just the target.
+3. **Before proceeding to next host in multi-host operations:** Verify every
+   host is still accessible before building the next one.
+4. **Every 30 minutes during long sessions:** Periodic health check.
+
+What counts as a connectivity failure (ALL are SHOW STOPPERS):
+- SSH "Permission denied" (key rejected — lost management access)
+- SSH connection refused or timed out
+- Proxmox API (port 8006) connection refused
+- Ansible `unreachable=1` in any play recap
+- SuperManager showing 0% disk AND 0% memory for a host (Manager can't
+  SSH to collect metrics)
+
+NEVER "skip a broken host and continue building others." If ANY host is
+inaccessible, ALL work stops until it's recovered.
+
+Previous bug (2026-04-08): ai SSH auth failed mid-session. Agent continued
+building 4 other hosts individually instead of stopping. User had to
+explicitly call out the show stopper. The "I'll come back to it" instinct
+is ALWAYS wrong for infrastructure hosts.
+
 ## OpenWrt LXC default LAN IP collision
 - OpenWrt LXC containers boot with 192.168.1.1 on br-lan regardless of the Proxmox-assigned static IP. On WAN-bridged hosts, this collides with the router VM's bootstrap target (also 192.168.1.1).
 - OpenWrt LXC provision roles MUST override the default LAN IP to the assigned container IP via `uci set network.lan.ipaddr` during provisioning — not just in the configure role.
@@ -344,6 +369,57 @@ alwaysApply: true
 ## OpenWrt DHCP static lease management
 - When removing DHCP static leases via UCI, iterate from index 0 upward, NOT from `@host[-1]`. Iterating from the end with `break` on non-match stops early, leaving duplicates earlier in the list.
 - Previous bug: The cleanup loop used `@host[-1]` and broke on the first non-proxmox entry from the end. A proxmox entry earlier in the list survived, and the add task created a duplicate. Dnsmasq refused to start: "duplicate dhcp-host IP address 10.10.10.2."
+
+## Bridge creation: skip disconnected NICs
+- NEVER create bridges for physical NICs that have no link carrier (no cable connected). The `proxmox_bridges` role MUST check `cat /sys/class/net/<NIC>/carrier` before adding unbridged NICs to `ansible-bridges.conf`.
+- Creating bridges for disconnected NICs leaves persistent config in `/etc/network/interfaces.d/ansible-bridges.conf` that references NIC names that may not initialize on reboot. If the NIC fails to come up, the bridge stanza fails, which can cascade into PVE service failures.
+- The carrier check applies ONLY to unbridged NICs (new bridge candidates). Already-bridged NICs are discovered regardless of carrier state so `existing_physical_bridges` and `proxmox_all_bridges` remain accurate.
+- Previous bug (2026-04-08): ai had PCIe NIC (r8169 nic1) with no cable connected. The bridge role created a bridge for it in `ansible-bridges.conf`. On reboot, PVE services failed because the bridge config referenced a NIC that never initialized. Required OS reinstall.
+
+## USB ethernet: connection fragility
+- Hosts with USB ethernet (e.g., ai with Realtek RTL8153 r8152) have fragile connectivity. Minimize unnecessary SSH/pct-exec operations as a best practice.
+- Batch file pushes into a single tarball when deploying multiple files into containers: create tar on host → single `pct push` → single `pct exec` to extract. Never loop individual `pct push` calls.
+- The `kiosk_configure` role was batched from 14 individual `pct push` calls to a single tarball (2 pct operations instead of 17).
+
+## WAN container IP collision (historical — resolved by NAT)
+- WAN containers now use private NAT subnets (10.99.x.x) instead of the household subnet. IP collisions with host management IPs are no longer possible.
+- Historical context: the old `offset + base + group_index` formula on the shared 192.168.86.x subnet caused IP collisions that manifested as SSH host key oscillation, intermittent "Permission denied," and authentication failures. This was replaced by per-host NAT bridges in the Container NAT Networking project (2026-04-09).
+- Previous bug (2026-04-08/2026-04-09): kiosk container on bridge-1 was assigned IP 192.168.86.220 (offset 19 + 200 + group index 1 = 220) — the same IP as ai's host management IP. Resolved by moving to NAT subnets.
+
+## Router VM rebuild requirements
+- Rebuilding the router VM requires BOTH infrastructure and openwrt tags: `--tags infra,openwrt`. Running `--tags openwrt` alone fails because `proxmox_all_bridges` is undefined — it's set by the `proxmox_bridges` role which runs under the `infra` tag.
+- After destroying the router VM, `/etc/resolv.conf` on Proxmox hosts still points to `10.10.10.1` (the router's LAN IP). DNS breaks and all `apt` operations hang. Fix Proxmox DNS to the ISP gateway (e.g., `192.168.86.1`) and a public fallback (`8.8.8.8`) before running infrastructure roles.
+- Prefer `molecule converge` over raw `ansible-playbook` for full rebuilds. It handles dynamic inventory, SSH configuration, and the prepare phase (API server startup, state file creation) correctly.
+- Previous bug (2026-04-09): `ansible-playbook --tags openwrt --limit home` failed with "'proxmox_all_bridges' is undefined". Then `ansible-playbook` without `--limit` caused an SSH jumphost loop for `openwrt-router`. Then `molecule converge` found a partial VM (no NICs) from a previous failed run and skipped NIC attachment. Each iteration required different recovery. Clean rebuild via `qm destroy 100 --purge` + `molecule converge` was the correct approach.
+
+## OpenWrt LXC bootstrap IP collision
+- OpenWrt LXC containers (mesh, bridge) boot with `192.168.1.1` on `br-lan` regardless of the Proxmox-assigned static IP. On WAN-bridged hosts, this collides with the router VM's bootstrap target (also `192.168.1.1`).
+- During router VM bootstrap, SSH to `192.168.1.1` may hit a bridge LXC container instead of the router VM. Symptoms: wrong kernel version in `uname -r` (e.g., `6.17.2-1-pve` instead of OpenWrt's `6.6.73`), "No LAN devices found" during configure.
+- Fix: stop bridge LXC containers (`pct stop 104`) before router VM rebuild, clear stale SSH known_hosts entries, then proceed with bootstrap.
+- OpenWrt LXC provision roles SHOULD override the default LAN IP via `uci set network.lan.ipaddr` during provisioning to prevent this.
+
+## WiFi bridge L2 loop prevention (CRITICAL)
+- NEVER put both ends of a WiFi bridge (AP and STA containers) on the same L2 broadcast domain. If both containers have eth0 on the same Proxmox bridge (e.g., both on vmbr0 via the same physical switch), the WiFi link creates a second L2 path, forming a broadcast storm that takes down the entire household network.
+- Bridge container network assignment MUST depend on `wifi_role`:
+  - `wifi_role: ap` → container eth0 on `proxmox_wan_bridge` (vmbr0). Extends the household network over WiFi.
+  - `wifi_role: sta` → container eth0 on the **backhaul bridge** (vmbr1). Receives WiFi traffic and outputs to the physical cable toward mesh2/switch.
+  - If STA mode has no backhaul bridge → HARD FAIL. The architecture requires a physical cable.
+- STP on OpenWrt's `br-lan` does NOT prevent this loop. The loop spans multiple external bridges (two Proxmox vmbr0 instances + physical switch) that don't participate in the same STP domain.
+- AX210 WiFi (self-managed regulatory) cannot run AP mode on 5GHz — all 5GHz channels are `PASSIVE-SCAN` in `country 00: DFS-UNSET`. Hostapd segfaults during ACS or rejects the channel. Bridge containers MUST use 2.4GHz (channel 11, non-overlapping with mesh channel 1).
+- ALWAYS pass an explicit `--band` parameter to `wifi_setup.sh`. The `detect_band()` auto-detection prefers 5GHz when the hardware supports it, which is wrong for AX210 AP mode.
+- Previous catastrophe (2026-04-09): Agent changed bridge WiFi from non-functional 5GHz (channel 1 invalid for 5GHz) to working 2.4GHz channel 11. Both containers were on vmbr0. The WiFi link completed the L2 loop. Broadcast storm took down the entire household WiFi network. All units had to be powered off. The non-functional 5GHz config had been accidentally preventing the loop.
+- Previous bug: `wifi_setup.sh configure_radios()` only set the channel when it was not "auto", leaving the `wifi config`-generated default channel 1 (2.4GHz) in place after switching band to 5GHz. Channel 1 is invalid for 5GHz.
+- NEVER use `bridge link show dev <iface> master <bridge>` exit code alone to detect bridge membership. The command returns exit code 0 with EMPTY output when the interface is NOT a member. ALWAYS check that the output is non-empty.
+- Previous catastrophe (2026-04-09, second occurrence): The bridge detection loop checked only exit code. `bridge link show dev enx00e04c68007a master vmbr0` returned 0 with empty output, matching the FIRST bridge (vmbr0) instead of the actual member (vmbr1). STA container was provisioned on vmbr0 again. Broadcast storm recurred when WiFi link established. Fix: check output non-empty, add post-provision safety gate that reads back `pct config` and hard-fails on mismatch, deploy systemd broadcast storm guard that auto-kills containers at >500 bcast/sec.
+- Three mandatory safety gates in `openwrt_bridge_lxc`:
+  1. Pre-provision: fail if `_backhaul_bridge == proxmox_wan_bridge` for STA
+  2. Post-provision: read actual `pct config`, stop CT and fail if STA is on WAN bridge
+  3. Runtime: `bridge-storm-guard.service` monitors broadcast rate, auto-kills CT on storm
+
+## Proxmox /etc/hosts hostname resolution
+- Proxmox's `pve-cluster` service requires the node hostname to resolve to a non-loopback IP in `/etc/hosts`. If the entry is missing or maps to the wrong hostname, `pve-cluster` fails to start and ALL `pct` commands fail with "Connection refused".
+- After OS installation or hostname changes, ALWAYS verify `/etc/hosts` contains `<HOST_IP> <hostname>`.
+- Previous bug (2026-04-09): bridge-1's `/etc/hosts` mapped its IP to `home` (from a previous installation). After power cycle, `pve-cluster` failed because it couldn't resolve `bridge-1`. Fix: updated `/etc/hosts` to map the correct hostname.
 
 ## Documentation accuracy
 - When changing a role's exported facts, bridge names, device paths, or connection patterns, ALWAYS update `docs/architecture/` in the same commit.

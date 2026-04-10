@@ -2,3 +2,4 @@
 ansible_host: "{{ lookup('env', 'PRIMARY_HOST') }}"
 pci_passthrough_allow_reboot: true
 wol_capable: true
+container_subnet_id: 1

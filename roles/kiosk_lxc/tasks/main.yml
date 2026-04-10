@@ -100,3 +100,33 @@
   ansible.builtin.set_fact:
     kiosk_static_ip: "{{ _lxc_net_ip }}"
     cacheable: true
+
+# ── Port forwarding for Manager API on NAT bridge (WAN hosts only) ──
+# The Cluster Manager on the LAN needs to reach child Managers on WAN
+# hosts. WAN kiosk containers are on private NAT subnets (10.99.x.x),
+# so we DNAT port 9001 from the host's WAN bridge to the container.
+
+- name: Add DNAT rule for Manager API (WAN hosts)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      WAN_IF="{{ proxmox_wan_bridge }}"
+      CT_IP="{{ _lxc_net_ip }}"
+      if ! iptables -t nat -C PREROUTING -i "$WAN_IF" -p tcp --dport 9001 -j DNAT --to-destination "$CT_IP:9001" 2>/dev/null; then
+        iptables -t nat -A PREROUTING -i "$WAN_IF" -p tcp --dport 9001 -j DNAT --to-destination "$CT_IP:9001"
+      fi
+    executable: /bin/bash
+  when: not (_lxc_net_on_lan | bool)
+  changed_when: true
+
+- name: Add FORWARD rule for Manager DNAT traffic (WAN hosts)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      CT_IP="{{ _lxc_net_ip }}"
+      if ! iptables -C FORWARD -d "$CT_IP" -p tcp --dport 9001 -j ACCEPT 2>/dev/null; then
+        iptables -A FORWARD -d "$CT_IP" -p tcp --dport 9001 -j ACCEPT
+      fi
+    executable: /bin/bash
+  when: not (_lxc_net_on_lan | bool)
+  changed_when: true

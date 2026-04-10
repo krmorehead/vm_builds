@@ -6,3 +6,4 @@ pci_passthrough_allow_reboot: true
 # traffic (no kernel log, host keeps running). Requires physical restart.
 # PCIe NIC (r8169 nic0) is present but has no cable connected.
 wol_capable: false
+container_subnet_id: 3

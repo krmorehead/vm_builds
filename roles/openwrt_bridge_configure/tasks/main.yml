@@ -21,4 +21,5 @@
     _wds_wifi_role: "{{ hostvars[inventory_hostname | regex_replace('^openwrt-bridge-', '')].wifi_role | default('ap') }}"
     _wds_country: "{{ openwrt_bridge_country }}"
     _wds_channel: "{{ openwrt_bridge_channel }}"
+    _wds_band: "{{ openwrt_bridge_band }}"
     _wds_mesh_key: "{{ lookup('env', 'MESH_KEY') | default('', true) }}"

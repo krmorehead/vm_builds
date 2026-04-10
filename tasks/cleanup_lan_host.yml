@@ -22,7 +22,8 @@
     _host_reachable: "{{ _key_check.rc == 0 }}"
     _cleanup_ssh: >-
       ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-      -o ConnectTimeout=10 root@{{ _lan_host_ip }}
+      -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3
+      root@{{ _lan_host_ip }}
 
 - name: Skip cleanup if LAN host is unreachable
   ansible.builtin.debug:
@@ -32,11 +33,10 @@
 - name: Stop and destroy project containers on LAN host  # noqa command-instead-of-shell
   ansible.builtin.shell:
     cmd: >-
-      {{ _cleanup_ssh }} "
+      timeout 180 {{ _cleanup_ssh }} "
       for vm in {{ desktop_vm_id }} {{ gaming_vm_id }}; do
         qm status \$vm >/dev/null 2>&1 || continue;
-        qm stop \$vm 2>/dev/null || true;
-        sleep 3;
+        qm stop \$vm --timeout 15 2>/dev/null || true;
         qm destroy \$vm --purge 2>/dev/null || true;
       done;
       for ct in {{ wireguard_ct_id }} {{ meshwifi_ct_id }}
@@ -46,7 +46,6 @@
       {{ gaming_ct_id }}; do
         pct status \$ct >/dev/null 2>&1 || continue;
         pct stop \$ct 2>/dev/null || true;
-        sleep 2;
         pct destroy \$ct --purge 2>/dev/null || true;
       done"
   when: _host_reachable | bool
@@ -58,6 +57,7 @@
     cmd: >-
       {{ _cleanup_ssh }} "rm -f
       /etc/network/interfaces.d/ansible-bridges.conf
+      /etc/network/interfaces.d/ansible-container-bridge.conf
       /etc/network/interfaces.d/ansible-proxmox-lan.conf
       /etc/network/interfaces.d/ansible-temp-lan.conf
       /etc/modprobe.d/blacklist-wifi.conf
@@ -77,6 +77,20 @@
         /var/lib/vz/snippets/bridge-wifi-phy-*.sh
         /var/lib/vz/snippets/gpu-passthrough-hook.sh
         /var/lib/vz/snippets/display-exclusive.sh"
+  when: _host_reachable | bool
+  changed_when: true
+  failed_when: false
+
+- name: Flush container NAT rules on LAN host  # noqa command-instead-of-shell
+  ansible.builtin.shell:
+    cmd: >-
+      {{ _cleanup_ssh }} "
+      iptables -t nat -S 2>/dev/null | grep -q '10\.99\.' && iptables -t nat -F || true;
+      iptables -S FORWARD 2>/dev/null | grep 'vmbr_ct\|10\.99\.' | while read -r rule; do
+        iptables \$(echo \"\$rule\" | sed 's/^-A/-D/') 2>/dev/null || true;
+      done;
+      ip link set vmbr_ct down 2>/dev/null || true;
+      ip link delete vmbr_ct 2>/dev/null || true"
   when: _host_reachable | bool
   changed_when: true
   failed_when: false

@@ -254,15 +254,21 @@ class TestFindAnsiblePlaybook:
         venv_bin = tmp_path / "bin" / "ansible-playbook"
         venv_bin.parent.mkdir(parents=True)
         venv_bin.write_text("#!/bin/sh\n")
+        # WHY: Redirects venv lookup to a controlled directory so we can test binary detection.
+        # HOW: Tests the actual find_ansible_playbook logic against real filesystem operations.
         monkeypatch.setattr(build, "VENV_DIR", tmp_path)
         assert build.find_ansible_playbook() == str(venv_bin)
 
     def test_falls_back_to_system(self, monkeypatch, tmp_path):
+        # WHY: Tests the PATH fallback when venv is empty; shutil.which result varies by environment.
+        # HOW: Tests the actual branching logic in find_ansible_playbook (venv → PATH).
         monkeypatch.setattr(build, "VENV_DIR", tmp_path / "empty")
         monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/ansible-playbook")
         assert build.find_ansible_playbook() == "/usr/bin/ansible-playbook"
 
     def test_returns_none_when_missing(self, monkeypatch, tmp_path):
+        # WHY: Tests the "binary not found anywhere" path; requires both sources to report missing.
+        # HOW: Tests the None return that triggers build.py's "ansible not found" error.
         monkeypatch.setattr(build, "VENV_DIR", tmp_path / "empty")
         monkeypatch.setattr("shutil.which", lambda _: None)
         assert build.find_ansible_playbook() is None
@@ -365,7 +371,15 @@ class TestInfrastructureHealth:
 
 
 class TestResolveProxmoxHostFallback:
-    """Fallback logic uses the state file when PRIMARY_HOST is down."""
+    """Fallback logic uses the state file when PRIMARY_HOST is down.
+
+    WHY probe_host is mocked here: These tests use synthetic IPs (10.0.0.x)
+    to test the DECISION LOGIC of resolve_proxmox_host — which IP to try,
+    when to fall back, how to handle corrupt state. Cannot selectively make
+    real hosts unreachable to exercise these code paths.
+    HOW: Tests the actual resolve_proxmox_host function's branching logic
+    (primary → state file → empty) with controlled probe results.
+    """
 
     def test_returns_primary_when_reachable(self, monkeypatch):
         monkeypatch.setattr(build, "probe_host", lambda *a, **kw: True)
@@ -438,6 +452,15 @@ class TestResolveProxmoxHostFallback:
 
 
 class TestMain:
+    """Tests for build.main() CLI flow.
+
+    WHY PROJECT_ROOT/probe_host/subprocess.run are mocked: main() orchestrates
+    the full build pipeline — env parsing, host probing, ansible-playbook launch.
+    Running it unpatched would execute real ansible-playbook against real infra.
+    HOW: Tests the CLI validation logic (missing env, missing vars, missing
+    playbook, unreachable host, missing binary, tag passthrough) in isolation.
+    """
+
     def test_missing_env_file_returns_1(self, tmp_path, monkeypatch):
         monkeypatch.setattr(build, "PROJECT_ROOT", tmp_path)
         assert build.main(["--env", "nonexistent.env"]) == 1
@@ -555,6 +578,8 @@ class TestGetControllerIp:
         assert len(ip) > 0
 
     def test_fallback_on_error(self, monkeypatch):
+        # WHY: Cannot reliably break the real socket stack to test the fallback.
+        # HOW: Tests that get_controller_ip() returns 127.0.0.1 when socket creation fails.
         def broken_socket(*a, **kw):
             raise OSError("no route")
 
@@ -615,6 +640,14 @@ class TestStopApiServer:
 
 
 class TestStartApiServer:
+    """Tests for API server lifecycle.
+
+    WHY subprocess.Popen is mocked: start_api_server spawns a real Python
+    subprocess running app.py. Launching a real server during pytest would
+    bind ports and leave orphaned processes.
+    HOW: Tests the return-value logic (early exit → None, running → process object).
+    """
+
     def test_returns_none_on_early_exit(self, tmp_path, monkeypatch):
         env_file = tmp_path / "test.env"
         env_file.write_text("CALLHOME_SERVER=http://test\n")
@@ -665,6 +698,12 @@ class TestStartApiServer:
 
 
 class TestNoApiFlag:
+    """Tests for the --no-api CLI flag.
+
+    WHY: Same as TestMain — prevents launching real ansible-playbook and API server.
+    HOW: Tests that --no-api correctly skips start_api_server while default starts it.
+    """
+
     def test_no_api_skips_server(self, tmp_path, monkeypatch):
         monkeypatch.setattr(build, "PROJECT_ROOT", tmp_path)
         monkeypatch.setattr(build, "probe_host", lambda *a, **kw: True)

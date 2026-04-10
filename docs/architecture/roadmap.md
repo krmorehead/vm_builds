@@ -319,6 +319,24 @@ Delivered:
 - Circuit breaker for detecting container deaths mid-run
 - API endpoints: `/api/checkin`, `/api/fleet/ready`, `/api/fleet/stale`
 
+### 4-Tier Management Architecture ✓
+
+Cluster-based management hierarchy for multi-node household networks
+and national/remote hosts.
+
+Delivered:
+- `BaseManager` → `NodeManager` → `ClusterManager` OOP hierarchy in `manager.py`
+- SuperManager (`app.py`): global fleet view across all clusters
+- ClusterManager (`kiosk_server.py`, `IS_CLUSTER_MANAGER=true`): subnet-scoped fleet
+  view, event broadcast (batman, bridge-wifi), child Manager discovery via
+  `CHILD_MANAGER_IPS` on LAN (10.10.10.x)
+- NodeManager (`kiosk_server.py`, default): per-host container ops, heartbeat relay
+- Event propagation: batman enable/disable broadcasts from Cluster Manager to all
+  Node Managers, which execute locally via `pct exec` → `batman_trigger.sh`
+- Host-qualified status keys (`home/router-100`, `mesh1/mesh-103`) prevent collisions
+- Dynamic container discovery via `pct status` — only probes running containers
+- `kiosk_configure` role generates `CHILD_MANAGER_IPS` from `kiosk_static_ip` facts
+
 ## Medium-Term Goals
 
 ### Additional VM/LXC Types
@@ -354,7 +372,11 @@ Delivered:
 - Automatic detection of hardware capabilities and appropriate role selection.
 - Graceful degradation when hardware features (WiFi, multiple NICs) are absent.
 
-### Multi-Site
-- Extend to multiple physical locations with site-to-site VPN (WireGuard).
-- Centralized management with per-site inventory files.
-- Cross-site mesh networking for seamless roaming.
+### Multi-Site (enabled by 4-tier architecture)
+- Each remote site is a **cluster** with its own Cluster Manager
+- Remote clusters connect via WireGuard VPN to the SuperManager
+- SuperManager provides global fleet view across all clusters
+- Per-cluster autonomy: batman mode, WiFi management, and service health
+  are managed locally by each Cluster Manager without SuperManager involvement
+- Cross-site visibility without cross-site control — each cluster is
+  tightly managed by its local end user

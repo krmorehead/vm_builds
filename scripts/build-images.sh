@@ -40,6 +40,7 @@ IB_ARCHIVE="${IB_NAME}.tar.zst"
 IB_URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}/${SUBTARGET}/${IB_ARCHIVE}"
 
 MESH_FILES_DIR="${SCRIPT_DIR}/image-builder/files-mesh-lxc"
+ROUTER_FILES_DIR="${SCRIPT_DIR}/image-builder/files-router-vm"
 
 MESH_OUTPUT_NAME="openwrt-mesh-lxc-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}-rootfs.tar.gz"
 ROUTER_OUTPUT_NAME="openwrt-router-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}-combined.img.gz"
@@ -96,6 +97,8 @@ MESH_PACKAGES=(
     # batman-adv mesh routing (dormant until configured)
     kmod-batman-adv
     batctl-tiny
+    # openssl CLI for HMAC verification in batman_trigger.sh
+    openssl-util
     # Remove packages that conflict or are unnecessary in LXC
     -wpad-basic-openssl
     -wpad-basic-wolfssl
@@ -127,6 +130,11 @@ ROUTER_PACKAGES=(
     banip
     # Mesh steering
     dawn
+    # batman-adv mesh routing (dormant until configured)
+    kmod-batman-adv
+    batctl-tiny
+    # openssl CLI for HMAC verification in batman_trigger.sh
+    openssl-util
     # Remove conflicting default wpad
     -wpad-basic-openssl
     -wpad-basic-wolfssl
@@ -284,6 +292,7 @@ build_router_vm() {
     make -C "$ib_dir" image \
         PROFILE="generic" \
         PACKAGES="$pkg_list" \
+        FILES="$ROUTER_FILES_DIR" \
         EXTRA_IMAGE_NAME="router" \
         2>&1 | tee "$make_log" | tail -5
     if [[ ${PIPESTATUS[0]} -ne 0 ]]; then

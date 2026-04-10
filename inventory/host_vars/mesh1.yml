@@ -3,3 +3,4 @@ ansible_host: 10.10.10.210
 pci_passthrough_allow_reboot: true
 wol_capable: true
 wifi_role: sta
+container_subnet_id: 2

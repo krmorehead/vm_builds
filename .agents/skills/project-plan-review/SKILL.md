@@ -47,13 +47,11 @@ Cross-reference verification:
 Container IP allocation check:
 
 ```yaml
-# Verify offset doesn't collide:
-# Current allocations:
-WireGuard: 3-6    Pi-hole: 10    rsyslog: 12    Netdata: 13
-HA: 14           Jellyfin: 15   MeshWiFi: 20
-
-# WAN offset +200, verify against host IPs:
-# home=.201, ai=.220, mesh2=.211
+# Verify offset doesn't collide with existing allocations:
+# Current: WG=3, Pi-hole=10, rsyslog=12, HA=14, Jellyfin=15,
+# Kodi=16, Moonlight=17, Gaming=18, Kiosk=19, Netdata=21
+# WAN hosts use NAT bridge (10.99.x.x) — offsets just need to
+# be unique per host. No host IP collision risk.
 ```
 
 ## Anti-patterns

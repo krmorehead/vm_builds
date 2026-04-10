@@ -39,28 +39,24 @@ from nicegui.persistence.file_persistent_dict import FilePersistentDict  # noqa:
 from nicegui.storage import Storage  # noqa: E402
 from nicegui import background_tasks  # noqa: E402
 
-_orig_backup = FilePersistentDict.backup
-
-
-def _safe_backup(self: FilePersistentDict) -> None:
-    """Ensure the storage directory exists before scheduling async writes."""
-    try:
-        Path(_STORAGE_DIR).mkdir(parents=True, exist_ok=True)
-        _orig_backup(self)
-    except (FileNotFoundError, OSError):
-        pass
-
-
-FilePersistentDict.backup = _safe_backup
-
 _orig_storage_clear = Storage.clear
 
 
 def _safe_storage_clear(self: Storage) -> None:
-    try:
-        _orig_storage_clear(self)
-    except RuntimeError:
-        pass
+    """Clear storage data but keep the temp directory alive.
+
+    NiceGUI's async_backup coroutine writes storage-general.json after
+    clear() returns. If we delete the directory here, the async write
+    hits FileNotFoundError. The temp dir is cleaned in pytest_sessionfinish.
+    """
+    self._general.clear()
+    self._users.clear()
+    self._tabs.clear()
+    for filepath in self.path.glob("storage-*.json"):
+        try:
+            filepath.unlink()
+        except FileNotFoundError:
+            pass
 
 
 Storage.clear = _safe_storage_clear
