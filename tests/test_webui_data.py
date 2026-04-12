@@ -1623,9 +1623,11 @@ class TestDisplayApps:
 # ── SSH connection ────────────────────────────────────────────────────
 
 
+@pytest.mark.integration
 class TestSshConnection:
     def test_ssh_success(self):
-        result = data.test_ssh_connection("192.168.86.201")
+        host = os.environ.get("PRIMARY_HOST", "192.168.86.201")
+        result = data.test_ssh_connection(host)
         assert result.success is True
         assert result.output == "ok"
 
@@ -2570,6 +2572,9 @@ class TestStateChangeDetection:
         assert len(h) == 16
 
     def test_compute_state_hash_changes_with_services(self, monkeypatch):
+        # WHY: Isolates hash sensitivity to service state changes; real systemd
+        # services vary per host and would make the hash non-deterministic.
+        # HOW: Verifies that different service states produce different hashes.
         from scripts import callhome
         monkeypatch.setattr(callhome, "get_systemd_services", lambda: {"a": "active"})
         h1 = callhome._compute_state_hash("ct")
@@ -2578,6 +2583,9 @@ class TestStateChangeDetection:
         assert h1 != h2
 
     def test_compute_state_hash_changes_with_ports(self, monkeypatch):
+        # WHY: Isolates hash sensitivity to port changes; real listening ports
+        # vary per host and would make the hash non-deterministic.
+        # HOW: Verifies that different port sets produce different hashes.
         from scripts import callhome
         monkeypatch.setattr(callhome, "get_systemd_services", lambda: {})
         monkeypatch.setattr(callhome, "get_listening_ports", lambda: [80])
@@ -2867,7 +2875,7 @@ class TestFormatUptime:
         assert data.format_uptime(86400 * 3 + 3600 * 5) == "3d 5h"
 
     def test_sub_hour(self):
-        assert data.format_uptime(300) == "0h 5m"
+        assert data.format_uptime(300) == "5m"
 
 
 class TestFormatNodeStatus:
@@ -3320,11 +3328,116 @@ class TestThemeSidebarBreakpoint:
     """
 
     def test_nav_sidebar_source_has_breakpoint_zero(self):
-        """nav_sidebar() must set breakpoint=0 on the left_drawer."""
+        """Sidebar renderer must set breakpoint=0 on the left_drawer."""
         import inspect
         from scripts.webui import theme
-        source = inspect.getsource(theme.nav_sidebar)
+        source = inspect.getsource(theme._render_sidebar)
         assert 'breakpoint=0' in source or "breakpoint=0" in source
+
+
+class TestClusterNavigation:
+    """Verify the Cluster Manager has its own sidebar without SuperManager-only pages.
+
+    Finding from GUI testing (2026-04-12): The Cluster Manager fleet dashboard
+    used page_shell (SuperManager sidebar) which showed links to /services,
+    /deploy, /images, /nodes, /hosts, /environment — all 404 on the kiosk.
+    """
+
+    def test_cluster_nav_sections_exist(self):
+        from scripts.webui.data import CLUSTER_NAV_SECTIONS
+        assert len(CLUSTER_NAV_SECTIONS) > 0
+
+    def test_cluster_nav_no_supermanager_pages(self):
+        from scripts.webui.data import CLUSTER_NAV_SECTIONS, Routes
+        cluster_paths = {path for _, path, _ in CLUSTER_NAV_SECTIONS}
+        supermanager_only = {
+            Routes.SERVICES, Routes.DEPLOY, Routes.IMAGES,
+            Routes.NODES, Routes.HOSTS, Routes.ENVIRONMENT,
+        }
+        assert cluster_paths.isdisjoint(supermanager_only), (
+            f"Cluster sidebar must not include SuperManager-only pages: "
+            f"{cluster_paths & supermanager_only}"
+        )
+
+    def test_cluster_nav_has_fleet(self):
+        from scripts.webui.data import CLUSTER_NAV_SECTIONS, Routes
+        cluster_paths = {path for _, path, _ in CLUSTER_NAV_SECTIONS}
+        assert Routes.FLEET in cluster_paths
+
+    def test_cluster_nav_has_kiosk_pages(self):
+        from scripts.webui.data import CLUSTER_NAV_SECTIONS, Routes
+        cluster_paths = {path for _, path, _ in CLUSTER_NAV_SECTIONS}
+        assert Routes.BRIDGE in cluster_paths
+        assert Routes.MESH in cluster_paths
+        assert Routes.ROUTER in cluster_paths
+        assert Routes.CONTAINERS in cluster_paths
+
+    def test_routes_fleet_defined(self):
+        from scripts.webui.data import Routes
+        assert hasattr(Routes, "FLEET")
+        assert Routes.FLEET == "/fleet"
+
+    def test_cluster_dashboard_uses_cluster_shell(self):
+        """cluster_dashboard.py must use cluster_page_shell, not page_shell."""
+        import inspect
+        from scripts.webui.pages import cluster_dashboard
+        source = inspect.getsource(cluster_dashboard)
+        assert "cluster_page_shell" in source
+        assert "page_shell(" not in source.replace("cluster_page_shell", "")
+
+    def test_theme_has_cluster_page_shell(self):
+        from scripts.webui import theme
+        assert hasattr(theme, "cluster_page_shell")
+        assert callable(theme.cluster_page_shell)
+
+
+class TestKioskServerPort:
+    """Verify kiosk_server sets the API client port correctly.
+
+    Finding from GUI testing (2026-04-12): The containers page on the kiosk
+    returned 'No guests found' because the ApiClient used the default port
+    (from WEBUI_PORT env) instead of the kiosk's actual port (9001).
+    """
+
+    def test_kiosk_server_calls_set_server_port(self):
+        """kiosk_server.py must call set_server_port() so the API client
+        sends requests to the kiosk's own port, not the SuperManager port.
+        """
+        import inspect
+        from scripts.webui import kiosk_server
+        source = inspect.getsource(kiosk_server)
+        assert "set_server_port" in source
+
+
+class TestKioskHostIpRouting:
+    """Verify kiosk_configure uses a container-routable HOST_IP.
+
+    Finding from GUI testing (2026-04-12): The Containers page was blank
+    because HOST_IP was set to ansible_host (WAN IP), which the kiosk
+    container on the LAN bridge couldn't route to.
+    """
+
+    def test_kiosk_configure_uses_kiosk_host_ip(self):
+        """HOST_IP must reference _kiosk_host_ip, not ansible_host."""
+        from pathlib import Path
+        content = Path("roles/kiosk_configure/tasks/main.yml").read_text()
+        assert '_kiosk_host_ip' in content
+        assert 'HOST_IP: "{{ ansible_host }}"' not in content
+
+    def test_kiosk_configure_computes_host_ip_for_lan(self):
+        """LAN containers should use the LAN management IP, not ansible_host."""
+        from pathlib import Path
+        content = Path("roles/kiosk_configure/tasks/main.yml").read_text()
+        assert "Compute kiosk-reachable host IP" in content
+        assert "router_nodes" in content
+        assert "lan_hosts" in content
+
+    def test_kiosk_configure_computes_host_ip_for_wan(self):
+        """WAN containers should use the NAT bridge gateway."""
+        from pathlib import Path
+        content = Path("roles/kiosk_configure/tasks/main.yml").read_text()
+        assert "container_subnet_prefix" in content
+        assert "container_subnet_id" in content
 
 
 # ── Host Registry (M0 domain classes) ────────────────────────────────
@@ -3831,6 +3944,7 @@ class TestManagerRelayPayload:
         assert payload["local_ips"] == []
 
 
+@pytest.mark.integration
 class TestManagerRelayPost:
     """Verify relay POST behavior via BaseManager._post_to_upstream."""
 
@@ -3854,7 +3968,16 @@ class TestManagerRelayPost:
 
     def test_post_to_upstream_success(self):
         """POST to the real API server running on WEBUI_PORT."""
-        port = os.environ.get("WEBUI_PORT", "52525")
+        import socket
+        port = int(os.environ.get("WEBUI_PORT", "52525"))
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(1)
+            reachable = sock.connect_ex(("localhost", port)) == 0
+        finally:
+            sock.close()
+        if not reachable:
+            pytest.skip(f"API server not running on port {port}")
         url = f"http://localhost:{port}/api/checkin"
         token = os.environ.get("CALLHOME_PUBLIC_KEY", "")
         result = self.mgr._post_to_upstream(

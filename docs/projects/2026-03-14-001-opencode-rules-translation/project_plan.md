@@ -1,3 +1,5 @@
+> **Status: Archived** — Superseded by current implementation. Retained for historical reference.
+
 # OpenCode Rules Translation Project
 
 Translate all rules from `.cursor/rules/` directory to `.agents/skills/` directory following OpenCode rules writing patterns.

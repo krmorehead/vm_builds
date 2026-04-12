@@ -1,5 +1,4 @@
 ---
 desktop_user: "{{ lookup('env', 'DESKTOP_USER') | default('desktop', true) }}"
-desktop_password: "{{ lookup('env', 'DESKTOP_PASSWORD') | default('', true) }}"
 desktop_autologin: "{{ lookup('env', 'DESKTOP_AUTOLOGIN') | default('false', true) }}"
 desktop_default_session: "{{ lookup('env', 'DESKTOP_DEFAULT_SESSION') | default('plasma', true) }}"

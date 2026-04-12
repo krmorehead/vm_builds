@@ -32,7 +32,7 @@ description: Molecule testing patterns, TDD workflow, baseline management, and s
 source .venv/bin/activate
 set -a; source test.env; set +a
 
-molecule test          # full clean-state pipeline (destroys baseline)
+molecule test          # full clean-state pipeline
 molecule converge      # run playbook only (preserves baseline)
 molecule verify        # run assertions only
 molecule cleanup       # reset test host
@@ -52,11 +52,11 @@ molecule verify -s mesh1-infra     # verify layered scenario
 
 **Clean-state validation (CI, pre-commit, final proof):**
 ```bash
-molecule test                      # full pipeline — restores baseline at end
+molecule test                      # full pipeline: cleanup → converge → verify
 ```
 
-`molecule test` ends with a final converge that restores the baseline. No
-manual reconverge needed. mesh1 stays accessible when tests pass.
+After `molecule test`, the baseline is left running (verify is the last step).
+To do a clean rebuild for the next iteration, run `molecule converge` manually.
 
 ## Molecule Pipeline Sequence
 
@@ -64,34 +64,31 @@ manual reconverge needed. mesh1 stays accessible when tests pass.
 1. `dependency` — install Galaxy requirements
 2. `cleanup` — reset host from previous runs
 3. `syntax` — ansible syntax check
-4. `converge` — run `playbooks/site.yml`
-5. `verify` — run `molecule/default/verify.yml`
-6. `cleanup` — reset host after test
-7. `converge` — restore baseline (proves rebuild works AND keeps mesh1 accessible)
+4. `prepare` — start API server, verify images exist
+5. `converge` — run `playbooks/site.yml`
+6. `verify` — run `molecule/default/verify.yml`
 
-The final converge is NOT optional. It serves as both a rebuild test and
-baseline restoration. NEVER end the test_sequence with just `cleanup`.
-
-Previous bug: test_sequence ended with `cleanup`. Every `molecule test` left
-mesh1 unreachable because OpenWrt was destroyed with no reconverge.
+There is NO trailing cleanup or reconverge. The baseline is left running
+after verify so mesh1 (LAN host) remains accessible. NEVER add cleanup
+or destroy to the end of the test_sequence.
 
 There is NO `lint` phase in the Molecule config. Run `ansible-lint` and `yamllint` separately.
 
 ## Architecture
 
 - **Driver**: `default` with `managed: false` (real Proxmox hardware, not Docker)
-- **Platforms**: 4 nodes — `home` (primary), `ai` and `mesh2` (directly reachable), `mesh1` (LAN satellite via ProxyJump)
+- **Platforms**: 6 nodes — `home` (primary), `ai`, `mesh2`, `bridge-1`, `bridge-2` (directly reachable), `mesh1` (LAN satellite via ProxyCommand)
 - **Provisioner**: `playbooks/site.yml` (phased: primary hosts → LAN bootstrap → services)
 
-## 4-Node Topology
+## 6-Node Topology
 
 ```
 ISP Router (192.168.86.x supernet)
   |
 Switch
-  |            |                  |
-Home          AI Node          Mesh2
-(primary)     192.168.86.220   192.168.86.211
+  |            |              |           |          |
+Home          AI Node       Mesh2     Bridge-1   Bridge-2
+(primary)     .220          .211        .230       .231
   |
   |-- OpenWrt VM (10.10.10.1)
   |     |
@@ -100,36 +97,21 @@ Home          AI Node          Mesh2
   |     Mesh1 (10.10.10.210)
 ```
 
-- **home**, **ai**, **mesh2**: directly reachable on the supernet (no ProxyJump)
-- **mesh1**: behind home's OpenWrt, reachable via ProxyJump through home
-- All 4 nodes are in `vpn_nodes` — WireGuard containers deploy on all 4 in parallel
-- `mesh1` and `mesh2` are also in `wifi_nodes` — OpenWrt Mesh LXC deploys on both
-- `home` is the only `router_nodes` member (runs OpenWrt)
-- `mesh1` is the only `lan_hosts` member (requires OpenWrt to be running)
-- `mesh1` is also in `streaming_nodes` — Moonlight streaming client (cross-subnet from Sunshine server)
-- `home` is in `gaming_nodes` — Sunshine Gaming VM (the streaming SERVER)
+- **home**, **ai**, **mesh2**, **bridge-1**, **bridge-2**: directly reachable on the supernet (no proxy)
+- **mesh1**: behind home's OpenWrt, reachable via ProxyCommand through home
+- `home` is the only `router_nodes` member (runs OpenWrt VM)
+- `ai` is in `gaming_nodes` — Gaming LXC with Sunshine
+- `mesh1` is in `streaming_nodes` — Moonlight streaming client
+- `bridge-1` and `bridge-2` are in `bridge_nodes` — WiFi bridge AP and STA
+- All 6 nodes are in `kiosk_nodes` (every host needs a Manager)
 
-## Use the 4 nodes intelligently for different tests
+## Use the 6 nodes intelligently for different tests
 
 Each molecule scenario can assign different groups to the same host. A host
-is NOT locked into one role across all scenarios. Use the 4 nodes to exercise
-different topology combinations:
+is NOT locked into one role across all scenarios.
 
-- **moonlight-lxc scenario**: mesh1 = streaming client, home = router only.
-  mesh1 is NOT a mesh WiFi node in this scenario.
-- **mesh-wifi scenario**: mesh1 = WiFi mesh node. NOT a streaming client.
-- **E2E (default)**: mesh1 = WiFi mesh + streaming client + VPN + monitoring.
-
-NEVER co-locate a streaming server and client on the same host. If home runs
-Sunshine (gaming_nodes), home CANNOT also run Moonlight (streaming_nodes).
-The whole point of cross-subnet streaming is testing real network discovery
-via WireGuard VPN.
-
-Previous catastrophe: Agent put Moonlight on home (media_nodes) instead of
-mesh1 (streaming_nodes), making home both the Sunshine server AND the
-Moonlight client. This is physically nonsensical — you can't stream to
-yourself. It also eliminated cross-subnet testing, which was the entire
-purpose of the Moonlight project.
+NEVER co-locate a streaming server and client on the same host. If ai runs
+Sunshine (gaming_nodes), ai CANNOT also run Moonlight (streaming_nodes).
 
 ## Phased site.yml
 
@@ -137,13 +119,13 @@ purpose of the Moonlight project.
 
 1. **Phase 1 (Primary hosts)**: `proxmox:!lan_hosts` — backup, infra, OpenWrt VM, OpenWrt configure
 2. **Phase 2 (LAN satellites)**: After OpenWrt creates the LAN, bootstrap LAN hosts from `router_nodes`, then run backup + infra on `lan_hosts`
-3. **Phase 3 (Services)**: Flavor groups that span both primary and LAN hosts — runs in parallel across both hosts
+3. **Phase 3 (Services)**: Flavor groups that span both primary and LAN hosts — runs in parallel across all hosts
 
 ## Pre-Test Checklist
 
 1. Source test env: `set -a; source test.env; set +a`
 2. Verify SSH: `ssh root@$PRIMARY_HOST hostname`
-3. Build custom images (required): `./build-images.sh`
+3. Build custom images (required): `scripts/build-images.sh`
 4. Verify images exist: `ls images/openwrt-router-*.img.gz images/openwrt-mesh-lxc-*-rootfs.tar.gz images/debian-*.tar.zst`
 5. If previous run left host in bad state, power-cycle the machine
 
@@ -153,12 +135,12 @@ purpose of the Moonlight project.
 |---------|-------|-----|
 | `UNREACHABLE` during converge | SSH broken or host down | Check `PRIMARY_HOST`, verify SSH |
 | `community.proxmox` not found | Collections missing | `ansible-galaxy collection install -r requirements.yml` |
-| Bridge numbers keep incrementing | Cleanup didn't remove bridges | `./cleanup.sh clean test.env` |
+| Bridge numbers keep incrementing | Cleanup didn't remove bridges | `scripts/cleanup.sh clean test.env` |
 | WiFi radios=0 after converge | PCI passthrough not cleaned up | Ensure cleanup unbinds vfio-pci, reloads modules, rescans PCI |
 | `Timeout waiting for SSH` | Network restart dropped connection | Verify SSH args include `ConnectTimeout=10`, `ServerAliveInterval=15` |
 
 ## Multi-Node E2E Testing
 
-When a service needs testing on all 4 nodes, add the flavor group to ALL platforms in the molecule default scenario — not just the static inventory.
+When a service needs testing on all 6 nodes, add the flavor group to ALL platforms in the molecule default scenario — not just the static inventory.
 
 This is a test-only change that doesn't affect production.

@@ -2,7 +2,6 @@
 pihole_web_password: "{{ lookup('env', 'PIHOLE_WEB_PASSWORD') | default('', true) }}"
 pihole_upstream_dns_1: ""  # empty = auto-detect container gateway
 pihole_upstream_dns_2: ""  # empty = omitted; set explicitly for dual upstream
-pihole_query_logging_days: 7
 
 # pct exec uses a restricted PATH that excludes /usr/local/bin
 pihole_bin: /usr/local/bin/pihole

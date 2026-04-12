@@ -139,6 +139,7 @@ def _init_manager() -> None:
         "CALLHOME_PUBLIC_KEY": env.get("CALLHOME_PUBLIC_KEY", ""),
         "MESH_KEY": env.get("MESH_KEY", ""),
         "CHILD_MANAGER_IPS": env.get("CHILD_MANAGER_IPS", ""),
+        "STATE_DIR": str(get_state_dir()),
     }
     manager.init(
         _env_node_resolver,
@@ -160,26 +161,50 @@ def _get_callhome_private_key() -> str:
 
 
 def _merge_cluster_containers(state_dir: Path, checkin_node_id: str, cluster_nodes: dict) -> None:
-    """Merge child NodeManager containers into the parent's extensions.
+    """Promote child NodeManagers to top-level nodes AND merge containers.
 
-    Instead of promoting each child to a top-level node (which would violate
-    the 4-tier model), we fold all children's ``containers`` data into the
-    parent ClusterManager's ``container_health.extensions.containers``.
-
-    This way, ``check_container_ready`` finds any container in the cluster
-    by searching the parent's nested ``extensions.containers`` — no 4-tier
-    violation, full per-container visibility.
+    Each child in ``cluster_nodes`` is registered as a top-level node on
+    the SuperManager (so the fleet dashboard shows all physical hosts).
+    Their container data is ALSO folded into the parent ClusterManager's
+    ``container_health.extensions.containers`` for ``check_container_ready``.
     """
+    all_child_containers: dict[str, dict] = {}
+
+    for nid, child in cluster_nodes.items():
+        ch = child.get("container_health", {}) or {}
+        child_containers = ch.get("extensions", {}).get("containers", {})
+        for ct_name, ct_data in child_containers.items():
+            all_child_containers[ct_name] = ct_data
+
+        child_ch = None
+        if ch:
+            child_ch = data.ContainerHealth(
+                container_id=ch.get("container_id", nid),
+                systemd_services=ch.get("systemd_services", {}),
+                listening_ports=ch.get("listening_ports", []),
+                ready=ch.get("ready", False),
+                extensions=ch.get("extensions", {}),
+            )
+        child_checkin = data.NodeCheckin(
+            node_id=nid,
+            hostname=child.get("hostname", nid),
+            local_ips=child.get("local_ips", []),
+            uptime_seconds=child.get("uptime_seconds", 0),
+            services=child.get("services", []),
+            disk_usage_pct=child.get("disk_usage_pct", 0),
+            memory_usage_pct=child.get("memory_usage_pct", 0),
+            version=child.get("version", ""),
+            container_health=child_ch,
+        )
+        remote_ip = child_checkin.local_ips[0] if child_checkin.local_ips else ""
+        data.register_checkin(state_dir, child_checkin, remote_ip)
+
     nodes = data.load_node_registry(state_dir)
     parent = next((n for n in nodes if n.node_id == checkin_node_id), None)
     if not parent or not parent.container_health:
         return
     existing_containers = parent.container_health.extensions.get("containers", {})
-    for _nid, child in cluster_nodes.items():
-        ch = child.get("container_health", {}) or {}
-        child_containers = ch.get("extensions", {}).get("containers", {})
-        for ct_name, ct_data in child_containers.items():
-            existing_containers[ct_name] = ct_data
+    existing_containers.update(all_child_containers)
     parent.container_health.extensions["containers"] = existing_containers
     data._save_node_registry(state_dir, nodes)
 

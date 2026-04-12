@@ -1,6 +1,6 @@
-# Container NAT Networking
+> **Status: Completed** — Archived 2026-04-10
 
-## Status: IN PROGRESS
+# Container NAT Networking
 
 ## Overview
 

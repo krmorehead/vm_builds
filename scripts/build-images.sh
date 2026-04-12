@@ -49,6 +49,23 @@ IB_URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARG
 MESH_FILES_DIR="${SCRIPT_DIR}/image-builder/files-mesh-lxc"
 ROUTER_FILES_DIR="${SCRIPT_DIR}/image-builder/files-router-vm"
 
+# Canonical sources for scripts shared between mesh and router images.
+# Copied into both files directories before building to avoid duplication.
+SHARED_SCRIPTS_DIR="${SCRIPT_DIR}/image-builder/shared-scripts"
+
+sync_shared_scripts() {
+    local target_dir="$1"
+    if [[ -d "$SHARED_SCRIPTS_DIR" ]]; then
+        for src in "$SHARED_SCRIPTS_DIR"/*; do
+            [[ -f "$src" ]] || continue
+            local fname
+            fname="$(basename "$src")"
+            cp -f "$src" "$target_dir/usr/sbin/$fname"
+            chmod +x "$target_dir/usr/sbin/$fname"
+        done
+    fi
+}
+
 # Output names are computed from the image manifest (see init_output_names)
 
 # Shared Debian base template for all Debian-based LXC builds
@@ -370,6 +387,7 @@ build_mesh_lxc() {
     local output="${IMAGES_DIR}/${MESH_OUTPUT_NAME}"
     should_skip_build "mesh" "$output" && return
 
+    sync_shared_scripts "$MESH_FILES_DIR"
     log "Building mesh LXC rootfs..."
     local ib_dir="${BUILD_DIR}/${IB_NAME}"
     local pkg_list
@@ -403,6 +421,7 @@ build_router_vm() {
     local output="${IMAGES_DIR}/${ROUTER_OUTPUT_NAME}"
     should_skip_build "router" "$output" && return
 
+    sync_shared_scripts "$ROUTER_FILES_DIR"
     log "Building router VM image..."
     local ib_dir="${BUILD_DIR}/${IB_NAME}"
     local pkg_list
@@ -517,6 +536,12 @@ build_pihole_lxc() {
         cat > /etc/pihole/pihole.toml << TOML_EOF
 [dns]
 upstreams = [\"1.1.1.1\", \"1.0.0.1\"]
+
+[dhcp]
+active = false
+
+[database]
+maxDBdays = 30
 TOML_EOF
         chown pihole:pihole /etc/pihole/pihole.toml
     '"
@@ -796,7 +821,7 @@ build_jellyfin_lxc() {
         log "  waiting... ($retries/30)"
         sleep 2
     done
-    log "Container has network access."
+    log "Container is running."
 
     # Force reliable DNS — DHCP may inject an ISP nameserver that doesn't resolve
     remote_cmd "pct exec ${vmid} -- bash -c 'echo nameserver 8.8.8.8 > /etc/resolv.conf'"
@@ -838,9 +863,14 @@ build_jellyfin_lxc() {
             mesa-va-drivers \
             mesa-vdpau-drivers
 
-        # Pre-configure Jellyfin for port 8096
+        # Create render group and add jellyfin to it
+        groupadd -g 993 render 2>/dev/null || true
+        usermod -a -G render jellyfin 2>/dev/null || true
+
+        # Pre-configure Jellyfin
         mkdir -p /etc/jellyfin
-        cat > /etc/jellyfin/jellyfin.conf << \"JELLYFIN_EOF\"
+
+        cat > /etc/jellyfin/jellyfin.conf << \"JELLYFIN_CONF_EOF\"
 [Networking]
 _port = 8096
 _base_url = /
@@ -848,9 +878,33 @@ _base_url = /
 [MediaEncoder]
 _vaapi_device = /dev/dri/renderD128
 _vaapi_driver = auto
-JELLYFIN_EOF
+JELLYFIN_CONF_EOF
 
-        # Enable hardware acceleration by default
+        cat > /etc/jellyfin/network.xml << \"NETWORK_EOF\"
+<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<Network>
+  <BaseUrl>/</BaseUrl>
+  <Port>8096</Port>
+  <EnableHttps>false</EnableHttps>
+  <EnableUPnP>false</EnableUPnP>
+</Network>
+NETWORK_EOF
+
+        cat > /etc/jellyfin/library.xml << \"LIBRARY_EOF\"
+<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<Library>
+  <SaveMetadataHidden>false</SaveMetadataHidden>
+  <EnableAutomaticSeriesGrouping>false</EnableAutomaticSeriesGrouping>
+  <EnableAutomaticPhotosGrouping>true</EnableAutomaticPhotosGrouping>
+  <CollectionFolders>
+    <CollectionFolder>
+      <Name>Media</Name>
+      <Path>/media</Path>
+    </CollectionFolder>
+  </CollectionFolders>
+</Library>
+LIBRARY_EOF
+
         systemctl enable jellyfin || true
 
         # Clean up package caches
@@ -1215,6 +1269,7 @@ WantedBy=multi-user.target
 SERVICE_EOF
 
         systemctl daemon-reload
+        systemctl enable kodi-standalone 2>/dev/null || true
 
         # Pre-configure advancedsettings.xml template for buffer/cache tuning
         mkdir -p /home/kodi/.kodi/userdata
@@ -1230,6 +1285,18 @@ SERVICE_EOF
   </network>
 </advancedsettings>
 SETTINGS_EOF
+
+        # Bake default guisettings.xml (web server on port 8080)
+        cat > /home/kodi/.kodi/userdata/guisettings.xml << \"GUI_EOF\"
+<settings version=\"2\">
+  <setting id=\"services.webserver\">true</setting>
+  <setting id=\"services.webserverport\">8080</setting>
+  <setting id=\"services.esallinterfaces\">true</setting>
+  <setting id=\"services.esenabled\">true</setting>
+  <setting id=\"services.esport\">9090</setting>
+</settings>
+GUI_EOF
+
         chown -R kodi:kodi /home/kodi/.kodi
 
         apt-get clean 2>/dev/null || true
@@ -1461,6 +1528,40 @@ DISPLAY_EOF
 
     rm -rf "${tmpdir}"
 
+    # Bake webui application code into the image
+    log "Baking webui Python files and build.py into image..."
+    local webui_src="${SCRIPT_DIR}/webui"
+    local webui_tar
+    webui_tar=$(mktemp)
+
+    tar czf "${webui_tar}" \
+        -C "${SCRIPT_DIR}/webui" \
+        __init__.py theme.py data.py heartbeat.py manager.py \
+        host_state.py api_client.py metric_controller.py \
+        kiosk_server.py \
+        pages/__init__.py pages/hub.py pages/bridge.py pages/mesh.py \
+        pages/router.py pages/viewer.py pages/launch.py \
+        pages/containers.py pages/cluster_dashboard.py \
+        -C "${SCRIPT_DIR}/.." build.py
+
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS "${webui_tar}" "root@${PROXMOX_HOST}:/tmp/kiosk_webui.tar.gz"
+    remote_cmd "pct push ${vmid} /tmp/kiosk_webui.tar.gz /tmp/kiosk_webui.tar.gz && rm -f /tmp/kiosk_webui.tar.gz"
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        mkdir -p /opt/kiosk/scripts/webui/pages
+        touch /opt/kiosk/scripts/__init__.py
+        tar xzf /tmp/kiosk_webui.tar.gz -C /opt/kiosk/scripts/webui/
+        mv /opt/kiosk/scripts/webui/build.py /opt/kiosk/build.py 2>/dev/null || true
+        chown -R kiosk:kiosk /opt/kiosk
+        rm -f /tmp/kiosk_webui.tar.gz
+    '"
+    rm -f "${webui_tar}"
+
+    # Enable services so they start on boot
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        systemctl enable kiosk-web kiosk-display 2>/dev/null || true
+    '"
+
     log "Verifying Kiosk installation..."
     remote_cmd "pct exec ${vmid} -- bash -c '
         dpkg -l cage | grep -c ^ii || { echo FAIL: cage not installed; exit 1; }
@@ -1471,6 +1572,8 @@ DISPLAY_EOF
         test -x /opt/kiosk/wait-for-hub.sh || { echo FAIL: wait-for-hub script missing; exit 1; }
         id kiosk || { echo FAIL: kiosk user missing; exit 1; }
         test -d /opt/kiosk/scripts/webui || { echo FAIL: kiosk webui dir missing; exit 1; }
+        test -f /opt/kiosk/scripts/webui/kiosk_server.py || { echo FAIL: kiosk_server.py missing; exit 1; }
+        test -f /opt/kiosk/build.py || { echo FAIL: build.py missing; exit 1; }
         echo ALL CHECKS PASSED
     '"
     log "Kiosk smoke test passed."
@@ -1765,6 +1868,8 @@ build_wireguard_lxc() {
 net.ipv4.ip_forward=1
 SYSCTL_EOF
 
+        systemctl enable wg-quick@wg0 2>/dev/null || true
+
         apt-get clean 2>/dev/null || true
         rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
     '"
@@ -1898,7 +2003,7 @@ build_homeassistant_lxc() {
 
         # Add Docker repository
         echo \\
-          \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian \\
+          \"deb [arch=\$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian \\
           \$(lsb_release -cs) stable\" | tee /etc/apt/sources.list.d/docker.list > /dev/null
 
         apt-get update -qq
@@ -1924,9 +2029,85 @@ build_homeassistant_lxc() {
 }
 DOCKER_EOF
 
-        # Pre-pull Home Assistant container image (documented exception to bake principle)
+        # Pre-pull Home Assistant container image
         systemctl start docker
         docker pull homeassistant/home-assistant:stable
+
+        # Bake config directory and static configuration files
+        mkdir -p /opt/homeassistant/config
+
+        cat > /opt/homeassistant/config/docker-compose.yml << \"COMPOSE_EOF\"
+services:
+  home-assistant:
+    image: homeassistant/home-assistant:stable
+    container_name: home-assistant
+    restart: always
+    network_mode: host
+    volumes:
+      - /opt/homeassistant/config:/config
+    environment:
+      - TZ=UTC
+    privileged: false
+    security_opt:
+      - no-new-privileges:true
+    cap_add:
+      - SYS_TIME
+COMPOSE_EOF
+
+        cat > /opt/homeassistant/config/configuration.yaml << \"HA_CFG_EOF\"
+default_config:
+
+http:
+  server_port: 8123
+  ip_ban_enabled: true
+  login_attempts_threshold: 5
+  use_x_forwarded_for: true
+  trusted_proxies:
+    - 127.0.0.1
+    - "::1"
+
+recorder:
+  db_url: sqlite:///config/home-assistant_v2.db
+  purge_keep_days: 10
+  exclude:
+    entities:
+      - sensor.date
+      - sensor.time
+      - sun.sun
+    domains:
+      - updater
+
+logger:
+  default: INFO
+  logs:
+    homeassistant.core: WARNING
+    homeassistant.components.recorder: WARNING
+    homeassistant.components.http: WARNING
+
+automation: []
+HA_CFG_EOF
+
+        # Bake systemd unit to start HA compose on boot
+        cat > /etc/systemd/system/homeassistant-compose.service << \"HA_SVC_EOF\"
+[Unit]
+Description=Home Assistant Docker Compose
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/homeassistant/config
+ExecStart=/usr/bin/docker compose up -d
+ExecStop=/usr/bin/docker compose down
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
+HA_SVC_EOF
+
+        systemctl daemon-reload
+        systemctl enable homeassistant-compose 2>/dev/null || true
 
         # Clean up apt cache
         apt-get clean 2>/dev/null || true
@@ -2244,8 +2425,9 @@ PEOF
 
 # ── Desktop VM image ─────────────────────────────────────────────────
 # Debian 12 cloud image with KDE Plasma, GNOME, SDDM, and shared apps
-# pre-installed. GPU drivers are NOT baked (host-dependent, installed at
-# configure time). The generic cloud image must already be downloaded to
+# pre-installed. Both Intel and AMD GPU driver stacks are baked in so
+# the image works on any host — only the matching driver loads at runtime.
+# The generic cloud image must already be downloaded to
 # images/debian-12-generic-amd64.qcow2.
 
 cleanup_desktop_build() {
@@ -2416,6 +2598,188 @@ apt-get install -y --no-install-recommends \
     pipewire-audio \
     wireplumber \
     qemu-guest-agent
+
+echo "==> Installing GPU drivers (both Intel and AMD -- no conflict)..."
+apt-get install -y --no-install-recommends \
+    xserver-xorg-video-intel \
+    intel-media-va-driver \
+    xserver-xorg-video-amdgpu \
+    mesa-va-drivers \
+    mesa-vulkan-drivers \
+    vainfo
+
+echo "==> Configuring SDDM as default display manager..."
+echo "/usr/bin/sddm" > /etc/X11/default-display-manager
+dpkg-reconfigure -f noninteractive sddm
+
+echo "==> Enabling services..."
+systemctl enable qemu-guest-agent 2>/dev/null || true
+systemctl set-default graphical.target
+systemctl enable sddm 2>/dev/null || true
+
+echo "==> Creating desktop user with correct groups..."
+useradd -m -G video,render,audio,sudo -s /bin/bash desktop 2>/dev/null || \
+    usermod -a -G video,render,audio,sudo desktop
+
+echo "==> Running xdg-user-dirs-update..."
+su - desktop -c "xdg-user-dirs-update" 2>/dev/null || true
+
+echo "==> Baking KDE Plasma configuration..."
+DHOME=/home/desktop
+mkdir -p "$DHOME/.config/kglobalshortcutsrc.d" "$DHOME/.config/autostart" "$DHOME/.config/gtk-3.0" "$DHOME/.local/share/plasma/layout-templates"
+
+cat > "$DHOME/.config/kdeglobals" << "KDE_EOF"
+[General]
+ColorScheme=BreezeDark
+
+[KDE]
+SingleClick=false
+LookAndFeelPackage=org.kde.breezedark.desktop
+KDE_EOF
+
+cat > "$DHOME/.config/kglobalshortcutsrc" << "KDE_SC_EOF"
+[kwin]
+Overview=Meta+Tab
+Window Close=Alt+F4
+Window Maximize=Meta+Up
+Window Minimize=Meta+Down
+Window Quick Tile Left=Meta+Left
+Window Quick Tile Right=Meta+Right
+Switch Window Down=Alt+Tab
+
+[plasmashell]
+activate task manager entry 1=Meta+1
+activate task manager entry 2=Meta+2
+activate task manager entry 3=Meta+3
+show-on-mouse-pos=Meta+V
+
+[org.kde.spectacle.desktop]
+ActiveWindowScreenShot=Alt+Print
+CurrentMonitorScreenShot=Ctrl+Print
+FullScreenScreenShot=Print
+RectangularRegionScreenShot=Ctrl+Shift+4
+_launch=Meta+Shift+S
+
+[flameshot.desktop]
+Capture=Ctrl+Shift+4
+KDE_SC_EOF
+
+cat > "$DHOME/.config/plasma-org.kde.plasma.desktop-appletsrc" << "KDE_PANEL_EOF"
+[PlasmaViews][Panel 2]
+alignment=0
+floating=1
+panelVisibility=1
+
+[PlasmaViews][Panel 2][Defaults]
+thickness=44
+
+[Containments][2]
+activityId=
+formfactor=2
+immutability=1
+lastScreen=0
+location=4
+plugin=org.kde.panel
+wallpaperplugin=org.kde.image
+KDE_PANEL_EOF
+
+echo "==> Baking GNOME configuration..."
+mkdir -p /etc/dconf/db/local.d/locks /etc/dconf/profile
+
+cat > /etc/dconf/profile/user << "DCONF_PROFILE_EOF"
+user-db:user
+system-db:local
+DCONF_PROFILE_EOF
+
+cat > /etc/dconf/db/local.d/00-desktop-defaults << "DCONF_DEFAULTS_EOF"
+[org/gnome/desktop/interface]
+color-scheme='prefer-dark'
+gtk-theme='Adwaita-dark'
+clock-format='12h'
+enable-hot-corners=true
+
+[org/gnome/shell]
+enabled-extensions=['dash-to-dock@micxgx.gmail.com']
+favorite-apps=['firefox-esr.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop', 'org.gnome.TextEditor.desktop']
+
+[org/gnome/shell/extensions/dash-to-dock]
+dock-position='BOTTOM'
+dash-max-icon-size=48
+extend-height=false
+dock-fixed=true
+click-action='minimize'
+intellihide=true
+transparency-mode='DYNAMIC'
+
+[org/gnome/desktop/wm/keybindings]
+close=['<Alt>F4', '<Super>q']
+minimize=['<Super>h']
+toggle-maximized=['<Super>Up']
+begin-move=['<Super>m']
+switch-applications=['<Alt>Tab']
+switch-windows=['<Super>Tab']
+
+[org/gnome/shell/keybindings]
+toggle-overview=['<Super>space']
+
+[org/gnome/settings-daemon/plugins/media-keys]
+screenshot=['Print', '<Shift><Super>3']
+screenshot-clip=['<Shift><Control>4']
+area-screenshot-clip=['<Shift><Control>4']
+window-screenshot=['<Shift><Super>5']
+
+[org/gnome/desktop/peripherals/touchpad]
+natural-scroll=true
+tap-to-click=true
+
+[org/gnome/desktop/input-sources]
+xkb-options=['caps:super']
+
+[org/gnome/mutter]
+edge-tiling=true
+dynamic-workspaces=true
+DCONF_DEFAULTS_EOF
+
+cat > /etc/dconf/db/local.d/locks/desktop-defaults << "DCONF_LOCKS_EOF"
+[org/gnome/shell]
+enabled-extensions='dash-to-dock@micxgx.gmail.com'
+
+[org/gnome/desktop/interface]
+color-scheme='prefer-dark'
+DCONF_LOCKS_EOF
+
+dconf update 2>/dev/null || true
+
+echo "==> Baking shared desktop polish..."
+cat > "$DHOME/.config/autostart/flameshot.desktop" << "FLAME_EOF"
+[Desktop Entry]
+Type=Application
+Name=Flameshot
+Exec=flameshot
+Icon=flameshot
+Terminal=false
+X-GNOME-Autostart-enabled=true
+X-KDE-autostart-after=panel
+FLAME_EOF
+
+cat > "$DHOME/.config/gtk-3.0/bookmarks" << "BOOKMARKS_EOF"
+file:///home/desktop/Downloads Downloads
+file:///home/desktop/Documents Documents
+file:///home/desktop/Pictures Pictures
+file:///home/desktop/Videos Videos
+file:///home/desktop/Music Music
+BOOKMARKS_EOF
+
+mkdir -p /etc/sddm.conf.d
+cat > /etc/sddm.conf.d/default.conf << "SDDM_EOF"
+[Theme]
+Current=breeze
+
+[General]
+DefaultSession=plasma.desktop
+SDDM_EOF
+
+chown -R desktop:desktop "$DHOME"
 
 echo "==> Cleaning up..."
 apt-get clean

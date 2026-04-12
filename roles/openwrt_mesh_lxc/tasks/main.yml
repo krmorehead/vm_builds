@@ -184,17 +184,34 @@
 
 # ── Configure callhome agent (OpenWrt / cron-based) ─────────
 # callhome.sh and crontab are baked into the image.
-# Write the server URL so heartbeats start immediately.
+# Target the local kiosk NodeManager so heartbeats follow the
+# 4-tier chain (container → NodeManager → ClusterManager → Super).
+
+- name: Detect local kiosk IP for mesh callhome target
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct config {{ kiosk_ct_id }} 2>/dev/null | grep -oP 'ip=\K[^/]+' | head -1
+    executable: /bin/bash
+  register: _mesh_kiosk_ip
+  changed_when: false
+  failed_when: false
 
 - name: Configure callhome on mesh container
   ansible.builtin.shell:
-    cmd: >-
-      pct exec {{ meshwifi_ct_id }} -- sh -c
-      'printf "CALLHOME_SERVER=%s\nCALLHOME_PUBLIC_KEY=%s\nCALLHOME_CONTAINER=%s\n"
-      "{{ callhome_server }}" "{{ callhome_public_key }}"
-      "{{ openwrt_mesh_ct_hostname }}"
-      > /etc/default/callhome;
-      /etc/init.d/cron restart 2>/dev/null || true'
+    cmd: |
+      set -o pipefail
+      KIOSK_IP="{{ _mesh_kiosk_ip.stdout | default('') | trim }}"
+      if [ -n "$KIOSK_IP" ]; then
+        TARGET="http://${KIOSK_IP}:{{ kiosk_manager_port | default('9001') }}"
+      else
+        TARGET="{{ callhome_server }}"
+      fi
+      pct exec {{ meshwifi_ct_id }} -- sh -c \
+        "printf 'CALLHOME_SERVER=%s\nCALLHOME_PUBLIC_KEY=%s\nCALLHOME_CONTAINER=1\nCALLHOME_HOSTNAME=%s\n' \
+        '$TARGET' '{{ callhome_public_key }}' '{{ openwrt_mesh_ct_hostname }}' \
+        > /etc/default/callhome; \
+        /etc/init.d/cron restart 2>/dev/null || true"
     executable: /bin/bash
   changed_when: true
   failed_when: false
@@ -216,6 +233,17 @@
       done
     executable: /bin/bash
   changed_when: true
+
+# ── Register PHY namespace move with Manager ─────────────────────
+
+- name: Update PHY namespaces in Manager after move
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/manager_register.yml"
+  vars:
+    register_path: "api/host/{{ inventory_hostname }}/hardware/phy/{{ item }}"
+    register_body:
+      namespace: "container:{{ meshwifi_ct_id }}"
+    register_method: PATCH
+  loop: "{{ _wifi_phys }}"
 
 # ── Deploy hookscript for PHY persistence across reboots ─────────
 

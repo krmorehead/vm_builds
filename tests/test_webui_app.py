@@ -1125,6 +1125,7 @@ class TestHeartbeatMetrics:
 # ── Batman API tests ─────────────────────────────────────────────────
 
 
+@pytest.mark.integration
 class TestBatmanApi:
     async def test_batman_status_returns_nodes(self, tmp_path):
         """Batman status queries real infrastructure — no mocks."""
@@ -1241,6 +1242,13 @@ class TestBatmanApi:
             )
             assert resp.status_code != 403
 
+
+# ── Batman HMAC unit tests (no infrastructure needed) ─────────────────
+
+
+class TestBatmanHmac:
+    """Pure unit tests for HMAC token generation — no SSH, no hosts."""
+
     async def test_batman_hmac_token_matches_openssl(self, tmp_path):
         """Verify Python HMAC produces the same output as openssl dgst."""
         import hashlib
@@ -1258,6 +1266,7 @@ class TestBatmanApi:
 # ── Bridge action API tests ──────────────────────────────────────────
 
 
+@pytest.mark.integration
 class TestBridgeActionApi:
     async def test_restart_wifi_resolves_nodes(self, tmp_path):
         """Restart WiFi hits real bridge hosts — no mocks."""
@@ -1302,6 +1311,7 @@ class TestBridgeActionApi:
 # ── WiFi mode API tests ─────────────────────────────────────────────
 
 
+@pytest.mark.integration
 class TestWifiModeApi:
     async def test_wifi_mode_switch_hits_real_infra(self, tmp_path):
         """Switch a bridge node's WiFi mode — no mocks."""
@@ -1400,6 +1410,7 @@ class TestWifiModeApi:
 # ── Guest management API tests ──────────────────────────────────────
 
 
+@pytest.mark.integration
 class TestGuestApi:
     async def test_guests_no_host_ip(self, tmp_path):
         """Returns 500 when HOST_IP (PRIMARY_HOST) is not configured."""
@@ -1922,3 +1933,179 @@ class TestHostRegisterEndpoint:
         manual = fleet.get_host("manual-host")
         assert manual is not None
         assert manual.mac == "aa:bb:cc:dd:ee:ff"
+
+
+# ── Host State API (Manager as Source of Truth) ──────────────────────
+
+
+class TestHostStateApi:
+    async def test_get_unknown_host_returns_404(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            resp = await client.get("/api/host/nonexistent/state")
+            assert resp.status_code == 404
+
+    async def test_post_hardware_creates_host_and_stores(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            hw_payload = {
+                "ip": "192.168.86.201",
+                "pci_devices": [{
+                    "bdf": "02:00.0", "device_type": "wifi",
+                    "vendor_device": "8086:2725", "driver": "iwlwifi",
+                    "assigned_to": None, "iommu_group": 1,
+                }],
+                "wifi_phys": [{
+                    "name": "phy0", "pci_device": "02:00.0",
+                    "namespace": "host", "driver": "iwlwifi",
+                }],
+            }
+            resp = await client.post("/api/host/home/hardware", json=hw_payload)
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["hostname"] == "home"
+            assert len(body["hardware"]["pci_devices"]) == 1
+            assert len(body["hardware"]["wifi_phys"]) == 1
+
+            get_resp = await client.get("/api/host/home/state")
+            assert get_resp.status_code == 200
+            state = get_resp.json()
+            assert state["hostname"] == "home"
+            assert state["hardware"]["wifi_phys"][0]["name"] == "phy0"
+
+    async def test_post_bridges(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            await client.post("/api/host/home/hardware", json={"ip": "10.0.0.1"})
+            br_payload = {
+                "bridges": [{
+                    "name": "vmbr0", "role": "wan",
+                    "physical_nics": ["enp1s0"], "has_carrier": True,
+                }],
+                "wan_bridge": "vmbr0",
+                "container_bridge": "vmbr_ct",
+            }
+            resp = await client.post("/api/host/home/bridges", json=br_payload)
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["bridges"]["wan_bridge"] == "vmbr0"
+            assert len(body["bridges"]["bridges"]) == 1
+
+    async def test_register_and_deregister_container(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            await client.post("/api/host/home/hardware", json={"ip": "10.0.0.1"})
+            ct_payload = {
+                "service_type": "pihole", "hostname": "pihole",
+                "state": "running", "ip": "10.10.10.10",
+                "bridge": "vmbr1",
+            }
+            resp = await client.post("/api/host/home/containers/102", json=ct_payload)
+            assert resp.status_code == 201
+            body = resp.json()
+            assert "102" in body["containers"]
+            assert body["containers"]["102"]["service_type"] == "pihole"
+
+            del_resp = await client.request("DELETE", "/api/host/home/containers/102")
+            assert del_resp.status_code == 200
+
+            state = (await client.get("/api/host/home/state")).json()
+            assert "102" not in state["containers"]
+
+    async def test_patch_phy_namespace(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            hw_payload = {
+                "ip": "10.0.0.1",
+                "wifi_phys": [{
+                    "name": "phy0", "pci_device": "02:00.0",
+                    "namespace": "host", "driver": "iwlwifi",
+                }],
+            }
+            await client.post("/api/host/home/hardware", json=hw_payload)
+            patch_resp = await client.patch(
+                "/api/host/home/hardware/phy/phy0",
+                json={"namespace": "container:103"},
+            )
+            assert patch_resp.status_code == 200
+            body = patch_resp.json()
+            phy = body["hardware"]["wifi_phys"][0]
+            assert phy["namespace"] == "container:103"
+
+    async def test_persistence_survives_reload(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            await client.post("/api/host/home/hardware", json={"ip": "10.0.0.1"})
+            await client.post("/api/host/home/containers/300", json={
+                "service_type": "jellyfin", "hostname": "jellyfin",
+                "state": "running", "ip": "10.10.10.15", "bridge": "vmbr1",
+            })
+        async with api_client(tmp_path) as client:
+            resp = await client.get("/api/host/home/state")
+            assert resp.status_code == 200
+            assert "300" in resp.json()["containers"]
+
+    async def test_invalid_vmid_returns_400(self, tmp_path):
+        async with api_client(tmp_path) as client:
+            await client.post("/api/host/home/hardware", json={"ip": "10.0.0.1"})
+            resp = await client.post("/api/host/home/containers/abc", json={
+                "service_type": "test", "hostname": "test",
+                "state": "running", "ip": "0.0.0.0", "bridge": "vmbr0",
+            })
+            assert resp.status_code == 400
+
+    async def test_full_lifecycle_registration(self, tmp_path):
+        """Simulates full infra+service registration matching the Ansible flow."""
+        async with api_client(tmp_path) as client:
+            resp = await client.post("/api/host/home/hardware", json={
+                "ip": "192.168.86.201",
+                "pci_devices": [
+                    {"bdf": "02:00.0", "device_type": "wifi",
+                     "vendor_device": "8086:2725", "driver": "iwlwifi",
+                     "assigned_to": None, "iommu_group": 1},
+                ],
+                "wifi_phys": [
+                    {"name": "phy0", "pci_device": "02:00.0",
+                     "namespace": "host", "driver": "iwlwifi"},
+                ],
+                "igpu": {
+                    "vendor": "intel", "driver": "i915",
+                    "pci_address": "00:02.0",
+                    "render_device": "/dev/dri/renderD128",
+                    "render_gid": 104, "video_gid": 44,
+                },
+            })
+            assert resp.status_code == 200
+
+            resp = await client.post("/api/host/home/bridges", json={
+                "bridges": [
+                    {"name": "vmbr0", "role": "wan",
+                     "physical_nics": ["enp1s0"], "has_carrier": True},
+                    {"name": "vmbr1", "role": "lan",
+                     "physical_nics": ["enp2s0"], "has_carrier": True},
+                ],
+                "wan_bridge": "vmbr0",
+                "container_bridge": "vmbr_ct",
+            })
+            assert resp.status_code == 200
+
+            resp = await client.post("/api/host/home/containers/100", json={
+                "service_type": "openwrt_vm", "hostname": "openwrt-router",
+                "state": "running", "ip": "192.168.1.1", "bridge": "vmbr0",
+                "hardware": ["02:00.0"],
+            })
+            assert resp.status_code == 201
+
+            resp = await client.post("/api/host/home/containers/102", json={
+                "service_type": "pihole", "hostname": "pihole",
+                "state": "running", "ip": "10.10.10.10", "bridge": "vmbr1",
+            })
+            assert resp.status_code == 201
+
+            await client.patch("/api/host/home/hardware/phy/phy0",
+                               json={"namespace": "container:100"})
+
+            state = (await client.get("/api/host/home/state")).json()
+            assert state["hostname"] == "home"
+            assert state["hardware"]["igpu"]["vendor"] == "intel"
+            assert len(state["bridges"]["bridges"]) == 2
+            assert state["bridges"]["wan_bridge"] == "vmbr0"
+            assert "100" in state["containers"]
+            assert "102" in state["containers"]
+            assert state["containers"]["100"]["service_type"] == "openwrt_vm"
+            phy0 = state["hardware"]["wifi_phys"][0]
+            assert phy0["namespace"] == "container:100"

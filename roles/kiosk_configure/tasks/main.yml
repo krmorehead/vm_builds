@@ -1,4 +1,8 @@
 ---
+# Webui Python files, build.py, systemd units, and service enablement are
+# baked into the image by build-images.sh. This role handles ONLY
+# host-specific runtime config: render GID, config.json, SSH keys.
+
 # ── Ensure container is running ──────────────────────────────────
 
 - name: Check Kiosk container status
@@ -24,15 +28,6 @@
   changed_when: false
   when: "'stopped' in (_kiosk_status.stdout | default(''))"
 
-# ── Verify Kiosk packages are available ──────────────────────────
-
-- name: Verify Cage compositor installed in container
-  ansible.builtin.command:
-    cmd: pct exec {{ kiosk_ct_id }} -- dpkg -l cage
-  register: _cage_pkg_check
-  changed_when: false
-  failed_when: _cage_pkg_check.rc != 0
-
 # ── Configure iGPU access ───────────────────────────────────────
 
 - name: Detect render group GID from host
@@ -56,7 +51,7 @@
   ansible.builtin.shell:
     cmd: |
       pct exec {{ kiosk_ct_id }} -- bash -c '
-        groupadd -g {{ _render_gid }} render 2>/dev/null || true
+        groupadd -g {{ _render_gid }} render 2>/dev/null || groupmod -g {{ _render_gid }} render 2>/dev/null || true
         usermod -a -G render,video kiosk 2>/dev/null || true
       '
     executable: /bin/bash
@@ -71,9 +66,6 @@
          | default('10.10.10.1', true) | trim }}
 
 # ── Build node IP map for the per-host manager ──────────────────
-# Maps node_id -> IP so the kiosk manager can SSH to sibling
-# containers for metric collection. Uses static_ip facts exported
-# by provision roles plus the OpenWrt router gateway.
 
 - name: Build child Manager IP map (LAN hosts use container IP, WAN hosts use host IP with DNAT)
   ansible.builtin.set_fact:
@@ -117,11 +109,24 @@
       ai: "{{ hostvars['ai']['ansible_host'] | default('') if 'ai' in hostvars else '' }}"
   when: item.value | length > 0
 
+# ── Compute host IP reachable from the kiosk container ─────────
+# LAN containers (router_nodes, lan_hosts) reach their host via the
+# LAN management IP (10.10.10.2). WAN containers reach their host
+# via the NAT bridge gateway (10.99.{subnet_id}.1). Using ansible_host
+# (the WAN IP) fails because LAN containers can't route to it.
+
+- name: Compute kiosk-reachable host IP
+  ansible.builtin.set_fact:
+    _kiosk_host_ip: >-
+      {{ _lan_gateway.split('.')[0:3] | join('.') + '.' +
+         (proxmox_lan_mgmt_ip_offset | default(2) | string)
+         if ('router_nodes' in group_names or 'lan_hosts' in group_names)
+            and (_lan_gateway | default('')) | length > 0
+         else container_subnet_prefix + '.' + (container_subnet_id | string) + '.1'
+              if (container_subnet_id | default('')) | string | length > 0
+         else ansible_host }}
+
 # ── Build service URLs from topology facts ─────────────────────
-# Each URL resolves in priority order:
-#   1. Explicit override from role defaults (operator-provided)
-#   2. Auto-computed from the service's exported static_ip fact
-#   3. Empty string (card renders as "Not available" on dashboard)
 
 - name: Build service URLs from LAN topology
   ansible.builtin.set_fact:
@@ -175,11 +180,26 @@
            else '' }}
       MANAGEMENT_SERVER: >-
         {{ kiosk_management_server if (kiosk_management_server | default('')) | length > 0
+           else callhome_server
+                if inventory_hostname in groups.get('router_nodes', [])
+           else (
+             'http://' + hostvars[groups['router_nodes'][0]]['kiosk_static_ip'] + ':' + kiosk_manager_port
+           ) if (
+             groups.get('router_nodes', []) | length > 0
+             and hostvars[groups['router_nodes'][0]].get('kiosk_static_ip', '') | length > 0
+             and (inventory_hostname in groups.get('lan_hosts', [])
+                  or inventory_hostname in groups.get('router_nodes', []))
+           )
+           else (
+             'http://' + hostvars[groups['router_nodes'][0]]['ansible_host'] + ':' + kiosk_manager_port
+           ) if (
+             groups.get('router_nodes', []) | length > 0
+           )
            else callhome_server }}
       CALLHOME_SERVER: "{{ callhome_server }}"
       CALLHOME_PUBLIC_KEY: "{{ callhome_public_key }}"
       MESH_KEY: "{{ lookup('env', 'MESH_KEY') | default('', true) }}"
-      HOST_IP: "{{ ansible_host }}"
+      HOST_IP: "{{ _kiosk_host_ip | trim }}"
       HOST_NAME: "{{ inventory_hostname }}"
       IS_CLUSTER_MANAGER: "{{ 'true' if inventory_hostname in groups.get('router_nodes', []) else 'false' }}"
       CHILD_MANAGER_IPS: >-
@@ -187,44 +207,7 @@
       NODE_IPS: >-
         {{ _kiosk_node_ips | default({}) }}
 
-# ── Deploy NiceGUI webui files and service URL config ─────────────
-
-- name: Create host temp directory for webui files
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: directory
-    mode: "0755"
-  loop:
-    - /tmp/kiosk_webui
-    - /tmp/kiosk_webui/pages
-
-- name: Copy build.py to host temp directory
-  ansible.builtin.copy:
-    src: "{{ project_root }}/build.py"
-    dest: /tmp/kiosk_build.py
-    mode: "0644"
-
-- name: Copy webui source files to host temp directory
-  ansible.builtin.copy:
-    src: "{{ item.src }}"
-    dest: "/tmp/kiosk_webui/{{ item.dest }}"
-    mode: "0644"
-  loop:
-    - { src: "{{ project_root }}/scripts/webui/__init__.py", dest: "__init__.py" }
-    - { src: "{{ project_root }}/scripts/webui/theme.py", dest: "theme.py" }
-    - { src: "{{ project_root }}/scripts/webui/data.py", dest: "data.py" }
-    - { src: "{{ project_root }}/scripts/webui/heartbeat.py", dest: "heartbeat.py" }
-    - { src: "{{ project_root }}/scripts/webui/manager.py", dest: "manager.py" }
-    - { src: "{{ project_root }}/scripts/webui/kiosk_server.py", dest: "kiosk_server.py" }
-    - { src: "{{ project_root }}/scripts/webui/pages/__init__.py", dest: "pages/__init__.py" }
-    - { src: "{{ project_root }}/scripts/webui/pages/hub.py", dest: "pages/hub.py" }
-    - { src: "{{ project_root }}/scripts/webui/pages/bridge.py", dest: "pages/bridge.py" }
-    - { src: "{{ project_root }}/scripts/webui/pages/mesh.py", dest: "pages/mesh.py" }
-    - { src: "{{ project_root }}/scripts/webui/pages/router.py", dest: "pages/router.py" }
-    - { src: "{{ project_root }}/scripts/webui/pages/viewer.py", dest: "pages/viewer.py" }
-    - { src: "{{ project_root }}/scripts/webui/pages/launch.py", dest: "pages/launch.py" }
-    - { src: "{{ project_root }}/scripts/webui/pages/containers.py", dest: "pages/containers.py" }
-    - { src: "{{ project_root }}/scripts/webui/pages/cluster_dashboard.py", dest: "pages/cluster_dashboard.py" }
+# ── Deploy host-specific config.json ─────────────────────────────
 
 - name: Build service URL config JSON
   ansible.builtin.set_fact:
@@ -236,55 +219,21 @@
     dest: /tmp/kiosk_config.json
     mode: "0644"
 
-- name: Create tarball of webui files, build.py, and config on host
+- name: Push config.json into container
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
-      tar czf /tmp/kiosk_payload.tar.gz \
-        -C /tmp/kiosk_webui . \
-        -C /tmp kiosk_build.py kiosk_config.json
+      pct push {{ kiosk_ct_id }} /tmp/kiosk_config.json /opt/kiosk/config.json
+      pct exec {{ kiosk_ct_id }} -- chown kiosk:kiosk /opt/kiosk/config.json
     executable: /bin/bash
-  changed_when: true
-
-- name: Push tarball into container and extract
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      pct push {{ kiosk_ct_id }} /tmp/kiosk_payload.tar.gz /tmp/kiosk_payload.tar.gz
-      pct exec {{ kiosk_ct_id }} -- bash -c '
-        rm -rf /opt/kiosk/webui /opt/kiosk/scripts
-        mkdir -p /opt/kiosk/scripts/webui/pages
-        touch /opt/kiosk/scripts/__init__.py
-        tar xzf /tmp/kiosk_payload.tar.gz -C /opt/kiosk/scripts/webui/ \
-          ./__init__.py ./theme.py ./data.py ./heartbeat.py ./manager.py \
-          ./kiosk_server.py ./pages
-        tar xzf /tmp/kiosk_payload.tar.gz -C /opt/kiosk/ \
-          kiosk_build.py kiosk_config.json
-        mv /opt/kiosk/kiosk_build.py /opt/kiosk/build.py
-        mv /opt/kiosk/kiosk_config.json /opt/kiosk/config.json
-        rm -f /tmp/kiosk_payload.tar.gz
-      '
-    executable: /bin/bash
-  changed_when: true
-
-- name: Set ownership on kiosk files
-  ansible.builtin.command:
-    cmd: pct exec {{ kiosk_ct_id }} -- chown -R kiosk:kiosk /opt/kiosk
   changed_when: true
 
 - name: Clean up host temp files
   ansible.builtin.file:
-    path: "{{ item }}"
+    path: /tmp/kiosk_config.json
     state: absent
-  loop:
-    - /tmp/kiosk_webui
-    - /tmp/kiosk_config.json
-    - /tmp/kiosk_build.py
-    - /tmp/kiosk_payload.tar.gz
 
 # ── SSH key for host management ──────────────────────────────────
-# The kiosk manager needs SSH access to the Proxmox host to run
-# pct/qm commands for container/VM lifecycle management.
 
 - name: Generate SSH key inside kiosk container if absent
   ansible.builtin.shell:
@@ -314,35 +263,21 @@
     comment: "kiosk-manager-{{ inventory_hostname }}"
     state: present
 
-# ── Patch systemd service to match deployed file layout ─────────
-- name: Update kiosk-web ExecStart to correct path and port
+# ── Restart kiosk services with new config ───────────────────────
+
+- name: Restart kiosk-web (Manager API) with new config
   ansible.builtin.shell:
     cmd: |
       pct exec {{ kiosk_ct_id }} -- bash -c '
-        sed -i "s|^ExecStart=.*kiosk_server.py.*|ExecStart=/usr/bin/python3 /opt/kiosk/scripts/webui/kiosk_server.py --port {{ kiosk_manager_port }}|" \
-          /etc/systemd/system/kiosk-web.service
-        systemctl daemon-reload
-      '
-    executable: /bin/bash
-  changed_when: true
-
-# ── Enable and restart kiosk services ───────────────────────────
-
-- name: Enable and restart kiosk-web (Manager API)
-  ansible.builtin.shell:
-    cmd: |
-      pct exec {{ kiosk_ct_id }} -- bash -c '
-        systemctl enable kiosk-web
         systemctl restart kiosk-web
       '
     executable: /bin/bash
   changed_when: true
 
-- name: Enable kiosk-display (headless-safe)
+- name: Start kiosk-display (headless-safe)
   ansible.builtin.shell:
     cmd: |
       pct exec {{ kiosk_ct_id }} -- bash -c '
-        systemctl enable kiosk-display
         systemctl start kiosk-display 2>/dev/null || true
       '
     executable: /bin/bash

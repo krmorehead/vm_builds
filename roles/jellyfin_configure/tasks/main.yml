@@ -1,7 +1,10 @@
 ---
+# Render group, /etc/jellyfin, network.xml, library.xml, and service
+# enablement are baked into the image by build-images.sh. This role
+# handles ONLY host-specific config: render GID override, transcoding
+# device path, password, and service start.
+
 # ── Ensure container is running ──────────────────────────────────
-# The display-exclusive hookscript stops DRI-sharing containers when the
-# Desktop VM grabs the iGPU. Restart the container if stopped.
 
 - name: Check Jellyfin container status
   ansible.builtin.command:
@@ -26,22 +29,13 @@
   changed_when: false
   when: "'stopped' in (_jellyfin_ct_status.stdout | default(''))"
 
-# ── Verify Jellyfin service is available ──────────────────────────
+# ── Configure iGPU access (host-specific GID) ──────────────────
 
-- name: Verify Jellyfin service is available in container
-  ansible.builtin.command:
-    cmd: pct exec {{ jellyfin_ct_id }} -- systemctl is-enabled jellyfin
-  register: _jellyfin_service_check
-  changed_when: false
-  failed_when: _jellyfin_service_check.rc != 0
-
-# ── Configure iGPU access ─────────────────────────────────────────
-
-- name: Create render group and add jellyfin user
+- name: Update render group GID to match host
   ansible.builtin.shell:
     cmd: |
       pct exec {{ jellyfin_ct_id }} -- bash -c '
-        groupadd -g {{ igpu_render_gid }} render 2>/dev/null || true
+        groupmod -g {{ igpu_render_gid }} render 2>/dev/null || true
         usermod -a -G render jellyfin 2>/dev/null || true
       '
     executable: /bin/bash
@@ -53,11 +47,6 @@
   register: _vainfo_check
   changed_when: false
   failed_when: false
-
-- name: Report VA-API driver status
-  ansible.builtin.debug:
-    msg: "VA-API drivers: {{ _vainfo_check.stdout | default('Not available') }}"
-    verbosity: 1
 
 # ── Generate admin password if not provided ───────────────────────
 
@@ -79,31 +68,7 @@
     _jellyfin_admin_password: "{{ _generated_password.stdout | trim }}"
   when: jellyfin_admin_password | length == 0
 
-# ── Configure Jellyfin server settings ─────────────────────────────
-# Use copy + pct push to avoid shell escaping issues with heredocs
-
-- name: Ensure config directory exists in container
-  ansible.builtin.command:
-    cmd: pct exec {{ jellyfin_ct_id }} -- mkdir -p /etc/jellyfin
-  changed_when: true
-
-- name: Write network config to host temp
-  ansible.builtin.copy:
-    content: |
-      <?xml version="1.0" encoding="UTF-8"?>
-      <Network>
-        <BaseUrl>/</BaseUrl>
-        <Port>8096</Port>
-        <EnableHttps>false</EnableHttps>
-        <EnableUPnP>false</EnableUPnP>
-      </Network>
-    dest: /tmp/jellyfin_network.xml
-    mode: "0644"
-
-- name: Push network config into container
-  ansible.builtin.command:
-    cmd: pct push {{ jellyfin_ct_id }} /tmp/jellyfin_network.xml /etc/jellyfin/network.xml
-  changed_when: true
+# ── Deploy host-specific transcoding config ─────────────────────
 
 - name: Write transcoding config to host temp
   ansible.builtin.copy:
@@ -124,44 +89,12 @@
     cmd: pct push {{ jellyfin_ct_id }} /tmp/jellyfin_transcoding.xml /etc/jellyfin/transcoding.xml
   changed_when: true
 
-- name: Write library config to host temp
-  ansible.builtin.copy:
-    content: |
-      <?xml version="1.0" encoding="UTF-8"?>
-      <Library>
-        <SaveMetadataHidden>false</SaveMetadataHidden>
-        <EnableAutomaticSeriesGrouping>false</EnableAutomaticSeriesGrouping>
-        <EnableAutomaticPhotosGrouping>true</EnableAutomaticPhotosGrouping>
-        <CollectionFolders>
-          <CollectionFolder>
-            <Name>Media</Name>
-            <Path>/media</Path>
-          </CollectionFolder>
-        </CollectionFolders>
-      </Library>
-    dest: /tmp/jellyfin_library.xml
-    mode: "0644"
-
-- name: Push library config into container
-  ansible.builtin.command:
-    cmd: pct push {{ jellyfin_ct_id }} /tmp/jellyfin_library.xml /etc/jellyfin/library.xml
-  changed_when: true
-
 - name: Clean up host temp files
   ansible.builtin.file:
-    path: "{{ item }}"
+    path: /tmp/jellyfin_transcoding.xml
     state: absent
-  loop:
-    - /tmp/jellyfin_network.xml
-    - /tmp/jellyfin_transcoding.xml
-    - /tmp/jellyfin_library.xml
 
-# ── Enable and start Jellyfin service ─────────────────────────────
-
-- name: Enable Jellyfin service
-  ansible.builtin.command:
-    cmd: pct exec {{ jellyfin_ct_id }} -- systemctl enable jellyfin
-  changed_when: true
+# ── Start Jellyfin service ─────────────────────────────────────
 
 - name: Start Jellyfin service
   ansible.builtin.command:

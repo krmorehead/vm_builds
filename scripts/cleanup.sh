@@ -5,7 +5,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 usage() {
-    echo "Usage: ./cleanup.sh <command> [args...] [env-file]"
+    echo "Usage: scripts/cleanup.sh <command> [args...] [env-file]"
     echo ""
     echo "Commands:"
     echo "  restore              Restore host config only (leave VMs as-is)"
@@ -17,11 +17,11 @@ usage() {
     echo "  env-file      Environment file to use (default: test.env)"
     echo ""
     echo "Examples:"
-    echo "  ./cleanup.sh clean                      # test machine reset"
-    echo "  ./cleanup.sh full-restore .env          # production rollback"
-    echo "  ./cleanup.sh restore                    # config-only restore"
-    echo "  ./cleanup.sh rollback security          # revert security hardening"
-    echo "  ./cleanup.sh rollback vlans test.env    # revert VLANs on test machine"
+    echo "  scripts/cleanup.sh clean                      # test machine reset"
+    echo "  scripts/cleanup.sh full-restore .env          # production rollback"
+    echo "  scripts/cleanup.sh restore                    # config-only restore"
+    echo "  scripts/cleanup.sh rollback security          # revert security hardening"
+    echo "  scripts/cleanup.sh rollback vlans test.env    # revert VLANs on test machine"
     exit 1
 }
 
@@ -45,6 +45,10 @@ if [ ! -f "$ENV_FILE" ]; then
     exit 1
 fi
 
+if [ ! -d ".venv" ]; then
+    echo "ERROR: .venv not found. Run scripts/setup.sh first."
+    exit 1
+fi
 source .venv/bin/activate
 set -a; source "$ENV_FILE"; set +a
 

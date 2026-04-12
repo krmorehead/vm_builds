@@ -29,7 +29,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from scripts.webui import manager  # noqa: E402
-from scripts.webui.data import load_kiosk_config  # noqa: E402
+from scripts.webui.data import load_kiosk_config, set_server_port  # noqa: E402
 
 
 def _build_node_resolver(config: dict) -> Callable[[str], str | None]:
@@ -125,9 +125,13 @@ def main() -> None:
     args = parser.parse_args()
 
     config_path = Path(args.config) if args.config else None
+    set_server_port(args.port)
     create_app(config_path=config_path)
 
-    def _on_startup() -> None:
+    async def _on_startup() -> None:
+        mgr = manager.get_instance()
+        if isinstance(mgr, manager.NodeManager):
+            await mgr.fetch_host_state_from_upstream()
         manager.start_poller()
 
     app.on_startup(_on_startup)

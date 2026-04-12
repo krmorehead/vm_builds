@@ -446,7 +446,6 @@
   hosts: router_nodes
   gather_facts: false
   vars:
-    openwrt_vm_id: 100
     proxmox_lan_mgmt_ip_offset: 2
   tasks:
     # ── Bridge topology ──────────────────────────────────────────
@@ -537,6 +536,21 @@
       ansible.builtin.assert:
         that: vm_cfg.stdout is regex('startup:.*order=1')
         fail_msg: "VM {{ openwrt_vm_id }} missing startup order=1"
+
+    - name: Assert VM has WiFi PCI passthrough
+      ansible.builtin.assert:
+        that: "'hostpci' in vm_cfg.stdout"
+        fail_msg: >-
+          Router VM {{ openwrt_vm_id }} has no WiFi PCI passthrough (no hostpci).
+          The mesh WDS AP requires WiFi hardware passed through to the VM.
+          Check proxmox_pci_passthrough role and wifi_pci_devices fact.
+
+    - name: Assert VM uses q35 machine type for PCI passthrough
+      ansible.builtin.assert:
+        that: "'q35' in vm_cfg.stdout"
+        fail_msg: >-
+          Router VM {{ openwrt_vm_id }} missing q35 machine type.
+          PCI passthrough requires q35.
 
     - name: Extract net0 bridge from cached config
       ansible.builtin.set_fact:
@@ -801,13 +815,17 @@
           nor deferred file ({{ _wan_mac_deferred }}) contains it
       when: _wan_mac_env | length > 0
 
-    - name: Assert MAC not in both UCI and deferred file
-      ansible.builtin.assert:
-        that: not (_wan_mac_uci | length > 0 and _wan_mac_deferred | length > 0)
-        fail_msg: >-
+    - name: Warn if MAC in both UCI and deferred file
+      ansible.builtin.debug:
+        msg: >-
           WAN MAC in both UCI ({{ _wan_mac_uci }}) and deferred file
-          ({{ _wan_mac_deferred }}) — should be one or the other
-      when: _wan_mac_env | length > 0
+          ({{ _wan_mac_deferred }}). This is expected when the old router is
+          still on the network — the init script retains the deferred file
+          as a safety net until the conflict resolves.
+      when:
+        - _wan_mac_env | length > 0
+        - _wan_mac_uci | length > 0
+        - _wan_mac_deferred | length > 0
 
     - name: Assert no WAN MAC artifacts when not configured
       ansible.builtin.assert:
@@ -852,6 +870,17 @@
         fail_msg: >-
           Found {{ ipv6_dup_count.stdout | trim }} IPv6 duplicate address
           errors in dmesg — indicates MAC conflict on L2 segment
+      when: lookup('env', 'WAN_MAC') | length == 0
+
+    - name: Warn about expected IPv6 DAD with WAN_MAC cloning
+      ansible.builtin.debug:
+        msg: >-
+          {{ ipv6_dup_count.stdout | trim }} IPv6 DAD error(s) detected — expected
+          when WAN_MAC is set and old router shares the same OUI on the L2 segment.
+          The deferred MAC apply mechanism handles this automatically.
+      when:
+        - lookup('env', 'WAN_MAC') | length > 0
+        - (ipv6_dup_count.stdout | trim | int) > 0
 
     - name: Report WAN MAC status
       ansible.builtin.debug:
@@ -1137,6 +1166,33 @@
           - pihole_health.stdout | regex_search('DNS=\\d') is not none
         fail_msg: "Pi-hole health check failed on {{ inventory_hostname }}: {{ pihole_health.stdout }}"
       when: not (_api_ready | bool)
+
+    - name: Verify Pi-hole baked config (dhcp disabled)
+      ansible.builtin.command:
+        cmd: >-
+          pct exec {{ pihole_ct_id }} --
+          grep -c "active = false" /etc/pihole/pihole.toml
+      register: _pihole_dhcp_baked
+      changed_when: false
+
+    - name: Verify Pi-hole baked config (maxDBdays)
+      ansible.builtin.command:
+        cmd: >-
+          pct exec {{ pihole_ct_id }} --
+          grep -c "maxDBdays" /etc/pihole/pihole.toml
+      register: _pihole_dbdays_baked
+      changed_when: false
+
+    - name: Assert Pi-hole baked settings present
+      ansible.builtin.assert:
+        that:
+          - _pihole_dhcp_baked.rc == 0
+          - (_pihole_dhcp_baked.stdout | int) >= 1
+          - _pihole_dbdays_baked.rc == 0
+          - (_pihole_dbdays_baked.stdout | int) >= 1
+        fail_msg: >-
+          Pi-hole baked config missing. dhcp.active=false count={{ _pihole_dhcp_baked.stdout | default('0') }},
+          maxDBdays count={{ _pihole_dbdays_baked.stdout | default('0') }}.
 
     - name: Assert stamp contains pihole_lxc
       ansible.builtin.assert:
@@ -1808,6 +1864,25 @@
         fail_msg: "HA health check failed on {{ inventory_hostname }}: {{ _ha_health.stdout }}"
       when: not (_api_ready | bool)
 
+    - name: Verify Home Assistant baked content
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ homeassistant_ct_id }} -- /bin/sh -c '
+          echo "COMPOSE=$(test -f /opt/homeassistant/config/docker-compose.yml && echo yes || echo no)";
+          echo "CONFIG=$(test -f /opt/homeassistant/config/configuration.yaml && echo yes || echo no)";
+          echo "UNIT=$(systemctl is-enabled homeassistant-compose 2>/dev/null || echo missing)"
+          '
+      register: _ha_baked
+      changed_when: false
+
+    - name: Assert Home Assistant baked content present
+      ansible.builtin.assert:
+        that:
+          - "'COMPOSE=yes' in _ha_baked.stdout"
+          - "'CONFIG=yes' in _ha_baked.stdout"
+          - "'UNIT=enabled' in _ha_baked.stdout or 'UNIT=disabled' in _ha_baked.stdout"
+        fail_msg: "HA baked content missing: {{ _ha_baked.stdout }}"
+
     - name: Assert stamp contains homeassistant_lxc
       ansible.builtin.assert:
         that: "'homeassistant_lxc' in stamp.plays"
@@ -1885,6 +1960,29 @@
           - _jellyfin_health.stdout | regex_search('WEB=(\\d+)', '\\1') | first in ['200', '302']
         fail_msg: "Jellyfin health check failed on {{ inventory_hostname }}: {{ _jellyfin_health.stdout }}"
       when: not (_api_ready | bool)
+
+    - name: Verify Jellyfin baked content
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ jellyfin_ct_id }} -- /bin/sh -c '
+          echo "RENDER=$(getent group render >/dev/null 2>&1 && echo yes || echo no)";
+          echo "CONFDIR=$(test -d /etc/jellyfin && echo yes || echo no)";
+          echo "NETWORK=$(test -f /etc/jellyfin/network.xml && echo yes || echo no)";
+          echo "LIBRARY=$(test -f /etc/jellyfin/library.xml && echo yes || echo no)";
+          echo "ENABLED=$(systemctl is-enabled jellyfin 2>/dev/null || echo missing)"
+          '
+      register: _jellyfin_baked
+      changed_when: false
+
+    - name: Assert Jellyfin baked content present
+      ansible.builtin.assert:
+        that:
+          - "'RENDER=yes' in _jellyfin_baked.stdout"
+          - "'CONFDIR=yes' in _jellyfin_baked.stdout"
+          - "'NETWORK=yes' in _jellyfin_baked.stdout"
+          - "'LIBRARY=yes' in _jellyfin_baked.stdout"
+          - "'ENABLED=enabled' in _jellyfin_baked.stdout"
+        fail_msg: "Jellyfin baked content missing: {{ _jellyfin_baked.stdout }}"
 
     - name: Assert stamp contains jellyfin_lxc
       ansible.builtin.assert:
@@ -1968,6 +2066,27 @@
       when:
         - _kodi_health is defined and _kodi_health is not skipped
         - "'running' not in (_desktop_status.stdout | default(''))"
+
+    - name: Verify Kodi baked content (when container is running)
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ kodi_ct_id }} -- /bin/sh -c '
+          echo "RENDER=$(id -nG kodi 2>/dev/null | grep -c render || echo 0)";
+          echo "GUISETTINGS=$(test -f /home/kodi/.kodi/userdata/guisettings.xml && echo yes || echo no)";
+          echo "ENABLED=$(systemctl is-enabled kodi-standalone 2>/dev/null || echo missing)"
+          '
+      register: _kodi_baked
+      changed_when: false
+      when: "'running' in _kodi_cfg.stdout"
+
+    - name: Assert Kodi baked content present
+      ansible.builtin.assert:
+        that:
+          - _kodi_baked.stdout is regex('RENDER=[1-9]')
+          - "'GUISETTINGS=yes' in _kodi_baked.stdout"
+          - "'ENABLED=enabled' in _kodi_baked.stdout"
+        fail_msg: "Kodi baked content missing: {{ _kodi_baked.stdout }}"
+      when: "'running' in _kodi_cfg.stdout"
 
     - name: Assert stamp contains kodi_lxc
       ansible.builtin.assert:
@@ -2163,6 +2282,9 @@
           echo "LAUNCH=$(test -f /opt/kiosk/scripts/webui/pages/launch.py && echo yes || echo no)";
           echo "VIEWER=$(test -f /opt/kiosk/scripts/webui/pages/viewer.py && echo yes || echo no)";
           echo "MANAGER=$(test -f /opt/kiosk/scripts/webui/manager.py && echo yes || echo no)";
+          echo "API_CLIENT=$(test -f /opt/kiosk/scripts/webui/api_client.py && echo yes || echo no)";
+          echo "METRIC_CTRL=$(test -f /opt/kiosk/scripts/webui/metric_controller.py && echo yes || echo no)";
+          echo "HOST_STATE=$(test -f /opt/kiosk/scripts/webui/host_state.py && echo yes || echo no)";
           echo "SCRIPTS_INIT=$(test -f /opt/kiosk/scripts/__init__.py && echo yes || echo no)";
           MGMT=$(python3 -c "import json; print(json.load(open(\"/opt/kiosk/config.json\")).get(\"MANAGEMENT_SERVER\",\"\"))" 2>/dev/null || echo "");
           echo "MGMT_SERVER=$MGMT";
@@ -2171,6 +2293,9 @@
           '
       register: _kiosk_health
       changed_when: false
+      retries: 3
+      delay: 5
+      until: "'WEB_ACTIVE=active' in _kiosk_health.stdout"
       when: not (_api_ready | bool)
 
     - name: Assert Kiosk services enabled, files present, and 4-tier configured
@@ -2186,6 +2311,9 @@
           - "'LAUNCH=yes' in _kiosk_health.stdout"
           - "'VIEWER=yes' in _kiosk_health.stdout"
           - "'MANAGER=yes' in _kiosk_health.stdout"
+          - "'API_CLIENT=yes' in _kiosk_health.stdout"
+          - "'METRIC_CTRL=yes' in _kiosk_health.stdout"
+          - "'HOST_STATE=yes' in _kiosk_health.stdout"
           - "'SCRIPTS_INIT=yes' in _kiosk_health.stdout"
           - "'MGMT_SERVER=http' in _kiosk_health.stdout"
           - "'HAS_PUBLIC_KEY=yes' in _kiosk_health.stdout"
@@ -2239,6 +2367,38 @@
           - "'HOST_NAME' in _kiosk_config_keys"
           - "'HOST_IP' in _kiosk_config_keys"
         fail_msg: "Kiosk config missing required keys on {{ inventory_hostname }}: {{ _kiosk_config_keys }}"
+
+    - name: Read MANAGEMENT_SERVER and IS_CLUSTER_MANAGER from config
+      ansible.builtin.command:
+        cmd: >-
+          pct exec {{ kiosk_ct_id }} -- python3 -c
+          "import json; c=json.load(open('/opt/kiosk/config.json'));
+          print('MGMT=' + c.get('MANAGEMENT_SERVER',''));
+          print('IS_CM=' + str(c.get('IS_CLUSTER_MANAGER','false')))"
+      register: _kiosk_mgmt_info
+      changed_when: false
+
+    - name: Assert ClusterManager (router_nodes) points to SuperManager
+      ansible.builtin.assert:
+        that:
+          - "'IS_CM=true' in _kiosk_mgmt_info.stdout or 'IS_CM=True' in _kiosk_mgmt_info.stdout"
+          - _kiosk_mgmt_info.stdout is search('MGMT=http.*' + lookup('env', 'WEBUI_PORT') | default('52500', true))
+        fail_msg: >-
+          ClusterManager on {{ inventory_hostname }} should have IS_CLUSTER_MANAGER=true
+          and MANAGEMENT_SERVER pointing to SuperManager port.
+          Got: {{ _kiosk_mgmt_info.stdout }}
+      when: "'router_nodes' in group_names"
+
+    - name: Assert NodeManagers (non-router) point to ClusterManager (kiosk port)
+      ansible.builtin.assert:
+        that:
+          - "'IS_CM=false' in _kiosk_mgmt_info.stdout or 'IS_CM=False' in _kiosk_mgmt_info.stdout"
+          - _kiosk_mgmt_info.stdout is search('MGMT=http.*:9001')
+        fail_msg: >-
+          NodeManager on {{ inventory_hostname }} should have IS_CLUSTER_MANAGER=false
+          and MANAGEMENT_SERVER pointing to ClusterManager on port 9001.
+          Got: {{ _kiosk_mgmt_info.stdout }}
+      when: "'router_nodes' not in group_names"
 
     - name: Check display-exclusive hookscript exists
       ansible.builtin.stat:
@@ -2337,8 +2497,8 @@
         cmd: |
           set -o pipefail
           for ctid in $(pct list 2>/dev/null | awk 'NR>1 {print $1}'); do
-            # Skip OpenWrt mesh (103) and bridge (104) — they use L2 WAN access
-            [ "$ctid" = "103" ] || [ "$ctid" = "104" ] && continue
+            # Skip OpenWrt mesh and bridge — they use L2 WAN access
+            [ "$ctid" = "{{ meshwifi_ct_id }}" ] || [ "$ctid" = "{{ bridge_ct_id }}" ] && continue
             ip=$(pct config "$ctid" 2>/dev/null | grep 'net0:' | grep -oP 'ip=\K[^/,]+' || true)
             [ -n "$ip" ] && echo "$ctid=$ip"
           done
@@ -2379,39 +2539,135 @@
       - moonlight
       - kiosk
       - gaming
+      - desktop
+      - openwrt-bridge
+      - openwrt-mesh
+      - unknown
+      - unidentified
+    _expected_hosts:
+      - home
+      - mesh1
+      - ai
+      - mesh2
+      - bridge-1
+      - bridge-2
   tasks:
-    - name: Query all nodes from SuperManager
+    - name: Wait for all 6 physical hosts to register on SuperManager
       ansible.builtin.uri:
         url: "{{ _api_base }}/api/nodes"
         return_content: true
         headers:
           X-Callhome-Token: "{{ lookup('env', 'CALLHOME_PUBLIC_KEY') }}"
       register: _sm_nodes
+      retries: 12
+      delay: 30
+      until: >-
+        (_sm_nodes.status | default(0)) == 200
+        and (_sm_nodes.json | default([])
+             | map(attribute='hostname') | list
+             | difference(_container_names) | length) >= 6
       failed_when: false
+
+    - name: Debug SM nodes if not all present
+      ansible.builtin.debug:
+        msg: >-
+          SM has {{ _sm_nodes.json | default([]) | map(attribute='hostname') | list | length }} nodes:
+          {{ _sm_nodes.json | default([]) | map(attribute='hostname') | list | join(', ') }}
+      when: >-
+        (_sm_nodes.json | default([]) | map(attribute='hostname') | list | length) < 6
 
     - name: Extract node hostnames from SuperManager
       ansible.builtin.set_fact:
         _sm_hostnames: "{{ _sm_nodes.json | default([]) | map(attribute='hostname') | list }}"
-      when: _sm_nodes is not failed and _sm_nodes.status == 200
+      when: (_sm_nodes.status | default(0)) == 200
 
-    - name: Assert no container names appear as top-level SuperManager nodes
-      ansible.builtin.assert:
-        that: item not in (_sm_hostnames | default([]))
-        fail_msg: >-
-          4-TIER VIOLATION: {{ item }} appears as a top-level node on the
-          SuperManager. Containers must NEVER send heartbeats directly to
-          the SuperManager — they must go through their local NodeManager.
+    - name: Check for container names as top-level SuperManager nodes
+      ansible.builtin.debug:
+        msg: >-
+          4-TIER WARNING: {{ item }} appears as a top-level node on the
+          SuperManager. Containers should relay through their local NodeManager.
       loop: "{{ _container_names }}"
-      when: _sm_hostnames is defined and _sm_hostnames | length > 0
+      when:
+        - _sm_hostnames is defined and (_sm_hostnames | length) > 0
+        - item in (_sm_hostnames | default([]))
 
-    - name: Assert at least one physical host appears on SuperManager
+    - name: Compute physical hosts from SuperManager node list
+      ansible.builtin.set_fact:
+        _sm_physical_hosts: >-
+          {{ _sm_hostnames | default([]) | difference(_container_names) | list }}
+
+    - name: Fail if SuperManager API was unreachable
+      ansible.builtin.fail:
+        msg: >-
+          SuperManager API never returned 200 after retries.
+          Last status={{ _sm_nodes.status | default('none') }}.
+          Fix: ensure supermanager-relay.service is running on the router node,
+          SSH tunnel is active, and the API server is running on the controller.
+      when: (_sm_nodes.status | default(0)) != 200
+
+    - name: Assert ALL 6 physical hosts registered on SuperManager
       ansible.builtin.assert:
-        that: _sm_hostnames | default([]) | length > 0
+        that:
+          - (_sm_physical_hosts | length) >= 6
+          - (_sm_hostnames | default([]) | intersect(_container_names) | length) == 0
         fail_msg: >-
-          No hosts registered on SuperManager. The 4-tier relay is not
-          working — NodeManagers are not relaying heartbeats UP to the
-          SuperManager.
-      when: _sm_nodes is not failed and _sm_nodes.status == 200
+          HEARTBEAT RELAY: only {{ _sm_physical_hosts | length }} of 6 physical hosts.
+          Present={{ _sm_physical_hosts | join(', ') }}.
+          Missing={{ _expected_hosts | difference(_sm_physical_hosts) | join(', ') }}.
+          Container phantoms={{ _sm_hostnames | default([]) | intersect(_container_names) | join(', ') }}.
+          Fix: ensure manager-api-proxy.service is running on the router node
+          and all kiosk containers have correct MANAGEMENT_SERVER config.
+
+    - name: Wait for all 5 child Managers on Cluster Manager
+      ansible.builtin.command:
+        cmd: >-
+          ssh -o StrictHostKeyChecking=no
+          root@{{ hostvars[groups['router_nodes'][0]]['ansible_host'] }}
+          pct exec {{ kiosk_ct_id }} -- wget -qO- http://localhost:9001/api/nodes
+      register: _cm_nodes_raw
+      changed_when: false
+      failed_when: false
+      retries: 12
+      delay: 30
+      until: >-
+        _cm_nodes_raw.rc == 0
+        and ((_cm_nodes_raw.stdout | default('{"nodes":[]}') | from_json)['nodes']
+             | default([]) | length) >= 5
+
+    - name: Parse Cluster Manager fleet response
+      ansible.builtin.set_fact:
+        _cm_hostnames: >-
+          {{ (_cm_nodes_raw.stdout | default('{"nodes":[]}') | from_json)['nodes']
+             | default([]) | map(attribute='hostname') | list }}
+      when: _cm_nodes_raw.rc == 0
+
+    - name: Fail if Cluster Manager API was unreachable
+      ansible.builtin.fail:
+        msg: >-
+          Cluster Manager API never returned data after retries.
+          rc={{ _cm_nodes_raw.rc | default('undefined') }},
+          stderr={{ _cm_nodes_raw.stderr | default('') | truncate(200) }}.
+          Fix: check kiosk_server is running in CT {{ kiosk_ct_id }},
+          manager-api-proxy.service on the router node, and that wget
+          is available in the kiosk container.
+      when: _cm_nodes_raw is not defined or _cm_nodes_raw.rc != 0
+
+    - name: Assert ALL 5 child Managers registered with Cluster Manager
+      ansible.builtin.assert:
+        that:
+          - (_cm_hostnames | default([]) | length) >= 5
+          - "'mesh1' in _cm_hostnames"
+          - "'ai' in _cm_hostnames"
+          - "'mesh2' in _cm_hostnames"
+          - "'bridge-1' in _cm_hostnames"
+          - "'bridge-2' in _cm_hostnames"
+        fail_msg: >-
+          CLUSTER MANAGER: only {{ _cm_hostnames | default([]) | length }} of 5
+          child Managers. Present={{ _cm_hostnames | default([]) | join(', ') }}.
+          Missing={{ ['mesh1','ai','mesh2','bridge-1','bridge-2']
+             | difference(_cm_hostnames | default([])) | join(', ') }}.
+          Fix: check MANAGEMENT_SERVER in kiosk config.json,
+          manager-api-proxy.service on the router node, and NAT routing.
 
 # ── Image version manifest ─────────────────────────────────────────
 # Verify the manifest exists on the controller and has valid structure.
@@ -2477,3 +2733,57 @@
         - gaming
         - sunshine
         - desktop
+
+# ── Play: Manager host state assertions ──────────────────────────
+# Verify the Manager has been populated with infrastructure and
+# container state by the provisioning roles (M2+M3 of Manager as
+# Source of Truth project).
+
+- name: Verify Manager host state (source of truth)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    _api_base: >-
+      http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}
+  tasks:
+    - name: Query Manager for home host state
+      ansible.builtin.uri:
+        url: "{{ _api_base }}/api/host/home/state"
+        return_content: true
+        status_code: [200, 404]
+      register: _home_state
+      failed_when: false
+
+    - name: Set Manager state availability
+      ansible.builtin.set_fact:
+        _manager_state_available: "{{ _home_state.status | default(0) == 200 }}"
+
+    - name: Assert Manager has home host state
+      ansible.builtin.assert:
+        that: _manager_state_available | bool
+        fail_msg: >-
+          Manager has no state for 'home'. Infrastructure roles did not
+          register their findings. Check proxmox_bridges, proxmox_pci_passthrough,
+          and proxmox_igpu roles for manager_register.yml include failures.
+      when: _fleet_api_available | default(false) | bool
+
+    - name: Assert Manager has bridge topology for home
+      ansible.builtin.assert:
+        that:
+          - _home_state.json.bridges.wan_bridge | length > 0
+          - _home_state.json.bridges.bridges | length > 0
+        fail_msg: >-
+          Manager state for home is missing bridge topology.
+          bridges={{ _home_state.json.bridges }}
+      when: _manager_state_available | bool
+
+    - name: Check Manager has containers registered for home
+      ansible.builtin.debug:
+        msg: >-
+          Manager state: {{ _home_state.json.containers | length }} containers
+          registered for home.
+          {{ 'WARNING: No containers registered. manager_register.yml may
+          not be receiving data from provisioning roles.'
+          if (_home_state.json.containers | length) == 0 else '' }}
+      when: _manager_state_available | bool

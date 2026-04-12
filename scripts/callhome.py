@@ -31,6 +31,7 @@ import socket
 import subprocess
 import sys
 import time
+import typing
 import urllib.error
 import urllib.request
 
@@ -238,8 +239,12 @@ def get_listening_ports() -> list[int]:
     return sorted(set(tcp + udp))
 
 
-def collect_network() -> dict:
-    """Network interfaces and default gateway (stdlib-only)."""
+def collect_network() -> dict | None:
+    """Network interfaces and default gateway (stdlib-only).
+
+    Returns None when no interfaces are found, matching the collector
+    contract (None = skip this extension).
+    """
     interfaces = []
     try:
         for iface in sorted(os.listdir("/sys/class/net/")):
@@ -291,6 +296,8 @@ def collect_network() -> dict:
     except OSError:
         pass
 
+    if not interfaces:
+        return None
     return {"interfaces": interfaces, "default_gateway": gateway}
 
 
@@ -390,36 +397,52 @@ def collect_http_probes() -> dict | None:
     return result if result else None
 
 
-def collect_extensions() -> dict[str, dict]:
-    """Run all available health collectors and return extensions dict.
+class CollectorRegistry:
+    """Auto-discovers and runs health extension collectors.
 
-    Each collector is independent — if a collector's prerequisites aren't
-    present (no wg binary, no docker, no config files, no probe URLs),
-    it returns None and is omitted from the payload.
+    Each collector returns ``dict | None``. Collectors that return
+    ``None`` (prerequisites missing) are silently omitted.  The
+    ``network`` collector uses a special non-empty check on
+    ``interfaces`` instead of the ``None`` gate.
     """
-    ext: dict[str, dict] = {}
 
-    net = collect_network()
-    if net.get("interfaces"):
-        ext["network"] = net
+    def __init__(self) -> None:
+        self._collectors: list[tuple[str, typing.Callable[[], dict | None]]] = []
 
-    wg = collect_wireguard()
-    if wg is not None:
-        ext["wireguard"] = wg
+    def register(
+        self, name: str, fn: typing.Callable[[], dict | None],
+    ) -> None:
+        self._collectors.append((name, fn))
 
-    docker = collect_docker()
-    if docker is not None:
-        ext["docker"] = docker
+    def collect_all(self) -> dict[str, dict]:
+        ext: dict[str, dict] = {}
+        for name, fn in self._collectors:
+            try:
+                result = fn()
+            except Exception as exc:
+                print(
+                    f"[callhome] collector '{name}' failed: {exc}",
+                    file=sys.stderr, flush=True,
+                )
+                continue
+            if result is None:
+                continue
+            ext[name] = result
+        return ext
 
-    cfg = collect_config_files()
-    if cfg is not None:
-        ext["config_files"] = cfg
 
-    probes = collect_http_probes()
-    if probes is not None:
-        ext["http_probes"] = probes
+# Module-level registry populated at import time.
+_registry = CollectorRegistry()
+_registry.register("network", collect_network)
+_registry.register("wireguard", collect_wireguard)
+_registry.register("docker", collect_docker)
+_registry.register("config_files", collect_config_files)
+_registry.register("http_probes", collect_http_probes)
 
-    return ext
+
+def collect_extensions() -> dict[str, dict]:
+    """Run all registered collectors and return extensions dict."""
+    return _registry.collect_all()
 
 
 def build_container_payload(container_id: str = "") -> dict:
@@ -463,9 +486,10 @@ def get_version() -> str:
 
 
 def build_payload() -> dict:
+    hostname = os.environ.get("CALLHOME_HOSTNAME") or socket.gethostname()
     return {
         "node_id": socket.getfqdn(),
-        "hostname": socket.gethostname(),
+        "hostname": hostname,
         "local_ips": get_local_ips(),
         "uptime_seconds": get_uptime(),
         "services": get_running_services(),

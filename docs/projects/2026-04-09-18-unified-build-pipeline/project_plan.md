@@ -1,3 +1,5 @@
+> **Status: Completed** — Archived 2026-04-10
+
 # Unified Build Pipeline
 
 ## Status: COMPLETE

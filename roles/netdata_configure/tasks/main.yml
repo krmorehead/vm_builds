@@ -60,7 +60,7 @@
 
 - name: Wait for netdata readiness via API
   ansible.builtin.uri:
-    url: "{{ callhome_server }}/api/container/netdata/ready"
+    url: "{{ callhome_server_local }}/api/container/netdata/ready"
     return_content: true
   register: _netdata_api_check
   delegate_to: localhost

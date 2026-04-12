@@ -3,6 +3,26 @@
 Step-by-step runbooks for verifying the 4-tier system on real hardware.
 Every command targets real infrastructure — no mocks, no fabricated data.
 
+## CRITICAL: Fully Converged State Required
+
+Manual testing MUST run against a fully converged system. This means:
+
+1. `molecule test` (or `molecule converge`) has completed successfully
+2. ALL 6 hosts are on the 10.10.10.x LAN (mesh established)
+3. ALL containers and VMs are deployed, configured, and heartbeating
+4. The SuperManager API is running and receiving heartbeats from all nodes
+5. ALL child Managers are visible in the Cluster Manager fleet
+
+If the system is NOT in this state, run `molecule test` first. NEVER
+start manual testing against a partially deployed or pre-mesh system.
+Testing in a pre-mesh state produces a wall of "No route to host" errors
+that prove nothing and waste time.
+
+Previous catastrophe (2026-04-10): Agent started manual testing in pre-mesh
+state. Every playbook that touched WAN hosts returned "No route to host."
+The entire session was wasted verifying expected failures instead of testing
+real functionality. The fix: ALWAYS converge first, test second.
+
 ## Prerequisites
 
 ```bash
@@ -10,7 +30,17 @@ set -a && source test.env && set +a
 source .venv/bin/activate
 ```
 
-Verify all 6 hosts reachable:
+### Step 0: Ensure fully converged state
+
+If the system is not already converged from a recent `molecule test`:
+
+```bash
+molecule test
+```
+
+This runs cleanup → converge → verify and leaves all infrastructure deployed.
+
+### Step 1: Verify all 6 hosts reachable
 
 ```bash
 for h in $PRIMARY_HOST $AI_HOST $MESH_2_HOST $BRIDGE_1_HOST $BRIDGE_2_HOST; do
@@ -20,6 +50,19 @@ ssh -o StrictHostKeyChecking=no -o ProxyCommand="ssh -o StrictHostKeyChecking=no
 ```
 
 If ANY host is unreachable: FULL STOP. Do not proceed.
+
+### Step 2: Verify all containers are running
+
+```bash
+for pair in "$PRIMARY_HOST:home" "$AI_HOST:ai" "$MESH_2_HOST:mesh2" \
+            "$BRIDGE_1_HOST:bridge-1" "$BRIDGE_2_HOST:bridge-2"; do
+  host="${pair%%:*}"; label="${pair##*:}"
+  echo "=== $label ==="
+  ssh -o StrictHostKeyChecking=no root@$host "pct list" 2>&1
+done
+```
+
+If ANY expected container is missing or stopped: run `molecule converge` first.
 
 ## Playbook 1: Verify Kiosk Containers Running
 
@@ -62,8 +105,9 @@ for n in nodes:
 "
 ```
 
-**Expected**: All containers on the LAN (home's + mesh1's) appear with `ready=True`.
-Other hosts join when WiFi mesh brings them onto the 10.10.10.x subnet.
+**Expected**: ALL containers across ALL 6 hosts appear with `ready=True`.
+If any host or container is missing, the system is not fully converged —
+run `molecule test` before proceeding.
 
 ## Playbook 3: Batman Mode — Enable and Verify
 
@@ -454,7 +498,8 @@ for n in sorted(nodes, key=lambda x: x['node_id']):
 "
 ```
 
-**Expected**: All containers on home and mesh1 appear. WAN hosts appear only after WiFi mesh is up.
+**Expected**: ALL containers across ALL 6 hosts appear. If any are missing,
+the system is not fully converged — run `molecule test` first.
 
 ### Step 3: Fleet page renders
 
@@ -573,9 +618,9 @@ Open `http://localhost:9098/fleet` in a browser.
 
 Navigate to `/bridge`, `/mesh`, `/router` at `http://localhost:9098/`.
 
-**Bridge:** Status cards for bridge-1 and bridge-2. May show SSH errors
-in pre-mesh state (expected — no SSH keys between containers). Traffic
-graph and stats table present.
+**Bridge:** Status cards for bridge-1 and bridge-2. WiFi status shows AP/STA
+roles and signal quality. Traffic graph and stats table present. SSH errors
+here indicate a failed converge — fix infrastructure before continuing.
 
 **Mesh:** Topology diagram (Node → mesh1, mesh2). Status cards for each
 node. Batman Mode section with enable/disable buttons.
@@ -629,12 +674,12 @@ have index 0, so the offset IS the IP.
 **Symptom:** Bridge and mesh pages on the Cluster Manager show SSH errors
 (connection refused, permission denied).
 
-**Cause:** In the pre-mesh state, the Cluster Manager (on the LAN) cannot
-SSH to WAN hosts (mesh2, bridge-1, bridge-2) or child NodeManagers that
-haven't exchanged SSH keys.
+**Cause:** The system is not fully converged. Manual testing MUST NOT
+proceed until all nodes are on the LAN and the mesh is established.
 
-**Status:** Expected in pre-mesh topology. Resolves when WiFi mesh brings
-all nodes onto the 10.10.10.x subnet.
+**Fix:** Run `molecule test` to converge the full system. If SSH errors
+persist after a successful converge, investigate the specific connectivity
+failure — do NOT dismiss it as "pre-mesh."
 
 ### SuperManager headless vs UI mode
 
@@ -658,12 +703,13 @@ the new server without interruption.
 5. Check for IP collisions: `for ct in $(pct list | awk 'NR>1{print $1}'); do ip=$(pct config $ct | grep net0 | grep -oP 'ip=\K[^/]+'); echo "CT $ct: $ip"; done | sort -t: -k2`
 6. Check ARP consistency: `ip neigh show dev vmbr1` — MAC should match `pct config` hwaddr
 
-## Network topology when fully configured
+## Network topology (fully converged)
 
-When the WiFi mesh is fully established, all 6 nodes are on the 10.10.10.x
-subnet. The Cluster Manager (home kiosk at 10.10.10.23) can reach all child
-Managers directly — no DNAT, no WAN IPs needed.
+After a successful `molecule test` or `molecule converge`, all 6 nodes are
+on the 10.10.10.x subnet via the WiFi mesh. The Cluster Manager (home kiosk
+at 10.10.10.23) can reach all child Managers directly — no DNAT, no WAN IPs
+needed.
 
-Until the mesh is established, only home and mesh1 (physically wired) are
-on the LAN. Other hosts (ai, mesh2, bridge-1, bridge-2) remain on their
-WAN IPs (192.168.86.x) and are not reachable from the Cluster Manager.
+Manual testing assumes this topology. If any host is still on its WAN IP
+(192.168.86.x), the system is NOT fully converged and manual testing MUST
+NOT proceed.

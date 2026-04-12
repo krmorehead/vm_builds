@@ -82,15 +82,16 @@
   failed_when: false
 
 # ── Start display and streaming services ─────────────────────────
-- name: Enable and start Xorg virtual display
+# Service enablement is baked into the image. Just start them.
+- name: Start Xorg virtual display
   ansible.builtin.command:
-    cmd: pct exec {{ gaming_ct_id }} -- systemctl enable --now xorg-virtual.service
+    cmd: pct exec {{ gaming_ct_id }} -- systemctl start xorg-virtual.service
   changed_when: true
   failed_when: false
 
-- name: Enable and start Sunshine service
+- name: Start Sunshine service
   ansible.builtin.command:
-    cmd: pct exec {{ gaming_ct_id }} -- systemctl enable --now sunshine.service
+    cmd: pct exec {{ gaming_ct_id }} -- systemctl start sunshine.service
   changed_when: true
   failed_when: false
 

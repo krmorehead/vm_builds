@@ -16,7 +16,7 @@
 - name: Check for stale heartbeats (circuit breaker)
   ansible.builtin.uri:
     url: >-
-      {{ callhome_server }}/api/fleet/stale?services={{
+      {{ callhome_server_local }}/api/fleet/stale?services={{
         gate_services | join(',')
       }}&max_age_seconds={{ gate_max_age_seconds | default(120) }}
     return_content: true

@@ -1,0 +1,55 @@
+#!/bin/sh /etc/rc.common
+START=99
+
+start() {
+    local deferred="/etc/openwrt_wan_mac_deferred"
+    [ -f "$deferred" ] || return 0
+
+    local mac=$(cat "$deferred" | tr -d ' \t\n\r')
+    [ -n "$mac" ] || return 0
+
+    local wan_dev=$(uci get network.wan.device 2>/dev/null || echo "eth0")
+
+    local tries=0
+    while [ $tries -lt 30 ]; do
+        ip route show default 2>/dev/null | grep -q default && break
+        sleep 2
+        tries=$((tries + 1))
+    done
+    local conflict="no"
+    local mac_lower=$(echo "$mac" | tr 'A-F' 'a-f')
+    if awk -v m="$mac_lower" 'tolower($4)==m{found=1} END{exit !found}' /proc/net/arp 2>/dev/null; then
+        conflict="yes"
+    fi
+    local b1=$(echo "$mac_lower" | cut -d: -f1)
+    local b2=$(echo "$mac_lower" | cut -d: -f2)
+    local b3=$(echo "$mac_lower" | cut -d: -f3)
+    local b4=$(echo "$mac_lower" | cut -d: -f4)
+    local b5=$(echo "$mac_lower" | cut -d: -f5)
+    local b6=$(echo "$mac_lower" | cut -d: -f6)
+    local b1f=$(printf '%02x' $((0x$b1 ^ 2)))
+    local eui="${b1f}${b2}:${b3}ff:fe${b4}:${b5}${b6}"
+    if ip -6 neigh 2>/dev/null | grep -qi "$eui"; then
+        conflict="yes"
+    fi
+    local gw_ip=$(ip route show default 2>/dev/null | awk '/^default/{print $3}' | head -1)
+    if [ -n "$gw_ip" ]; then
+        ping -c 1 -W 2 "$gw_ip" >/dev/null 2>&1
+        local gw_mac=$(awk -v ip="$gw_ip" '$1==ip{print tolower($4)}' /proc/net/arp | head -1)
+        local cloned_oui=$(echo "$mac_lower" | cut -d: -f1-3)
+        local gw_oui=$(echo "$gw_mac" | cut -d: -f1-3)
+        if [ -n "$gw_oui" ] && [ "$cloned_oui" = "$gw_oui" ]; then
+            conflict="yes"
+        fi
+    fi
+
+    if [ "$conflict" = "no" ]; then
+        logger -t wan_mac_apply "No conflict for MAC $mac - applying and restarting network"
+        uci set network.wan.macaddr="$mac"
+        uci commit network
+        rm -f "$deferred"
+        /etc/init.d/network restart
+    else
+        logger -t wan_mac_apply "Conflict still present for MAC $mac - keeping deferred"
+    fi
+}

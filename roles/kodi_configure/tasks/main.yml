@@ -1,7 +1,10 @@
 ---
+# Render group, guisettings.xml (default port), .kodi skeleton, and
+# kodi-standalone enablement are baked into the image by build-images.sh.
+# This role handles ONLY host-specific config: render GID override,
+# ALSA device, and optional web port override.
+
 # ── Ensure container is running ──────────────────────────────────
-# The display-exclusive hookscript stops DRI-sharing containers when the
-# Desktop VM grabs the iGPU. Restart the container if stopped.
 
 - name: Check Kodi container status
   ansible.builtin.command:
@@ -26,59 +29,19 @@
   changed_when: false
   when: "'stopped' in (_kodi_ct_status.stdout | default(''))"
 
-# ── Verify Kodi packages are available ───────────────────────────
+# ── Configure iGPU access (host-specific GID) ─────────────────
 
-- name: Verify Kodi packages installed in container
-  ansible.builtin.command:
-    cmd: pct exec {{ kodi_ct_id }} -- dpkg -l kodi
-  register: _kodi_pkg_check
-  changed_when: false
-  failed_when: _kodi_pkg_check.rc != 0
-
-# ── Configure iGPU access ───────────────────────────────────────
-
-- name: Create render group and add kodi user to groups
+- name: Update render group GID to match host
   ansible.builtin.shell:
     cmd: |
       pct exec {{ kodi_ct_id }} -- bash -c '
-        groupadd -g {{ igpu_render_gid }} render 2>/dev/null || true
+        groupmod -g {{ igpu_render_gid }} render 2>/dev/null || true
         usermod -a -G render,video,audio,input kodi 2>/dev/null || true
       '
     executable: /bin/bash
   changed_when: true
 
-# ── Configure Kodi web interface ─────────────────────────────────
-# Use copy + pct push to avoid shell escaping issues with heredocs
-
-- name: Ensure Kodi user dirs exist
-  ansible.builtin.command:
-    cmd: pct exec {{ kodi_ct_id }} -- bash -c 'mkdir -p /home/kodi/.kodi/userdata && chown -R kodi:kodi /home/kodi/.kodi'
-  changed_when: true
-
-- name: Write Kodi GUI settings to host temp
-  ansible.builtin.copy:
-    content: |
-      <settings version="2">
-        <setting id="services.webserver">true</setting>
-        <setting id="services.webserverport">{{ kodi_web_port }}</setting>
-        <setting id="services.esallinterfaces">true</setting>
-        <setting id="services.esenabled">true</setting>
-        <setting id="services.esport">9090</setting>
-      </settings>
-    dest: /tmp/kodi_guisettings.xml
-    mode: "0644"
-
-- name: Push GUI settings into container
-  ansible.builtin.command:
-    cmd: pct push {{ kodi_ct_id }} /tmp/kodi_guisettings.xml /home/kodi/.kodi/userdata/guisettings.xml
-  changed_when: true
-
-- name: Set Kodi ownership on GUI settings
-  ansible.builtin.command:
-    cmd: pct exec {{ kodi_ct_id }} -- chown kodi:kodi /home/kodi/.kodi/userdata/guisettings.xml
-  changed_when: true
-
-# ── Configure ALSA HDMI audio output ────────────────────────────
+# ── Configure ALSA HDMI audio output (host-specific) ────────────
 
 - name: Write ALSA config to host temp
   ansible.builtin.copy:
@@ -107,18 +70,21 @@
 
 - name: Clean up host temp files
   ansible.builtin.file:
-    path: "{{ item }}"
+    path: /tmp/kodi_asoundrc
     state: absent
-  loop:
-    - /tmp/kodi_guisettings.xml
-    - /tmp/kodi_asoundrc
 
-# ── Enable kodi-standalone service ───────────────────────────────
+# ── Override web port if non-default ────────────────────────────
 
-- name: Enable kodi-standalone service
-  ansible.builtin.command:
-    cmd: pct exec {{ kodi_ct_id }} -- systemctl enable kodi-standalone
+- name: Override Kodi web port if non-default
+  ansible.builtin.shell:
+    cmd: |
+      pct exec {{ kodi_ct_id }} -- bash -c '
+        sed -i "s/services.webserverport\">8080/services.webserverport\">{{ kodi_web_port }}/" \
+          /home/kodi/.kodi/userdata/guisettings.xml
+      '
+    executable: /bin/bash
   changed_when: true
+  when: kodi_web_port | string != '8080'
 
 # ── Report completion ────────────────────────────────────────────
 
@@ -129,4 +95,4 @@
       Web interface: http://{{ kodi_static_ip | default('unknown') }}:{{ kodi_web_port }}
       Display: GBM/DRM via /dev/dri
       Audio: ALSA via /dev/snd (HDMI)
-      Service: kodi-standalone (enabled, on-demand start)
+      Service: kodi-standalone (baked + enabled)

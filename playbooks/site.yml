@@ -24,12 +24,37 @@
         - not _callhome_state.stat.exists
         - lookup('env', 'MOLECULE_PROJECT_DIRECTORY') | length > 0
 
+    - name: Verify API server is responding
+      ansible.builtin.uri:
+        url: "{{ callhome_server_local }}/api/fleet/health"
+        return_content: true
+      register: _api_health
+      retries: 5
+      delay: 2
+      until: _api_health.status == 200
+      failed_when: false
+      when: callhome_server | default('') | length > 0
+
+    - name: Restart API server if health check failed
+      ansible.builtin.command:
+        cmd: "{{ playbook_dir }}/../.venv/bin/python3 {{ playbook_dir }}/../scripts/start_test_api.py"
+      environment:
+        MOLECULE_PROJECT_DIRECTORY: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') | default('', true) }}"
+      register: _api_restart
+      changed_when: true
+      when:
+        - callhome_server | default('') | length > 0
+        - _api_health.status | default(-1) | int != 200
+        - lookup('env', 'MOLECULE_PROJECT_DIRECTORY') | length > 0
+
     - name: Report API server status
       ansible.builtin.debug:
         msg: >-
-          {{ 'API server started: ' + _api_start.stdout | default('')
-             if _api_start is not skipped
-             else 'API server already running' }}
+          {{ 'API server restarted: ' + (_api_restart.stdout | default(''))
+             if _api_restart is changed
+             else ('API server started: ' + (_api_start.stdout | default('')))
+             if _api_start is changed
+             else 'API server healthy' }}
 
 # ── Phase 0b: Start heartbeat watchdog ─────────────────────────
 # Background process polls /api/fleet/stale every second.
@@ -45,9 +70,9 @@
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          CALLHOME_URL=$(cat "{{ playbook_dir }}/../.state/callhome_url" 2>/dev/null || echo "")
-          if [ -z "$CALLHOME_URL" ]; then
-            echo "No callhome_url — watchdog skipped"
+          CALLHOME_URL="{{ callhome_server_local }}"
+          if [ -z "$CALLHOME_URL" ] || [ "$CALLHOME_URL" = "http://localhost:" ]; then
+            echo "No callhome port — watchdog skipped"
             exit 0
           fi
           SERVICES="{{ fleet_monitored_services | join(',') }}"
@@ -277,6 +302,41 @@
   roles:
     - kiosk_configure
 
+# ── Distribute Cluster Manager SSH key to all Proxmox hosts ──
+# The Cluster Manager (router node's kiosk) needs SSH access to every
+# Proxmox host for batman/wifi/bridge fleet operations.  Each kiosk
+# generates its own key and authorizes it locally in kiosk_configure.
+# This play reads the Cluster Manager's key and authorizes it on
+# every other host so _ssh_exec() works across the fleet.
+
+- name: Distribute Cluster Manager SSH key
+  hosts: kiosk_nodes
+  gather_facts: false
+  tags: [kiosk]
+  tasks:
+    - name: Read Cluster Manager public key
+      ansible.builtin.command:
+        cmd: pct exec {{ kiosk_ct_id }} -- cat /home/kiosk/.ssh/id_ed25519.pub
+      register: _cm_pubkey
+      changed_when: false
+      when: inventory_hostname in groups.get('router_nodes', [])
+
+    - name: Set Cluster Manager key fact
+      ansible.builtin.set_fact:
+        _cluster_manager_pubkey: "{{ hostvars[groups['router_nodes'][0]]._cm_pubkey.stdout }}"
+      when: groups.get('router_nodes', []) | length > 0
+
+    - name: Authorize Cluster Manager key on this host
+      ansible.posix.authorized_key:
+        user: root
+        key: "{{ _cluster_manager_pubkey }}"
+        comment: "cluster-manager-{{ groups['router_nodes'][0] }}"
+        state: present
+      when:
+        - _cluster_manager_pubkey is defined
+        - _cluster_manager_pubkey | length > 0
+        - inventory_hostname not in groups.get('router_nodes', [])
+
 # ── Phase 3a: Service provisioning (all containers created first) ──
 # Provisions run back-to-back so containers start booting in parallel.
 # The fleet readiness gate (Phase 3b) waits for all containers to
@@ -418,7 +478,7 @@
     - name: Query fleet readiness from API
       ansible.builtin.uri:
         url: >-
-          {{ callhome_server }}/api/fleet/ready?services={{
+          {{ callhome_server_local }}/api/fleet/ready?services={{
             fleet_ready_services | join(',')
           }}
         return_content: true
@@ -639,7 +699,7 @@
               [ -f /usr/share/netdata/web/index.html ] && PROBES='http://127.0.0.1:19999'
               [ -x /usr/bin/pihole-FTL ] && PROBES='http://127.0.0.1/admin/'
               [ -x /usr/bin/sunshine ] && PROBES='https://127.0.0.1:47990'
-              command -v docker >/dev/null 2>&1 && [ -f /etc/homeassistant/docker-compose.yml ] && PROBES='http://127.0.0.1:8123'
+              command -v docker >/dev/null 2>&1 && [ -f /opt/homeassistant/config/docker-compose.yml ] && PROBES='http://127.0.0.1:8123'
               [ -n \"\$PROBES\" ] && echo \"CALLHOME_HTTP_PROBES=\$PROBES\" >> /etc/default/callhome
               systemctl restart callhome.service 2>/dev/null || true
             " 2>/dev/null || true
@@ -668,6 +728,34 @@
   tags: [kiosk]
   roles:
     - kiosk_configure
+
+- name: Redistribute Cluster Manager SSH key (post-refresh)
+  hosts: kiosk_nodes
+  gather_facts: false
+  tags: [kiosk]
+  tasks:
+    - name: Read Cluster Manager public key
+      ansible.builtin.command:
+        cmd: pct exec {{ kiosk_ct_id }} -- cat /home/kiosk/.ssh/id_ed25519.pub
+      register: _cm_pubkey
+      changed_when: false
+      when: inventory_hostname in groups.get('router_nodes', [])
+
+    - name: Set Cluster Manager key fact
+      ansible.builtin.set_fact:
+        _cluster_manager_pubkey: "{{ hostvars[groups['router_nodes'][0]]._cm_pubkey.stdout }}"
+      when: groups.get('router_nodes', []) | length > 0
+
+    - name: Authorize Cluster Manager key on this host
+      ansible.posix.authorized_key:
+        user: root
+        key: "{{ _cluster_manager_pubkey }}"
+        comment: "cluster-manager-{{ groups['router_nodes'][0] }}"
+        state: present
+      when:
+        - _cluster_manager_pubkey is defined
+        - _cluster_manager_pubkey | length > 0
+        - inventory_hostname not in groups.get('router_nodes', [])
 
 # ── Per-feature plays (opt-in via tags + never) ─────────────────
 

@@ -84,8 +84,8 @@ When adding a new feature: write the verify assertion that checks the feature wo
 
 ### Clean-State Validation
 - Use `molecule test` only for clean-state validation (CI, pre-commit, final proof)
-- It destroys the baseline at the end
-- After `molecule test`, **ALWAYS** re-run `molecule converge` to restore the baseline before working on layered scenarios
+- The test_sequence ends at `verify` — the baseline is left running
+- Layered scenarios can run immediately after a successful `molecule test`
 
 **Default `test_sequence` (`molecule/default/molecule.yml`):** `dependency` → `cleanup` → `syntax` → `prepare` → `converge` → `verify`. The `prepare` step asserts all required images exist (hard-fails with build instructions if any are missing). There is **no** extra `converge` step at the end of the sequence — restoring a full baseline after a clean-state run is manual (`molecule converge`), not part of `molecule test`.
 

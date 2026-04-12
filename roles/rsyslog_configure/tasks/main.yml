@@ -32,7 +32,7 @@
 
 - name: Wait for rsyslog readiness via API
   ansible.builtin.uri:
-    url: "{{ callhome_server }}/api/container/rsyslog/ready"
+    url: "{{ callhome_server_local }}/api/container/rsyslog/ready"
     return_content: true
   register: _rsyslog_api_check
   delegate_to: localhost

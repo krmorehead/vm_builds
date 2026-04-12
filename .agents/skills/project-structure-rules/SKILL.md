@@ -11,12 +11,29 @@ Use when designing new services, understanding project architecture, or implemen
 
 1. NEVER install packages during configure roles - bake them into images instead
 2. NEVER add "fallback" logic - fail with clear messages when prerequisites are missing
-3. ALWAYS follow community standards before writing custom automation
-4. ALWAYS use two-role pattern: `<type>_vm/lxc` + `<type>_configure` for each service
-5. ALWAYS include `deploy_stamp` as last role in provision plays
-6. NEVER hardcode VMIDs - use allocation ranges by service type
-7. NEVER reference another role's defaults/main.yml directly
-8. ALWAYS use `env_generated_path` for auto-generated secrets and dynamic config
+3. NEVER add "legacy image fallback" code in configure roles - if the image lacks baked content, REBUILD THE IMAGE
+4. ALWAYS follow community standards before writing custom automation
+5. ALWAYS use two-role pattern: `<type>_vm/lxc` + `<type>_configure` for each service
+6. ALWAYS include `deploy_stamp` as last role in provision plays
+7. NEVER hardcode VMIDs - use allocation ranges by service type
+8. NEVER reference another role's defaults/main.yml directly
+9. ALWAYS use `env_generated_path` for auto-generated secrets and dynamic config
+10. ALWAYS follow the 6-step standard work cycle for image/role changes (see below)
+11. Proxmox hosts are bakeable targets — treat them like any other machine you control. Host-level packages (socat), systemd units, iptables rules, and kernel parameters are all infrastructure that gets deployed and tested, not hand-configured
+
+## Standard Work Cycle
+
+Every change that touches `build-images.sh` or a configure role follows
+this exact 6-step cycle:
+
+1. **Update build-images.sh** — bake packages, static config, systemd units
+2. **Build images IN PARALLEL on test units** — `--force --parallel` across 6 hosts (REQUIRED)
+3. **Write tests and playbook updates** (while images build)
+4. **Run E2E molecule test** (after images ready)
+5. **Code review** (while E2E runs) — DRY, ARCH, KISS, OOP, test quality
+6. **Manual playbook verification** (after E2E passes) — every play, every heartbeat
+
+No rollback strategy needed — old image versions saved, just rebuild.
 
 ## Patterns
 
@@ -24,11 +41,13 @@ Image-first pattern:
 
 ```bash
 # Build all packages into image during build-images.sh
-./build-images.sh --only <target>
+# Build IN PARALLEL across hosts
+./build-images.sh --force --parallel --only <target1> --only <target2>
 
 # Configure role only applies host-specific config
 # roles/<type>_configure/tasks/main.yml
 # NO opkg install, apt install, or pip install commands
+# NO "if baked file missing, deploy at runtime" fallbacks
 ```
 
 Two-role service pattern:
@@ -110,16 +129,34 @@ BaseManager → NodeManager → ClusterManager
 - ClusterManager → SuperManager: `POST /api/checkin` (cluster relay via MANAGEMENT_SERVER)
 - ClusterManager → NodeManager: `POST /api/manager/events` (event broadcast via CHILD_MANAGER_IPS)
 
-### WAN host reachability (DNAT)
+### WAN host reachability (DNAT + socat)
 
 WAN host kiosk containers live on private NAT subnets (10.99.x.x) that
-are unreachable from the LAN. The `kiosk_lxc` role deploys iptables DNAT
-rules on WAN hosts forwarding port 9001 from the host's WAN bridge to
-the container. This lets the Cluster Manager reach child Managers on WAN
-hosts via the Proxmox host IP (`ansible_host`).
+are unreachable from the LAN. The `kiosk_lxc` role deploys host-level
+infrastructure on each Proxmox host to expose port 9001:
+
+- **WAN hosts (non-router)**: iptables DNAT on the WAN bridge forwarding
+  port 9001 to the kiosk container IP. Works because container and host
+  share the same 10.99.x.x NAT bridge — no hairpin issue.
+- **Router node**: systemd `manager-api-proxy.service` running socat
+  (WAN:9001 → kiosk LAN IP:9001). DNAT fails here because the kiosk is
+  on the LAN bridge (vmbr1) while WAN traffic arrives on vmbr0 — hairpin
+  NAT breaks conntrack. Socat operates in userspace, avoiding this.
+- **LAN hosts**: no forwarding needed — direct LAN access.
+
+The SuperManager relay (`supermanager-relay.service`) on the router node
+forwards port 52525 through an SSH reverse tunnel to the controller
+where the SM API runs. Both relay units use `Restart=always` so they
+survive reboots and SSH session teardown.
 
 `CHILD_MANAGER_IPS` uses container IPs for LAN hosts (directly reachable)
-and host IPs for WAN hosts (via DNAT). See `manager-api-pattern` skill.
+and host IPs for WAN hosts (via DNAT/socat). See `manager-api-pattern` skill.
+
+Previous bug (2026-04-12): socat on port 9001 was started with `nohup &`
+instead of a systemd unit. It died when ansible's SSH ControlMaster session
+closed, breaking the heartbeat relay chain. WAN NodeManagers could not
+reach the Cluster Manager, causing 0 of 6 hosts on the SuperManager.
+Fix: deploy as `manager-api-proxy.service` with `Restart=always`.
 
 ## Anti-patterns
 
@@ -130,3 +167,5 @@ NEVER add graceful degradation for expected hardware (iGPU, WiFi, IOMMU)
 NEVER put fleet-level operations on NodeManager — ClusterManager only
 NEVER patch running containers — update build scripts, rebuild images, redeploy
 NEVER use raw `ansible-playbook --tags openwrt` without `infra` — bridges undefined
+NEVER treat Proxmox hosts as special snowflakes — they are machines you control, same as containers. Host-level systemd units, iptables rules, and packages are deployable infrastructure
+NEVER use `nohup ... &` for persistent host-level services — deploy systemd units with Restart=always. Background processes die when SSH sessions close

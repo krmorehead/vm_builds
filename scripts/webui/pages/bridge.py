@@ -23,10 +23,8 @@ def register() -> None:
 
 def _bridge_content() -> None:
     """Render the bridge dashboard with auto-refreshing metrics."""
-    from scripts.webui.manager import get_metric_cache, get_subscription_manager, resolve_node_ip
+    from scripts.webui.metric_controller import MetricPageController
 
-    mgr = get_subscription_manager()
-    cache = get_metric_cache()
     bridge_nodes = get_bridge_nodes()
 
     theme.page_header(PageTitles.BRIDGE, "Dedicated WDS link monitoring")
@@ -45,20 +43,7 @@ def _bridge_content() -> None:
     tx_history: list[float] = []
     rx_history: list[float] = []
 
-    def _subscribe() -> None:
-        for node in bridge_nodes:
-            ip = resolve_node_ip(node["node_id"])
-            if ip:
-                mgr.subscribe(node["node_id"], "bridge", ttl_seconds=30)
-
-    def _refresh() -> None:
-        _subscribe()
-
-        node_data = {}
-        for node in bridge_nodes:
-            cached = cache.get(node["node_id"], "bridge")
-            node_data[node["node_id"]] = cached
-
+    def _on_refresh(node_data: dict) -> None:
         banner_container.clear()
         with banner_container:
             _render_link_banner(node_data)
@@ -77,13 +62,16 @@ def _bridge_content() -> None:
         with detail_container:
             _render_detail_table(node_data)
 
-    _refresh()
-
-    timer = ui.timer(5.0, _refresh)
+    ctrl = MetricPageController(
+        "bridge",
+        [n["node_id"] for n in bridge_nodes],
+        on_refresh=_on_refresh,
+    )
+    ctrl.start_timer()
 
     with ui.row().classes("gap-3 mt-4"):
         ui.button(
-            Labels.REFRESH_NOW, icon="refresh", on_click=_refresh,
+            Labels.REFRESH_NOW, icon="refresh", on_click=ctrl.refresh,
         ).classes("outline-btn")
         ui.button(
             Labels.RESTART_WIFI, icon="restart_alt",
@@ -384,24 +372,23 @@ async def _bridge_action(target: str) -> None:
     """Restart WiFi on bridge nodes via the manager API."""
     import httpx
 
-    from scripts.webui.data import get_api_base_url
+    from scripts.webui.api_client import api
 
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{get_api_base_url()}/api/bridge/restart-wifi",
-                json={"target": target},
-                timeout=20.0,
+        resp = await api.post(
+            "/api/bridge/restart-wifi",
+            json={"target": target},
+            timeout=20.0,
+        )
+        if resp.status_code == 200:
+            results = resp.json()
+            ok_count = sum(1 for r in results.values() if r.get("success"))
+            ui.notify(
+                f"WiFi restart: {ok_count}/{len(results)} nodes succeeded",
+                type="positive" if ok_count == len(results) else "warning",
             )
-            if resp.status_code == 200:
-                results = resp.json()
-                ok_count = sum(1 for r in results.values() if r.get("success"))
-                ui.notify(
-                    f"WiFi restart: {ok_count}/{len(results)} nodes succeeded",
-                    type="positive" if ok_count == len(results) else "warning",
-                )
-            else:
-                ui.notify(f"Restart failed: {resp.status_code}", type="negative")
+        else:
+            ui.notify(f"Restart failed: {resp.status_code}", type="negative")
     except (httpx.HTTPError, OSError) as exc:
         ui.notify(f"Restart failed: {exc}", type="negative")
 

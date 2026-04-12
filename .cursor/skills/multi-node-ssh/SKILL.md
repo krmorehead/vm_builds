@@ -1,13 +1,13 @@
 ---
 name: multi-node-ssh
-description: SSH ProxyJump patterns for managing Proxmox nodes behind the OpenWrt router. Use when adding LAN hosts, debugging satellite connectivity, writing Molecule scenarios for LAN nodes, or working with tasks/bootstrap_lan_host.yml.
+description: SSH ProxyCommand patterns for managing Proxmox nodes behind the OpenWrt router. Use when adding LAN hosts, debugging satellite connectivity, writing Molecule scenarios for LAN nodes, or working with tasks/bootstrap_lan_host.yml.
 ---
 
 # Multi-Node SSH Patterns
 
 LAN hosts sit behind the OpenWrt router on 10.10.10.0/24 and are NOT directly
 reachable from the controller. All SSH goes through the primary Proxmox host
-via ProxyJump. LAN hosts are ONLY reachable when the OpenWrt router VM is
+via ProxyCommand. LAN hosts are ONLY reachable when the OpenWrt router VM is
 running on the primary host.
 
 ## Rules
@@ -20,7 +20,7 @@ running on the primary host.
 - NEVER manage SSH keys or passwords in playbooks. The operator sets up key
   auth manually via the Proxmox GUI shell or `ssh-copy-id` through the tunnel.
 - ALWAYS add `ServerAliveInterval=15` and `ServerAliveCountMax=4` to SSH args
-  for ProxyJump connections. Without keepalives, the connection drops during
+  for ProxyCommand connections. Without keepalives, the connection drops during
   long sequences of local Ansible tasks that don't send traffic.
 - ALWAYS export env vars before running Molecule:
   `set -a; source test.env; set +a; molecule test -s mesh1-infra`
@@ -31,7 +31,7 @@ running on the primary host.
 Controller (laptop, 192.168.86.0/24)
   └──SSH──► Primary host (home, 192.168.86.201)
                ├──SSH──► OpenWrt VM (10.10.10.1, manages LAN)
-               └──ProxyJump──► LAN host (mesh1, 10.10.10.210)
+               └──ProxyCommand──► LAN host (mesh1, 10.10.10.210)
 ```
 
 Dependency chain: controller → home → OpenWrt VM → LAN exists → mesh1 reachable.
@@ -57,8 +57,8 @@ for i in $(seq 200 220); do ping -c1 -W1 10.10.10.$i &>/dev/null && echo 10.10.1
 ssh -L 8007:<node-ip>:8006 root@192.168.86.201
 # Browse https://localhost:8007, open Shell, paste public keys
 
-# Option B: ssh-copy-id through ProxyJump (requires password)
-ssh-copy-id -o ProxyJump=root@192.168.86.201 root@<node-ip>
+# Option B: ssh-copy-id through ProxyCommand (requires password)
+ssh-copy-id -o "ProxyCommand=ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -W %h:%p root@192.168.86.201" root@<node-ip>
 ```
 
 Both the controller's AND the primary host's keys must be authorized.
@@ -68,7 +68,7 @@ Both the controller's AND the primary host's keys must be authorized.
 6. **Create host_vars**: `inventory/host_vars/nodename.yml` with `ansible_host`
 7. **Run bootstrap**: the `tasks/bootstrap_lan_host.yml` task handles DHCP
    lease and API token creation automatically during converge
-8. **Verify**: `ssh -o ProxyJump=root@$PRIMARY_HOST root@<node-ip> hostname`
+8. **Verify**: `ssh -o "ProxyCommand=ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -W %h:%p root@$PRIMARY_HOST" root@<node-ip> hostname`
 
 ### SSH tunnel for browser access
 
@@ -154,7 +154,7 @@ Three layers prevent mid-play SSH drops through the ProxyCommand tunnel:
    Phase 2 play targeting lan_hosts.
 
 Previous bug: mesh1 became UNREACHABLE mid-play during `proxmox_igpu` (54 tasks ok,
-then "Data could not be sent"). Root cause: the ControlMaster carrying the ProxyJump
+then "Data could not be sent"). Root cause: the ControlMaster carrying the ProxyCommand
 tunnel had no keepalives and could silently die.
 
 ## Bootstrap flow (`tasks/bootstrap_lan_host.yml`)

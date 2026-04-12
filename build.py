@@ -264,9 +264,11 @@ def start_api_server(env_path: Path, port: int = API_PORT) -> subprocess.Popen |
 
     proc = subprocess.Popen(
         cmd,
+        stdin=subprocess.DEVNULL,
         stdout=log_fh,
         stderr=subprocess.STDOUT,
         cwd=str(PROJECT_ROOT),
+        start_new_session=True,
     )
 
     for _ in range(20):
@@ -528,7 +530,7 @@ def main(argv: list[str] | None = None) -> int:
     ansible_bin = find_ansible_playbook()
     if ansible_bin is None:
         print("ERROR: ansible-playbook not found.", file=sys.stderr)
-        print("  Run ./setup.sh to create the virtual environment.", file=sys.stderr)
+        print("  Run scripts/setup.sh to create the virtual environment.", file=sys.stderr)
         return 1
 
     cmd = build_command(
@@ -575,7 +577,7 @@ def main(argv: list[str] | None = None) -> int:
             print("WARNING: Continuing without API server", file=sys.stderr)
 
     fleet_monitor: FleetProgressMonitor | None = None
-    if api_proc and not args.no_api:
+    if api_proc:
         fleet_monitor = FleetProgressMonitor(callhome_url)
         fleet_monitor.start()
         print("Fleet monitor:  active (live status on stderr)\n")
@@ -584,7 +586,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"{callhome_url}/api/timeline/start", method="POST",
             )
             urlopen(req, timeout=5)
-        except Exception:
+        except (URLError, TimeoutError, OSError):
             pass
     else:
         print()
@@ -606,7 +608,7 @@ def main(argv: list[str] | None = None) -> int:
             duration = tl_data.get("duration", 0)
             if svc_count > 0:
                 print(f"\nTimeline: {svc_count} services tracked over {duration:.0f}s")
-        except Exception:
+        except (URLError, TimeoutError, OSError):
             pass
         print()
 

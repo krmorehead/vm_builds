@@ -1,3 +1,3 @@
 # Populated by Ansible during provisioning
-# CALLHOME_SERVER=http://<host>:8088
+# CALLHOME_SERVER=http://<host>:$WEBUI_PORT
 # CALLHOME_PUBLIC_KEY=<token>

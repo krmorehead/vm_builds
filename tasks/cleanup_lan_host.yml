@@ -52,6 +52,28 @@
   changed_when: true
   failed_when: false
 
+- name: Deregister LAN host containers from Manager
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/manager_register.yml"
+  vars:
+    register_path: "api/host/{{ _lan_host_name }}/containers/{{ _deregister_vmid }}"
+    register_body: {}
+    register_method: DELETE
+    register_ignore_errors: true
+  loop:
+    - "{{ wireguard_ct_id }}"
+    - "{{ pihole_ct_id }}"
+    - "{{ meshwifi_ct_id }}"
+    - "{{ netdata_ct_id }}"
+    - "{{ rsyslog_ct_id }}"
+    - "{{ homeassistant_ct_id }}"
+    - "{{ jellyfin_ct_id }}"
+    - "{{ kodi_ct_id }}"
+    - "{{ moonlight_ct_id }}"
+    - "{{ kiosk_ct_id }}"
+    - "{{ gaming_ct_id }}"
+  loop_control:
+    loop_var: _deregister_vmid
+
 - name: Remove ansible-managed files on LAN host  # noqa command-instead-of-shell
   ansible.builtin.shell:
     cmd: >-
@@ -85,12 +107,15 @@
   ansible.builtin.shell:
     cmd: >-
       {{ _cleanup_ssh }} "
-      iptables -t nat -S 2>/dev/null | grep -q '10\.99\.' && iptables -t nat -F || true;
+      set -o pipefail;
+      cnt=\$(iptables -t nat -S 2>/dev/null | grep -c '10\.99\.' || true);
+      [ \"\${cnt:-0}\" -gt 0 ] && iptables -t nat -F || true;
       iptables -S FORWARD 2>/dev/null | grep 'vmbr_ct\|10\.99\.' | while read -r rule; do
         iptables \$(echo \"\$rule\" | sed 's/^-A/-D/') 2>/dev/null || true;
       done;
       ip link set vmbr_ct down 2>/dev/null || true;
       ip link delete vmbr_ct 2>/dev/null || true"
+    executable: /bin/bash
   when: _host_reachable | bool
   changed_when: true
   failed_when: false
@@ -160,7 +185,7 @@
 
 - name: Check if OpenWrt is running (for DHCP lease cleanup)
   ansible.builtin.command:
-    cmd: qm status 100
+    cmd: qm status {{ openwrt_vm_id }}
   register: _vm_status
   changed_when: false
   failed_when: false

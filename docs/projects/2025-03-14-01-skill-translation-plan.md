@@ -5,6 +5,8 @@ project_number: 01
 status: active
 ---
 
+> **Status: Completed** — Archived 2026-04-10
+
 # Skill Translation Project Plan
 
 ## Overview

@@ -84,6 +84,16 @@ Use `./build-images.sh --host <ip> --only <target>` to rebuild a single image. F
 
 Every service MUST have a custom image with ALL packages baked in. ZERO configure roles should install packages at runtime.
 
+Build images IN PARALLEL across 6 hosts. Never serialize image builds when you have 6 available machines. The fast iteration loop is: fix build script → rebuild 1 image (~2 min) → per-feature test (~5 min) → loop until clean → full E2E once.
+
+## Host-Level Services Are Deployable Infrastructure
+
+Proxmox hosts are bakeable targets. Host-level systemd units (`manager-api-proxy.service`, `supermanager-relay.service`), iptables rules, and kernel parameters are all infrastructure that Ansible deploys during provisioning. They are tested the same way as container services — if a host service breaks, it shows up in molecule verify.
+
+NEVER use `nohup ... &` for persistent host services. Background processes die when SSH sessions close. ALWAYS deploy systemd units with `Restart=always`.
+
+Previous bug (2026-04-12): socat relays for 4-tier heartbeat chain were started with `nohup socat &`. Both died when Ansible's SSH ControlMaster session closed mid-E2E, causing 0 of 6 hosts on the SuperManager. Fix: systemd units persisted through the entire test and survived reboots.
+
 ## pct_remote gather_facts Avoidance
 
 NEVER use `gather_facts: true` on plays targeting `pct_remote` dynamic groups unless the configure role actually references `ansible_*` facts. The `pct_remote` connection plugin pipes the setup module's JSON through `pct exec` and SSH. Hosts with many block devices (LVM thin pool, loop devices, device-mapper) generate `ansible_devices` output that exceeds the buffer, causing "Module result deserialization failed: No end of json char found".

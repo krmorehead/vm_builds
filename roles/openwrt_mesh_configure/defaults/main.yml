@@ -4,4 +4,3 @@ openwrt_mesh_key: "{{ lookup('env', 'MESH_KEY') | default('changeme', true) }}"
 openwrt_mesh_channel: auto
 openwrt_mesh_encryption: sae
 openwrt_mesh_country: "US"
-openwrt_mesh_preferred_band: "5g"

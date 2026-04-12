@@ -276,19 +276,10 @@ def collect_bridge_metrics(ip: str) -> HeartbeatCache:
         if ok:
             bridge_data["bridge"]["stp"] = stp_out[:500]
 
-    script_status = bridge_data.get("script_status", {})
-    if "mode" in script_status:
-        role = script_status["mode"]
-    else:
-        role = "unknown"
-        for iface in bridge_data.get("interfaces", []):
-            mode = iface.get("type", "")
-            if mode == "AP":
-                role = "ap"
-                break
-            if mode in ("managed", "station"):
-                role = "sta"
-                break
+    role = infer_wifi_role(
+        bridge_data.get("script_status", {}),
+        bridge_data.get("interfaces", []),
+    )
     bridge_data["bridge"]["role"] = role
     bridge_data["bridge"]["paired"] = len(bridge_data.get("stations", [])) > 0
 
@@ -369,25 +360,71 @@ def collect_mesh_metrics(ip: str) -> HeartbeatCache:
             "connected_time": station.get("connected_time", ""),
         })
 
-    script_status = mesh_data.get("script_status", {})
-    if "mode" in script_status:
-        role = script_status["mode"]
-    else:
-        role = "unknown"
-        for iface in mesh_data.get("interfaces", []):
-            mode = iface.get("type", "")
-            if mode == "AP":
-                role = "ap"
-                break
-            if mode in ("managed", "station"):
-                role = "sta"
-                break
+    role = infer_wifi_role(
+        mesh_data.get("script_status", {}),
+        mesh_data.get("interfaces", []),
+    )
     mesh_data["role"] = role
 
     return HeartbeatCache(
         node_id="", metric_type="mesh", data=mesh_data,
         collected_at=now, success=wifi.success, error=wifi.error,
     )
+
+
+# ── Shared helpers ───────────────────────────────────────────────────
+
+
+def infer_wifi_role(
+    script_status: dict, interfaces: list[dict],
+) -> str:
+    """Determine WiFi role from script status or interface modes.
+
+    Used by both ``collect_bridge_metrics`` and ``collect_mesh_metrics``
+    to avoid duplicating the same role-inference logic.
+    """
+    if "mode" in script_status:
+        return script_status["mode"]
+    for iface in interfaces:
+        mode = iface.get("type", "")
+        if mode == "AP":
+            return "ap"
+        if mode in ("managed", "station"):
+            return "sta"
+    return "unknown"
+
+
+def parse_guest_list(stdout: str) -> list[dict]:
+    """Parse ``pct list`` or ``qm list`` output into structured dicts.
+
+    ``pct list`` columns: VMID  Status  Lock  Name
+    ``qm list``  columns: VMID  NAME  STATUS  MEM  BOOTDISK  PID
+
+    Detects format from the header row and maps fields accordingly.
+    Returns ``[{"vmid": ..., "status": ..., "name": ...}, ...]``.
+    """
+    lines = stdout.strip().splitlines()
+    if not lines:
+        return []
+    header = lines[0].upper().split()
+    qm_format = len(header) >= 2 and header[1] == "NAME"
+    guests: list[dict] = []
+    for line in lines[1:]:
+        parts = line.split()
+        if len(parts) >= 3:
+            if qm_format:
+                guests.append({
+                    "vmid": parts[0],
+                    "name": parts[1],
+                    "status": parts[2],
+                })
+            else:
+                guests.append({
+                    "vmid": parts[0],
+                    "status": parts[1],
+                    "name": parts[2],
+                })
+    return guests
 
 
 # ── Parser helpers ───────────────────────────────────────────────────

@@ -87,18 +87,12 @@
     dest: /etc/wireguard/wg0.conf
     mode: "0600"
 
-- name: Enable and start wg-quick@wg0
+# Service enablement and sysctl are baked into the image.
+# Just start the service after writing the host-specific wg0.conf.
+- name: Start wg-quick@wg0
   ansible.builtin.systemd:
     name: wg-quick@wg0
-    enabled: true
     state: started
-
-# ── IP forwarding ──────────────────────────────────────────────
-
-- name: Apply sysctl settings
-  ansible.builtin.command:
-    cmd: sysctl -p /etc/sysctl.d/99-wireguard.conf
-  changed_when: true
 
 # ── NAT (MASQUERADE on wg0) ───────────────────────────────────
 

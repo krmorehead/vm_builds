@@ -9,26 +9,49 @@ Use when running molecule tests, implementing TDD workflow, diagnosing test fail
 
 ## Rules
 
+**Standard Work Cycle (MANDATORY for any image/role change):**
+0. ALWAYS follow the 6-step standard work cycle when changing build-images.sh or configure roles:
+   Step 1: Update build-images.sh → Step 2: Build images IN PARALLEL on test units (REQUIRED, NOT OPTIONAL) →
+   Step 3: Write tests/playbook updates while images build → Step 4: Run E2E molecule test →
+   Step 5: Code review while E2E runs → Step 6: Manual playbook verification after E2E passes
+1. NEVER skip Step 2 (image rebuild). If you modify build-images.sh and run molecule test without rebuilding, the old image lacks baked content and configure roles WILL fail
+2. NEVER add "legacy image fallback" code in configure roles. The image is the source of truth — rebuild it
+3. You have 6 Proxmox hosts available — build images IN PARALLEL across them: `build-images.sh --host <ip> --only <target>` on each host simultaneously
+4. The `proxmox_lxc` version-mismatch system auto-rebuilds containers from fresh images. Fresh image + version bump = automatic container recreation
+
+**Fail-Fast Image Iteration (CRITICAL — this is why we have 6 hosts):**
+5. When an image has a problem, FIX THAT ONE IMAGE and rebuild it. Do NOT run a full E2E to discover what broke — you already know the image is broken
+6. Build a single image with `build-images.sh --host <ip> --only <target>` (~2-3 min). Test it with its per-feature molecule scenario (`molecule test -s <type>-lxc`). If it fails, fix and rebuild. FAST loop
+7. Once all individual images pass their per-feature tests, THEN run the full E2E (`molecule test`)
+8. The full E2E should be FAST because all images are already cached on all hosts from Step 2. If E2E is slow, something is wrong — probably re-uploading images or re-installing packages at runtime
+9. NEVER run `molecule test` (full E2E with cleanup) as the primary iteration loop. Use `molecule converge && molecule verify` for fast iteration. Full `molecule test` is for clean-state proof only
+10. Treat Proxmox hosts as bakeable targets. Host-level infrastructure (socat, iptables rules, systemd units) is part of the image/deploy pipeline, not hand-configured. If a host needs a package or service, bake it or deploy it via Ansible — same as containers
+
 **TDD and Test-First Development:**
-1. ALWAYS reproduce production bugs on test machine first using `molecule test` or `molecule converge`
-2. NEVER iterate on production when test machine is available  
-3. ALWAYS write verify assertions before implementing features (TDD)
-4. NEVER consider a fix complete until `molecule test` passes end-to-end
+5. ALWAYS reproduce production bugs on test machine first using `molecule test` or `molecule converge`
+6. NEVER iterate on production when test machine is available  
+7. ALWAYS write verify assertions before implementing features (TDD)
+8. NEVER consider a fix complete until `molecule test` passes end-to-end
 
 **Environment and Setup Validation:**
-5. ALWAYS validate environment before ANY molecule commands: `set -a && source test.env && set +a`
-6. ALWAYS test SSH and Ansible connectivity before running molecule: `ansible home -m ping`
-7. ALWAYS run lint checks (`ansible-lint && yamllint .`) after ANY code changes
+9. ALWAYS validate environment before ANY molecule commands: `set -a && source test.env && set +a`
+10. ALWAYS test SSH and Ansible connectivity before running molecule: `ansible home -m ping`
+11. ALWAYS run lint checks (`ansible-lint && yamllint .`) after ANY code changes
 
 **Proactive Testing Triggers:**
-8. Test IMMEDIATELY when creating new service roles or container types
-9. Test IMMEDIATELY when adding Docker-in-LXC or container-specific patterns  
-10. Test IMMEDIATELY when you see variable scoping issues or undefined variable errors
-11. NEVER proceed with development when environment validation fails
+12. Test IMMEDIATELY when creating new service roles or container types
+13. Test IMMEDIATELY when adding Docker-in-LXC or container-specific patterns  
+14. Test IMMEDIATELY when you see variable scoping issues or undefined variable errors
+15. NEVER proceed with development when environment validation fails
+
+**Manual Testing Prerequisites:**
+16. NEVER start manual testing unless `molecule test` has completed and ALL 6 hosts are on the 10.10.10.x LAN with ALL containers deployed
+17. NEVER rationalize "No route to host" during manual testing as "expected in pre-mesh" — if you see it, converge first
+18. The system ALWAYS ends `molecule test` in a pristine state. Manual testing starts from that pristine state. Build first, test second.
 
 **Cleanup and Safety:**
-12. NEVER use blanket cleanup that destroys all resources - use explicit VMIDs
-13. NEVER add graceful degradation for expected hardware (iGPU, WiFi, VT-d)
+15. NEVER use blanket cleanup that destroys all resources - use explicit VMIDs
+16. NEVER add graceful degradation for expected hardware (iGPU, WiFi, VT-d)
 
 **Failure Diagnosis:**
 14. ALWAYS check dmesg first when diagnosing test failures
@@ -69,12 +92,24 @@ molecule test
 Converge vs test workflow:
 
 ```bash
-# Day-to-day iteration (preserves baseline)
+# Day-to-day iteration (preserves baseline, FAST)
 molecule converge && molecule verify
 
-# Clean-state validation (CI, final proof)
-# Ends with reconverge — baseline restored, mesh1 stays accessible
+# Per-image iteration (fix ONE broken image, FASTEST)
+./build-images.sh --host $PRIMARY_HOST --only pihole  # ~2-3 min
+molecule test -s pihole-lxc                            # per-feature only
+
+# Full E2E clean-state validation (CI, final proof, LAST STEP)
+# Only run after all images pass individual tests
 molecule test
+```
+
+Fail-fast iteration priority:
+
+```
+Fix image → rebuild 1 image (~2 min) → per-feature test (~5 min)
+         ↑ loop here until image works ↓
+         ↓ then run full E2E once      ↓
 ```
 
 Diagnostic order:
@@ -312,6 +347,11 @@ NEVER continue development with ANY host unreachable — it is a show stopper
 NEVER "skip a broken host and build the next one" — ALL hosts must be healthy first
 NEVER proceed to the next build without SSH-checking ALL hosts after the previous build
 NEVER treat SSH "Permission denied" as less severe than EHOSTUNREACH — both = FULL STOP
+NEVER run `molecule test` (full E2E) as the primary iteration loop — use `molecule converge && molecule verify` for fast iteration
+NEVER run full E2E to discover a single-image problem — rebuild that one image and run its per-feature scenario
+NEVER let E2E runs take 30+ minutes — if they do, images are being re-uploaded or packages installed at runtime, which means the bake pipeline is broken
+NEVER treat Proxmox host config as "not our problem" — host-level systemd units, iptables rules, and packages are deployable and testable infrastructure, same as container images
+NEVER use `nohup ... &` for persistent host services — deploy systemd units with Restart=always. Background processes die when SSH sessions close
 NEVER fabricate test data (curl heartbeats, fake check-ins, simulated nodes) to populate a UI for "manual testing" — this is mocking with extra steps and proves nothing about real functionality
 NEVER claim "manual testing passed" after only VIEWING pages — every interactive feature (buttons, toggles, mode switches) must be ENGAGED against real hardware
 NEVER say "the fleet dashboard shows 5 nodes" when those 5 nodes were curl'd into existence 10 seconds ago — real nodes heartbeat from real kiosk_server instances

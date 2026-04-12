@@ -5,6 +5,71 @@ alwaysApply: true
 
 # Testing workflow
 
+## Standard work cycle (MANDATORY for any image/role change)
+
+Every change that touches `build-images.sh` or a configure role follows
+this exact 6-step cycle. No shortcuts. No skipping steps.
+
+### Step 1: Update image build scripts
+Modify `build-images.sh` to bake the new content into the image. All
+packages, static config, systemd enablement, user/group setup, and
+application code go HERE, not in configure roles.
+
+### Step 2: Build images on test units (PARALLEL, REQUIRED)
+Run `build-images.sh --host <ip> --only <target>` on the Proxmox hosts.
+You have 6 healthy units. Build images in PARALLEL across them.
+This step is NOT optional. If you skip it, the configure role will fail
+because the baked content doesn't exist in the running container. The
+version-mismatch system in `proxmox_lxc` auto-rebuilds containers when
+the image version changes, so fresh images = fresh containers.
+
+```bash
+# Build specific images in parallel across hosts
+./scripts/build-images.sh --host $PRIMARY_HOST --only pihole &
+./scripts/build-images.sh --host $AI_HOST --only wireguard &
+./scripts/build-images.sh --host $MESH_2_HOST --only kiosk &
+wait
+```
+
+### Step 3: Write tests and playbook updates (while images build)
+While images are building, write unit tests (`pytest tests/`),
+integration tests (`molecule/*/verify.yml`), and update playbook/role
+code. Use the build wait time productively — never just poll.
+
+### Step 4: Run E2E test suite (after images are ready)
+Once images are rebuilt, run `molecule test` for full integration
+validation. This creates all containers from the fresh images, runs
+converge + verify, and validates the entire stack.
+
+### Step 5: Code review (while E2E runs)
+While `molecule test` runs (~30-45 min), review code for:
+- DRY violations (duplicated logic)
+- Architecture adherence (bake-not-configure, two-role pattern)
+- Code quality (no magic strings, proper error handling)
+- KISS (remove unnecessary complexity)
+- OOP service patterns (manager hierarchy)
+- Test quality (no mocks for real infrastructure)
+
+### Step 6: Manual playbook verification (after E2E passes)
+After `molecule test` passes, manually run ALL playbook plays to verify
+the 4-tier manager system works end-to-end. Every container, every
+heartbeat, every manager relay. No rollback strategy needed — we save
+the old image version and can just rebuild.
+
+### NEVER skip Step 2
+The most common failure mode is modifying `build-images.sh` and then
+running `molecule test` WITHOUT rebuilding images first. The old image
+lacks the baked content, the configure role fails, and the agent wastes
+time adding fallback code that violates the bake-not-configure principle.
+THERE ARE NO FALLBACKS. The image is the source of truth. Build it.
+
+Previous catastrophe (2026-04-11): Agent modified 8 services in
+build-images.sh, then ran molecule test without rebuilding images.
+HA configure failed because `homeassistant-compose.service` didn't exist
+in the old image. Agent added a legacy fallback path. User correctly
+rejected it — fallbacks violate bake-not-configure. The fix was to
+rebuild the image, not add fallback code.
+
 ## Test-first reproduction
 
 When a bug is reported against a production host, ALWAYS reproduce it on the
@@ -38,15 +103,23 @@ works, then implement the feature.
 
 - Use `molecule converge` + `molecule verify` for day-to-day iteration. This
   preserves the OpenWrt baseline so leaf nodes (mesh1) remain accessible and
-  layered scenarios don't need a full rebuild (~4 min saved).
+  layered scenarios don't need a full rebuild (~4 min saved). This is the
+  PRIMARY iteration loop — 90% of development uses this.
+- Fix broken images INDIVIDUALLY with per-feature scenarios before running
+  full E2E. `build-images.sh --only <target>` (~2 min) + `molecule test -s
+  <type>-lxc` (~5 min) is the fast loop for single-image fixes.
 - Use `molecule test` for clean-state validation (CI, pre-commit, final
   proof). The test_sequence runs: `dependency → cleanup → syntax → prepare
   → converge → verify`. There is NO trailing converge or cleanup — the
-  baseline is left running after a successful test. If you need a clean
-  rebuild, run `molecule converge` manually afterward.
+  baseline is left running after a successful test. This is the LAST STEP,
+  after all individual images pass their own tests.
 - NEVER add `cleanup` or `destroy` to the end of the test_sequence. That
   tears down OpenWrt and makes mesh1 permanently unreachable.
+- NEVER run `molecule test` as the primary iteration loop. It destroys and
+  rebuilds everything, wasting 15-30 min per cycle. Use converge+verify.
 - NEVER consider a fix complete until `molecule test` passes end-to-end.
+- If E2E takes 30+ minutes, something is wrong — images are being
+  re-uploaded or packages installed at runtime. Debug the bake pipeline.
 
 ## Heartbeat API server (callhome)
 
@@ -98,6 +171,31 @@ the wait time productively. See the `use-idle-time` rule for priority order.
 
 NEVER just poll. Start productive work immediately and interleave status checks.
 Tell the user what you're reviewing so they have context on parallel work.
+
+## Manual testing requires a fully converged system
+
+NEVER start manual testing (browser-based UI walkthrough or CLI playbook
+verification) unless the system is fully converged:
+
+1. `molecule test` (or `molecule converge`) completed successfully
+2. ALL 6 hosts are on the 10.10.10.x LAN (mesh established)
+3. ALL containers and VMs are deployed, configured, and heartbeating
+4. ALL child Managers are visible in the Cluster Manager fleet
+
+If ANY of these conditions are not met, run `molecule test` first.
+
+Testing in a pre-mesh state produces a wall of "No route to host" errors
+that prove nothing. It wastes time verifying expected failures instead
+of testing real functionality.
+
+The manual testing playbooks (`docs/manual-testing-playbooks.md`) CAN be
+used to deploy via the Deploy page, but the STARTING POINT must be a
+pristine, fully converged system. Build first, test second. Always.
+
+Previous catastrophe (2026-04-10): Agent started manual testing in pre-mesh
+state. Batman enable returned "No route to host" for 4 of 6 nodes. Agent
+proceeded to Playbook 3, 4, 5 instead of stopping and converging first.
+Wasted the entire testing session verifying expected failures.
 
 ## Diagnosing test failures
 

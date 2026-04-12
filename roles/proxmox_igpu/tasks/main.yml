@@ -367,3 +367,20 @@
         video_gid:     {{ igpu_video_gid }}
         driver:        {{ _igpu_driver | default('n/a') }}
         vainfo_ok:     {{ (_vainfo.rc | default(1)) == 0 }}
+
+# ── Register iGPU state with Manager ─────────────────────────────
+
+- name: Register iGPU with Manager
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/manager_register.yml"
+  vars:
+    register_path: "api/host/{{ inventory_hostname }}/hardware"
+    register_body:
+      ip: "{{ ansible_host }}"
+      igpu:
+        vendor: "{{ igpu_vendor }}"
+        driver: "{{ _igpu_driver }}"
+        pci_address: "{{ igpu_pci_address }}"
+        render_device: "{{ igpu_render_device }}"
+        render_gid: "{{ igpu_render_gid | int }}"
+        video_gid: "{{ igpu_video_gid | int }}"
+  when: igpu_available | bool

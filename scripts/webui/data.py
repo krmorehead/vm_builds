@@ -47,6 +47,7 @@ class Routes:
     HOSTS = "/hosts"
     ENVIRONMENT = "/environment"
     CONTAINERS = "/containers"
+    FLEET = "/fleet"
     LAUNCH = "/launch"
     TIMELINE = "/timeline"
     VIEW = "/view"
@@ -161,6 +162,15 @@ NAV_SECTIONS: list[NavItem] = [
     ("Nodes", Routes.NODES, "device_hub"),
     ("Hosts", Routes.HOSTS, "dns"),
     ("Environment", Routes.ENVIRONMENT, "settings"),
+]
+
+CLUSTER_NAV_SECTIONS: list[NavItem] = [
+    ("Fleet", Routes.FLEET, "device_hub"),
+    ("Home Hub", Routes.HUB, "tv"),
+    ("Bridge", Routes.BRIDGE, "swap_horiz"),
+    ("Mesh", Routes.MESH, "hub"),
+    ("Router", Routes.ROUTER, "router"),
+    ("Containers", Routes.CONTAINERS, "view_in_ar"),
 ]
 
 KIOSK_NAV_ITEMS: list[KioskNavItem] = [
@@ -1407,19 +1417,12 @@ class Fleet:
         if total == 0:
             return 100
         online = sum(1 for h in self.hosts if h.online)
-        avail_score = (online / total) * 40
-
         reporting = [h for h in self.hosts if h.telemetry and h.status != "offline"]
-        if reporting:
-            disk_score = sum(_resource_score(h.disk_pct) for h in reporting)
-            mem_score = sum(_resource_score(h.memory_pct) for h in reporting)
-            disk_score = (disk_score / len(reporting)) * 30
-            mem_score = (mem_score / len(reporting)) * 30
-        else:
-            disk_score = 0.0
-            mem_score = 0.0
-
-        return max(0, min(100, round(avail_score + disk_score + mem_score)))
+        return compute_health_score(
+            online, total,
+            [h.disk_pct for h in reporting],
+            [h.memory_pct for h in reporting],
+        )
 
     def hosts_by_bucket(self, bucket: str) -> list[Host]:
         """Return hosts belonging to a specific bucket."""
@@ -1885,15 +1888,22 @@ class RegisteredNode:
 
 
 def format_uptime(seconds: float) -> str:
-    """Human-readable uptime string from seconds."""
+    """Human-readable uptime string from seconds.
+
+    Canonical uptime formatter — used by Fleet dashboard, cluster
+    dashboard, and node detail pages. Sub-hour precision for short
+    uptimes, day+hour for long uptimes.
+    """
     if seconds <= 0:
         return "--"
     days = int(seconds // 86400)
     hours = int((seconds % 86400) // 3600)
+    minutes = int((seconds % 3600) // 60)
     if days > 0:
         return f"{days}d {hours}h"
-    minutes = int((seconds % 3600) // 60)
-    return f"{hours}h {minutes}m"
+    if hours > 0:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
 
 
 def format_node_status(status: str) -> str:
@@ -2441,7 +2451,12 @@ def compute_fleet_health(nodes: list[RegisteredNode]) -> FleetHealth:
     worst_disk_node = max(nodes, key=lambda n: n.disk_usage_pct)
     worst_mem_node = max(nodes, key=lambda n: n.memory_usage_pct)
 
-    score = _compute_health_score(nodes, online, len(nodes))
+    reporting = [n for n in nodes if n.status != "offline"]
+    score = compute_health_score(
+        online, len(nodes),
+        [n.disk_usage_pct for n in reporting],
+        [n.memory_usage_pct for n in reporting],
+    )
 
     return FleetHealth(
         total_nodes=len(nodes), online_nodes=online,
@@ -2456,26 +2471,30 @@ def compute_fleet_health(nodes: list[RegisteredNode]) -> FleetHealth:
     )
 
 
-def _compute_health_score(
-    nodes: list[RegisteredNode], online: int, total: int,
+def compute_health_score(
+    online: int,
+    total: int,
+    disk_usages: list[float],
+    memory_usages: list[float],
 ) -> int:
-    """0-100 score: availability (40%), disk (30%), memory (30%)."""
+    """0-100 fleet health: availability (40%), disk (30%), memory (30%).
+
+    Unified scorer used by both ``Fleet.health_score`` and
+    ``compute_fleet_health``. Takes pre-filtered metric lists so callers
+    handle their own "reporting vs offline" filtering.
+    """
     if total == 0:
         return 100
     avail_score = (online / total) * 40
 
     disk_score = 0.0
     mem_score = 0.0
-    reporting = [n for n in nodes if n.status != "offline"]
-    if reporting:
-        for n in reporting:
-            disk_score += _resource_score(n.disk_usage_pct)
-            mem_score += _resource_score(n.memory_usage_pct)
-        disk_score = (disk_score / len(reporting)) * 30
-        mem_score = (mem_score / len(reporting)) * 30
-    else:
-        disk_score = 0.0
-        mem_score = 0.0
+    if disk_usages:
+        disk_score = sum(_resource_score(d) for d in disk_usages)
+        disk_score = (disk_score / len(disk_usages)) * 30
+    if memory_usages:
+        mem_score = sum(_resource_score(m) for m in memory_usages)
+        mem_score = (mem_score / len(memory_usages)) * 30
 
     return max(0, min(100, round(avail_score + disk_score + mem_score)))
 

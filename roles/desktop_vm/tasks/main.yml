@@ -248,41 +248,64 @@
     state: started
   delegate_to: localhost
 
-- name: Get Desktop VM MAC address
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      qm config {{ desktop_vm_id }} | grep '^net0' | sed -n 's/.*\(..:..:..:..:..:..\).*/\1/p'
-    executable: /bin/bash
-  register: _desktop_mac
-  changed_when: false
-
-- name: Wait for Desktop VM to acquire DHCP lease
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      mac="{{ _desktop_mac.stdout | lower }}"
-      ip=$(awk "/$mac/"'{print $3}' /var/lib/misc/dnsmasq.leases 2>/dev/null)
-      [ -n "$ip" ] && echo "$ip" && exit 0
-      wan_ip=$(ip -4 addr show {{ proxmox_wan_bridge }} 2>/dev/null | awk '/inet /{print $2}' | head -1 | cut -d/ -f1)
-      if [ -n "$wan_ip" ]; then
-        subnet=$(echo "$wan_ip" | sed 's/\.[0-9]*$//')
-        for i in $(seq 1 254); do
-          ping -c1 -W1 "${subnet}.${i}" >/dev/null 2>&1 &
-        done
-        wait
-      fi
-      ip -4 neigh show dev {{ proxmox_wan_bridge }} | awk "/$mac/"'{print $1}'
-    executable: /bin/bash
-  register: _desktop_ip_poll
-  changed_when: false
-  retries: 30
+- name: Wait for QEMU Guest Agent to respond
+  ansible.builtin.command:
+    cmd: qm agent {{ desktop_vm_id }} ping
+  register: _desktop_agent_ping
+  retries: 60
   delay: 10
-  until: _desktop_ip_poll.stdout | trim | length > 0
+  until: _desktop_agent_ping.rc == 0
+  changed_when: false
+  failed_when: false
+
+- name: Desktop VM boot diagnostics (agent not responding)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      echo "VM_STATUS=$(qm status {{ desktop_vm_id }} 2>&1)"
+      echo "HOSTPCI=$(qm config {{ desktop_vm_id }} | grep hostpci || echo 'none')"
+      echo "DRI_USERS=$(lsof /dev/dri/renderD* 2>/dev/null | wc -l || echo 0)"
+      echo "VFIO_BOUND=$(ls /sys/bus/pci/drivers/vfio-pci/ 2>/dev/null | grep -c ':' || echo 0)"
+      echo "I915_BOUND=$(ls /sys/bus/pci/drivers/i915/ 2>/dev/null | grep -c ':' || echo 0)"
+    executable: /bin/bash
+  register: _desktop_boot_diag
+  changed_when: false
+  when: _desktop_agent_ping.rc != 0
+
+- name: Display Desktop VM boot diagnostics
+  ansible.builtin.debug:
+    var: _desktop_boot_diag.stdout_lines
+  when: _desktop_agent_ping.rc != 0
+
+- name: Fail if QEMU Guest Agent never responded
+  ansible.builtin.fail:
+    msg: >-
+      Desktop VM guest agent did not respond after 10 minutes.
+      VM may have failed to boot (check iGPU passthrough and DRI conflicts).
+      Diagnostics: {{ _desktop_boot_diag.stdout_lines | default([]) | join(', ') }}
+  when: _desktop_agent_ping.rc != 0
+
+- name: Get Desktop VM IP via QEMU Guest Agent
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      qm agent {{ desktop_vm_id }} network-get-interfaces 2>/dev/null |
+      python3 -c 'import sys,json; data=json.load(sys.stdin);
+      [print(a["ip-address"]) or sys.exit(0)
+      for i in (data.get("result",data) if isinstance(data,dict) else data)
+      if i.get("name")!="lo"
+      for a in i.get("ip-addresses",[])
+      if a.get("ip-address-type")=="ipv4"]'
+    executable: /bin/bash
+  register: _desktop_ip_agent
+  changed_when: false
+  retries: 10
+  delay: 5
+  until: (_desktop_ip_agent.stdout | default('') | trim) | length > 0
 
 - name: Set Desktop VM IP fact
   ansible.builtin.set_fact:
-    _desktop_vm_ip: "{{ _desktop_ip_poll.stdout | trim }}"
+    _desktop_vm_ip: "{{ _desktop_ip_agent.stdout | trim }}"
 
 - name: Wait for SSH on Desktop VM
   ansible.builtin.wait_for:
@@ -312,3 +335,18 @@
     desktop_proxmox_host: "{{ inventory_hostname }}"
     desktop_vm_id_ref: "{{ desktop_vm_id }}"
     igpu_vendor: "{{ igpu_vendor | default('intel') }}"
+
+# ── Register VM with Manager ─────────────────────────────────────
+
+- name: Register Desktop VM with Manager
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/manager_register.yml"
+  vars:
+    register_path: "api/host/{{ inventory_hostname }}/containers/{{ desktop_vm_id }}"
+    register_body:
+      service_type: desktop_vm
+      hostname: "desktop-{{ inventory_hostname }}"
+      state: running
+      ip: "{{ _desktop_vm_ip }}"
+      bridge: "{{ proxmox_all_bridges[0] | default('') }}"
+      hardware: []
+      last_deployed: "{{ ansible_date_time.iso8601 }}"

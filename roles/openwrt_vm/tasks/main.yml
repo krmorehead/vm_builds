@@ -205,6 +205,28 @@
 
 # ── WiFi PCIe passthrough ──────────────────────────────────────
 
+- name: Check if VM already has WiFi passthrough
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      qm config {{ openwrt_vm_id }} | grep -c '^hostpci'
+    executable: /bin/bash
+  register: _vm_hostpci_count
+  changed_when: false
+  failed_when: false
+  when:
+    - vm_exists | bool
+    - wifi_pci_devices | default([]) | length > 0
+
+- name: Upgrade existing VM to q35 machine type for PCI passthrough
+  ansible.builtin.command:
+    cmd: qm set {{ openwrt_vm_id }} --machine q35
+  changed_when: true
+  when:
+    - vm_exists | bool
+    - wifi_pci_devices | default([]) | length > 0
+    - (_vm_hostpci_count.stdout | default('0') | trim | int) == 0
+
 - name: Attach WiFi PCIe devices to VM
   ansible.builtin.command:
     cmd: >-
@@ -216,8 +238,25 @@
     loop_var: pci_addr
   changed_when: true
   when:
-    - not vm_exists | bool
     - wifi_pci_devices | default([]) | length > 0
+    - not vm_exists | bool or (_vm_hostpci_count.stdout | default('0') | trim | int) == 0
+
+- name: Restart VM to apply WiFi passthrough (stop then start below)
+  community.proxmox.proxmox_kvm:
+    node: "{{ proxmox_node }}"
+    api_host: "{{ proxmox_api_host }}"
+    api_user: "{{ proxmox_api_user }}"
+    api_token_id: "{{ proxmox_api_token_id }}"
+    api_token_secret: "{{ proxmox_api_token_secret }}"
+    vmid: "{{ openwrt_vm_id }}"
+    state: stopped
+    force: true
+    timeout: 60
+  delegate_to: localhost
+  when:
+    - vm_exists | bool
+    - wifi_pci_devices | default([]) | length > 0
+    - (_vm_hostpci_count.stdout | default('0') | trim | int) == 0
 
 - name: Clean up uploaded image
   ansible.builtin.file:
@@ -356,3 +395,18 @@
     _lan_bridges: "{{ _ordered_bridges[1:] }}"
     _bootstrap_ip: "{{ openwrt_bootstrap_ip }}"
     _bootstrap_cidr: "{{ openwrt_bootstrap_cidr }}"
+
+# ── Register VM with Manager ─────────────────────────────────────
+
+- name: Register OpenWrt VM with Manager
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/manager_register.yml"
+  vars:
+    register_path: "api/host/{{ inventory_hostname }}/containers/{{ openwrt_vm_id }}"
+    register_body:
+      service_type: openwrt_vm
+      hostname: "{{ openwrt_vm_name }}"
+      state: running
+      ip: "{{ _openwrt_connect_ip }}"
+      bridge: "{{ _wan_bridge }}"
+      hardware: "{{ wifi_pci_devices | default([]) }}"
+      last_deployed: "{{ ansible_date_time.iso8601 }}"

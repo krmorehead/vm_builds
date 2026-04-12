@@ -13,10 +13,14 @@ Use when debugging failures, implementing workarounds, or encountering unexpecte
 2. ALWAYS check if existing skills should be updated after fixing issues
 3. NEVER add graceful degradation for expected hardware (iGPU, WiFi, IOMMU)
 4. ALWAYS do credentials safety audit after completing features
-5. ALWAYS run full test suite after code changes
-6. NEVER consider task complete until `molecule test` passes
-7. ALWAYS generalize ad-hoc diagnostics and make them permanent
-8. NEVER commit or present changes as complete without passing tests
+5. ALWAYS follow the 6-step standard work cycle for image/role changes
+6. NEVER skip image rebuild after changing build-images.sh
+7. NEVER add "legacy image fallback" code in configure roles — rebuild the image
+8. ALWAYS build images IN PARALLEL across 6 hosts (use --parallel --force)
+9. ALWAYS run full test suite after code changes
+10. NEVER consider task complete until `molecule test` passes
+11. ALWAYS generalize ad-hoc diagnostics and make them permanent
+12. NEVER commit or present changes as complete without passing tests
 
 ## Patterns
 

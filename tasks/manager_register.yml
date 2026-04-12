@@ -1,0 +1,23 @@
+---
+# Register or deregister a resource with the local Manager API.
+#
+# Required vars:
+#   register_path   - API path (e.g. "api/host/home/containers/101")
+#
+# Optional vars:
+#   register_body            - JSON body for PUT/POST (default: {})
+#   register_method          - HTTP method (default: PUT)
+#   register_ignore_errors   - Ignore failures (default: false)
+
+- name: Register state with Manager
+  ansible.builtin.uri:
+    url: "{{ callhome_server }}/{{ register_path }}"
+    method: "{{ register_method | default('PUT') }}"
+    body_format: json
+    body: "{{ register_body | default({}) }}"
+    status_code: [200, 201, 204, 404, 405]
+    headers:
+      X-Callhome-Token: "{{ lookup('env', 'CALLHOME_PUBLIC_KEY') }}"
+  delegate_to: localhost
+  failed_when: false
+  when: callhome_server | default('') | length > 0

@@ -26,6 +26,29 @@ Trigger: any of these happened during the session:
 - A coding convention was violated in multiple files (systemic issue)
 - A test was found to be fake (mocking the thing it claims to test)
 - A test passed while the system it tests was broken/offline
+- Manual testing was attempted against a non-converged system
+
+# NEVER test against a partially deployed system
+
+Manual testing (browser UI, CLI playbooks, API queries) MUST ONLY run
+against a fully converged system where `molecule test` has completed and
+ALL hosts are on the LAN with ALL containers deployed and heartbeating.
+
+NEVER start manual testing in a "pre-mesh" state. NEVER rationalize
+"No route to host" errors as "expected in pre-mesh topology." If you see
+those errors during manual testing, you started too early — go back and
+converge first.
+
+The system ALWAYS ends `molecule test` in a pristine, fully deployed state.
+Manual testing starts from that pristine state. Build first, test second.
+The manual testing system CAN deploy via the Deploy page, but the baseline
+must already be established.
+
+Previous catastrophe (2026-04-10): Agent started manual testing without
+running molecule test. Batman enable, WiFi status, and fleet queries all
+returned "No route to host" for WAN hosts. Instead of stopping to converge,
+the agent proceeded through playbooks collecting useless failures. The
+entire session was wasted.
 
 # SHOW STOPPER: Unreachable host protocol
 
@@ -138,15 +161,24 @@ After completing a feature or fixing a bug, ALWAYS do a custodianship pass:
    one assertion in `molecule/default/verify.yml`. A role that passes silently
    provides no safety net.
 
-# Mandatory testing
+# Mandatory testing — standard work cycle
 
-ALWAYS run the full test suite after making code changes. NEVER consider a
-task complete until tests pass.
+ALWAYS follow the 6-step standard work cycle for any image/role change:
 
-1. **Lint first.** Run `ansible-lint && yamllint .` to catch syntax/style issues before deploying to hardware.
-2. **Run molecule test.** After every code change to roles, playbooks, or molecule config, run `molecule test` against the test machine. See the `ansible-testing` skill for details.
-3. **Update verify.yml.** When adding or changing behavior, ALWAYS add or update corresponding assertions in `molecule/default/verify.yml`.
-4. **No untested merges.** Do not commit or present changes as complete until `molecule test` passes with exit code 0.
+1. **Update build-images.sh** — bake packages, static config, systemd units, users/groups into the image.
+2. **Build images IN PARALLEL on test units** — `build-images.sh --host <ip> --only <target>` across 6 hosts simultaneously. This is REQUIRED. Skipping it means the old image lacks baked content and molecule WILL fail.
+3. **Write tests and playbook updates** (while images build) — unit tests, integration tests, role cleanup.
+4. **Run E2E molecule test** (after images ready) — full integration validation.
+5. **Code review** (while E2E runs) — DRY, architecture, KISS, OOP, test quality.
+6. **Manual playbook verification** (after E2E passes) — every play, every heartbeat, every manager relay.
+
+NEVER add "legacy image fallback" code. NEVER skip the image rebuild step.
+No rollback strategy needed — old image versions are saved, just rebuild.
+
+Additional requirements:
+- **Lint first.** Run `ansible-lint && yamllint .` to catch syntax/style issues before deploying to hardware.
+- **Update verify.yml.** When adding or changing behavior, ALWAYS add or update corresponding assertions in `molecule/default/verify.yml`.
+- **No untested merges.** Do not commit or present changes as complete until `molecule test` passes with exit code 0.
 
 # NEVER fabricate test data
 

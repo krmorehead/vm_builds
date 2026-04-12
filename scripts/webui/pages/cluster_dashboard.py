@@ -11,12 +11,13 @@ from __future__ import annotations
 from nicegui import ui
 
 from scripts.webui import manager, theme
+from scripts.webui.data import format_uptime
 
 
 def register() -> None:
     @ui.page("/fleet")
     def cluster_fleet_page() -> None:
-        with theme.page_shell("fleet"):
+        with theme.cluster_page_shell("fleet"):
             theme.page_header("Cluster Fleet", "Nodes managed by this cluster")
 
             with ui.column().classes("w-full gap-4") as fleet_container:
@@ -33,7 +34,7 @@ def register() -> None:
 
     @ui.page("/fleet/{node_id}")
     def cluster_node_detail(node_id: str) -> None:
-        with theme.page_shell("fleet"):
+        with theme.cluster_page_shell("fleet"):
             mgr = manager.get_instance()
             if not isinstance(mgr, manager.ClusterManager):
                 ui.label("Not a Cluster Manager").classes("text-xl")
@@ -59,7 +60,7 @@ def register() -> None:
                 with ui.row().classes("gap-6"):
                     _resource_gauge("Disk", disk)
                     _resource_gauge("Memory", mem)
-                    ui.label(f"Uptime: {_fmt_uptime(uptime)}").classes("text-sm")
+                    ui.label(f"Uptime: {format_uptime(uptime)}").classes("text-sm")
 
             ips = payload.get("local_ips", [])
             if ips:
@@ -171,9 +172,3 @@ def _resource_gauge(label: str, pct: float) -> None:
         ui.label(label).classes("text-xs").style(f"color: {theme.TEXT_SECONDARY}")
 
 
-def _fmt_uptime(seconds: int) -> str:
-    if seconds < 3600:
-        return f"{seconds // 60}m"
-    if seconds < 86400:
-        return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
-    return f"{seconds // 86400}d {(seconds % 86400) // 3600}h"

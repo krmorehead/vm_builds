@@ -66,7 +66,7 @@ Proxmox connection and authentication:
 
 ### group_vars/lan_hosts.yml
 LAN host SSH configuration:
-- ProxyJump through primary host
+- ProxyCommand through primary host
 - SSH connection parameters for hosts behind OpenWrt router
 
 ## Host Variables Structure

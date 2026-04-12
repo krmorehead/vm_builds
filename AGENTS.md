@@ -199,19 +199,19 @@ This tree organizes all skills by domain area to help agents quickly find releva
 # Lint checking before commits
 ansible-lint && yamllint .
 
-# Test individual roles with molecule
-molecule converge     # Fast iteration (keeps baseline)
-molecule verify       # Run assertions on converged state
-molecule test         # Full clean-state test (destroys all)
+# FAST iteration loop (90% of the time — preserves baseline)
+molecule converge && molecule verify
 
-# Test specific scenarios
-molecule test -s default              # Full integration (6 nodes)
-molecule test -s openwrt-security     # Per-feature scenario
-molecule test -s pihole-lxc           # Service-specific test
+# Fix ONE broken image (fastest loop)
+./scripts/build-images.sh --host $PRIMARY_HOST --only pihole  # ~2-3 min
+molecule test -s pihole-lxc                                    # per-feature
 
-# Build custom images
-./scripts/build-images.sh --only router  # Build single image
-./scripts/build-images.sh               # Build all images
+# Full E2E clean-state proof (LAST STEP — after all images pass)
+molecule test                                # Full integration (6 nodes)
+
+# Build custom images (IN PARALLEL across 6 hosts)
+./scripts/build-images.sh --only router      # Build single image
+./scripts/build-images.sh                    # Build all images
 
 # Python testing (for build.py changes)
 pytest tests/ -v
@@ -260,11 +260,28 @@ pytest tests/ -v
 - ALL ports are controlled by the `WEBUI_PORT` env var (default: 52500, set to 52525 in test.env/.env). This port MUST be open in the controller's firewall.
 - During molecule runs, query `http://localhost:$WEBUI_PORT/api/fleet/health` for real-time fleet status.
 
-**MANDATORY: Testing Workflow**
-- Use `molecule converge + verify` for day-to-day iteration (preserves baseline)
-- Use `molecule test` only for clean-state validation (destroys all)
+**MANDATORY: Testing Workflow (Fail-Fast)**
+- Use `molecule converge + verify` for day-to-day iteration (preserves baseline, FAST)
+- Fix broken images INDIVIDUALLY: `build-images.sh --only <target>` + `molecule test -s <type>-lxc`
+- Full E2E (`molecule test`) is the LAST STEP — only after all images pass individually
+- NEVER run `molecule test` as the primary iteration loop — it destroys and rebuilds everything
+- If E2E takes 30+ minutes, the bake pipeline is broken (images being re-uploaded or packages installed at runtime)
+- You have 6 Proxmox hosts — build images IN PARALLEL across them
 - Run lint checks (`ansible-lint && yamllint .`) after ANY code changes
 - Load relevant skills proactively when working with LXC, Docker, or new service types
+
+**MANDATORY: Proxmox Hosts Are Bakeable Targets**
+- Proxmox hosts are machines you control, same as containers. Host-level infrastructure (socat, iptables rules, systemd units, kernel parameters) is part of the deploy pipeline
+- NEVER hand-configure Proxmox hosts. Everything needed should be deployed via Ansible roles or baked into the base Proxmox image
+- NEVER use `nohup ... &` for persistent host services. Deploy systemd units with `Restart=always`. Background processes die when SSH sessions close
+- Host-level services (e.g., `manager-api-proxy.service`, `supermanager-relay.service`) are deployed by provisioning roles and cleaned up by `playbooks/cleanup.yml`
+- Previous bug (2026-04-12): socat proxies for 4-tier heartbeat were started with `nohup &` and died when Ansible's SSH ControlMaster closed. Fix: systemd units with Restart=always
+
+**MANDATORY: Manual Testing Requires Fully Converged System**
+- NEVER start manual testing (browser UI, CLI playbooks, API queries) unless `molecule test` has completed and ALL 6 hosts are on the 10.10.10.x LAN with ALL containers deployed and heartbeating
+- NEVER rationalize "No route to host" as "expected in pre-mesh state" — if you see that error during manual testing, you started too early
+- The system ALWAYS ends `molecule test` in a pristine state. Manual testing starts from that pristine state. Build first, test second. Always.
+- Previous catastrophe (2026-04-10): Agent started manual testing before converging. Wasted entire session verifying expected failures.
 
 **PROMPT YOURSELF:**
 - "Should I test this right now?" YES - test after every significant change
@@ -272,6 +289,7 @@ pytest tests/ -v
 - "Should I load skills for this pattern?" YES - especially for LXC/Docker/Container work
 - "Am I about to mock something I could test for real?" STOP — test the real thing
 - "Am I debugging blind?" NO - reproduce on test machine first
+- "Is the system fully converged for manual testing?" If not — run molecule test FIRST
 
 ## Safety and Architecture Rules
 
@@ -297,13 +315,14 @@ pytest tests/ -v
 - Previous bug: E2E cleanup ran `modprobe -r amdgpu` on all hosts. `ai` (single AMD GPU, USB ethernet) kernel-panicked. Required physical power-on 3000 miles away
 
 ### Architecture Principles
-- **Bake, don't configure**: NEVER install packages during configure roles
+- **Bake, don't configure**: NEVER install packages during configure roles — this applies to containers AND Proxmox hosts. Host-level packages (socat), systemd units, and iptables rules are infrastructure that gets deployed, not hand-configured
 - **Two-role pattern**: Every service has `<type>_vm/lxc` + `<type>_configure`
 - **One path, no fallbacks**: Never add fallback logic - fail with clear messages
 - **Deploy_stamp pattern**: Include as last role in provision plays
 - **Hard-fail over graceful degradation**: Expected hardware (iGPU, WiFi) must be present
 - **Docker-in-LXC configure**: Target the HOST group (e.g., `service_nodes`), NOT the container dynamic group. `pct exec` only exists on the Proxmox host
 - **Jinja2 vs Docker templates**: Docker `--format "{{.X}}"` conflicts with Jinja2. Use `docker image inspect` or escape with `{{ "{{" }}`
+- **Proxmox = bakeable target**: Host-level systemd units, iptables rules, kernel parameters are all deployable infrastructure. NEVER use `nohup &` for persistent services — systemd units with `Restart=always`
 
 ### Network and Bridge Management
 - WAN bridge auto-detected via host default route device
@@ -400,6 +419,54 @@ For async patterns: @.agents/skills/async-job-patterns
 - NEVER put fleet-level ops (batman_fleet, get_mesh_nodes) on NodeManager — ClusterManager only
 
 When working in specific directories or on particular tasks, load the relevant directory AGENTS.md or skill file for detailed guidance.
+
+## Standard Work Cycle (MANDATORY)
+
+Every change that touches `build-images.sh` or a configure role follows this
+exact 6-step cycle. No shortcuts. No skipping steps. No fallback code.
+
+### Step 1: Update image build scripts
+Modify `build-images.sh` to bake new content into the image. All packages,
+static config, systemd enablement, user/group setup, and application code
+go HERE. Configure roles handle ONLY host-specific runtime config.
+
+### Step 2: Build images on test units (PARALLEL, REQUIRED)
+Run `build-images.sh --host <ip> --only <target>` on the Proxmox hosts.
+You have 6 healthy units (home, mesh1, ai, mesh2, bridge-1, bridge-2).
+Build images IN PARALLEL across them. This step is NOT optional — if you
+skip it, configure roles will fail because baked content doesn't exist.
+
+**THERE ARE NO FALLBACKS. NEVER add "legacy image" detection or fallback
+code in configure roles.** The image is the source of truth. Build it.
+
+```bash
+# Parallel image builds across hosts
+./scripts/build-images.sh --host $PRIMARY_HOST --only pihole &
+./scripts/build-images.sh --host $AI_HOST --only wireguard &
+./scripts/build-images.sh --host $MESH_2_HOST --only kiosk &
+wait
+```
+
+### Step 3: Write tests and playbook updates (while images build)
+While images are building, write unit tests, integration tests, and
+update playbook/role code. NEVER just poll the build.
+
+### Step 4: Run E2E test suite (after images are ready)
+Once images are rebuilt, run `molecule test` for full integration.
+The `proxmox_lxc` version-mismatch system auto-rebuilds containers
+from fresh images.
+
+### Step 5: Code review (while E2E runs)
+While `molecule test` runs (~30-45 min), review for DRY, architecture
+adherence, code quality, KISS, OOP service patterns, and test quality.
+
+### Step 6: Manual playbook verification (after E2E passes)
+After `molecule test` passes, manually run ALL playbook plays to verify
+the 4-tier manager system works end-to-end. Every container, every
+heartbeat, every manager relay.
+
+No rollback strategy needed — old image versions are saved and we can
+just rebuild. Straightforward clean management.
 
 ## Deployment and Testing Strategy
 

@@ -13,7 +13,7 @@ Replace a consumer home router with a virtualized OpenWrt instance running on Pr
 
 ### 1. Full NIC Passthrough via Virtual Bridges
 
-Every physical ethernet port on the Proxmox host gets its own dedicated virtual bridge (`vmbr0`, `vmbr1`, etc.). Each bridge is then attached to the OpenWrt VM as a separate `virtio` NIC.
+Every physical ethernet port on the Proxmox host gets its own dedicated virtual bridge. Each bridge is then attached to the OpenWrt VM as a separate `virtio` NIC.
 
 **Why individual bridges instead of a single shared bridge?**
 
@@ -23,11 +23,11 @@ Every physical ethernet port on the Proxmox host gets its own dedicated virtual 
 
 ### 2. WAN Assignment
 
-The first bridge in `proxmox_all_bridges` (typically `vmbr0`) maps to `eth0` inside the VM, which is designated WAN. All other `ethN` interfaces become LAN ports on a bridge.
+The WAN bridge is auto-detected at runtime via the host's default route device. It maps to `eth0` inside the VM, which is designated WAN. All other `ethN` interfaces become LAN ports on a bridge.
 
 The configure role waits up to 90 seconds for a DHCP default route to appear on the WAN interface, confirming upstream connectivity. If no route appears, the play fails with a clear error.
 
-**Practical implication:** plug the upstream (ISP/router) cable into the physical NIC that corresponds to `vmbr0`. On multi-port mini-PCs, this is typically the first ethernet port. You can check bridge-to-NIC mappings on the Proxmox host with `brctl show`.
+**Practical implication:** plug the upstream (ISP/router) cable into the physical NIC whose bridge carries the default route. On multi-port mini-PCs, this is typically the first ethernet port. You can check bridge-to-NIC mappings on the Proxmox host with `brctl show`.
 
 ### 3. Collision-Free LAN Subnet
 
@@ -63,13 +63,14 @@ WiFi cards cannot be virtualized effectively -- they need direct hardware access
 5. Blacklisting the host WiFi driver and binding the device to `vfio-pci`.
 6. Attaching the device to the VM with `qm set --hostpciN`.
 
+WiFi driver packages (`kmod-iwlwifi`, firmware, `wpad-mesh-openssl`) are baked into the router image during `build-images.sh`. The configure role does NOT install any packages at runtime.
+
 Once inside OpenWrt, the `openwrt_configure` role (Phase 2, after WAN is up):
 
 1. Switches opkg feeds to HTTP (BusyBox `wget` lacks SSL support).
-2. Installs WiFi driver packages (`kmod-iwlwifi`, firmware) via opkg.
-3. Explicitly loads kernel modules with `modprobe` (opkg does not auto-load them).
-4. Detects WiFi radios via `/sys/class/ieee80211/`.
-5. If radios are found: replaces `wpad-basic` with `wpad-mesh-openssl`, enables each radio, and configures 802.11s mesh with WPA3-SAE encryption.
+2. Explicitly loads kernel modules with `modprobe` (auto-load is disabled in OpenWrt).
+3. Detects WiFi radios via `/sys/class/ieee80211/`.
+4. If radios are found: enables each radio and configures 802.11s mesh with WPA3-SAE encryption.
 
 ### 6. Firewall and DHCP Baseline
 

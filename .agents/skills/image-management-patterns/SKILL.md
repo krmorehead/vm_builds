@@ -39,7 +39,7 @@ description: Image management and local storage patterns for VM and LXC images. 
 
    ALWAYS follow this workflow:
    1. Update the build script (`build-images.sh`) or image source files
-   2. Rebuild the image: `./build-images.sh --only <target>`
+   2. Rebuild the image IN PARALLEL across hosts: `./build-images.sh --host <ip> --only <target>`
    3. Redeploy: `molecule converge` (or `molecule test` for clean state)
 
    Runtime patches are fragile — they're lost on container recreation, not
@@ -52,6 +52,44 @@ description: Image management and local storage patterns for VM and LXC images. 
    in `build-images.sh`, rebuild the router image, and redeploy via
    `molecule converge`. Same bug occurred earlier with mesh containers
    missing `openssl-util` — same fix pattern.
+
+## NEVER Add Legacy Image Fallbacks (CRITICAL)
+
+8b. NEVER add conditional "if baked content not found, deploy at runtime"
+    logic in configure roles. This violates the bake-not-configure principle.
+    If the image lacks something, the answer is ALWAYS to rebuild the image.
+    There is no such thing as an "old image" in normal operation — images
+    are always rebuilt before running molecule test.
+
+    The `proxmox_lxc` role has a version-mismatch detection system that
+    auto-rebuilds containers when the image version changes. This means
+    a fresh image with a version bump automatically produces fresh containers
+    on the next converge. No fallback code needed.
+
+    Previous bug (2026-04-11): Agent modified 8 services in build-images.sh,
+    then ran molecule test WITHOUT rebuilding images. HA configure failed
+    because `homeassistant-compose.service` didn't exist in the old image.
+    Agent added a runtime fallback (check if file exists, deploy via heredoc
+    if not). User correctly rejected it — the fix was to rebuild the image,
+    not to add dead fallback code that violates architecture.
+
+## Parallel Image Builds (REQUIRED)
+
+8c. You have 6 Proxmox hosts. Build images IN PARALLEL across them.
+    `build-images.sh --host <ip> --only <target>` builds a single image
+    type on a single host. Run multiple simultaneously:
+
+    ```bash
+    ./scripts/build-images.sh --host $PRIMARY_HOST --only router &
+    ./scripts/build-images.sh --host $AI_HOST --only pihole &
+    ./scripts/build-images.sh --host $MESH_2_HOST --only wireguard &
+    wait
+    ```
+
+    Each image build needs one host as a build environment (creates a temp
+    container, installs packages, captures template). Different images can
+    build on different hosts simultaneously. The only constraint is that
+    each host can only run one build at a time.
 
 ## Custom Images via Image Builder
 

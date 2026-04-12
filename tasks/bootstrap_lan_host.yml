@@ -62,7 +62,8 @@
 - name: Get MAC address of {{ _lan_host_name }}  # noqa command-instead-of-shell
   ansible.builtin.shell:
     cmd: >-
-      {{ _lan_ssh }} "ip link show | grep -A1 'state UP' | grep ether | awk '{print \$2}' | head -1"
+      {{ _lan_ssh }} "set -o pipefail; ip link show | grep -A1 'state UP' | grep ether | awk '{print \$2; exit}'"
+    executable: /bin/bash
   register: _lan_host_mac_raw
   changed_when: false
 

@@ -1,3 +1,5 @@
+> **Status: Archived** — Superseded by current implementation. Retained for historical reference.
+
 # Mesh WiFi Controller
 
 ## Overview

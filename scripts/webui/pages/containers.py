@@ -11,29 +11,24 @@ import httpx
 from nicegui import ui
 
 from scripts.webui import data, theme
-from scripts.webui.data import Fleet, Labels, PageTitles, get_api_base_url
+from scripts.webui.api_client import api
+from scripts.webui.data import Fleet, Labels, PageTitles
 
 
 async def _fetch_guests() -> list[dict]:
     """Fetch the guest list from the local manager API."""
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(f"{get_api_base_url()}/api/guests", timeout=15)
-            if resp.status_code == 200:
-                return resp.json().get("guests", [])
-    except (httpx.HTTPError, OSError):
-        pass
+    result = await api.get_json("/api/guests", timeout=15)
+    if isinstance(result, dict):
+        return result.get("guests", [])
     return []
 
 
 async def _guest_action(vmid: str, action: str) -> dict:
     """Send a start/stop/restart action to the manager API."""
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{get_api_base_url()}/api/guests/{vmid}/{action}", timeout=30,
-            )
-            return resp.json()
+        resp = await api.post(f"/api/guests/{vmid}/{action}", timeout=30)
+        resp.raise_for_status()
+        return resp.json()
     except (httpx.HTTPError, OSError) as exc:
         return {"success": False, "error": str(exc)}
 

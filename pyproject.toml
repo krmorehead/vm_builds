@@ -6,3 +6,6 @@ requires-python = ">=3.10"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "integration: Tests requiring real infrastructure (SSH, Proxmox hosts, deployed containers).",
+]

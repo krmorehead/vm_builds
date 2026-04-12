@@ -1,7 +1,7 @@
 ---
-# Desktop environments, SDDM, and shared applications are baked into the
-# image (built by build-images.sh --only desktop). This role only handles
-# host-specific configuration and GPU drivers (vendor-dependent at runtime).
+# GPU drivers, SDDM, user groups, KDE/GNOME polish, flameshot, graphical
+# target, and all static config are baked into the image by build-images.sh.
+# This role handles ONLY host-specific runtime config.
 
 # ── Wait for cloud-init to finish ──────────────────────────────────
 
@@ -14,84 +14,35 @@
   register: _ci_status
   until: _ci_status.rc == 0
 
-# ── GPU drivers (vendor-specific, small and host-dependent) ────────
-# Accepted exception to bake-don't-configure: these small driver packages
-# depend on igpu_vendor which is detected at runtime. Baking both vendors
-# into the image would pull in conflicting Mesa driver stacks.
+# ── Configure callhome agent ──────────────────────────────────────
 
-- name: Update apt cache
-  ansible.builtin.apt:
-    update_cache: true
-    cache_valid_time: 86400
-  become: true
-
-- name: Install Intel GPU drivers
-  ansible.builtin.apt:
-    name:
-      - xserver-xorg-video-intel
-      - intel-media-va-driver
-      - mesa-vulkan-drivers
-      - vainfo
-    state: present
-  become: true
-  when: igpu_vendor | default('intel') == 'intel'
-
-- name: Install AMD GPU drivers
-  ansible.builtin.apt:
-    name:
-      - xserver-xorg-video-amdgpu
-      - mesa-va-drivers
-      - mesa-vulkan-drivers
-      - vainfo
-    state: present
-  become: true
-  when: igpu_vendor | default('intel') == 'amd'
-
-# ── Display manager setup ──────────────────────────────────────────
-
-- name: Set SDDM as default display manager
+- name: Detect local kiosk Manager IP for callhome target
   ansible.builtin.shell:
     cmd: |
-      echo "/usr/bin/sddm" > /etc/X11/default-display-manager
-      dpkg-reconfigure -f noninteractive sddm
+      set -o pipefail
+      pct config {{ kiosk_ct_id }} 2>/dev/null | grep -oP 'ip=\K[^/]+' | head -1
     executable: /bin/bash
-  become: true
-  changed_when: true
-
-# ── Service activation ─────────────────────────────────────────────
-
-- name: Enable QEMU Guest Agent
-  ansible.builtin.systemd:
-    name: qemu-guest-agent
-    enabled: true
-    state: started
-  become: true
-
-# ── User setup ─────────────────────────────────────────────────────
-
-- name: Ensure desktop user has correct groups
-  ansible.builtin.user:
-    name: "{{ desktop_user }}"
-    groups: video,render,audio,sudo
-    append: true
-  become: true
-
-- name: Create XDG user directories
-  ansible.builtin.command:
-    cmd: xdg-user-dirs-update
-  become: true
-  become_user: "{{ desktop_user }}"
+  register: _desktop_kiosk_ip
   changed_when: false
+  failed_when: false
+  delegate_to: "{{ desktop_proxmox_host }}"
 
-# ── Configure callhome agent ──────────────────────────────────────
+- name: Compute callhome target (local NodeManager or fallback to SuperManager)
+  ansible.builtin.set_fact:
+    _desktop_callhome_target: >-
+      {{ 'http://' + _desktop_kiosk_ip.stdout | trim + ':'
+         + (kiosk_manager_port | default('9001'))
+         if (_desktop_kiosk_ip.stdout | default('') | trim | length > 0)
+         else callhome_server }}
 
 - name: Write callhome config
   ansible.builtin.copy:
     dest: /etc/default/callhome
     mode: "0644"
     content: |
-      CALLHOME_SERVER={{ callhome_server }}
+      CALLHOME_SERVER={{ _desktop_callhome_target }}
       CALLHOME_PUBLIC_KEY={{ callhome_public_key }}
+      CALLHOME_HOSTNAME=desktop-{{ inventory_hostname }}
   become: true
   when: callhome_server | default('') | length > 0
 
@@ -107,13 +58,29 @@
   ansible.builtin.systemd:
     name: callhome
     state: restarted
-    enabled: true
   become: true
   when:
     - callhome_server | default('') | length > 0
     - "'callhome.service' in _callhome_unit.stdout"
 
-# ── Include session polish ─────────────────────────────────────────
+# ── SDDM autologin (operator choice per deploy) ─────────────────
 
-- name: Apply desktop session polish
-  ansible.builtin.include_tasks: polish.yml
+- name: Configure SDDM autologin
+  ansible.builtin.copy:
+    content: |
+      [Autologin]
+      User={{ desktop_user }}
+      Session={{ desktop_default_session }}.desktop
+    dest: /etc/sddm.conf.d/autologin.conf
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  when: desktop_autologin | bool
+
+- name: Remove SDDM autologin when disabled
+  ansible.builtin.file:
+    path: /etc/sddm.conf.d/autologin.conf
+    state: absent
+  become: true
+  when: not (desktop_autologin | bool)

@@ -148,6 +148,32 @@
       when: item.rc == 0
       failed_when: false
 
+    # ── Deregister destroyed resources from Manager state ─────────
+    # failed_when: false because the Manager may already be stopped
+    # during cleanup. This is the one exception to fail-fast.
+
+    - name: Deregister destroyed containers from Manager
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/manager_register.yml"
+      vars:
+        register_path: "api/host/{{ inventory_hostname }}/containers/{{ _deregister_vmid }}"
+        register_body: {}
+        register_method: DELETE
+        register_ignore_errors: true
+      loop: "{{ project_ct_ids }}"
+      loop_control:
+        loop_var: _deregister_vmid
+
+    - name: Deregister destroyed VMs from Manager
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/manager_register.yml"
+      vars:
+        register_path: "api/host/{{ inventory_hostname }}/containers/{{ _deregister_vmid }}"
+        register_body: {}
+        register_method: DELETE
+        register_ignore_errors: true
+      loop: "{{ project_vm_ids }}"
+      loop_control:
+        loop_var: _deregister_vmid
+
     # ── PCI passthrough cleanup ──────────────────────────────────
 
     - name: Unbind devices from vfio-pci and restore native drivers
@@ -211,12 +237,28 @@
         - /tmp/desktop_tmp_key
         - /tmp/desktop_tmp_key.pub
 
+    # ── Manager API proxy cleanup ────────────────────────────────────
+
+    - name: Stop and remove Manager API socat proxy (router node)
+      ansible.builtin.shell:
+        cmd: |
+          systemctl stop manager-api-proxy 2>/dev/null || true
+          systemctl disable manager-api-proxy 2>/dev/null || true
+          rm -f /etc/systemd/system/manager-api-proxy.service
+          systemctl daemon-reload 2>/dev/null || true
+          pkill -f 'socat.*TCP-LISTEN:9001' || true
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
     # ── Container NAT bridge cleanup ────────────────────────────────
 
     - name: Flush iptables NAT rules for container bridge
       ansible.builtin.shell:
         cmd: |
-          iptables -t nat -S 2>/dev/null | grep -q '10\.99\.' && iptables -t nat -F || true
+          set -o pipefail
+          cnt=$(iptables -t nat -S 2>/dev/null | grep -c '10\.99\.' || true)
+          [ "${cnt:-0}" -gt 0 ] && iptables -t nat -F || true
         executable: /bin/bash
       changed_when: true
       failed_when: false
@@ -401,19 +443,15 @@
       failed_when: false
       changed_when: true
 
-    - name: Read socat relay PID
-      ansible.builtin.slurp:
-        src: "{{ _project_root }}/.state/socat.pid"
-      register: _socat_pid
-      failed_when: false
-
-    - name: Terminate socat relay on Proxmox host
+    - name: Stop and remove SuperManager relay unit on Proxmox host
       ansible.builtin.command:
         cmd: >-
           ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
           root@{{ lookup('env', 'PRIMARY_HOST') }}
-          kill {{ (_socat_pid.content | b64decode | trim) }}
-      when: _socat_pid is not failed and _socat_pid.content is defined
+          systemctl stop supermanager-relay 2>/dev/null;
+          systemctl disable supermanager-relay 2>/dev/null;
+          rm -f /etc/systemd/system/supermanager-relay.service;
+          systemctl daemon-reload 2>/dev/null; true
       failed_when: false
       changed_when: true
 
@@ -1129,7 +1167,9 @@
     - name: Flush iptables NAT rules for container bridge
       ansible.builtin.shell:
         cmd: |
-          iptables -t nat -S 2>/dev/null | grep -q '10\.99\.' && iptables -t nat -F || true
+          set -o pipefail
+          cnt=$(iptables -t nat -S 2>/dev/null | grep -c '10\.99\.' || true)
+          [ "${cnt:-0}" -gt 0 ] && iptables -t nat -F || true
         executable: /bin/bash
       changed_when: true
       failed_when: false

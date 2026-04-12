@@ -51,7 +51,7 @@ The **SuperManager** provides global fleet visibility across all clusters
 │  Global fleet view across ALL clusters and national hosts      │
 │  Receives relay heartbeats from every Cluster Manager          │
 │  nodes.json persistent storage, deploy orchestration           │
-│  Port: $WEBUI_PORT (default 52525)                             │
+│  Port: $WEBUI_PORT (default 52500)                             │
 │                                                                │
 │  ┌───────────────────────┐     ┌────────────────────────────┐  │
 │  │ Cluster "Home Lab"    │     │ National Host "cabin"      │  │
@@ -284,7 +284,7 @@ inventory. Shared infrastructure (`proxmox_backup`, `proxmox_bridges`,
 `proxmox_pci_passthrough`, `proxmox_igpu`) runs on every host in `proxmox`.
 
 Hosts on the OpenWrt LAN subnet (not directly reachable from the controller)
-belong to `lan_hosts`, which automatically configures SSH ProxyJump through
+belong to `lan_hosts`, which automatically configures SSH ProxyCommand through
 the primary Proxmox host. See the `multi-node-ssh` skill for details.
 
 ```
@@ -310,8 +310,8 @@ Build Profiles
 │   ├── wifi_nodes         → OpenWrt Mesh LXC (WDS STA, WiFi PHY namespace move)
 │   └── kiosk_nodes        → Custom UX Kiosk
 │
-├── LAN Satellite (mesh1 — via ProxyJump through home, requires OpenWrt running)
-│   ├── lan_hosts          → ProxyJump SSH config (group_vars/lan_hosts.yml)
+├── LAN Satellite (mesh1 — via ProxyCommand through home, requires OpenWrt running)
+│   ├── lan_hosts          → ProxyCommand SSH config (group_vars/lan_hosts.yml)
 │   ├── vpn_nodes          → WireGuard
 │   ├── wifi_nodes         → OpenWrt Mesh LXC (WDS STA)
 │   ├── streaming_nodes    → Moonlight streaming client
@@ -483,8 +483,8 @@ Home          AI Node          Mesh2       Bridge-1     Bridge-2
   |     Mesh1 (10.10.10.210)
 ```
 
-- **home**, **ai**, **mesh2**, **bridge-1**, **bridge-2**: directly reachable on the supernet (no ProxyJump)
-- **mesh1**: behind home's OpenWrt, reachable via ProxyJump through home
+- **home**, **ai**, **mesh2**, **bridge-1**, **bridge-2**: directly reachable on the supernet (no ProxyCommand)
+- **mesh1**: behind home's OpenWrt, reachable via ProxyCommand through home
 - All 6 nodes run shared infrastructure (backup, bridges, PCI, iGPU)
 - 4 original nodes are in `vpn_nodes` — WireGuard containers deploy on all 4
 - bridge-1 and bridge-2 are in `bridge_nodes` — WiFi Bridge containers deploy on both
@@ -517,7 +517,7 @@ Internet
             │
             └── LAN Network (all other services connect here)
                 ├── Proxmox Host "home" (LAN management IP on LAN bridge, 10.10.10.2)
-                ├── Proxmox Host "mesh1" (LAN node, 10.10.10.210, via ProxyJump)
+                ├── Proxmox Host "mesh1" (LAN node, 10.10.10.210, via ProxyCommand)
                 │   ├── SSH: controller → home (.201) → mesh1 (.210 via LAN bridge)
                 │   └── OpenWrt Mesh LXC (VMID 103, WDS STA, WiFi PHY namespace move)
                 │
@@ -817,7 +817,7 @@ Service Role Pattern
 └── <type>_configure
     ├── Targets: dynamic group (populated by add_host during provisioning)
     ├── LXC: configured via pct exec (no SSH, no bootstrap IP needed)
-    └── VM: configured via SSH through ProxyJump
+    └── VM: configured via SSH through ProxyCommand
 ```
 
 ### Shared Infrastructure Roles
@@ -837,7 +837,7 @@ Shared Roles (run once per host, before any service roles)
 ├── proxmox_pci_passthrough
 │   ├── Runs on: proxmox
 │   ├── Purpose: vfio-pci binding for exclusive devices (WiFi, discrete GPU)
-│   └── Exports: wifi_pci_devices (future: gpu_pci_devices)
+│   └── Exports: wifi_pci_devices
 │
 ├── proxmox_igpu
 │   ├── Runs on: proxmox
@@ -977,10 +977,10 @@ vm_builds/
 │   ├── group_vars/
 │   │   ├── all.yml               VMIDs, image paths, LXC templates, storage
 │   │   ├── proxmox.yml           API auth, SSH settings
-│   │   └── lan_hosts.yml         ProxyJump SSH config for LAN-reachable hosts
+│   │   └── lan_hosts.yml         ProxyCommand SSH config for LAN-reachable hosts
 │   └── host_vars/
 │       ├── home.yml              Per-host overrides (primary node, direct SSH)
-│       ├── mesh1.yml             LAN node (10.10.10.210, ProxyJump via home)
+│       ├── mesh1.yml             LAN node (10.10.10.210, ProxyCommand via home)
 │       ├── ai.yml                AI node (192.168.86.220, direct SSH)
 │       ├── mesh2.yml             Mesh node 2 (192.168.86.211, direct SSH)
 │       ├── bridge-1.yml          Bridge node 1 (192.168.86.230, direct SSH)

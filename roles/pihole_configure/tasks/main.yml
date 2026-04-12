@@ -4,8 +4,6 @@
 # This role applies host-specific config via the pihole-FTL CLI:
 #   - Web admin password
 #   - Upstream DNS servers
-#   - Query logging retention
-#   - DHCP disabled (OpenWrt handles DHCP)
 #   - Container DNS pointed to itself after setup
 
 # ── Set web password ────────────────────────────────────────────
@@ -68,37 +66,8 @@
   changed_when: true
   notify: _restart_ftl
 
-# ── Configure query logging retention ────────────────────────────
-
-- name: Read current query log retention
-  ansible.builtin.command:
-    cmd: "{{ pihole_ftl_bin }} --config database.maxDBdays"
-  register: _current_maxdays
-  changed_when: false
-
-- name: Set database max days for query log retention
-  ansible.builtin.command:
-    cmd: >-
-      {{ pihole_ftl_bin }} --config
-      database.maxDBdays {{ pihole_query_logging_days }}
-  when: (_current_maxdays.stdout | trim) != (pihole_query_logging_days | string)
-  changed_when: true
-  notify: _restart_ftl
-
-# ── Ensure DHCP is disabled ─────────────────────────────────────
-
-- name: Read current DHCP state
-  ansible.builtin.command:
-    cmd: "{{ pihole_ftl_bin }} --config dhcp.active"
-  register: _current_dhcp
-  changed_when: false
-
-- name: Ensure Pi-hole DHCP server is disabled
-  ansible.builtin.command:
-    cmd: "{{ pihole_ftl_bin }} --config dhcp.active false"
-  when: "'false' not in _current_dhcp.stdout"
-  changed_when: true
-  notify: _restart_ftl
+# dhcp.active=false and database.maxDBdays=30 are baked into pihole.toml
+# by build-images.sh. No runtime configuration needed for these.
 
 # ── Restart FTL if config changed, then wait for readiness ───────
 

@@ -20,8 +20,11 @@ import logging
 from datetime import datetime
 from typing import Any, Callable
 
+from pathlib import Path
+
 from scripts.webui import heartbeat
 from scripts.webui.data import event_bus
+from scripts.webui.host_state import HostState, HostStateStore
 
 
 # ── Base Manager ─────────────────────────────────────────────────────
@@ -43,9 +46,13 @@ class BaseManager:
         management_server: str = "",
         callhome_public_key: str = "",
         mesh_key: str = "",
+        state_dir: str = "",
     ) -> None:
         self.subscription_mgr = heartbeat.SubscriptionManager()
         self.metric_cache = heartbeat.MetricCache()
+        self.host_state_store: HostStateStore | None = None
+        if state_dir:
+            self.host_state_store = HostStateStore(Path(state_dir))
         self._node_resolver = node_resolver
         self._auth_validator = auth_validator
         self._host_ip = host_ip
@@ -152,18 +159,18 @@ class BaseManager:
             host_ip, "pct list 2>/dev/null || true", timeout=10,
         )
         if ok_ct and ct_out:
-            for line in ct_out.strip().splitlines()[1:]:
-                parts = line.split()
-                if len(parts) >= 3:
-                    metrics["services"].append(f"ct:{parts[0]}:{parts[2]}:{parts[1].lower()}")
+            for g in heartbeat.parse_guest_list(ct_out):
+                metrics["services"].append(
+                    f"ct:{g['vmid']}:{g['name']}:{g['status'].lower()}"
+                )
         ok_vm, vm_out = heartbeat._ssh_exec(
             host_ip, "qm list 2>/dev/null || true", timeout=10,
         )
         if ok_vm and vm_out:
-            for line in vm_out.strip().splitlines()[1:]:
-                parts = line.split()
-                if len(parts) >= 3:
-                    metrics["services"].append(f"vm:{parts[0]}:{parts[2]}:{parts[1].lower()}")
+            for g in heartbeat.parse_guest_list(vm_out):
+                metrics["services"].append(
+                    f"vm:{g['vmid']}:{g['name']}:{g['status'].lower()}"
+                )
         return metrics
 
     def build_relay_payload(
@@ -300,8 +307,43 @@ class NodeManager(BaseManager):
     """Per-host manager: local container ops, guest management.
 
     Only knows about containers on THIS physical host. Receives
-    broadcast events from its Cluster Manager.
+    broadcast events from its Cluster Manager. On startup, fetches
+    host state from the upstream Manager and caches it locally.
     """
+
+    def __init__(self, node_resolver: Callable[[str], str | None], **kwargs: Any) -> None:
+        super().__init__(node_resolver, **kwargs)
+        self._local_host_state: HostState | None = None
+
+    async def fetch_host_state_from_upstream(self) -> None:
+        """Fetch this host's state from the upstream Manager on startup.
+
+        404 = first time, no state yet (normal for fresh deploys).
+        Connection error = log warning, proceed without cached state.
+        """
+        if not self._management_server or not self._host_name:
+            return
+        import urllib.request
+        import urllib.error
+        log = logging.getLogger("vm_builds.node_state")
+        url = f"{self._management_server.rstrip('/')}/api/host/{self._host_name}/state"
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = _json.loads(resp.read().decode())
+                self._local_host_state = HostState.from_dict(data)
+                log.info("Fetched host state for %s from upstream", self._host_name)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                log.info("No upstream state for %s (first deploy)", self._host_name)
+            else:
+                log.warning("Failed to fetch state for %s: HTTP %s", self._host_name, exc.code)
+        except (urllib.error.URLError, OSError) as exc:
+            log.warning("Cannot reach upstream for state: %s", exc)
+
+    def get_local_host_state(self) -> HostState | None:
+        """Return the locally-cached host state (fetched from upstream on startup)."""
+        return self._local_host_state
 
     async def _get_local_batman_containers(self) -> list[tuple[int, str]]:
         """Discover which batman-capable containers (mesh/bridge) exist locally."""
@@ -431,25 +473,17 @@ class NodeManager(BaseManager):
                 "pct list 2>/dev/null || true", timeout=10,
             )
             if ok_ct and ct_out:
-                for line in ct_out.strip().splitlines()[1:]:
-                    parts = line.split()
-                    if len(parts) >= 3:
-                        guests.append({
-                            "vmid": parts[0], "type": "lxc",
-                            "status": parts[1], "name": parts[2],
-                        })
+                for g in heartbeat.parse_guest_list(ct_out):
+                    g["type"] = "lxc"
+                    guests.append(g)
             ok_vm, vm_out = await asyncio.to_thread(
                 heartbeat._ssh_exec, mgr._host_ip,
                 "qm list 2>/dev/null || true", timeout=10,
             )
             if ok_vm and vm_out:
-                for line in vm_out.strip().splitlines()[1:]:
-                    parts = line.split()
-                    if len(parts) >= 3:
-                        guests.append({
-                            "vmid": parts[0], "type": "qemu",
-                            "status": parts[1], "name": parts[2],
-                        })
+                for g in heartbeat.parse_guest_list(vm_out):
+                    g["type"] = "qemu"
+                    guests.append(g)
             return JSONResponse({"guests": guests})
 
         async def _api_guest_action(request: StarletteRequest) -> JSONResponse:
@@ -558,6 +592,137 @@ class NodeManager(BaseManager):
             _api_guest_action, methods=["POST"],
         ))
 
+        # ── Host state endpoints (Manager as source of truth) ─────
+
+        def _no_store() -> JSONResponse:
+            return JSONResponse(
+                {"error": "state store not configured"}, status_code=501,
+            )
+
+        def _bad_json() -> JSONResponse:
+            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+        def _require_store() -> HostStateStore | None:
+            """Return the store or None (caller returns _no_store())."""
+            return mgr.host_state_store
+
+        async def _parse_body(request: StarletteRequest) -> dict | None:
+            """Parse JSON body; returns None on malformed input."""
+            try:
+                return await request.json()
+            except (ValueError, TypeError, _json.JSONDecodeError):
+                return None
+
+        async def _api_host_state_get(request: StarletteRequest) -> JSONResponse:
+            host_id = request.path_params["id"]
+            store = _require_store()
+            if not store:
+                return _no_store()
+            state = store.get(host_id)
+            if state is None:
+                return JSONResponse({"error": "unknown host"}, status_code=404)
+            return JSONResponse(state.to_dict())
+
+        async def _api_host_hardware_post(request: StarletteRequest) -> JSONResponse:
+            host_id = request.path_params["id"]
+            store = _require_store()
+            if not store:
+                return _no_store()
+            body = await _parse_body(request)
+            if body is None:
+                return _bad_json()
+            store.get_or_create(host_id, body.get("ip", ""))
+            result = store.update_hardware(host_id, body)
+            if result is None:
+                return JSONResponse({"error": "unknown host"}, status_code=404)
+            return JSONResponse(result.to_dict(), status_code=200)
+
+        async def _api_host_bridges_post(request: StarletteRequest) -> JSONResponse:
+            host_id = request.path_params["id"]
+            store = _require_store()
+            if not store:
+                return _no_store()
+            body = await _parse_body(request)
+            if body is None:
+                return _bad_json()
+            store.get_or_create(host_id, body.get("ip", ""))
+            result = store.update_bridges(host_id, body)
+            if result is None:
+                return JSONResponse({"error": "unknown host"}, status_code=404)
+            return JSONResponse(result.to_dict(), status_code=200)
+
+        async def _api_host_container_post(request: StarletteRequest) -> JSONResponse:
+            host_id = request.path_params["id"]
+            vmid_str = request.path_params["vmid"]
+            store = _require_store()
+            if not store:
+                return _no_store()
+            try:
+                vmid = int(vmid_str)
+            except ValueError:
+                return JSONResponse({"error": f"Invalid VMID: {vmid_str}"}, status_code=400)
+            body = await _parse_body(request)
+            if body is None:
+                return _bad_json()
+            result = store.register_container(host_id, vmid, body)
+            if result is None:
+                return JSONResponse({"error": "unknown host"}, status_code=404)
+            return JSONResponse(result.to_dict(), status_code=201)
+
+        async def _api_host_container_delete(request: StarletteRequest) -> JSONResponse:
+            host_id = request.path_params["id"]
+            vmid_str = request.path_params["vmid"]
+            store = _require_store()
+            if not store:
+                return _no_store()
+            try:
+                vmid = int(vmid_str)
+            except ValueError:
+                return JSONResponse({"error": f"Invalid VMID: {vmid_str}"}, status_code=400)
+            result = store.deregister_container(host_id, vmid)
+            if result is None:
+                return JSONResponse({"error": "unknown host"}, status_code=404)
+            return JSONResponse({"status": "ok"}, status_code=200)
+
+        async def _api_host_phy_patch(request: StarletteRequest) -> JSONResponse:
+            host_id = request.path_params["id"]
+            phy_name = request.path_params["name"]
+            store = _require_store()
+            if not store:
+                return _no_store()
+            body = await _parse_body(request)
+            if body is None:
+                return _bad_json()
+            namespace = body.get("namespace")
+            if not namespace:
+                return JSONResponse({"error": "namespace required"}, status_code=400)
+            result = store.update_phy_namespace(host_id, phy_name, namespace)
+            if result is None:
+                return JSONResponse({"error": "unknown host or PHY"}, status_code=404)
+            return JSONResponse(result.to_dict(), status_code=200)
+
+        starlette_app.routes.insert(0, Route(
+            "/api/host/{id}/state", _api_host_state_get, methods=["GET"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/host/{id}/hardware", _api_host_hardware_post, methods=["POST"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/host/{id}/bridges", _api_host_bridges_post, methods=["POST"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/host/{id}/containers/{vmid}",
+            _api_host_container_post, methods=["POST"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/host/{id}/containers/{vmid}",
+            _api_host_container_delete, methods=["DELETE"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/host/{id}/hardware/phy/{name}",
+            _api_host_phy_patch, methods=["PATCH"],
+        ))
+
 
 # ── Cluster Manager ─────────────────────────────────────────────────
 
@@ -582,6 +747,7 @@ class ClusterManager(NodeManager):
         management_server: str = "",
         callhome_public_key: str = "",
         mesh_key: str = "",
+        state_dir: str = "",
         child_managers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(
@@ -592,6 +758,7 @@ class ClusterManager(NodeManager):
             management_server=management_server,
             callhome_public_key=callhome_public_key,
             mesh_key=mesh_key,
+            state_dir=state_dir,
         )
         self._child_managers: dict[str, str] = child_managers or {}
         self._fleet_nodes: dict[str, dict] = {}
@@ -1111,6 +1278,7 @@ def init(
         management_server=cfg.get("MANAGEMENT_SERVER", ""),
         callhome_public_key=cfg.get("CALLHOME_PUBLIC_KEY", ""),
         mesh_key=cfg.get("MESH_KEY", ""),
+        state_dir=cfg.get("STATE_DIR", ""),
     )
     if issubclass(cls, ClusterManager):
         kwargs["child_managers"] = child_mgrs

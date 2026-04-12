@@ -46,7 +46,10 @@
 
 - name: Count WiFi PHYs before firmware check
   ansible.builtin.shell:
-    cmd: ls -1d /sys/class/ieee80211/phy* 2>/dev/null | wc -l
+    cmd: |
+      set -o pipefail
+      find /sys/class/ieee80211 -mindepth 1 -maxdepth 1 -name 'phy*' -print 2>/dev/null | wc -l
+    executable: /bin/bash
   register: _early_phy_count
   changed_when: false
 
@@ -177,7 +180,36 @@
          | select('match', '.+')
          | list }}
 
-- name: Detect WiFi kernel driver for each device
+# ── Fallback: resolve PCI addresses from lspci when wireless
+#    interfaces are absent (e.g., card on vfio-pci or driver re-probe
+#    hasn't created an interface yet) ─────────────────────────────
+- name: Resolve WiFi PCI addresses from lspci (fallback)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      lspci -D 2>/dev/null \
+        | grep -i 'Network controller' \
+        | awk '{print $1}' \
+        | sed 's/^0000://'
+    executable: /bin/bash
+  register: _wifi_pci_lspci
+  changed_when: false
+  when:
+    - wifi_pci_devices | length == 0
+    - (_wifi_pci_controllers.stdout_lines | default([])) | length > 0
+
+- name: Use lspci-derived PCI addresses when interface detection missed them
+  ansible.builtin.set_fact:
+    wifi_pci_devices: >-
+      {{ _wifi_pci_lspci.stdout_lines | default([])
+         | map('trim')
+         | select('match', '.+')
+         | list }}
+  when:
+    - wifi_pci_devices | length == 0
+    - (_wifi_pci_lspci.stdout_lines | default([])) | length > 0
+
+- name: Detect WiFi kernel driver for each device (via interface)
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
@@ -188,10 +220,28 @@
   changed_when: false
   when: wifi_ifaces | length > 0
 
+- name: Detect WiFi kernel driver for each device (via PCI address fallback)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      DRIVER=$(readlink -f /sys/bus/pci/devices/0000:{{ item }}/driver 2>/dev/null)
+      if [ -n "$DRIVER" ]; then
+        basename "$DRIVER"
+      else
+        echo ""
+      fi
+    executable: /bin/bash
+  loop: "{{ wifi_pci_devices }}"
+  register: _wifi_driver_pci_raw
+  changed_when: false
+  when:
+    - wifi_ifaces | length == 0
+    - wifi_pci_devices | length > 0
+
 - name: Build auto-detected driver blacklist
   ansible.builtin.set_fact:
     _auto_driver_blacklist: >-
-      {{ wifi_driver_raw.results | default([])
+      {{ (wifi_driver_raw.results | default([]) + _wifi_driver_pci_raw.results | default([]))
          | selectattr('stdout', 'defined')
          | map(attribute='stdout')
          | map('trim')
@@ -274,7 +324,15 @@
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
-      dmesg | grep -i -c 'IOMMU enabled\|DMAR.*IOMMU\|Adding to iommu group'
+      # Primary check: IOMMU groups exist in sysfs (works regardless of
+      # dmesg ring buffer state or kernel message format)
+      GROUPS=$(find /sys/kernel/iommu_groups -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+      if [ "$GROUPS" -gt 0 ]; then
+        echo "$GROUPS"
+        exit 0
+      fi
+      # Fallback: dmesg patterns for older kernels
+      dmesg | grep -i -c 'IOMMU enabled\|DMAR.*IOMMU\|Adding to iommu group' || echo "0"
     executable: /bin/bash
   register: iommu_check
   changed_when: false
@@ -511,6 +569,64 @@
     - wifi_pci_devices | length > 0
     - "'router_nodes' in group_names"
 
+# ── Runtime vfio-pci binding (avoid reboot) ───────────────────
+# The modprobe configs take effect on next boot. For immediate
+# passthrough, unbind from the current driver and bind to vfio-pci
+# at runtime.
+
+- name: Load vfio-pci module
+  ansible.builtin.command:
+    cmd: modprobe vfio-pci
+  changed_when: false
+  when:
+    - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
+
+- name: Unbind WiFi from current driver and bind to vfio-pci
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      PCI="0000:{{ item }}"
+      CURRENT=$(readlink -f /sys/bus/pci/devices/$PCI/driver 2>/dev/null | xargs basename 2>/dev/null)
+      if [ "$CURRENT" = "vfio-pci" ]; then
+        echo "already_bound"
+        exit 0
+      fi
+      VD=$(lspci -n -s {{ item }} | awk '{print $3}')
+      VENDOR=$(echo "$VD" | cut -d: -f1)
+      DEVICE=$(echo "$VD" | cut -d: -f2)
+      if [ -n "$CURRENT" ] && [ "$CURRENT" != "" ]; then
+        echo "$PCI" > /sys/bus/pci/drivers/$CURRENT/unbind 2>/dev/null || true
+        sleep 1
+      fi
+      echo "0x$VENDOR 0x$DEVICE" > /sys/bus/pci/drivers/vfio-pci/new_id 2>/dev/null || true
+      echo "$PCI" > /sys/bus/pci/drivers/vfio-pci/bind 2>/dev/null || true
+      sleep 1
+      BOUND=$(readlink -f /sys/bus/pci/devices/$PCI/driver 2>/dev/null | xargs basename 2>/dev/null)
+      echo "bound_to=$BOUND"
+    executable: /bin/bash
+  loop: "{{ wifi_pci_devices }}"
+  register: _vfio_bind_results
+  changed_when: true
+  when:
+    - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
+
+- name: Verify WiFi is bound to vfio-pci
+  ansible.builtin.assert:
+    that:
+      - "'bound_to=vfio-pci' in item.stdout or 'already_bound' in item.stdout"
+    fail_msg: >-
+      Failed to bind WiFi PCI device {{ item.item }} to vfio-pci on
+      {{ inventory_hostname }}. Output: {{ item.stdout | default('') }}
+  loop: "{{ _vfio_bind_results.results | default([]) }}"
+  when:
+    - wifi_pci_devices | length > 0
+    - "'router_nodes' in group_names"
+    - _vfio_bind_results is not skipped
+  loop_control:
+    loop_var: item
+
 # ── WiFi PHY verification ─────────────────────────────────────
 # Count PHY devices in /sys/class/ieee80211/ to confirm the
 # full WiFi stack is functional (driver + firmware + hardware).
@@ -524,7 +640,18 @@
   register: _wifi_phy_count_raw
   changed_when: false
 
-- name: Fail if WiFi PCI device detected but no PHY created
+- name: Check if mesh container is running (PHY may be namespace-moved)
+  ansible.builtin.command:
+    cmd: pct status {{ meshwifi_ct_id }}
+  register: _mesh_ct_status
+  changed_when: false
+  failed_when: false
+  when:
+    - (_wifi_pci_controllers.stdout_lines | default([])) | length > 0
+    - (_wifi_phy_count_raw.stdout | default('0') | trim | int) == 0
+    - "'router_nodes' not in group_names"
+
+- name: Fail if WiFi PCI device detected but no PHY created (non-router only)
   ansible.builtin.fail:
     msg: >-
       WiFi PCI device found ({{ _wifi_pci_controllers.stdout | trim }})
@@ -536,6 +663,8 @@
     - (_wifi_pci_controllers.stdout_lines | default([])) | length > 0
     - (_wifi_phy_count_raw.stdout | default('0') | trim | int) == 0
     - wifi_pci_devices | length > 0
+    - "'router_nodes' not in group_names"
+    - _mesh_ct_status.stdout | default('') is not search('running')
 
 # ── Export WiFi facts (all hosts) ─────────────────────────────
 
@@ -544,3 +673,53 @@
     wifi_pci_devices: "{{ wifi_pci_devices }}"
     wifi_phy_count: "{{ _wifi_phy_count_raw.stdout | default('0') | trim | int }}"
     cacheable: true
+
+# ── Register PCI + WiFi PHY state with Manager ───────────────────
+
+- name: Build PCI device list for Manager registration
+  ansible.builtin.set_fact:
+    _pci_device_list: >-
+      {% set result = [] %}
+      {% for dev in wifi_pci_devices %}
+      {%   set _ = result.append({
+             "bdf": dev,
+             "device_type": "wifi",
+             "vendor_device": "",
+             "driver": "vfio-pci" if ('router_nodes' in group_names) else "iwlwifi",
+             "assigned_to": none,
+             "iommu_group": none
+           }) %}
+      {% endfor %}
+      {{ result | to_json }}
+
+- name: Discover actual WiFi PHY names from sysfs
+  ansible.builtin.shell:
+    cmd: ls /sys/class/ieee80211/ 2>/dev/null || true
+    executable: /bin/bash
+  register: _actual_phy_names
+  changed_when: false
+
+- name: Build WiFi PHY list for Manager registration
+  ansible.builtin.set_fact:
+    _wifi_phy_list: >-
+      {% set phys = _actual_phy_names.stdout_lines | default([])
+         | select('match', '^phy') | list %}
+      {% set result = [] %}
+      {% for name in phys %}
+      {%   set _ = result.append({
+             "name": name,
+             "pci_device": wifi_pci_devices[loop.index0] | default(""),
+             "namespace": "host",
+             "driver": "iwlwifi"
+           }) %}
+      {% endfor %}
+      {{ result | to_json }}
+
+- name: Register hardware with Manager
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/manager_register.yml"
+  vars:
+    register_path: "api/host/{{ inventory_hostname }}/hardware"
+    register_body:
+      ip: "{{ ansible_host }}"
+      pci_devices: "{{ _pci_device_list | from_json }}"
+      wifi_phys: "{{ _wifi_phy_list | from_json }}"

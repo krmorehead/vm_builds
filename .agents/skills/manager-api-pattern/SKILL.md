@@ -396,6 +396,41 @@ _COLLECTOR_MAP = {
   scripts (`wifi_setup.sh metrics`) as their primary data source, falling
   back to raw `iw`/`uci` for containers without the script (e.g., router VM).
 
+### Cluster Manager SSH key distribution (CRITICAL)
+- The Cluster Manager (home kiosk) SSHes to ALL Proxmox hosts for fleet ops
+  (batman, WiFi, bridge). The `kiosk` user's SSH key is generated in
+  `kiosk_configure`, but that role only authorizes it on the LOCAL host.
+- `site.yml` has dedicated "Distribute Cluster Manager SSH key" plays that
+  read the Cluster Manager's public key and authorize it on every other
+  Proxmox host. These run AFTER `Configure Kiosk` and after `Refresh Kiosk
+  Config` (post-configure).
+- Without this distribution, `_ssh_exec()` from the Cluster Manager fails
+  with "Permission denied (publickey,password)" on all non-home hosts. WiFi
+  status, batman enable/disable, and bridge management all break silently.
+- Previous bug (2026-04-12): WiFi status API returned "Permission denied"
+  for all remote hosts. Root cause: `kiosk_configure` only authorized the
+  SSH key locally. The Cluster Manager on `home` could SSH to `home` but not
+  to ai, mesh2, bridge-1, bridge-2, or mesh1. Fix: added SSH key distribution
+  plays in `site.yml`.
+
+### HOST_IP must be container-routable (CRITICAL)
+- `HOST_IP` in config.json is used by the Manager to SSH back to its Proxmox
+  host for `pct list`, `qm list`, container start/stop, and host metrics.
+- LAN containers (router_nodes, lan_hosts) MUST use the Proxmox LAN
+  management IP (10.10.10.2), NOT `ansible_host` (the WAN IP). The container
+  is on the LAN bridge and cannot route to the WAN management IP.
+- WAN containers MUST use the NAT bridge gateway (10.99.{subnet_id}.1).
+  The Proxmox host IS the gateway for the container's NAT bridge.
+- NEVER set `HOST_IP: "{{ ansible_host }}"` — `ansible_host` is the WAN
+  management IP used by Ansible to reach the host, but containers inside
+  the host cannot route to it.
+- `kiosk_configure` computes `_kiosk_host_ip` dynamically from network
+  topology: LAN gateway + offset 2 for LAN nodes, NAT prefix for WAN nodes.
+- Previous bug (2026-04-12): `HOST_IP` was `ansible_host` (192.168.86.201).
+  The kiosk container on the LAN bridge (10.10.10.23) couldn't route to it.
+  The Containers page was blank because `_api_guests` SSH'd to an unreachable
+  host. Fix: compute the correct routable IP based on container topology.
+
 ### Strict configuration (CRITICAL)
 - NEVER use try/except fallback chains to resolve config values. Every
   manager instance receives ALL required config at construction time.

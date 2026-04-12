@@ -84,7 +84,7 @@ unreachable. There is NO `lint` phase in the Molecule config. Run
 ## Architecture
 
 - **Driver**: `default` with `managed: false` (real Proxmox hardware, not Docker)
-- **Platforms**: 6 nodes — `home` (primary), `ai`, `mesh2`, `bridge-1`, `bridge-2` (directly reachable), `mesh1` (LAN satellite via ProxyJump)
+- **Platforms**: 6 nodes — `home` (primary), `ai`, `mesh2`, `bridge-1`, `bridge-2` (directly reachable), `mesh1` (LAN satellite via ProxyCommand)
 - **Platform groups**: `home` gets `proxmox` + all primary flavor groups (including `wifi_nodes`); `ai` gets `proxmox`, `vpn_nodes`; `mesh2` gets `proxmox`, `vpn_nodes`, `wifi_nodes`; `mesh1` gets `proxmox`, `lan_hosts`, `vpn_nodes`, `wifi_nodes`
 - **Provisioner**: `playbooks/site.yml` (phased: primary hosts → LAN bootstrap → services)
 - **Cleanup**: two-play cleanup — `proxmox:!lan_hosts` for primary, `router_nodes` for LAN hosts via SSH
@@ -107,8 +107,8 @@ Home          AI Node          Mesh2
   |     Mesh1 (10.10.10.210)
 ```
 
-- **home**, **ai**, **mesh2**: directly reachable on the supernet (no ProxyJump)
-- **mesh1**: behind home's OpenWrt, reachable via ProxyJump through home
+- **home**, **ai**, **mesh2**: directly reachable on the supernet (no ProxyCommand)
+- **mesh1**: behind home's OpenWrt, reachable via ProxyCommand through home
 - home, mesh1, ai, mesh2 are in `vpn_nodes` — WireGuard containers deploy on all 4 in parallel
 - `mesh1` and `mesh2` are also in `wifi_nodes` — OpenWrt Mesh LXC deploys on both
 - `home` is the only `router_nodes` member (runs OpenWrt)
@@ -557,8 +557,8 @@ platforms:
 ```
 
 All 4 hosts are tested in the default scenario. `home` runs all services.
-`ai` and `mesh2` are directly reachable on the supernet (no ProxyJump).
-`mesh1` is behind OpenWrt (requires ProxyJump). All 4 are in `vpn_nodes` —
+`ai` and `mesh2` are directly reachable on the supernet (no ProxyCommand).
+`mesh1` is behind OpenWrt (requires ProxyCommand). All 4 are in `vpn_nodes` —
 WireGuard deploys on all 4 in parallel within the same play.
 
 Without this, provision plays targeting flavor groups will skip hosts.

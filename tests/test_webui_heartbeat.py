@@ -200,6 +200,7 @@ class TestMetricCache:
 # the test fails — that's the point.
 
 
+@pytest.mark.integration
 class TestRealSSH:
     """Verify _ssh_exec works against real Proxmox hosts."""
 
@@ -238,6 +239,7 @@ class TestRealSSH:
         assert not ok
 
 
+@pytest.mark.integration
 class TestRealWifiCollectors:
     """Test WiFi/bridge/mesh collectors against real hardware.
 
@@ -531,6 +533,71 @@ class TestBatmanOriginatorParsing:
         assert _parse_batman_interfaces("") == []
 
 
+class TestParseGuestList:
+    """Pure unit tests for parse_guest_list — no infrastructure needed."""
+
+    def test_normal_output(self):
+        from scripts.webui.heartbeat import parse_guest_list
+        output = (
+            "VMID       Status     Name\n"
+            "101        running    wireguard\n"
+            "102        running    pihole\n"
+            "401        stopped    kiosk\n"
+        )
+        result = parse_guest_list(output)
+        assert len(result) == 3
+        assert result[0] == {"vmid": "101", "status": "running", "name": "wireguard"}
+        assert result[2] == {"vmid": "401", "status": "stopped", "name": "kiosk"}
+
+    def test_empty_string(self):
+        from scripts.webui.heartbeat import parse_guest_list
+        assert parse_guest_list("") == []
+
+    def test_header_only(self):
+        from scripts.webui.heartbeat import parse_guest_list
+        assert parse_guest_list("VMID       Status     Name\n") == []
+
+    def test_partial_lines_skipped(self):
+        from scripts.webui.heartbeat import parse_guest_list
+        output = (
+            "VMID       Status     Name\n"
+            "101        running    wireguard\n"
+            "bad\n"
+            "200        running    homeassistant\n"
+        )
+        result = parse_guest_list(output)
+        assert len(result) == 2
+        assert result[0]["vmid"] == "101"
+        assert result[1]["vmid"] == "200"
+
+    def test_qm_list_format(self):
+        """qm list has VMID NAME STATUS columns (different order from pct)."""
+        from scripts.webui.heartbeat import parse_guest_list
+        output = (
+            "      VMID NAME                 STATUS     MEM(MB)    BOOTDISK(GB) PID\n"
+            "       100 openwrt-router       stopped    512                0.50 0\n"
+            "       400 desktop              running    4096              32.00 194969\n"
+        )
+        result = parse_guest_list(output)
+        assert len(result) == 2
+        assert result[0] == {"vmid": "100", "name": "openwrt-router", "status": "stopped"}
+        assert result[1] == {"vmid": "400", "name": "desktop", "status": "running"}
+
+    def test_pct_list_with_lock_column(self):
+        """pct list has an optional Lock column between Status and Name."""
+        from scripts.webui.heartbeat import parse_guest_list
+        output = (
+            "VMID       Status     Lock         Name\n"
+            "101        running                 wireguard\n"
+            "102        running                 pihole\n"
+        )
+        result = parse_guest_list(output)
+        assert len(result) == 2
+        assert result[0] == {"vmid": "101", "status": "running", "name": "wireguard"}
+        assert result[1] == {"vmid": "102", "status": "running", "name": "pihole"}
+
+
+@pytest.mark.integration
 class TestCollectBatmanMetricsReal:
     """Batman collector tests against real hardware.
 

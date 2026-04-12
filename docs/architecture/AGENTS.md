@@ -145,8 +145,8 @@ Home          AI Node          Mesh2       Bridge-1     Bridge-2
 ```
 
 **Network Rules:**
-- **home**, **ai**, **mesh2**, **bridge-1**, **bridge-2**: directly reachable on the supernet (no ProxyJump)
-- **mesh1**: behind home's OpenWrt, reachable via ProxyJump through home
+- **home**, **ai**, **mesh2**, **bridge-1**, **bridge-2**: directly reachable on the supernet (no ProxyCommand)
+- **mesh1**: behind home's OpenWrt, reachable via ProxyCommand through home
 
 ## Device Flavors (Inventory Groups)
 
@@ -162,7 +162,9 @@ Hosts belong to child groups under `proxmox` that determine which services they 
 - `streaming_nodes` — Moonlight
 - `desktop_nodes` — Desktop VM, UX Kiosk
 - `gaming_nodes` — Gaming LXC (separate physical machine)
-- `lan_hosts` — Satellite Proxmox nodes behind the OpenWrt router (accessed via ProxyJump; mesh1 only)
+- `kiosk_nodes` — Manager/Kiosk LXC (ALL hosts — MUST equal `proxmox` membership)
+- `bridge_nodes` — Dedicated WiFi Bridge LXC (bridge-1 AP, bridge-2 STA)
+- `lan_hosts` — Satellite Proxmox nodes behind the OpenWrt router (accessed via ProxyCommand; mesh1 only)
 
 A host can belong to multiple flavor groups.
 
@@ -188,7 +190,7 @@ All VMIDs defined in `group_vars/all.yml`.
 | `cleanup.sh` | Restore / full-restore / clean / rollback — delegates to `build.py` |
 | `build-images.sh` | Builds custom images (mesh, router, Pi-hole, rsyslog, Jellyfin, Netdata, WireGuard, Home Assistant, Kodi, Moonlight, Gaming, Sunshine, Desktop) |
 | `scripts/webui.sh` | Launch the NiceGUI Web UI |
-| `scripts/webui/app.py` | Web UI entry point (13 pages, deploy profiles, fleet dashboard) |
+| `scripts/webui/app.py` | Web UI entry point (see `Routes` in `data.py` for page list) |
 | `scripts/webui/kiosk_server.py` | Kiosk-mode server for per-host Home Hub display |
 | `scripts/webui/data.py` | Central data store (SERVICE_TAGS, DEPLOY_PROFILES, HUB_SERVICES) |
 | `scripts/callhome.py` | Container heartbeat agent (Python, for Debian containers) |

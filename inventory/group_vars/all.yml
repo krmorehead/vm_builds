@@ -20,6 +20,10 @@ env_generated_path: >-
 # Sole source of truth: .state/callhome_url written by build.py (production)
 # or molecule prepare.yml (test). Empty when file is absent (API disabled).
 callhome_server: "{{ lookup('file', project_root + '/.state/callhome_url', errors='ignore') | default('', true) }}"
+# Direct localhost path — used by plays on hosts: localhost to bypass
+# the socat/tunnel relay chain. The API server always listens locally.
+callhome_port: "{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
+callhome_server_local: "http://localhost:{{ callhome_port }}"
 callhome_public_key: "{{ lookup('env', 'CALLHOME_PUBLIC_KEY') }}"
 callhome_private_key: "{{ lookup('env', 'CALLHOME_PRIVATE_KEY') }}"
 

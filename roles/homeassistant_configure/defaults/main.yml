@@ -3,21 +3,5 @@
 # Auto-generates random password if empty (for testing)
 ha_admin_password: "{{ lookup('env', 'HA_ADMIN_PASSWORD') | default('', true) }}"
 
-# Docker image configuration
-homeassistant_image: "homeassistant/home-assistant:stable"
-
-# Home Assistant configuration paths
+# Home Assistant configuration path (must match build-images.sh layout)
 homeassistant_config_path: "/opt/homeassistant/config"
-homeassistant_config_volume: "{{ homeassistant_config_path }}:/config"
-
-# Home Assistant network configuration
-homeassistant_network_mode: "host"
-
-# Home Assistant restart policy
-homeassistant_restart_policy: "always"
-
-# Recorder configuration
-homeassistant_recorder_purge_days: 10
-
-# Logger configuration
-homeassistant_log_level: "INFO"

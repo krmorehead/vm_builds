@@ -14,24 +14,19 @@ from __future__ import annotations
 
 from urllib.parse import unquote
 
-import httpx
 from nicegui import ui
 
 from scripts.webui import theme
-from scripts.webui.data import DISPLAY_APPS, Labels, Routes, get_api_base_url
+from scripts.webui.api_client import api
+from scripts.webui.data import DISPLAY_APPS, Labels, Routes
 
 
 async def _launch_guest(vmid: str) -> dict:
     """Fire-and-forget start of a container/VM via the local manager API."""
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{get_api_base_url()}/api/guests/{vmid}/start",
-                timeout=5,
-            )
-            return resp.json()
-    except (httpx.HTTPError, OSError):
-        return {"success": True, "note": "display handoff in progress"}
+    result = await api.post_json(f"/api/guests/{vmid}/start", timeout=5)
+    if result is not None:
+        return result
+    return {"success": False, "error": "Manager API unreachable"}
 
 
 def register() -> None:
@@ -84,12 +79,17 @@ def register() -> None:
                 launch_btn.disable()
                 status_label.text = f"Starting VMID {vmid}..."
                 status_label.style(f"color: {theme.COLOR_WARNING}")
-                await _launch_guest(vmid)
-                status_label.text = (
-                    "Display switching... the kiosk will return when "
-                    f"{title} exits."
-                )
-                status_label.style(f"color: {theme.ACCENT}")
+                result = await _launch_guest(vmid)
+                if result.get("success", True):
+                    status_label.text = (
+                        "Display switching... the kiosk will return when "
+                        f"{title} exits."
+                    )
+                    status_label.style(f"color: {theme.ACCENT}")
+                else:
+                    status_label.text = result.get("error", "Launch failed")
+                    status_label.style(f"color: {theme.COLOR_ERROR}")
+                    launch_btn.enable()
 
             launch_btn.on_click(do_launch)
 

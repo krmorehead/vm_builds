@@ -281,3 +281,37 @@
          + container_subnet_prefix + '.' + (container_subnet_id | string) + '.0/24)'
          if (_needs_container_bridge | bool)
          else '(OpenWrt LAN bridge, no NAT)' }}
+
+# ── Register bridge topology with Manager ─────────────────────────
+
+- name: Enrich bridge info with roles and NICs
+  ansible.builtin.set_fact:
+    _enriched_bridges: |
+      {% set result = [] %}
+      {% for br in proxmox_all_bridges %}
+      {%   if br == proxmox_wan_bridge %}
+      {%     set role = 'wan' %}
+      {%   elif br == proxmox_container_bridge and (_needs_container_bridge | bool) %}
+      {%     set role = 'container_nat' %}
+      {%   else %}
+      {%     set role = 'lan' %}
+      {%   endif %}
+      {%   set nics = [] %}
+      {%   for pair in _bridge_nic_pairs | default([]) %}
+      {%     if pair[0] == br %}
+      {%       set _ = nics.append(pair[1]) %}
+      {%     endif %}
+      {%   endfor %}
+      {%   set _ = result.append({"name": br, "role": role, "physical_nics": nics, "has_carrier": true}) %}
+      {% endfor %}
+      {{ result | to_json }}
+
+- name: Register bridge topology with Manager
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/manager_register.yml"
+  vars:
+    register_path: "api/host/{{ inventory_hostname }}/bridges"
+    register_body:
+      ip: "{{ ansible_host }}"
+      bridges: "{{ _enriched_bridges | from_json }}"
+      wan_bridge: "{{ proxmox_wan_bridge }}"
+      container_bridge: "{{ proxmox_container_bridge }}"

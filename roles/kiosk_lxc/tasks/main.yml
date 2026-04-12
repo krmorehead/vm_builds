@@ -60,6 +60,7 @@
   ansible.builtin.copy:
     content: |
       #!/bin/bash
+      set -o pipefail
       VMID="$1"
       PHASE="$2"
       KIOSK_ID={{ kiosk_ct_id }}
@@ -81,16 +82,19 @@
               [[ "$VMID" == "$KIOSK_ID" ]] && exit 0
               for cid in "${CT_IDS[@]}"; do
                   [[ "$cid" == "$VMID" ]] && continue
-                  pct status "$cid" 2>/dev/null | grep -q running && pct stop "$cid" 2>/dev/null || true
+                  cnt=$(pct status "$cid" 2>/dev/null | grep -c running || true)
+                  [ "${cnt:-0}" -gt 0 ] && pct stop "$cid" 2>/dev/null || true
               done
               for vid in "${VM_IDS[@]}"; do
                   [[ "$vid" == "$VMID" ]] && continue
-                  qm status "$vid" 2>/dev/null | grep -q running && qm stop "$vid" 2>/dev/null || true
+                  cnt=$(qm status "$vid" 2>/dev/null | grep -c running || true)
+                  [ "${cnt:-0}" -gt 0 ] && qm stop "$vid" 2>/dev/null || true
               done
               ;;
           post-stop)
               [[ "$VMID" == "$KIOSK_ID" ]] && exit 0
-              pct status "$KIOSK_ID" 2>/dev/null | grep -q stopped && pct start "$KIOSK_ID" 2>/dev/null || true
+              cnt=$(pct status "$KIOSK_ID" 2>/dev/null | grep -c stopped || true)
+              [ "${cnt:-0}" -gt 0 ] && pct start "$KIOSK_ID" 2>/dev/null || true
               ;;
       esac
       exit 0
@@ -102,12 +106,18 @@
     kiosk_static_ip: "{{ _lxc_net_ip }}"
     cacheable: true
 
-# ── Port forwarding for Manager API on NAT bridge (WAN hosts only) ──
-# The Cluster Manager on the LAN needs to reach child Managers on WAN
-# hosts. WAN kiosk containers are on private NAT subnets (10.99.x.x),
-# so we DNAT port 9001 from the host's WAN bridge to the container.
+# ── Port forwarding for Manager API ──────────────────────────────
+# Every host forwards port 9001 to the kiosk container so the
+# 4-tier heartbeat chain works bi-directionally:
+#   - WAN hosts: iptables DNAT on the NAT bridge (container and host
+#     share the same 10.99.x.x subnet — no hairpin issue)
+#   - Router node: socat TCP proxy because the kiosk is on the LAN
+#     bridge (vmbr1) while WAN traffic arrives on vmbr0, creating a
+#     hairpin NAT scenario that iptables conntrack cannot handle
+# LAN hosts (behind the router) don't need forwarding — they share
+# the LAN and reach the kiosk directly.
 
-- name: Add DNAT rule for Manager API (WAN hosts)
+- name: Add DNAT rule for Manager API port (WAN hosts only)
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
@@ -117,10 +127,12 @@
         iptables -t nat -A PREROUTING -i "$WAN_IF" -p tcp --dport 9001 -j DNAT --to-destination "$CT_IP:9001"
       fi
     executable: /bin/bash
-  when: not (_lxc_net_on_lan | bool)
+  when:
+    - not (_lxc_net_on_lan | bool)
+    - inventory_hostname not in groups.get('router_nodes', [])
   changed_when: true
 
-- name: Add FORWARD rule for Manager DNAT traffic (WAN hosts)
+- name: Add FORWARD rule for Manager DNAT traffic (WAN hosts only)
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
@@ -129,5 +141,43 @@
         iptables -A FORWARD -d "$CT_IP" -p tcp --dport 9001 -j ACCEPT
       fi
     executable: /bin/bash
-  when: not (_lxc_net_on_lan | bool)
+  when:
+    - not (_lxc_net_on_lan | bool)
+    - inventory_hostname not in groups.get('router_nodes', [])
   changed_when: true
+
+# Router node: socat proxy instead of DNAT. The kiosk container is on
+# vmbr1 (LAN) while child Managers connect via vmbr0 (WAN). DNAT +
+# MASQUERADE between two bridges on the same host creates a hairpin NAT
+# where conntrack cannot reverse the NAT on reply packets (the bridge
+# delivers the reply to the host's local stack, bypassing conntrack's
+# re-routing logic). socat operates in userspace, avoiding this entirely.
+# Deployed as a systemd unit so it survives SSH session teardown and
+# auto-restarts on failure/reboot.
+- name: Deploy Manager API socat proxy unit (router node only)
+  ansible.builtin.copy:
+    content: |
+      [Unit]
+      Description=Manager API socat proxy (WAN:9001 -> kiosk:9001)
+      After=network.target pve-guests.service
+      Wants=pve-guests.service
+
+      [Service]
+      Type=simple
+      ExecStart=/usr/bin/socat TCP-LISTEN:9001,reuseaddr,fork TCP:{{ _lxc_net_ip }}:9001
+      Restart=always
+      RestartSec=3
+
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/manager-api-proxy.service
+    mode: "0644"
+  when: inventory_hostname in groups.get('router_nodes', [])
+
+- name: Enable and start Manager API socat proxy (router node only)
+  ansible.builtin.systemd:
+    name: manager-api-proxy
+    daemon_reload: true
+    enabled: true
+    state: restarted
+  when: inventory_hostname in groups.get('router_nodes', [])

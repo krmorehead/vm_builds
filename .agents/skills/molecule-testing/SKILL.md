@@ -7,11 +7,14 @@ description: Run and validate Ansible tests. Molecule commands, TDD workflow, la
 
 ## Rules
 
-1. Always run `molecule test` after modifications. TDD: write verify, test fails, fix, test passes.
+1. Use `molecule converge && molecule verify` for day-to-day iteration. Full `molecule test` is for clean-state proof ONLY.
 2. Keep baseline running between tests. 4-minute baseline costs on every run.
 3. Molecule platform config MUST include all flavor groups from inventory/hosts.yml.
 4. NEVER delete templates in cleanup. Template deletion forces ~820MB re-upload.
 5. NEVER use graceful skips for required hardware (iGPU, IOMMU). Silent skips mask problems.
+6. Fix broken images INDIVIDUALLY with per-feature scenarios before running full E2E. `build-images.sh --only <target>` (~2 min) + `molecule test -s <type>-lxc` (~5 min) is the fast loop.
+7. Full E2E (`molecule test`) should be fast because images are already cached. If it takes 30+ minutes, the bake pipeline is broken (re-uploading or runtime-installing).
+8. You have 6 Proxmox hosts — build images IN PARALLEL. Never serialize image builds across hosts.
 
 ## Commands
 
@@ -51,13 +54,35 @@ molecule cleanup       # reset host
 ## Baseline workflow
 
 ```bash
+# FAST iteration (primary loop — use this 90% of the time)
 molecule converge                  # build/update baseline
 molecule verify                    # run assertions
+
+# Per-image fix (when ONE image is broken)
+./build-images.sh --host $PRIMARY_HOST --only pihole  # ~2-3 min
+molecule test -s pihole-lxc        # per-feature only
+
+# Layered scenario (after baseline exists)
 molecule converge -s wireguard-lxc # run layered scenario
 molecule verify -s wireguard-lxc
+
+# Full E2E clean-state proof (LAST STEP — after all images pass)
+molecule test
 ```
 
 Pre-commit: `molecule test`
+
+## Fail-fast iteration rules
+
+The 6 test hosts are a STRENGTH. Use them for parallel image builds.
+Never wait for a full E2E to discover a single-image bug.
+
+1. Fix `build-images.sh` for the broken target
+2. Rebuild that ONE image on 1 host (~2-3 min)
+3. Run its per-feature molecule scenario (~5 min)
+4. If it fails, go back to step 1. FAST loop.
+5. Once all images pass individually, run full E2E once
+6. If E2E passes, manual verification (Step 6 of work cycle)
 
 ## Pipeline sequence
 

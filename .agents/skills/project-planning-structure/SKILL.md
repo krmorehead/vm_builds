@@ -61,9 +61,25 @@ M0 (test infra)
 └── M8 (docs + integration)
 ```
 
+## Standard Work Cycle Per Milestone
+
+9. Every milestone that changes images or configure roles MUST follow the
+   6-step standard work cycle:
+   - Step 1: Update `build-images.sh`
+   - Step 2: Build images IN PARALLEL on test units (REQUIRED — 6 hosts available)
+   - Step 3: Write tests and playbook updates while images build
+   - Step 4: Run E2E `molecule test` after images are ready
+   - Step 5: Code review while E2E runs (DRY, ARCH, KISS, OOP, test quality)
+   - Step 6: Manual playbook verification after E2E passes
+
+   No rollback strategy needed — old image versions are saved and we can
+   just rebuild. Straightforward clean management.
+
+   NEVER skip Step 2. NEVER add legacy fallback code in configure roles.
+
 ## Milestone Sizing
 
-9. Each milestone should be completable in a single focused session (2-4 hours). If a milestone has more than 8-10 checkbox items, split it. If it has fewer than 3, merge it with an adjacent milestone.
+10. Each milestone should be completable in a single focused session (2-4 hours). If a milestone has more than 8-10 checkbox items, split it. If it has fewer than 3, merge it with an adjacent milestone.
 
 ## Blocked Milestone Handling
 

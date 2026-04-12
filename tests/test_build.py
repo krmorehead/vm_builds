@@ -283,6 +283,7 @@ class TestFindAnsiblePlaybook:
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+@pytest.mark.integration
 class TestInfrastructureHealth:
     """Probe real Proxmox nodes. Failures = real infrastructure problems."""
 

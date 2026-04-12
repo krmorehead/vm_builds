@@ -185,10 +185,8 @@ def page_header(title: str, subtitle: str = "") -> None:
             )
 
 
-def nav_sidebar(active: str = "") -> None:
-    """Render the left navigation sidebar with gradient background."""
-    from scripts.webui.data import Labels, NAV_SECTIONS
-
+def _render_sidebar(items: list, title: str, active: str) -> None:
+    """Shared sidebar renderer for both SuperManager and Cluster Manager."""
     sidebar_bg = (
         f"background: linear-gradient(90deg, {BG_SIDEBAR_OUTER} 0%, "
         f"{BG_SIDEBAR_INNER} 100%); "
@@ -197,11 +195,11 @@ def nav_sidebar(active: str = "") -> None:
     with ui.left_drawer(value=True).props("breakpoint=0").style(
         f"{sidebar_bg} width: {SIDEBAR_WIDTH}"
     ):
-        ui.label(Labels.APP_TITLE).classes("text-lg font-medium text-center py-4").style(
+        ui.label(title).classes("text-lg font-medium text-center py-4").style(
             f"color: {TEXT_PRIMARY}"
         )
         ui.separator().style(f"background: {ACCENT_DIM}")
-        for label, path, icon in NAV_SECTIONS:
+        for label, path, icon in items:
             is_active = active == label.lower().replace(" ", "")
             color = ACCENT if is_active else TEXT_SECONDARY
             bg = ACCENT_DIM if is_active else "transparent"
@@ -215,6 +213,20 @@ def nav_sidebar(active: str = "") -> None:
                 f"background: {bg}; border-left: {border_left}; "
                 "border-radius: 0; transition: all 0.2s ease;"
             )
+
+
+def nav_sidebar(active: str = "") -> None:
+    """Render the SuperManager left navigation sidebar."""
+    from scripts.webui.data import Labels, NAV_SECTIONS
+
+    _render_sidebar(NAV_SECTIONS, Labels.APP_TITLE, active)
+
+
+def cluster_nav_sidebar(active: str = "") -> None:
+    """Render the Cluster Manager sidebar (only pages registered on the kiosk)."""
+    from scripts.webui.data import CLUSTER_NAV_SECTIONS
+
+    _render_sidebar(CLUSTER_NAV_SECTIONS, "Cluster Manager", active)
 
 
 def section_label(text: str) -> None:
@@ -263,6 +275,19 @@ def page_shell(active: str) -> Generator[ui.column, None, None]:
     """
     apply_theme()
     nav_sidebar(active=active)
+    with ui.column().classes("w-full max-w-5xl mx-auto p-6 gap-4") as col:
+        yield col
+
+
+@contextmanager
+def cluster_page_shell(active: str) -> Generator[ui.column, None, None]:
+    """Like page_shell() but with the Cluster Manager sidebar.
+
+    Only shows pages that exist on the kiosk_server (fleet, hub,
+    bridge, mesh, router, containers). Prevents 404 links.
+    """
+    apply_theme()
+    cluster_nav_sidebar(active=active)
     with ui.column().classes("w-full max-w-5xl mx-auto p-6 gap-4") as col:
         yield col
 

@@ -17,14 +17,22 @@ layout overflows, or workflow usability issues.
 
 ALWAYS verify these before starting a manual test session:
 
-1. **Environment loaded**: `set -a && source test.env && set +a`
-2. **Virtualenv active**: `source .venv/bin/activate`
-3. **All hosts reachable**: `pytest tests/test_webui_heartbeat.py -k "infrastructure" -v`
+1. **System fully converged**: `molecule test` (or `molecule converge`) MUST
+   have completed successfully. ALL 6 hosts on the 10.10.10.x LAN, ALL
+   containers deployed and heartbeating, mesh established. NEVER start
+   manual testing against a partially deployed or pre-mesh system. If the
+   system is not converged, run `molecule test` first — do NOT proceed.
+2. **Environment loaded**: `set -a && source test.env && set +a`
+3. **Virtualenv active**: `source .venv/bin/activate`
+4. **All hosts reachable**: `pytest tests/test_webui_heartbeat.py -k "infrastructure" -v`
    — if any host is unreachable, STOP. Fix reachability first.
-4. **Bridge infrastructure deployed**: `molecule converge -s bridge-lxc` —
-   batman/WiFi tests need live containers. NEVER manually deploy scripts.
 5. **Callhome API running**: Check `.state/callhome_url` exists, or start
    via `python scripts/webui/app.py --headless`
+
+Previous catastrophe (2026-04-10): Agent started manual testing in pre-mesh
+state without running molecule test first. Every playbook that touched WAN
+hosts returned "No route to host." The entire session was wasted verifying
+expected failures instead of testing real functionality.
 
 ## Starting the apps
 
@@ -142,8 +150,10 @@ When a manual test reveals an issue:
 1. NEVER manually deploy scripts, config files, or patches during testing.
    If infrastructure is missing, run the proper automation (`molecule converge`,
    `build-images.sh`, `build.py`).
-2. ALWAYS verify all 6 hosts are reachable before starting manual testing.
-   Incomplete infrastructure produces misleading results.
+2. ALWAYS verify the system is fully converged (molecule test completed,
+   all hosts on LAN, all containers running) before starting manual testing.
+   NEVER test in a pre-mesh or partially deployed state — it produces a wall
+   of "No route to host" errors that prove nothing.
 3. ALWAYS test with both `test.env` AND `.env` if production hosts are
    available. Bucket classification, host counts, and heartbeat behavior
    differ between environments.

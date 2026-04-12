@@ -8,19 +8,32 @@ alwaysApply: true
 When a long-running command is backgrounded (e.g., `molecule test`, `molecule converge`),
 ALWAYS use the wait time for productive work instead of just polling.
 
-## Priority order during idle time
+## Context: Standard Work Cycle
 
-1. **Review and update architecture docs** (`docs/architecture/`) — verify they
-   match the current code. Fix stale diagrams, outdated variable names, or
-   missing sections.
-2. **Review and update skills** (`.cursor/skills/`) — check for outdated
-   patterns, missing lessons from the current session, or stale examples.
-3. **Review and update rules** (`.cursor/rules/`) — same as skills.
-4. **Code review against original intent** — if working from a project plan
-   (`docs/projects/`), re-read the plan and diff against the current
-   implementation. Flag drift, incomplete items, or cleanup opportunities.
-5. **General code cleanliness** — scan recently changed files for dead code,
-   unclear naming, missing error handling, or inconsistent style.
+Idle time tasks correspond to specific steps in the standard work cycle:
+- **During Step 2** (image builds): Do Step 3 — write unit tests, integration
+  tests, and playbook updates.
+- **During Step 4** (E2E molecule test): Do Step 5 — code review for DRY,
+  architecture adherence, code quality, KISS, OOP patterns, test quality.
+
+## Priority order during image builds (Step 3)
+
+1. **Write unit tests** (`pytest tests/`) — cover new functions, error paths
+2. **Write integration tests** (`molecule/*/verify.yml`) — add assertions for
+   baked content and configure role behavior
+3. **Update playbook/role code** — clean up configure roles, remove dead code
+4. **Update skills/rules** with lessons from the current session
+
+## Priority order during E2E runs (Step 5)
+
+1. **DRY violations** — duplicated logic across roles or build functions
+2. **Architecture adherence** — bake-not-configure violations, two-role pattern
+3. **Code quality** — no magic strings, proper error handling, type hints
+4. **KISS** — remove unnecessary complexity, simplify conditional logic
+5. **OOP service patterns** — manager hierarchy, clean interfaces
+6. **Test quality** — no mocks for real infrastructure, no fake data
+7. **Architecture docs** (`docs/architecture/`) — verify they match code
+8. **Skills/rules** (`.cursor/skills/`, `.cursor/rules/`) — update with new patterns
 
 ## Constraints
 
@@ -38,8 +51,9 @@ ALWAYS use the wait time for productive work instead of just polling.
 This rule activates any time you run a command with `block_until_ms: 0` (backgrounded).
 The most common triggers:
 
-- `molecule test` (~4-5 min)
-- `molecule converge` (~3-4 min)
+- `build-images.sh` across multiple hosts (~5-15 min per image)
+- `molecule test` (~30-45 min for full E2E)
+- `molecule converge` (~20-30 min)
 - `ansible-playbook` against real hardware (~2-5 min)
 
 ## What NOT to do during idle time

@@ -5,18 +5,24 @@
   ansible.builtin.set_fact:
     wan_device: "{{ openwrt_wan_device | default('eth0') }}"
 
-- name: List all ethernet interfaces
+- name: Wait for LAN interfaces to appear (fresh VMs need kernel probe time)
   ansible.builtin.raw: ls -1 /sys/class/net/ | grep '^eth'
   register: all_eth
   changed_when: false
+  retries: 6
+  delay: 5
+  until: (all_eth.stdout_lines | difference([wan_device]) | length) > 0
 
 - name: Set LAN devices fact
   ansible.builtin.set_fact:
     lan_devices: "{{ all_eth.stdout_lines | difference([wan_device]) | sort }}"
 
-- name: Fail if no LAN devices found
+- name: Fail if no LAN devices detected
   ansible.builtin.fail:
-    msg: "No LAN devices found after excluding WAN ({{ wan_device }})"
+    msg: >-
+      No LAN interfaces found after excluding WAN device '{{ wan_device }}'.
+      Interfaces detected: {{ all_eth.stdout_lines | join(', ') }}.
+      Ensure the VM has at least 2 network interfaces attached.
   when: lan_devices | length == 0
 
 - name: Report detected network layout
@@ -116,7 +122,7 @@
 
 - name: Pause for services and network to stabilize
   ansible.builtin.pause:
-    seconds: 20
+    seconds: 30
 
 - name: Remove bootstrap IP from WAN bridge on Proxmox
   ansible.builtin.shell:
@@ -369,71 +375,25 @@
     - openwrt_wan_mac | default('') | length > 0
     - _wan_mac_conflict | default(false) | bool
 
-- name: Deploy WAN MAC auto-apply init script
-  ansible.builtin.raw: |
-    cat > /etc/init.d/wan_mac_apply << 'INITEOF'
-    #!/bin/sh /etc/rc.common
-    START=99
+# wan_mac_apply init script is baked into the router image overlay.
+# Just enable it when MAC conflict deferral is needed.
+- name: Check if wan_mac_apply init script exists
+  ansible.builtin.raw: test -x /etc/init.d/wan_mac_apply && echo exists
+  register: _wan_mac_apply_exists
+  changed_when: false
+  failed_when: false
+  when:
+    - openwrt_wan_mac | default('') | length > 0
+    - _wan_mac_conflict | default(false) | bool
 
-    start() {
-        local deferred="/etc/openwrt_wan_mac_deferred"
-        [ -f "$deferred" ] || return 0
-
-        local mac=$(cat "$deferred" | tr -d ' \t\n\r')
-        [ -n "$mac" ] || return 0
-
-        local wan_dev=$(uci get network.wan.device 2>/dev/null || echo "eth0")
-
-        local tries=0
-        while [ $tries -lt 30 ]; do
-            ip route show default 2>/dev/null | grep -q default && break
-            sleep 2
-            tries=$((tries + 1))
-        done
-        local conflict="no"
-        local mac_lower=$(echo "$mac" | tr 'A-F' 'a-f')
-        if awk -v m="$mac_lower" 'tolower($4)==m{found=1} END{exit !found}' /proc/net/arp 2>/dev/null; then
-            conflict="yes"
-        fi
-        local b1=$(echo "$mac_lower" | cut -d: -f1)
-        local b2=$(echo "$mac_lower" | cut -d: -f2)
-        local b3=$(echo "$mac_lower" | cut -d: -f3)
-        local b4=$(echo "$mac_lower" | cut -d: -f4)
-        local b5=$(echo "$mac_lower" | cut -d: -f5)
-        local b6=$(echo "$mac_lower" | cut -d: -f6)
-        local b1f=$(printf '%02x' $((0x$b1 ^ 2)))
-        local eui="${b1f}${b2}:${b3}ff:fe${b4}:${b5}${b6}"
-        if ip -6 neigh 2>/dev/null | grep -qi "$eui"; then
-            conflict="yes"
-        fi
-        local gw_ip=$(ip route show default 2>/dev/null | awk '/^default/{print $3}' | head -1)
-        if [ -n "$gw_ip" ]; then
-            ping -c 1 -W 2 "$gw_ip" >/dev/null 2>&1
-            local gw_mac=$(awk -v ip="$gw_ip" '$1==ip{print tolower($4)}' /proc/net/arp | head -1)
-            local cloned_oui=$(echo "$mac_lower" | cut -d: -f1-3)
-            local gw_oui=$(echo "$gw_mac" | cut -d: -f1-3)
-            if [ -n "$gw_oui" ] && [ "$cloned_oui" = "$gw_oui" ]; then
-                conflict="yes"
-            fi
-        fi
-
-        if [ "$conflict" = "no" ]; then
-            logger -t wan_mac_apply "No conflict for MAC $mac - applying and restarting network"
-            uci set network.wan.macaddr="$mac"
-            uci commit network
-            rm -f "$deferred"
-            /etc/init.d/network restart
-        else
-            logger -t wan_mac_apply "Conflict still present for MAC $mac - keeping deferred"
-        fi
-    }
-    INITEOF
-    chmod +x /etc/init.d/wan_mac_apply
+- name: Enable WAN MAC auto-apply init script
+  ansible.builtin.raw: >
     /etc/init.d/wan_mac_apply enable
   changed_when: true
   when:
     - openwrt_wan_mac | default('') | length > 0
     - _wan_mac_conflict | default(false) | bool
+    - "'exists' in (_wan_mac_apply_exists.stdout | default(''))"
 
 - name: Report WAN MAC deferred
   ansible.builtin.debug:
@@ -614,9 +574,9 @@
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
-      echo "vm_status=$(qm status 100 2>&1)"
-      echo "vm_onboot=$(qm config 100 2>/dev/null | grep -oP 'onboot: \K.*')"
-      echo "vm_startup=$(qm config 100 2>/dev/null | grep -oP 'startup: \K.*')"
+      echo "vm_status=$(qm status {{ openwrt_vm_id }} 2>&1)"
+      echo "vm_onboot=$(qm config {{ openwrt_vm_id }} 2>/dev/null | grep -oP 'onboot: \K.*')"
+      echo "vm_startup=$(qm config {{ openwrt_vm_id }} 2>/dev/null | grep -oP 'startup: \K.*')"
       echo "lan_bridge_ip=$(ip -4 addr show dev {{ _lan_bridge }} | grep -oP 'inet \K[^/]+')"
       echo "lan_bridge_dhcp=$(grep -c 'inet dhcp' /etc/network/interfaces.d/ansible-bridges.conf 2>/dev/null || echo 0)"
     executable: /bin/bash

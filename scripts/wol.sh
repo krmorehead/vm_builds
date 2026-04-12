@@ -24,12 +24,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Load env for PRIMARY_HOST if available
-if [[ -f "${SCRIPT_DIR}/.env" ]]; then
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+if [[ -f "${PROJECT_ROOT}/.env" ]]; then
     # shellcheck disable=SC1091
-    set -a; source "${SCRIPT_DIR}/.env"; set +a
-elif [[ -f "${SCRIPT_DIR}/test.env" ]]; then
+    set -a; source "${PROJECT_ROOT}/.env"; set +a
+elif [[ -f "${PROJECT_ROOT}/test.env" ]]; then
     # shellcheck disable=SC1091
-    set -a; source "${SCRIPT_DIR}/test.env"; set +a
+    set -a; source "${PROJECT_ROOT}/test.env"; set +a
 fi
 
 # ── Known hosts ────────────────────────────────────────────────────
@@ -67,7 +68,7 @@ SSH_OPTS="-o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes"
 
 usage() {
     cat <<'EOF'
-Usage: ./wol.sh [--wait] <target>
+Usage: scripts/wol.sh [--wait] <target>
 
 Targets:
   <mac-address>   Send magic packet to a specific MAC (e.g., 8c:16:45:d1:87:a6)
@@ -77,10 +78,10 @@ Targets:
   --wait          After sending WoL, poll until SSH is reachable (120s timeout)
 
 Examples:
-  ./wol.sh home                  # wake the home Proxmox host
-  ./wol.sh --wait all            # wake all hosts, wait for SSH
-  ./wol.sh 8c:16:45:d1:87:a6    # wake by MAC directly
-  ./wol.sh mesh1                 # wake mesh1 via proxy through home
+  scripts/wol.sh home                  # wake the home Proxmox host
+  scripts/wol.sh --wait all            # wake all hosts, wait for SSH
+  scripts/wol.sh 8c:16:45:d1:87:a6    # wake by MAC directly
+  scripts/wol.sh mesh1                 # wake mesh1 via proxy through home
 EOF
     exit 1
 }

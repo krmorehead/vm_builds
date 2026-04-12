@@ -370,3 +370,18 @@
 - name: Display container diagnostics
   ansible.builtin.debug:
     var: _lxc_diag.stdout_lines
+
+# ── Register container with Manager ──────────────────────────────
+
+- name: Register container with Manager
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/manager_register.yml"
+  vars:
+    register_path: "api/host/{{ inventory_hostname }}/containers/{{ lxc_ct_id }}"
+    register_body:
+      service_type: "{{ lxc_ct_dynamic_group }}"
+      hostname: "{{ lxc_ct_hostname }}"
+      state: running
+      ip: "{{ lxc_ct_ip | default('') }}"
+      bridge: "{{ lxc_ct_bridge | default('') }}"
+      hardware: []
+      last_deployed: "{{ ansible_date_time.iso8601 }}"
