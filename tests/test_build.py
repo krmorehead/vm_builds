@@ -288,11 +288,8 @@ class TestInfrastructureHealth:
     """Probe real Proxmox nodes. Failures = real infrastructure problems."""
 
     @pytest.fixture
-    def env(self):
-        env_file = REPO_ROOT / "test.env"
-        if not env_file.exists():
-            pytest.fail("test.env not found — cannot validate infrastructure")
-        return build.load_env(env_file)
+    def env(self, test_env):
+        return test_env
 
     def test_primary_host_reachable(self, env):
         """home (PRIMARY_HOST) must always be reachable."""

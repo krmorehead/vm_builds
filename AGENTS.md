@@ -78,6 +78,7 @@ This tree organizes all skills by domain area to help agents quickly find releva
 - **writing-skills** — Skill writing patterns and documentation standards
 - **webui-design-system** — NiceGUI design system, color semantics, scalable test constants
 - **webui-manual-testing** — Manual testing procedures for SuperManager, Manager, and Kiosk UIs
+- **manual-testing-playbook-writing** — How to write comprehensive manual testing playbooks: exhaustive feature enumeration, per-app steps, host-awareness, section structure
 - **webui-ux-principles** — UX design principles: color semantics, icon choices, layout, information hierarchy
 
 ### **Build & Scripting**
@@ -397,6 +398,7 @@ For async patterns: @.agents/skills/async-job-patterns
 - Diagnostics patterns: @.agents/skills/openwrt-diagnostics
 - Code review (MVC, safety, conventions): @.agents/skills/code-review-checklist
 - Manual UI testing: @.agents/skills/webui-manual-testing
+- Writing manual test playbooks: @.agents/skills/manual-testing-playbook-writing
 
 **Web UI Design and UX:**
 - Design system (colors, CSS, constants): @.agents/skills/webui-design-system

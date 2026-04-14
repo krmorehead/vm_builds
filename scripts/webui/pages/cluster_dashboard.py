@@ -11,11 +11,12 @@ from __future__ import annotations
 from nicegui import ui
 
 from scripts.webui import manager, theme
-from scripts.webui.data import format_uptime
+from scripts.webui.data import Labels, Routes, format_uptime
+from scripts.webui.pages.vnc_shared import render_app_console_links
 
 
 def register() -> None:
-    @ui.page("/fleet")
+    @ui.page(Routes.FLEET)
     def cluster_fleet_page() -> None:
         with theme.cluster_page_shell("fleet"):
             theme.page_header("Cluster Fleet", "Nodes managed by this cluster")
@@ -32,7 +33,7 @@ def register() -> None:
                     auto_refresh, "active",
                 )
 
-    @ui.page("/fleet/{node_id}")
+    @ui.page(Routes.FLEET_DETAIL)
     def cluster_node_detail(node_id: str) -> None:
         with theme.cluster_page_shell("fleet"):
             mgr = manager.get_instance()
@@ -45,12 +46,22 @@ def register() -> None:
             if not entry:
                 theme.page_header(f"Node: {node_id}", "Not found in cluster")
                 ui.button("Back to Fleet", icon="arrow_back",
-                          on_click=lambda: ui.navigate.to("/fleet")).classes("mt-4")
+                          on_click=lambda: ui.navigate.to(Routes.FLEET)).classes("mt-4")
                 return
 
             payload = entry.get("payload", {})
             hostname = payload.get("hostname", node_id)
             theme.page_header(f"Node: {hostname}", f"Detail view for {node_id}")
+
+            _vnc_url = mgr.get_child_vnc_url(node_id)
+            if _vnc_url is not None:
+                _fleet_detail_back = Routes.FLEET_DETAIL.replace("{node_id}", node_id)
+                _kiosk_target = Routes.REMOTE_KIOSK.replace("{node_id}", node_id) + f"?back={_fleet_detail_back}"
+                with ui.row().classes("items-center gap-2 mb-2"):
+                    ui.button(
+                        Labels.OPEN_KIOSK, icon="cast",
+                        on_click=lambda t=_kiosk_target: ui.navigate.to(t),
+                    ).classes("action-btn")
 
             with ui.card().classes("w-full"):
                 theme.card_title("Resources")
@@ -91,7 +102,7 @@ def register() -> None:
                 f"color: {theme.TEXT_SECONDARY}",
             )
             ui.button("Back to Fleet", icon="arrow_back",
-                      on_click=lambda: ui.navigate.to("/fleet")).classes("mt-4")
+                      on_click=lambda: ui.navigate.to(Routes.FLEET)).classes("mt-4")
 
 
 def _render_fleet(container: ui.column) -> None:
@@ -126,7 +137,7 @@ def _render_fleet(container: ui.column) -> None:
             last_seen = entry.get("received_at", "")
 
             with ui.card().classes("w-full cursor-pointer").on(
-                "click", lambda _, n=nid: ui.navigate.to(f"/fleet/{n}"),
+                "click", lambda _, n=nid: ui.navigate.to(Routes.FLEET_DETAIL.replace("{node_id}", n)),
             ):
                 with ui.row().classes("items-center justify-between w-full"):
                     with ui.row().classes("items-center gap-2"):
@@ -138,9 +149,20 @@ def _render_fleet(container: ui.column) -> None:
                             ui.label(ips[0]).classes("font-mono text-xs").style(
                                 f"color: {theme.TEXT_SECONDARY}",
                             )
-                    with ui.row().classes("gap-4"):
+                    with ui.row().classes("items-center gap-4"):
                         ui.label(f"D:{disk:.0f}%").classes("text-xs")
                         ui.label(f"M:{mem:.0f}%").classes("text-xs")
+                        if mgr.get_child_vnc_url(nid) is not None:
+                            kiosk_target = Routes.REMOTE_KIOSK.replace("{node_id}", nid) + f"?back={Routes.FLEET}"
+                            with ui.link(
+                                target=kiosk_target,
+                            ).style("text-decoration: none;").on(
+                                "click.stop", lambda: None,
+                            ):
+                                ui.icon("cast_connected").style(
+                                    f"color: {theme.ACCENT}; cursor: pointer;"
+                                )
+                        render_app_console_links(nid, back=Routes.FLEET)
 
                 ch = payload.get("container_health")
                 if ch and isinstance(ch, dict):

@@ -13,6 +13,26 @@
     lxc_net_service_name: pihole
     lxc_net_ip_offset: "{{ pihole_ct_ip_offset }}"
 
+# ── Check container existence ──────────────────────────────────
+
+- name: Check if Pi-hole container exists
+  ansible.builtin.command:
+    cmd: pct status {{ pihole_ct_id }}
+  register: _ct_status
+  failed_when: false
+  changed_when: false
+
+- name: Set container existence flag
+  ansible.builtin.set_fact:
+    _lxc_exists: "{{ _ct_status.rc == 0 }}"
+
+# ── Resolve deployed version ────────────────────────────────────
+
+- name: Resolve deployed Pi-hole version
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_deployed_version.yml"
+  vars:
+    _resolve_service_name: pihole
+
 # ── Provision via shared proxmox_lxc role ────────────────────────
 
 - name: Provision Pi-hole LXC container
@@ -28,7 +48,6 @@
     lxc_ct_onboot: "{{ pihole_ct_onboot }}"
     lxc_ct_startup_order: "{{ pihole_ct_startup_order }}"
     lxc_ct_features: "{{ pihole_ct_features }}"
-    lxc_ct_template: "{{ pihole_ct_template }}"
     lxc_ct_template_path: "{{ pihole_ct_template_path }}"
     lxc_ct_ip: "{{ _lxc_ct_ip }}/{{ _lan_cidr }}"
     lxc_ct_gateway: "{{ _lan_gateway }}"

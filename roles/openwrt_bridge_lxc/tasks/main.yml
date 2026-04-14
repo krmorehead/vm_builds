@@ -11,6 +11,10 @@
   changed_when: false
   failed_when: false
 
+- name: Set container existence flag
+  ansible.builtin.set_fact:
+    _lxc_exists: "{{ _stale_bridge_ct.rc == 0 }}"
+
 - name: Stop stale bridge container to release WiFi PHY
   ansible.builtin.command:
     cmd: pct stop {{ bridge_ct_id }}
@@ -216,6 +220,13 @@
       Bridge reuses the mesh image. Run ./build-images.sh --only mesh
   when: not (_bridge_lxc_stat.stat.exists | default(false))
 
+# ── Resolve deployed version ────────────────────────────────────
+
+- name: Resolve deployed WiFi bridge version
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_deployed_version.yml"
+  vars:
+    _resolve_service_name: openwrt_bridge
+
 # ── Provision LXC container ──────────────────────────────────────
 
 - name: Provision WiFi bridge LXC container
@@ -232,7 +243,6 @@
     lxc_ct_startup_order: "{{ openwrt_bridge_ct_startup_order }}"
     lxc_ct_features: "{{ openwrt_bridge_ct_features }}"
     lxc_ct_unprivileged: false
-    lxc_ct_template: "{{ openwrt_lxc_template }}"
     lxc_ct_template_path: "{{ openwrt_lxc_template_path }}"
     lxc_ct_skip_debian_cleanup: true
     lxc_ct_ostype: unmanaged

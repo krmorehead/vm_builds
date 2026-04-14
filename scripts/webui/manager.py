@@ -23,7 +23,10 @@ from typing import Any, Callable
 from pathlib import Path
 
 from scripts.webui import heartbeat
-from scripts.webui.data import event_bus
+from scripts.webui.data import Ports, event_bus
+from scripts.webui.display_transfer import (
+    DisplayTransferService, SshExecFn, build_handler,
+)
 from scripts.webui.host_state import HostState, HostStateStore
 
 
@@ -61,6 +64,10 @@ class BaseManager:
         self._callhome_public_key = callhome_public_key
         self._mesh_key = mesh_key
         self._container_checkins: dict[str, dict] = {}
+        self._display_ssh: SshExecFn = (
+            lambda ip, cmd, timeout=10: heartbeat._ssh_exec(ip, cmd, timeout=timeout)
+        )
+        self.display_transfer = DisplayTransferService()
         self._collector_map: dict[str, Any] = {
             "wifi": heartbeat.collect_wifi_metrics,
             "bridge": heartbeat.collect_bridge_metrics,
@@ -100,6 +107,56 @@ class BaseManager:
         if not self._auth_validator(token):
             return JSONResponse({"error": "unauthorized"}, status_code=403)
         return None
+
+    # ── VNC and hierarchy ────────────────────────────────────────
+
+    def _resolve_vnc_ip(self, node_id: str) -> str | None:
+        """Resolve the routable IP for a node's VNC websockify.
+
+        Base implementation returns None (leaf NodeManager).
+        ClusterManager overrides to read _child_managers.
+        SuperManager (app.py) overrides to read _fleet_nodes.
+        """
+        return None
+
+    def get_child_vnc_url(self, node_id: str) -> str | None:
+        """Build the WebSocket URL for a node's kiosk websockify.
+
+        LAN hosts need VNC relayed through the primary host because the
+        browser can't reach LAN IPs directly. The relay is a socat proxy
+        on PRIMARY_HOST at a dedicated port per LAN host.
+        """
+        relay = self._get_vnc_relay(node_id)
+        if relay:
+            ip, port = relay
+            return f"ws://{ip}:{port}"
+        ip = self._resolve_vnc_ip(node_id)
+        if not ip:
+            return None
+        return f"ws://{ip}:{Ports.KIOSK_VNC_WS}"
+
+    def _get_vnc_relay(self, node_id: str) -> tuple[str, int] | None:
+        """Check if this node needs VNC relayed. Override in subclasses."""
+        return None
+
+    def get_guest_viewstream_url(self, node_id: str, app_id: str) -> str | None:
+        """Build the viewstream URL for a display app on a node.
+
+        Uses the DisplayTransferService registry to look up the correct
+        endpoint (VNC WebSocket or HTTP) for the given app_id, and resolves
+        the node IP via the standard VNC IP resolver.
+        """
+        ip = self._resolve_vnc_ip(node_id)
+        if not ip:
+            return None
+        return self.display_transfer.get_viewstream_url(app_id, ip)
+
+    def get_fleet_children(self, node_id: str) -> list[str]:
+        """Return child node IDs for a given parent.
+
+        Base returns [] (leaf NodeManager). CM and SM override.
+        """
+        return []
 
     def get_container_checkins(self) -> dict[str, dict]:
         return self._container_checkins
@@ -269,6 +326,23 @@ class BaseManager:
         if self._management_server:
             asyncio.create_task(self._relay_heartbeat())
 
+    def _update_container_version(self, container_hostname: str, image_version: str) -> None:
+        """Update image_version on the ContainerInfo matching this container hostname.
+
+        containers dict is keyed by VMID (int). Hostname lookup is O(N)
+        with N ≤ 12 containers per host -- acceptable for heartbeat frequency.
+        """
+        if not self.host_state_store or not self._host_name:
+            return
+        state = self.host_state_store.get(self._host_name)
+        if state is None:
+            return
+        for ct in state.containers.values():
+            if ct.hostname == container_hostname:
+                ct.image_version = image_version
+                self.host_state_store.save(state)
+                return
+
     def _store_container_checkin(self, body: dict) -> str:
         """Store a container heartbeat in _container_checkins.
 
@@ -280,6 +354,10 @@ class BaseManager:
                 "payload": body,
                 "received_at": datetime.now().isoformat(),
             }
+            ch = body.get("container_health", {})
+            image_version = ch.get("image_version", "")
+            if image_version:
+                self._update_container_version(hostname, image_version)
         return hostname
 
     async def handle_container_checkin(self, request: Any) -> Any:
@@ -400,6 +478,32 @@ class NodeManager(BaseManager):
                 statuses[f"{host}/{label}-{vmid}"] = {"active": False, "error": out[:200]}
         return statuses
 
+    def _relay_to_cluster_manager(
+        self, path: str, *, method: str = "POST", token: str = "",
+    ) -> dict:
+        """Relay a request to this node's Cluster Manager.
+
+        NodeManagers use this to forward cluster-scoped operations (batman
+        enable/disable/status) UP to the CM, which then broadcasts to all
+        children.  Returns the CM's JSON response or an error dict.
+        """
+        import urllib.request
+        import urllib.error
+
+        if not self._management_server:
+            return {"error": "MANAGEMENT_SERVER not configured"}
+
+        url = f"{self._management_server}{path}"
+        req = urllib.request.Request(url, method=method)
+        req.add_header("Content-Type", "application/json")
+        if token:
+            req.add_header("x-callhome-token", token)
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return _json.loads(resp.read().decode())
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as exc:
+            return {"error": f"CM relay failed: {exc}"}
+
     def register_api(self, starlette_app: Any) -> None:
         """Register node-level API routes."""
         from starlette.requests import Request as StarletteRequest
@@ -512,9 +616,11 @@ class NodeManager(BaseManager):
             ok, out = await asyncio.to_thread(
                 heartbeat._ssh_exec, mgr._host_ip, cmd, timeout=30,
             )
+            already_running = "already running" in out.lower()
             return JSONResponse({
                 "vmid": vmid, "action": action,
-                "success": ok, "output": out[:300],
+                "success": ok or already_running,
+                "output": out[:300],
             })
 
         # ── Local batman endpoints ───────────────────────────────
@@ -537,6 +643,43 @@ class NodeManager(BaseManager):
 
         async def _api_batman_local_status(request: StarletteRequest) -> JSONResponse:
             result = await mgr.batman_local_status()
+            return JSONResponse(result)
+
+        # ── Cluster-scoped batman (relay to CM if we're a NodeManager) ──
+
+        async def _api_batman_enable(request: StarletteRequest) -> JSONResponse:
+            auth_err = mgr.check_mutation_auth(request)
+            if auth_err:
+                return auth_err
+            token = request.headers.get("x-callhome-token", "")
+            result = await asyncio.to_thread(
+                mgr._relay_to_cluster_manager,
+                "/api/batman/enable", method="POST", token=token,
+            )
+            if "error" in result and "CM relay" in result.get("error", ""):
+                return JSONResponse(result, status_code=502)
+            return JSONResponse(result)
+
+        async def _api_batman_disable(request: StarletteRequest) -> JSONResponse:
+            auth_err = mgr.check_mutation_auth(request)
+            if auth_err:
+                return auth_err
+            token = request.headers.get("x-callhome-token", "")
+            result = await asyncio.to_thread(
+                mgr._relay_to_cluster_manager,
+                "/api/batman/disable", method="POST", token=token,
+            )
+            if "error" in result and "CM relay" in result.get("error", ""):
+                return JSONResponse(result, status_code=502)
+            return JSONResponse(result)
+
+        async def _api_batman_status(request: StarletteRequest) -> JSONResponse:
+            result = await asyncio.to_thread(
+                mgr._relay_to_cluster_manager,
+                "/api/batman/status", method="GET",
+            )
+            if "error" in result and "CM relay" in result.get("error", ""):
+                return JSONResponse(result, status_code=502)
             return JSONResponse(result)
 
         # ── Event receive endpoint (broadcasts from Cluster Manager) ──
@@ -570,6 +713,15 @@ class NodeManager(BaseManager):
             "/api/batman/local/status", _api_batman_local_status, methods=["GET"],
         ))
         starlette_app.routes.insert(0, Route(
+            "/api/batman/enable", _api_batman_enable, methods=["POST"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/batman/disable", _api_batman_disable, methods=["POST"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/batman/status", _api_batman_status, methods=["GET"],
+        ))
+        starlette_app.routes.insert(0, Route(
             "/api/heartbeat/subscribe", _api_heartbeat_subscribe, methods=["POST"],
         ))
         starlette_app.routes.insert(0, Route(
@@ -590,6 +742,73 @@ class NodeManager(BaseManager):
         starlette_app.routes.insert(0, Route(
             "/api/guests/{vmid}/{action}",
             _api_guest_action, methods=["POST"],
+        ))
+
+        # ── Display transfer endpoints ────────────────────────────
+
+        async def _api_display_enter(request: StarletteRequest) -> JSONResponse:
+            app_id = request.path_params.get("app_id", "")
+            if not mgr._host_ip:
+                return JSONResponse({"error": "HOST_IP not configured"}, status_code=500)
+            auth_err = mgr.check_mutation_auth(request)
+            if auth_err:
+                return auth_err
+            result = mgr.display_transfer.enter(app_id, mgr._host_ip)
+            status_code = 200 if result.success else 502
+            return JSONResponse({
+                "app_id": app_id, "success": result.success,
+                "viewstream_url": result.viewstream_url,
+                "display_type": result.display_type.value,
+                "error": result.error,
+            }, status_code=status_code)
+
+        async def _api_display_exit(request: StarletteRequest) -> JSONResponse:
+            app_id = request.path_params.get("app_id", "")
+            if not mgr._host_ip:
+                return JSONResponse({"error": "HOST_IP not configured"}, status_code=500)
+            auth_err = mgr.check_mutation_auth(request)
+            if auth_err:
+                return auth_err
+            result = mgr.display_transfer.exit(app_id, mgr._host_ip)
+            status_code = 200 if result.success else 502
+            return JSONResponse({
+                "app_id": app_id, "success": result.success,
+                "error": result.error,
+            }, status_code=status_code)
+
+        async def _api_display_status(request: StarletteRequest) -> JSONResponse:
+            app_id = request.path_params.get("app_id", "")
+            if not mgr._host_ip:
+                return JSONResponse({"error": "HOST_IP not configured"}, status_code=500)
+            handler = mgr.display_transfer.get_handler(app_id)
+            if not handler:
+                return JSONResponse({"error": f"No handler for {app_id}"}, status_code=404)
+            active = mgr.display_transfer.is_active(app_id, mgr._host_ip)
+            url = handler.get_viewstream_url(mgr._host_ip) if active else None
+            return JSONResponse({
+                "app_id": app_id, "active": active,
+                "display_type": handler.display_type.value,
+                "viewstream_url": url,
+            })
+
+        async def _api_display_list(request: StarletteRequest) -> JSONResponse:
+            handlers = mgr.display_transfer.list_handlers()
+            active: list[str] = []
+            if mgr._host_ip:
+                active = mgr.display_transfer.list_active(mgr._host_ip)
+            return JSONResponse({"handlers": handlers, "active": active})
+
+        starlette_app.routes.insert(0, Route(
+            "/api/display/{app_id}/enter", _api_display_enter, methods=["POST"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/display/{app_id}/exit", _api_display_exit, methods=["POST"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/display/{app_id}/status", _api_display_status, methods=["GET"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/display/list", _api_display_list, methods=["GET"],
         ))
 
         # ── Host state endpoints (Manager as source of truth) ─────
@@ -723,6 +942,27 @@ class NodeManager(BaseManager):
             _api_host_phy_patch, methods=["PATCH"],
         ))
 
+        # ── Image version endpoint ────────────────────────────────
+        # Uses add_api_route() instead of routes.insert() because
+        # NiceGUI's page system can interfere with raw starlette Route
+        # registration ordering during middleware stack compilation.
+
+        async def _api_image_versions() -> JSONResponse:
+            """Return deployed image versions from the Node Manager's state."""
+            state = None
+            if mgr.host_state_store and mgr._host_name:
+                state = mgr.host_state_store.get(mgr._host_name)
+            if state is None:
+                state = mgr.get_local_host_state()
+            if state is None:
+                return JSONResponse({"versions": {}})
+            return JSONResponse({"versions": state.image_versions()})
+
+        starlette_app.add_api_route(
+            "/api/images/versions", _api_image_versions, methods=["GET"],
+            include_in_schema=False,
+        )
+
 
 # ── Cluster Manager ─────────────────────────────────────────────────
 
@@ -749,6 +989,7 @@ class ClusterManager(NodeManager):
         mesh_key: str = "",
         state_dir: str = "",
         child_managers: dict[str, str] | None = None,
+        vnc_relay_resolver: Callable[[str], tuple[str, int] | None] | None = None,
     ) -> None:
         super().__init__(
             node_resolver,
@@ -762,6 +1003,43 @@ class ClusterManager(NodeManager):
         )
         self._child_managers: dict[str, str] = child_managers or {}
         self._fleet_nodes: dict[str, dict] = {}
+        self._vnc_relay_resolver = vnc_relay_resolver
+
+    def _get_vnc_relay(self, node_id: str) -> tuple[str, int] | None:
+        if self._vnc_relay_resolver:
+            return self._vnc_relay_resolver(node_id)
+        return None
+
+    def _resolve_vnc_ip(self, node_id: str) -> str | None:
+        """Resolve VNC IP from child_managers, then fleet-wide resolver.
+
+        CM uses _child_managers (config-provided children).
+        SM (app.py) may have empty _child_managers but resolves all nodes
+        via _node_resolver (env-based fleet-wide lookup).
+        """
+        ip = self._child_managers.get(node_id)
+        if ip:
+            return ip
+        return self._node_resolver(node_id)
+
+    def get_fleet_children(self, node_id: str) -> list[str]:
+        """Return child node IDs when node_id matches this CM.
+
+        Also returns fleet node IDs for the SM (which sees all nodes
+        via heartbeat checkins in _fleet_nodes).
+        """
+        if node_id == self._host_name:
+            children = list(self._child_managers.keys())
+            for nid in self._fleet_nodes:
+                if nid not in children and nid != self._host_name:
+                    children.append(nid)
+            return children
+        for nid, entry in self._fleet_nodes.items():
+            p = entry.get("payload", {})
+            cluster_nodes = p.get("cluster_nodes", {})
+            if node_id == nid and cluster_nodes:
+                return list(cluster_nodes.keys())
+        return []
 
     def register_child_checkin(self, payload: dict) -> str:
         """Store a heartbeat from a child Manager.
@@ -1252,6 +1530,7 @@ def init(
     auth_validator: Callable[[str], bool] | None = None,
     config: dict[str, str] | None = None,
     manager_class: type | None = None,
+    vnc_relay_resolver: Callable[[str], tuple[str, int] | None] | None = None,
 ) -> BaseManager:
     """Create the module-level manager singleton.
 
@@ -1282,8 +1561,16 @@ def init(
     )
     if issubclass(cls, ClusterManager):
         kwargs["child_managers"] = child_mgrs
+        if vnc_relay_resolver:
+            kwargs["vnc_relay_resolver"] = vnc_relay_resolver
 
     _instance = cls(node_resolver, **kwargs)
+
+    from scripts.webui.data import DISPLAY_APP_CONFIGS
+    for app_config in DISPLAY_APP_CONFIGS.values():
+        handler = build_handler(app_config, _instance._display_ssh)
+        _instance.display_transfer.register(handler)
+
     return _instance
 
 
@@ -1295,6 +1582,11 @@ def reset() -> None:
 def get_instance() -> BaseManager:
     if _instance is None:
         raise RuntimeError("manager.init() has not been called")
+    return _instance
+
+
+def try_get_instance() -> BaseManager | None:
+    """Return the manager singleton or None if not yet initialised."""
     return _instance
 
 

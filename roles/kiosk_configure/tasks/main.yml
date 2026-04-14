@@ -83,16 +83,15 @@
     item in hostvars
     and (hostvars[item]['kiosk_static_ip'] | default('')) | length > 0
 
-- name: Build node IP map from topology facts
+- name: Build node IP map — service container IPs (always LAN-reachable)
   ansible.builtin.set_fact:
     _kiosk_node_ips: >-
       {{ _kiosk_node_ips | default({})
          | combine({item.key: item.value})
       }}
-  loop: "{{ _node_ip_entries | dict2items }}"
+  loop: "{{ _service_ip_entries | dict2items }}"
   vars:
-    _node_ip_entries:
-      home: "{{ ansible_host | default('') }}"
+    _service_ip_entries:
       openwrt: "{{ _lan_gateway | default('10.10.10.1') }}"
       pihole: "{{ pihole_static_ip | default('') }}"
       wireguard: "{{ wireguard_static_ip | default('') }}"
@@ -102,26 +101,44 @@
       kodi: "{{ kodi_static_ip | default('') }}"
       moonlight: "{{ moonlight_static_ip | default('') }}"
       rsyslog: "{{ rsyslog_static_ip | default('') }}"
-      bridge-1: "{{ hostvars['bridge-1']['ansible_host'] | default('') if 'bridge-1' in hostvars else '' }}"
-      bridge-2: "{{ hostvars['bridge-2']['ansible_host'] | default('') if 'bridge-2' in hostvars else '' }}"
-      mesh1: "{{ hostvars['mesh1']['ansible_host'] | default('') if 'mesh1' in hostvars else '' }}"
-      mesh2: "{{ hostvars['mesh2']['ansible_host'] | default('') if 'mesh2' in hostvars else '' }}"
-      ai: "{{ hostvars['ai']['ansible_host'] | default('') if 'ai' in hostvars else '' }}"
   when: item.value | length > 0
 
+- name: Build node IP map — Proxmox host IPs (match kiosk-reachable routing)
+  ansible.builtin.set_fact:
+    _kiosk_node_ips: >-
+      {{ _kiosk_node_ips | default({})
+         | combine({item: _host_ip})
+      }}
+  loop: "{{ groups.get('kiosk_nodes', []) }}"
+  vars:
+    _host_ip: >-
+      {{ (_lan_gateway.split('.')[0:3] | join('.') + '.' +
+          (proxmox_lan_mgmt_ip_offset | default(2) | string))
+         if ('router_nodes' in hostvars[item].get('group_names', []))
+            and (_lan_gateway | default('')) | length > 0
+         else hostvars[item]['ansible_host']
+              if ('lan_hosts' in hostvars[item].get('group_names', []))
+         else (container_subnet_prefix + '.' + (hostvars[item]['container_subnet_id'] | string) + '.1')
+      }}
+  when: item in hostvars
+
 # ── Compute host IP reachable from the kiosk container ─────────
-# LAN containers (router_nodes, lan_hosts) reach their host via the
-# LAN management IP (10.10.10.2). WAN containers reach their host
-# via the NAT bridge gateway (10.99.{subnet_id}.1). Using ansible_host
-# (the WAN IP) fails because LAN containers can't route to it.
+# Router nodes reach their host via the LAN management IP (10.10.10.2).
+# LAN hosts (mesh1) use ansible_host directly — it's already the LAN IP.
+# WAN containers reach their host via the NAT bridge gateway
+# (10.99.{subnet_id}.1). Using ansible_host (the WAN IP) fails because
+# LAN containers can't route to it, but for lan_hosts ansible_host IS
+# the LAN IP.
 
 - name: Compute kiosk-reachable host IP
   ansible.builtin.set_fact:
     _kiosk_host_ip: >-
       {{ _lan_gateway.split('.')[0:3] | join('.') + '.' +
          (proxmox_lan_mgmt_ip_offset | default(2) | string)
-         if ('router_nodes' in group_names or 'lan_hosts' in group_names)
+         if ('router_nodes' in group_names)
             and (_lan_gateway | default('')) | length > 0
+         else ansible_host
+              if ('lan_hosts' in group_names)
          else container_subnet_prefix + '.' + (container_subnet_id | string) + '.1'
               if (container_subnet_id | default('')) | string | length > 0
          else ansible_host }}
@@ -180,7 +197,7 @@
            else '' }}
       MANAGEMENT_SERVER: >-
         {{ kiosk_management_server if (kiosk_management_server | default('')) | length > 0
-           else callhome_server
+           else ('http://' + _kiosk_host_ip | trim + ':' + callhome_port)
                 if inventory_hostname in groups.get('router_nodes', [])
            else (
              'http://' + hostvars[groups['router_nodes'][0]]['kiosk_static_ip'] + ':' + kiosk_manager_port
@@ -206,6 +223,7 @@
         {{ _child_manager_ips | default({}) }}
       NODE_IPS: >-
         {{ _kiosk_node_ips | default({}) }}
+      STATE_DIR: /opt/kiosk/state
 
 # ── Deploy host-specific config.json ─────────────────────────────
 

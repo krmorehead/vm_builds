@@ -1,8 +1,7 @@
 ---
-# Shared pre-flight check: verify an LXC template exists on the controller
-# and that its filename matches the image manifest.
-# Used by 9 LXC roles: pihole, rsyslog, netdata, homeassistant, jellyfin,
-#   kodi, moonlight, kiosk, gaming.
+# Shared pre-flight check: verify an LXC template exists on the controller.
+# Used by 10 LXC roles: pihole, rsyslog, netdata, homeassistant, jellyfin,
+#   kodi, moonlight, kiosk, gaming, wireguard.
 #
 # Required variables (set via include_tasks vars:):
 #   lxc_template_path  — relative path to the template file (e.g. images/pihole-1.0.0-debian-12-amd64.tar.zst)
@@ -20,16 +19,3 @@
       {{ lxc_service_name }} template not found: {{ lxc_template_path }}.
       Run ./build-images.sh (or --only <target> for selective rebuild) to build it.
   when: not (_lxc_template_stat.stat.exists | default(false))
-
-- name: "Verify manifest exists — {{ lxc_service_name }}"
-  ansible.builtin.stat:
-    path: "{{ role_path }}/../../images/manifest.json"
-  register: _manifest_stat
-  delegate_to: localhost
-
-- name: "Fail if manifest is missing — {{ lxc_service_name }}"
-  ansible.builtin.fail:
-    msg: >-
-      Image manifest not found at images/manifest.json.
-      This file tracks image versions. It should be committed to git.
-  when: not (_manifest_stat.stat.exists | default(false))

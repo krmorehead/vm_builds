@@ -298,17 +298,17 @@ class TestKioskLaunchRendering:
     async def test_moonlight_icon_and_description(self, tmp_path):
         async with kiosk_ctx(tmp_path) as user:
             await user.open(f"{Routes.LAUNCH}?vmid=302&title=Moonlight&url_key=MOONLIGHT_URL")
-            await user.should_see("takes over this display for game streaming")
+            await user.should_see("Game streaming client")
 
     async def test_kodi_icon_and_description(self, tmp_path):
         async with kiosk_ctx(tmp_path) as user:
             await user.open(f"{Routes.LAUNCH}?vmid=301&title=Kodi&url_key=KODI_URL")
-            await user.should_see("takes over this display for media playback")
+            await user.should_see("Media center with headless")
 
     async def test_desktop_icon_and_description(self, tmp_path):
         async with kiosk_ctx(tmp_path) as user:
             await user.open(f"{Routes.LAUNCH}?vmid=400&title=Desktop&url_key=DESKTOP_URL")
-            await user.should_see("desktop VM takes over this display")
+            await user.should_see("Full Debian KDE desktop")
 
     async def test_launch_has_explanation_section(self, tmp_path):
         async with kiosk_ctx(tmp_path) as user:

@@ -363,13 +363,54 @@ Boot Sequence (Home Entertainment Box)
 │   └── Jellyfin (VMID 300)                   Media server (iGPU transcode, no display)
 │
 ├── Priority 6 ── Default Display
-│   └── Custom UX Kiosk (VMID 401)            Dashboard shown when idle
+│   └── Custom UX Kiosk (VMID 401)            Dashboard + VNC streaming when idle
 │
 └── On-Demand ── Manual Start Only
     ├── Kodi (VMID 301)                       Stops Kiosk on start, restarts Kiosk on stop
     ├── Moonlight Client (VMID 302)           Stops Kiosk on start, restarts Kiosk on stop
     └── Debian Desktop (VMID 400)             Stops Kiosk + takes exclusive iGPU
 ```
+
+---
+
+## VNC Remote Kiosk Streaming
+
+Every kiosk container runs a VNC streaming stack that enables remote control
+from any parent tier in the 4-tier hierarchy:
+
+```
+Browser (operator / parent kiosk)
+│   noVNC RFB client (JavaScript ES module)
+│   Direct WebSocket to target kiosk
+│   Port: 6080 (websockify)
+│
+├── websockify (python3-websockify)
+│   Bridges WebSocket ↔ TCP VNC
+│   Listens: 0.0.0.0:6080 → localhost:5900
+│
+├── wayvnc
+│   Wayland-native VNC server for wlroots (Cage)
+│   Captures framebuffer, serves VNC on 0.0.0.0:5900
+│   Creates virtual input devices for mouse/keyboard
+│
+└── Cage compositor + Chromium
+    Physical display output + VNC capture simultaneously
+```
+
+**Port forwarding** bridges the host IP to the container's websockify:
+- WAN hosts: iptables DNAT on the NAT bridge
+- Router node: socat TCP proxy (`kiosk-vnc-proxy.service`, cross-bridge)
+- LAN hosts: socat TCP proxy (`kiosk-vnc-proxy.service`, host:6080 → container:6080)
+
+**Two-level drill-down**: the operator's browser always connects directly to
+the target kiosk — never nested VNC. Navigation in the parent page's HTML
+chrome (back button, child picker dropdown) creates the hierarchy illusion.
+When drilling from a CM into a child NM, the browser disconnects from the CM
+and opens a new direct WebSocket to the NM's websockify.
+
+**Packages baked into image**: `wayvnc`, `python3-websockify`
+**Systemd units**: `kiosk-vnc.service`, `kiosk-vnc-ws.service`
+**Port constants**: `kiosk_vnc_port: 5900`, `kiosk_vnc_ws_port: 6080`
 
 ---
 
@@ -882,7 +923,7 @@ Service Roles
 │
 ├── Desktop Tier
 │   ├── desktop_vm / desktop_configure            VM   VMID 400   desktop_nodes  → desktop
-│   └── kiosk_lxc / kiosk_configure               LXC  VMID 401   desktop_nodes  → kiosk
+│   └── kiosk_lxc / kiosk_configure               LXC  VMID 401   desktop_nodes  → kiosk  (VNC: 5900/6080)
 │
 └── Gaming
     └── gaming_lxc / gaming_lxc_configure         LXC  VMID 601   gaming_nodes   → gaming

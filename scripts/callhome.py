@@ -445,6 +445,19 @@ def collect_extensions() -> dict[str, dict]:
     return _registry.collect_all()
 
 
+_IMAGE_VERSION_PATH = "/etc/image_version"
+
+
+def get_image_version(path: str | None = None) -> str:
+    """Read the image version baked in at build time."""
+    target = path or _IMAGE_VERSION_PATH
+    try:
+        with open(target) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
 def build_container_payload(container_id: str = "") -> dict:
     """Build a heartbeat payload for container mode."""
     cid = container_id or socket.gethostname()
@@ -466,6 +479,7 @@ def build_container_payload(container_id: str = "") -> dict:
             "listening_ports": ports,
             "ready": True,
             "extensions": extensions,
+            "image_version": get_image_version(),
         },
     }
 

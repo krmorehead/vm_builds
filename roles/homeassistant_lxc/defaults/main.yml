@@ -3,7 +3,6 @@ homeassistant_ct_hostname: homeassistant
 homeassistant_ct_memory: 1024
 homeassistant_ct_cores: 2
 homeassistant_ct_disk: "8"
-homeassistant_ct_template: "{{ homeassistant_lxc_template }}"
 homeassistant_ct_template_path: "{{ homeassistant_lxc_template_path }}"
 homeassistant_ct_onboot: true
 homeassistant_ct_startup_order: 5

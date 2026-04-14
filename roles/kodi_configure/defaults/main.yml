@@ -1,4 +1,2 @@
 ---
 kodi_web_port: 8080
-kodi_alsa_card: 0
-kodi_alsa_device: 3

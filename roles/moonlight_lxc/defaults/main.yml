@@ -3,7 +3,6 @@ moonlight_ct_hostname: moonlight
 moonlight_ct_memory: 512
 moonlight_ct_cores: 1
 moonlight_ct_disk: "2"
-moonlight_ct_template: "{{ moonlight_lxc_template }}"
 moonlight_ct_template_path: "{{ moonlight_lxc_template_path }}"
 moonlight_ct_onboot: false
 moonlight_ct_unprivileged: false

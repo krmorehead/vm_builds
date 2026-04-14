@@ -72,74 +72,63 @@ proxmox_lxc_default_template: debian-12-standard_12.12-1_amd64.tar.zst
 proxmox_lxc_template_storage: local
 proxmox_lxc_template_path: images/debian-12-standard_12.12-1_amd64.tar.zst
 
-# ── Image version manifest ──────────────────────────────────────
-# Single source of truth for image versions. Updated by build-images.sh.
-# Template names and paths are derived from this manifest so they stay
-# in sync with the versioned filenames produced by the build script.
-_image_manifest: "{{ lookup('file', project_root + '/images/manifest.json') | from_json }}"
+# ── Image versions (from per-image .version sidecars) ────────────
+# Each image has a sidecar file (e.g. images/pihole.version) written
+# by build-images.sh. Hard-fails if sidecar is missing — run the build.
 
 # ── OpenWrt LXC (mesh satellite nodes) ────────────────────────────
-openwrt_lxc_template: "{{ _image_manifest.images.mesh.filename }}"
-openwrt_lxc_template_path: "images/{{ _image_manifest.images.mesh.filename }}"
-openwrt_lxc_image_version: "{{ _image_manifest.images.mesh.version }}"
+openwrt_lxc_image_version: "{{ lookup('file', project_root + '/images/mesh.version') }}"
+openwrt_lxc_template_path: "images/openwrt-mesh-lxc-{{ openwrt_lxc_image_version }}-24.10.0-x86-64-rootfs.tar.gz"
 
 # ── Pi-hole LXC ──────────────────────────────────────────────────
-pihole_lxc_template: "{{ _image_manifest.images.pihole.filename }}"
-pihole_lxc_template_path: "images/{{ _image_manifest.images.pihole.filename }}"
-pihole_image_version: "{{ _image_manifest.images.pihole.version }}"
+pihole_image_version: "{{ lookup('file', project_root + '/images/pihole.version') }}"
+pihole_lxc_template_path: "images/pihole-{{ pihole_image_version }}-debian-12-amd64.tar.zst"
 pihole_ct_ip_offset: 10
 
 # ── rsyslog LXC ─────────────────────────────────────────────────
-rsyslog_lxc_template: "{{ _image_manifest.images.rsyslog.filename }}"
-rsyslog_lxc_template_path: "images/{{ _image_manifest.images.rsyslog.filename }}"
-rsyslog_image_version: "{{ _image_manifest.images.rsyslog.version }}"
+rsyslog_image_version: "{{ lookup('file', project_root + '/images/rsyslog.version') }}"
+rsyslog_lxc_template_path: "images/rsyslog-{{ rsyslog_image_version }}-debian-12-amd64.tar.zst"
 rsyslog_ct_ip_offset: 30
 
 # ── Netdata LXC ─────────────────────────────────────────────────
-netdata_lxc_template: "{{ _image_manifest.images.netdata.filename }}"
-netdata_lxc_template_path: "images/{{ _image_manifest.images.netdata.filename }}"
-netdata_image_version: "{{ _image_manifest.images.netdata.version }}"
+netdata_image_version: "{{ lookup('file', project_root + '/images/netdata.version') }}"
+netdata_lxc_template_path: "images/netdata-{{ netdata_image_version }}-debian-12-amd64.tar.zst"
 netdata_ct_ip_offset: 40
 bridge_ct_ip_offset: 27
 
 # ── Home Assistant LXC ──────────────────────────────────────────
-homeassistant_lxc_template: "{{ _image_manifest.images.homeassistant.filename }}"
-homeassistant_lxc_template_path: "images/{{ _image_manifest.images.homeassistant.filename }}"
-homeassistant_image_version: "{{ _image_manifest.images.homeassistant.version }}"
+homeassistant_image_version: "{{ lookup('file', project_root + '/images/homeassistant.version') }}"
+homeassistant_lxc_template_path: "images/homeassistant-{{ homeassistant_image_version }}-debian-12-amd64.tar.zst"
 homeassistant_ct_ip_offset: 14
 
 # ── Jellyfin LXC ────────────────────────────────────────────────
-jellyfin_lxc_template: "{{ _image_manifest.images.jellyfin.filename }}"
-jellyfin_lxc_template_path: "images/{{ _image_manifest.images.jellyfin.filename }}"
-jellyfin_image_version: "{{ _image_manifest.images.jellyfin.version }}"
+jellyfin_image_version: "{{ lookup('file', project_root + '/images/jellyfin.version') }}"
+jellyfin_lxc_template_path: "images/jellyfin-{{ jellyfin_image_version }}-debian-12-amd64.tar.zst"
 jellyfin_ct_ip_offset: 15
 jellyfin_media_path: /mnt/media
 
 # ── Kodi LXC ───────────────────────────────────────────────────
-kodi_lxc_template: "{{ _image_manifest.images.kodi.filename }}"
-kodi_lxc_template_path: "images/{{ _image_manifest.images.kodi.filename }}"
-kodi_image_version: "{{ _image_manifest.images.kodi.version }}"
+kodi_image_version: "{{ lookup('file', project_root + '/images/kodi.version') }}"
+kodi_lxc_template_path: "images/kodi-{{ kodi_image_version }}-debian-12-amd64.tar.zst"
 kodi_ct_ip_offset: 16
 
 # ── Moonlight LXC ────────────────────────────────────────────
-moonlight_lxc_template: "{{ _image_manifest.images.moonlight.filename }}"
-moonlight_lxc_template_path: "images/{{ _image_manifest.images.moonlight.filename }}"
-moonlight_image_version: "{{ _image_manifest.images.moonlight.version }}"
+moonlight_image_version: "{{ lookup('file', project_root + '/images/moonlight.version') }}"
+moonlight_lxc_template_path: "images/moonlight-{{ moonlight_image_version }}-debian-12-amd64.tar.zst"
 moonlight_ct_ip_offset: 17
 
 # ── Kiosk LXC (custom dashboard on physical display) ─────────────
-kiosk_lxc_template: "{{ _image_manifest.images.kiosk.filename }}"
-kiosk_lxc_template_path: "images/{{ _image_manifest.images.kiosk.filename }}"
-kiosk_image_version: "{{ _image_manifest.images.kiosk.version }}"
+kiosk_image_version: "{{ lookup('file', project_root + '/images/kiosk.version') }}"
+kiosk_lxc_template_path: "images/kiosk-{{ kiosk_image_version }}-debian-12-amd64.tar.zst"
 kiosk_ct_ip_offset: 20
 
 # ── Desktop VM (Debian 12 + KDE/GNOME baked image) ───────────────
-desktop_image_path: "images/{{ _image_manifest.images.desktop.filename }}"
-desktop_image_version: "{{ _image_manifest.images.desktop.version }}"
+desktop_image_version: "{{ lookup('file', project_root + '/images/desktop.version') }}"
+desktop_image_path: "images/desktop-{{ desktop_image_version }}-debian-12-amd64.qcow2"
 
 # ── OpenWrt Router (VM) ──────────────────────────────────────────
-openwrt_image_path: "images/{{ _image_manifest.images.router.filename }}"
-openwrt_image_version: "{{ _image_manifest.images.router.version }}"
+openwrt_image_version: "{{ lookup('file', project_root + '/images/router.version') }}"
+openwrt_image_path: "images/openwrt-router-{{ openwrt_image_version }}-24.10.0-x86-64-combined.img.gz"
 openwrt_vm_id: 100
 openwrt_vm_name: openwrt-router
 openwrt_vm_memory: 512
@@ -147,9 +136,8 @@ openwrt_vm_cores: 2
 openwrt_vm_disk_size: 512M
 
 # ── WireGuard LXC ─────────────────────────────────────────────────
-wireguard_lxc_template: "{{ _image_manifest.images.wireguard.filename }}"
-wireguard_lxc_template_path: "images/{{ _image_manifest.images.wireguard.filename }}"
-wireguard_image_version: "{{ _image_manifest.images.wireguard.version }}"
+wireguard_image_version: "{{ lookup('file', project_root + '/images/wireguard.version') }}"
+wireguard_lxc_template_path: "images/wireguard-{{ wireguard_image_version }}-debian-12-amd64.tar.zst"
 
 # ── Network Tier (100-199) ───────────────────────────────────────
 wireguard_ct_id: 101
@@ -169,20 +157,24 @@ moonlight_ct_id: 302
 desktop_vm_id: 400
 kiosk_ct_id: 401
 kiosk_manager_port: "{{ lookup('env', 'KIOSK_MANAGER_PORT') | default('9001', true) }}"
+kiosk_vnc_ws_port: 6080
+kiosk_vnc_relay_base_port: 16080
+desktop_vnc_ws_port: 6081
+kodi_vnc_ws_port: 6082
+moonlight_vnc_ws_port: 6083
 
 # ── Observability Tier (500-599) ─────────────────────────────────
 netdata_ct_id: 500
 rsyslog_ct_id: 501
 
 # ── Gaming LXC (Sunshine host) ───────────────────────────────────
-gaming_lxc_template: "{{ _image_manifest.images.gaming.filename }}"
-gaming_lxc_template_path: "images/{{ _image_manifest.images.gaming.filename }}"
-gaming_image_version: "{{ _image_manifest.images.gaming.version }}"
+gaming_image_version: "{{ lookup('file', project_root + '/images/gaming.version') }}"
+gaming_lxc_template_path: "images/gaming-{{ gaming_image_version }}-fedora-amd64.tar.zst"
 gaming_ct_ip_offset: 18
 
 # ── Windows VM (general-purpose, not active for gaming) ──────────
-gaming_image_path: "images/{{ _image_manifest.images.sunshine.filename }}"
-sunshine_image_version: "{{ _image_manifest.images.sunshine.version }}"
+sunshine_image_version: "{{ lookup('file', project_root + '/images/sunshine.version') }}"
+gaming_image_path: "images/sunshine-{{ sunshine_image_version }}-win11-amd64.qcow2"
 
 # ── Gaming (600-699) ─────────────────────────────────────────────
 gaming_vm_id: 600

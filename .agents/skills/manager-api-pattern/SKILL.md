@@ -237,6 +237,7 @@ Registered by NodeManager.register_api():
 - `DELETE /api/heartbeat/subscribe/{id}` — unsubscribe
 - `GET /api/heartbeat/{node}/{type}` — get cached metrics
 - `POST /api/checkin` — receive container heartbeats (when MANAGEMENT_SERVER set)
+- `GET /api/images/versions` — deployed image versions from HostStateStore
 
 ### ClusterManager endpoints (fleet-level)
 
@@ -275,6 +276,7 @@ ClusterManager routes (with `include_fleet_storage=False`):
 - `GET /api/fleet/ready` — from nodes.json
 - `GET /api/fleet/stale` — circuit breaker
 - `GET /api/fleet/health` — summary
+- `GET /api/fleet/versions` — aggregate image versions from all Node Managers
 
 All mutation endpoints:
 - Require `x-callhome-token` header when `CALLHOME_PRIVATE_KEY` is set

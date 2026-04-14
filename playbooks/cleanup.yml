@@ -251,6 +251,111 @@
       changed_when: true
       failed_when: false
 
+    - name: Stop and remove VNC WebSocket socat proxy (LAN hosts)
+      ansible.builtin.shell:
+        cmd: |
+          systemctl stop kiosk-vnc-proxy 2>/dev/null || true
+          systemctl disable kiosk-vnc-proxy 2>/dev/null || true
+          rm -f /etc/systemd/system/kiosk-vnc-proxy.service
+          systemctl daemon-reload 2>/dev/null || true
+          pkill -f 'socat.*TCP-LISTEN:{{ kiosk_vnc_ws_port }}' || true
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Stop and remove VNC relay units for LAN hosts (router node)
+      ansible.builtin.shell:
+        cmd: |
+          for unit in /etc/systemd/system/kiosk-vnc-relay-*.service; do
+            [ -f "$unit" ] || continue
+            name=$(basename "$unit")
+            systemctl stop "$name" 2>/dev/null || true
+            systemctl disable "$name" 2>/dev/null || true
+            rm -f "$unit"
+          done
+          systemctl daemon-reload 2>/dev/null || true
+          pkill -f 'socat.*TCP-LISTEN:1608' || true
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Remove kiosk VNC DNAT rule (WAN hosts)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          iptables -t nat -S PREROUTING 2>/dev/null | grep '{{ kiosk_vnc_ws_port }}' | while read -r rule; do
+            iptables -t nat $(echo "$rule" | sed 's/^-A/-D/') 2>/dev/null || true
+          done
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Remove kiosk VNC FORWARD rule (WAN hosts)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          iptables -S FORWARD 2>/dev/null | grep '{{ kiosk_vnc_ws_port }}' | while read -r rule; do
+            iptables $(echo "$rule" | sed 's/^-A/-D/') 2>/dev/null || true
+          done
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Stop and remove Desktop VNC WebSocket bridge
+      ansible.builtin.shell:
+        cmd: |
+          systemctl stop desktop-vnc-ws 2>/dev/null || true
+          systemctl disable desktop-vnc-ws 2>/dev/null || true
+          rm -f /etc/systemd/system/desktop-vnc-ws.service
+          systemctl daemon-reload 2>/dev/null || true
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Remove Desktop VNC DNAT rule
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          iptables -t nat -S PREROUTING 2>/dev/null | grep '{{ desktop_vnc_ws_port }}' | while read -r rule; do
+            iptables -t nat $(echo "$rule" | sed 's/^-A/-D/') 2>/dev/null || true
+          done
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Remove Desktop VNC FORWARD rule
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          iptables -S FORWARD 2>/dev/null | grep '{{ desktop_vnc_ws_port }}' | while read -r rule; do
+            iptables $(echo "$rule" | sed 's/^-A/-D/') 2>/dev/null || true
+          done
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Stop and remove Kodi VNC WebSocket proxy
+      ansible.builtin.shell:
+        cmd: |
+          systemctl stop kodi-vnc-proxy 2>/dev/null || true
+          systemctl disable kodi-vnc-proxy 2>/dev/null || true
+          rm -f /etc/systemd/system/kodi-vnc-proxy.service
+          systemctl daemon-reload 2>/dev/null || true
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Stop and remove Moonlight VNC WebSocket proxy
+      ansible.builtin.shell:
+        cmd: |
+          systemctl stop moonlight-vnc-proxy 2>/dev/null || true
+          systemctl disable moonlight-vnc-proxy 2>/dev/null || true
+          rm -f /etc/systemd/system/moonlight-vnc-proxy.service
+          systemctl daemon-reload 2>/dev/null || true
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
     # ── Container NAT bridge cleanup ────────────────────────────────
 
     - name: Flush iptables NAT rules for container bridge
@@ -266,6 +371,7 @@
     - name: Remove iptables FORWARD rules for container bridge
       ansible.builtin.shell:
         cmd: |
+          set -o pipefail
           iptables -S FORWARD 2>/dev/null | grep 'vmbr_ct\|10\.99\.' | while read -r rule; do
             iptables $(echo "$rule" | sed 's/^-A/-D/') 2>/dev/null || true
           done
@@ -1177,6 +1283,7 @@
     - name: Remove iptables FORWARD rules for container bridge
       ansible.builtin.shell:
         cmd: |
+          set -o pipefail
           iptables -S FORWARD 2>/dev/null | grep 'vmbr_ct\|10\.99\.' | while read -r rule; do
             iptables $(echo "$rule" | sed 's/^-A/-D/') 2>/dev/null || true
           done

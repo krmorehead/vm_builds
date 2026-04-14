@@ -72,12 +72,16 @@ def create_app(config_path: Path | None = None) -> None:
     @ui.page("/hub")
     def hub_page() -> None:
         theme.apply_theme()
+        theme.kiosk_nav_bar()
         ui.add_head_html(theme.HOVER_CARD_STYLES)
-        render_hub(urls=urls)
+        with ui.column().classes("w-full kiosk-body-offset"):
+            render_hub(urls=urls)
 
     if is_cluster:
-        from scripts.webui.pages import cluster_dashboard
+        from scripts.webui.pages import cluster_dashboard, console, remote_kiosk
         cluster_dashboard.register()
+        remote_kiosk.register()
+        console.register()
 
     from scripts.webui.pages.bridge import _bridge_content
     from scripts.webui.pages.containers import _render_containers

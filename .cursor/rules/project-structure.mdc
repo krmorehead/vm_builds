@@ -734,10 +734,12 @@ returned "No route to host" for WAN hosts. Wasted the entire session.
 
 ## Kiosk container HOST_IP must be routable from the container
 - Kiosk containers use `HOST_IP` to SSH back to their Proxmox host for `pct list`/`qm list`. This IP MUST be reachable from inside the container.
-- **LAN containers** (router_nodes, lan_hosts): use the Proxmox LAN management IP (10.10.10.2), NOT `ansible_host` (the WAN IP). The container is on the LAN bridge and cannot route to the WAN IP.
+- **Router nodes** (home): use the computed LAN management IP (e.g., 10.10.10.2 from `_lan_gateway` + `proxmox_lan_mgmt_ip_offset`). The WAN IP is unreachable from the LAN bridge.
+- **LAN hosts** (mesh1): use `ansible_host` directly — for `lan_hosts`, `ansible_host` IS the LAN IP (e.g., 10.10.10.210). NEVER apply the router node's fixed `.2` offset to non-router LAN hosts.
 - **WAN containers**: use the NAT bridge gateway IP (10.99.{container_subnet_id}.1). The host IS the gateway for the container's NAT bridge.
-- NEVER use `ansible_host` as `HOST_IP` — it's the Proxmox host's WAN management IP, which may be unreachable from containers on the LAN or NAT bridge.
+- NEVER use `ansible_host` as `HOST_IP` for router_nodes — it's the WAN IP, unreachable from LAN containers. But for `lan_hosts`, `ansible_host` IS the correct LAN IP.
 - Previous bug (2026-04-12): `HOST_IP` was set to `ansible_host` (192.168.86.201). The kiosk container on the LAN bridge (10.10.10.23) could not route to it. The Containers page showed blank because `_api_guests` SSH'd to an unreachable host. Fix: compute `_kiosk_host_ip` dynamically based on whether the host is a LAN or WAN node.
+- Previous bug (2026-04-12): The HOST_IP formula used `_lan_gateway[0:3] + '.2'` for ALL hosts in `router_nodes` OR `lan_hosts`. mesh1's kiosk got HOST_IP=10.10.10.2 (home's IP) instead of 10.10.10.210 (mesh1's IP). All batman status, guest management, and container operations on mesh1 were silently SSHing to the wrong Proxmox host (home instead of mesh1). Fix: split the condition — router_nodes use the computed offset, lan_hosts use ansible_host.
 
 ## qm list vs pct list column order
 - `pct list` columns: `VMID Status Lock Name` — status at index 1, name at index 2+

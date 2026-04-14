@@ -1,4 +1,8 @@
 ---
+# moonlight-embedded, sway, wayvnc, and websockify are baked into the image
+# by build-images.sh. This role handles ONLY host-specific config: server
+# address, resolution, codec settings, and optional pairing.
+
 # ── Verify moonlight-embedded is available ───────────────────────
 
 - name: Verify moonlight-embedded installed in container
@@ -7,34 +11,6 @@
   register: _moonlight_bin
   changed_when: false
   failed_when: _moonlight_bin.rc != 0
-
-# ── Configure iGPU access ───────────────────────────────────────
-
-- name: Create render group and add root to video/render
-  ansible.builtin.shell:
-    cmd: |
-      pct exec {{ moonlight_ct_id }} -- bash -c '
-        groupadd -g {{ igpu_render_gid }} render 2>/dev/null || true
-        usermod -a -G render,video,input root 2>/dev/null || true
-      '
-    executable: /bin/bash
-  changed_when: true
-
-# ── Verify VA-API decode ─────────────────────────────────────────
-
-- name: Check VA-API decode availability
-  ansible.builtin.command:
-    cmd: pct exec {{ moonlight_ct_id }} -- vainfo --display drm
-  register: _vainfo_check
-  changed_when: false
-  failed_when: false
-
-- name: Report VA-API status
-  ansible.builtin.debug:
-    msg: >-
-      VA-API status: {{ 'hardware decode available'
-        if 'VAProfile' in (_vainfo_check.stdout | default(''))
-        else 'software fallback (no hardware decode detected)' }}
 
 # ── Deploy Moonlight configuration ──────────────────────────────
 
@@ -79,7 +55,8 @@
       Server: {{ moonlight_server_ip | default('not set', true) }}
       Resolution: {{ moonlight_resolution }}@{{ moonlight_fps }}fps
       Codec: {{ moonlight_codec }}, Bitrate: {{ moonlight_bitrate }}kbps
-      VA-API: {{ 'hardware' if 'VAProfile' in (_vainfo_check.stdout | default('')) else 'software fallback' }}
+      Display: headless Wayland (sway + wayvnc) via VNC
+      VNC port: {{ moonlight_vnc_ws_port | default('6083') }}
       Pairing: {{ 'attempted'
         if (moonlight_server_ip | default('', true) | length > 0
             and moonlight_pair_pin | default('', true) | length > 0)

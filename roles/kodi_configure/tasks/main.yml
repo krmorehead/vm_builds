@@ -1,8 +1,7 @@
 ---
-# Render group, guisettings.xml (default port), .kodi skeleton, and
-# kodi-standalone enablement are baked into the image by build-images.sh.
-# This role handles ONLY host-specific config: render GID override,
-# ALSA device, and optional web port override.
+# guisettings.xml (default port), .kodi skeleton, and headless VNC services
+# (sway+wayvnc+websockify) are baked into the image by build-images.sh.
+# This role handles ONLY host-specific config: optional web port override.
 
 # ── Ensure container is running ──────────────────────────────────
 
@@ -29,50 +28,6 @@
   changed_when: false
   when: "'stopped' in (_kodi_ct_status.stdout | default(''))"
 
-# ── Configure iGPU access (host-specific GID) ─────────────────
-
-- name: Update render group GID to match host
-  ansible.builtin.shell:
-    cmd: |
-      pct exec {{ kodi_ct_id }} -- bash -c '
-        groupmod -g {{ igpu_render_gid }} render 2>/dev/null || true
-        usermod -a -G render,video,audio,input kodi 2>/dev/null || true
-      '
-    executable: /bin/bash
-  changed_when: true
-
-# ── Configure ALSA HDMI audio output (host-specific) ────────────
-
-- name: Write ALSA config to host temp
-  ansible.builtin.copy:
-    content: |
-      pcm.!default {
-        type hw
-        card {{ kodi_alsa_card }}
-        device {{ kodi_alsa_device }}
-      }
-      ctl.!default {
-        type hw
-        card {{ kodi_alsa_card }}
-      }
-    dest: /tmp/kodi_asoundrc
-    mode: "0644"
-
-- name: Push ALSA config into container
-  ansible.builtin.command:
-    cmd: pct push {{ kodi_ct_id }} /tmp/kodi_asoundrc /home/kodi/.asoundrc
-  changed_when: true
-
-- name: Set Kodi ownership on ALSA config
-  ansible.builtin.command:
-    cmd: pct exec {{ kodi_ct_id }} -- chown kodi:kodi /home/kodi/.asoundrc
-  changed_when: true
-
-- name: Clean up host temp files
-  ansible.builtin.file:
-    path: /tmp/kodi_asoundrc
-    state: absent
-
 # ── Override web port if non-default ────────────────────────────
 
 - name: Override Kodi web port if non-default
@@ -93,6 +48,6 @@
     msg: >-
       Kodi configured successfully!
       Web interface: http://{{ kodi_static_ip | default('unknown') }}:{{ kodi_web_port }}
-      Display: GBM/DRM via /dev/dri
-      Audio: ALSA via /dev/snd (HDMI)
-      Service: kodi-standalone (baked + enabled)
+      Display: headless Wayland (sway + wayvnc) via VNC
+      VNC port: {{ kodi_vnc_ws_port | default('6082') }}
+      Service: kodi-display + kodi-vnc + kodi-vnc-ws (baked + enabled)

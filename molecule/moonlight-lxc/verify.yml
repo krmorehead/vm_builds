@@ -55,37 +55,30 @@
         that: "'onboot: 0' in _moonlight_cfg.stdout"
         fail_msg: "Container {{ moonlight_ct_id }} should have onboot: 0"
 
-    # ── Device mounts ────────────────────────────────────────────
+    # ── Headless VNC stack (sway + wayvnc + websockify) ──────────
 
-    - name: Check DRI devices are mounted
-      ansible.builtin.command:
-        cmd: pct exec {{ moonlight_ct_id }} -- ls /dev/dri/
-      register: _dri_devices
+    - name: Check headless VNC stack inside container
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ moonlight_ct_id }} -- /bin/sh -c '
+          echo "SWAY=$(command -v sway >/dev/null 2>&1 && echo yes || echo no)";
+          echo "WAYVNC=$(command -v wayvnc >/dev/null 2>&1 && echo yes || echo no)";
+          echo "WEBSOCKIFY=$(command -v websockify >/dev/null 2>&1 && echo yes || echo no)";
+          echo "VNC_SVC=$(systemctl is-enabled moonlight-vnc 2>/dev/null || echo missing)";
+          echo "VNC_WS_SVC=$(systemctl is-enabled moonlight-vnc-ws 2>/dev/null || echo missing)"
+          '
+      register: _moonlight_vnc_health
       changed_when: false
 
-    - name: Assert DRI devices exist
+    - name: Assert headless VNC stack is present and enabled
       ansible.builtin.assert:
-        that: _dri_devices.rc == 0
-        fail_msg: "DRI devices not mounted at /dev/dri/"
-
-    - name: Check input devices are mounted
-      ansible.builtin.command:
-        cmd: pct exec {{ moonlight_ct_id }} -- ls /dev/input/
-      register: _input_devices
-      changed_when: false
-      failed_when: false
-
-    # ── lxc.mount.entry + cgroup allowlist (from cached config) ────
-
-    - name: Assert device bind mounts are configured
-      ansible.builtin.assert:
-        that: (_moonlight_cfg.stdout | regex_findall('lxc\\.mount\\.entry.*dev/') | length) >= 2
-        fail_msg: "Expected at least 2 lxc.mount.entry device rules in container config"
-
-    - name: Assert cgroup allowlist has device rules
-      ansible.builtin.assert:
-        that: (_moonlight_cfg.stdout | regex_findall('lxc\\.cgroup2\\.devices\\.allow') | length) >= 3
-        fail_msg: "Expected at least 3 cgroup device rules in container config"
+        that:
+          - "'SWAY=yes' in _moonlight_vnc_health.stdout"
+          - "'WAYVNC=yes' in _moonlight_vnc_health.stdout"
+          - "'WEBSOCKIFY=yes' in _moonlight_vnc_health.stdout"
+          - "'VNC_SVC=enabled' in _moonlight_vnc_health.stdout"
+          - "'VNC_WS_SVC=enabled' in _moonlight_vnc_health.stdout"
+        fail_msg: "Headless VNC stack missing or not enabled: {{ _moonlight_vnc_health.stdout }}"
 
     # ── Moonlight binary and config ──────────────────────────────
 
@@ -119,15 +112,6 @@
         fail_msg: "Moonlight config file /etc/moonlight.conf not found"
       when: not (_api_ready | bool)
 
-    # ── VA-API decode ────────────────────────────────────────────
-
-    - name: Check VA-API decode availability
-      ansible.builtin.command:
-        cmd: pct exec {{ moonlight_ct_id }} -- vainfo --display drm
-      register: _vaapi_verify
-      changed_when: false
-      failed_when: false
-
     # ── Container IP ─────────────────────────────────────────────
 
     - name: Get container IP
@@ -144,6 +128,20 @@
         that: _moonlight_verify_ip.stdout | trim | length > 0
         fail_msg: "Moonlight container has no IP address"
 
+    # ── Host-side VNC proxy ──────────────────────────────────────
+
+    - name: Check moonlight-vnc-proxy service on host
+      ansible.builtin.command:
+        cmd: systemctl is-active moonlight-vnc-proxy
+      register: _moonlight_vnc_proxy
+      changed_when: false
+      failed_when: false
+
+    - name: Assert moonlight-vnc-proxy is running
+      ansible.builtin.assert:
+        that: "'active' in _moonlight_vnc_proxy.stdout"
+        fail_msg: "moonlight-vnc-proxy not active on {{ inventory_hostname }}"
+
     # ── Report ───────────────────────────────────────────────────
 
     - name: Report Moonlight verification
@@ -153,6 +151,6 @@
           ct={{ moonlight_ct_id }}, running=yes,
           moonlight={{ 'api' if (_api_ready | bool) else ('installed' if 'MOONLIGHT=installed' in (_moonlight_health.stdout | default('')) else 'missing') }},
           config={{ 'api' if (_api_ready | bool) else ('deployed' if 'CONFIG=exists' in (_moonlight_health.stdout | default('')) else 'missing') }},
-          vaapi={{ 'hardware' if 'VAProfile' in (_vaapi_verify.stdout | default('')) else 'software' }},
-          dri={{ 'mounted' if _dri_devices.rc == 0 else 'missing' }},
+          vnc_stack={{ 'complete' if 'SWAY=yes' in _moonlight_vnc_health.stdout else 'incomplete' }},
+          proxy={{ 'active' if 'active' in (_moonlight_vnc_proxy.stdout | default('')) else 'inactive' }},
           ip={{ _moonlight_verify_ip.stdout | trim }}

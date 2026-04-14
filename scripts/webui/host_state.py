@@ -77,6 +77,7 @@ class ContainerInfo:
     bridge: str
     hardware: list[str] = field(default_factory=list)
     last_deployed: str = ""
+    image_version: str = ""
 
 
 # ── Composed sub-models ──────────────────────────────────────────────
@@ -147,6 +148,14 @@ class HostState:
             p for p in self.hardware.wifi_phys
             if p.namespace.startswith("container:")
         ]
+
+    def image_versions(self) -> dict[str, str]:
+        """Return {service_type: version} for all containers with known versions."""
+        return {
+            ct.service_type: ct.image_version
+            for ct in self.containers.values()
+            if ct.image_version
+        }
 
     # ── Serialization ─────────────────────────────────────────────
 

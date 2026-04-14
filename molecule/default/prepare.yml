@@ -1,56 +1,50 @@
 ---
-- name: Assert all required images exist
+- name: Verify image version sidecars exist
   hosts: localhost
   connection: local
   gather_facts: false
   vars:
     _project_root: "{{ playbook_dir }}/../.."
     images_dir: "{{ _project_root }}/images"
-    _manifest: "{{ lookup('file', _project_root + '/images/manifest.json') | from_json }}"
-    _optional_images:
-      - sunshine
-    required_images: >-
-      {{ _manifest.images | dict2items
-         | rejectattr('key', 'in', _optional_images)
-         | map(attribute='value.filename') | list }}
+    _required_version_files:
+      - pihole
+      - rsyslog
+      - jellyfin
+      - netdata
+      - wireguard
+      - homeassistant
+      - kodi
+      - moonlight
+      - kiosk
+      - gaming
+      - mesh
+      - router
+      - desktop
   tasks:
-    - name: Verify manifest.json exists and is valid
-      ansible.builtin.assert:
-        that:
-          - _manifest.schema_version is defined
-          - _manifest.images | length > 0
-        fail_msg: >-
-          images/manifest.json is missing or invalid.
-          This file tracks image versions. It should be committed to git.
-
-    - name: Check which images exist
+    - name: Check version sidecar files exist
       ansible.builtin.stat:
-        path: "{{ images_dir }}/{{ item }}"
-      loop: "{{ required_images }}"
-      register: _image_checks
+        path: "{{ images_dir }}/{{ item }}.version"
+      loop: "{{ _required_version_files }}"
+      register: _version_checks
 
-    - name: Identify missing images
+    - name: Identify missing version files
       ansible.builtin.set_fact:
-        missing_images: >-
-          {{ _image_checks.results
+        missing_versions: >-
+          {{ _version_checks.results
              | selectattr('stat.exists', 'false')
              | map(attribute='item')
              | list }}
 
-    - name: Fail if images are missing
+    - name: Fail if version files are missing
       ansible.builtin.fail:
         msg: |-
-          Missing images for E2E test:
-          {% for img in missing_images %}
-            - {{ img }}
+          Missing version sidecar files:
+          {% for v in missing_versions %}
+            - images/{{ v }}.version
           {% endfor %}
 
-          Build them with:
-            ./build-images.sh --parallel
-
-          Or build individually:
-            ./build-images.sh --host <ip> --only <target>
-      when: missing_images | length > 0
+          Build them with: ./build-images.sh
+      when: missing_versions | length > 0
 
 - name: Start heartbeat API server
   hosts: localhost

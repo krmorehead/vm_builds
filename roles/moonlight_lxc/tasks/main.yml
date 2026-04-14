@@ -13,6 +13,26 @@
     lxc_net_service_name: moonlight
     lxc_net_ip_offset: "{{ moonlight_ct_ip_offset }}"
 
+# ── Check container existence ──────────────────────────────────
+
+- name: Check if Moonlight container exists
+  ansible.builtin.command:
+    cmd: pct status {{ moonlight_ct_id }}
+  register: _ct_status
+  failed_when: false
+  changed_when: false
+
+- name: Set container existence flag
+  ansible.builtin.set_fact:
+    _lxc_exists: "{{ _ct_status.rc == 0 }}"
+
+# ── Resolve deployed version ──────────────────────────────────
+
+- name: Resolve deployed Moonlight version
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_deployed_version.yml"
+  vars:
+    _resolve_service_name: moonlight
+
 # ── Provision via shared proxmox_lxc role ────────────────────────
 
 - name: Provision Moonlight LXC container
@@ -27,7 +47,6 @@
     lxc_ct_disk: "{{ moonlight_ct_disk }}"
     lxc_ct_onboot: "{{ moonlight_ct_onboot }}"
     lxc_ct_startup_order: 0
-    lxc_ct_template: "{{ moonlight_ct_template }}"
     lxc_ct_template_path: "{{ moonlight_ct_template_path }}"
     lxc_ct_ip: "{{ _lxc_ct_ip }}/{{ _lan_cidr }}"
     lxc_ct_gateway: "{{ _lan_gateway }}"
@@ -37,20 +56,38 @@
     lxc_ct_features: "{{ moonlight_ct_features }}"
     lxc_ct_image_version: "{{ moonlight_image_version }}"
 
-# ── Device passthrough via lxc.mount.entry + cgroup allowlists ───
-
-- name: Apply device passthrough (DRI + input + uinput)
-  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_device_passthrough.yml"
-  vars:
-    lxc_dev_ct_id: "{{ moonlight_ct_id }}"
-    lxc_dev_conf_entries:
-      - "lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir"
-      - "lxc.mount.entry: /dev/input dev/input none bind,optional,create=dir"
-      - "lxc.cgroup2.devices.allow: c 226:* rwm"
-      - "lxc.cgroup2.devices.allow: c 13:* rwm"
-      - "lxc.cgroup2.devices.allow: c 10:223 rwm"
+# Moonlight runs headless via sway+wayvnc (WLR_BACKENDS=headless, pixman).
+# No DRI/input passthrough needed — VNC provides remote display.
 
 - name: Export Moonlight static IP for downstream roles
   ansible.builtin.set_fact:
     moonlight_static_ip: "{{ _lxc_ct_ip }}"
     cacheable: true
+
+# ── Port forwarding for Moonlight VNC WebSocket ──────────────────
+
+- name: Deploy Moonlight VNC socat proxy unit
+  ansible.builtin.copy:
+    content: |
+      [Unit]
+      Description=Moonlight VNC WebSocket proxy (host:{{ moonlight_vnc_ws_port }} -> moonlight:{{ moonlight_vnc_ws_port }})
+      After=network.target pve-guests.service
+      Wants=pve-guests.service
+
+      [Service]
+      Type=simple
+      ExecStart=/usr/bin/socat TCP-LISTEN:{{ moonlight_vnc_ws_port }},reuseaddr,fork TCP:{{ _lxc_ct_ip }}:{{ moonlight_vnc_ws_port }}
+      Restart=always
+      RestartSec=3
+
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/moonlight-vnc-proxy.service
+    mode: "0644"
+
+- name: Enable and start Moonlight VNC proxy
+  ansible.builtin.systemd:
+    name: moonlight-vnc-proxy
+    daemon_reload: true
+    enabled: true
+    state: restarted

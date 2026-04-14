@@ -2006,9 +2006,6 @@
         that:
           - "'status: ' in _kodi_cfg.stdout"
           - "'onboot: 0' in _kodi_cfg.stdout"
-          - _kodi_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/dri')
-          - _kodi_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/snd')
-          - _kodi_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/input')
         fail_msg: "Kodi container {{ kodi_ct_id }} config incorrect on {{ inventory_hostname }}"
 
     - name: Query Kodi readiness from API
@@ -2071,9 +2068,13 @@
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ kodi_ct_id }} -- /bin/sh -c '
-          echo "RENDER=$(id -nG kodi 2>/dev/null | grep -c render || echo 0)";
           echo "GUISETTINGS=$(test -f /home/kodi/.kodi/userdata/guisettings.xml && echo yes || echo no)";
-          echo "ENABLED=$(systemctl is-enabled kodi-standalone 2>/dev/null || echo missing)"
+          echo "DISPLAY_SVC=$(systemctl is-enabled kodi-display 2>/dev/null || echo missing)";
+          echo "VNC_SVC=$(systemctl is-enabled kodi-vnc 2>/dev/null || echo missing)";
+          echo "VNC_WS_SVC=$(systemctl is-enabled kodi-vnc-ws 2>/dev/null || echo missing)";
+          echo "SWAY=$(command -v sway >/dev/null 2>&1 && echo yes || echo no)";
+          echo "WAYVNC=$(command -v wayvnc >/dev/null 2>&1 && echo yes || echo no)";
+          echo "WEBSOCKIFY=$(command -v websockify >/dev/null 2>&1 && echo yes || echo no)"
           '
       register: _kodi_baked
       changed_when: false
@@ -2082,10 +2083,27 @@
     - name: Assert Kodi baked content present
       ansible.builtin.assert:
         that:
-          - _kodi_baked.stdout is regex('RENDER=[1-9]')
           - "'GUISETTINGS=yes' in _kodi_baked.stdout"
-          - "'ENABLED=enabled' in _kodi_baked.stdout"
-        fail_msg: "Kodi baked content missing: {{ _kodi_baked.stdout }}"
+          - "'DISPLAY_SVC=enabled' in _kodi_baked.stdout"
+          - "'VNC_SVC=enabled' in _kodi_baked.stdout"
+          - "'VNC_WS_SVC=enabled' in _kodi_baked.stdout"
+          - "'SWAY=yes' in _kodi_baked.stdout"
+          - "'WAYVNC=yes' in _kodi_baked.stdout"
+          - "'WEBSOCKIFY=yes' in _kodi_baked.stdout"
+        fail_msg: "Kodi headless VNC baked content missing: {{ _kodi_baked.stdout }}"
+      when: "'running' in _kodi_cfg.stdout"
+
+    - name: Check kodi-vnc-proxy service on host
+      ansible.builtin.command:
+        cmd: systemctl is-active kodi-vnc-proxy
+      register: _kodi_vnc_proxy
+      changed_when: false
+      failed_when: false
+
+    - name: Assert kodi-vnc-proxy is running
+      ansible.builtin.assert:
+        that: "'active' in _kodi_vnc_proxy.stdout"
+        fail_msg: "kodi-vnc-proxy not active on {{ inventory_hostname }}"
       when: "'running' in _kodi_cfg.stdout"
 
     - name: Assert stamp contains kodi_lxc
@@ -2117,8 +2135,6 @@
         that:
           - "'running' in _moonlight_cfg.stdout"
           - "'onboot: 0' in _moonlight_cfg.stdout"
-          - _moonlight_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/dri')
-          - _moonlight_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/input')
         fail_msg: "Moonlight container {{ moonlight_ct_id }} config incorrect on {{ inventory_hostname }}"
 
     - name: Query Moonlight readiness from API
@@ -2139,28 +2155,52 @@
         - _api_ready | bool
         - _moonlight_api.status | default(0) == 200
 
-    - name: Check Moonlight binary and config (pct exec, SSH fallback)
+    - name: Check Moonlight binary, config, and VNC stack (pct exec, SSH fallback)
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ moonlight_ct_id }} -- /bin/sh -c '
           echo "BINARY=$(test -x /usr/local/bin/moonlight && echo yes || echo no)";
           echo "CONFIG=$(test -f /etc/moonlight.conf && echo yes || echo no)";
-          echo "DRI=$(ls /dev/dri/renderD* 2>/dev/null | head -1 || echo none)"
+          echo "SWAY=$(command -v sway >/dev/null 2>&1 && echo yes || echo no)";
+          echo "WAYVNC=$(command -v wayvnc >/dev/null 2>&1 && echo yes || echo no)";
+          echo "WEBSOCKIFY=$(command -v websockify >/dev/null 2>&1 && echo yes || echo no)";
+          echo "DISPLAY_SVC=$(systemctl is-enabled moonlight-display 2>/dev/null || echo missing)";
+          echo "VNC_SVC=$(systemctl is-enabled moonlight-vnc 2>/dev/null || echo missing)";
+          echo "VNC_WS_SVC=$(systemctl is-enabled moonlight-vnc-ws 2>/dev/null || echo missing)"
           '
       register: _moonlight_health
       changed_when: false
       when: not (_api_ready | bool)
 
-    - name: Assert Moonlight binary and config present (SSH fallback)
+    - name: Assert Moonlight binary, config, and VNC stack present (SSH fallback)
       ansible.builtin.assert:
         that:
           - "'BINARY=yes' in _moonlight_health.stdout"
           - "'CONFIG=yes' in _moonlight_health.stdout"
+          - "'SWAY=yes' in _moonlight_health.stdout"
+          - "'WAYVNC=yes' in _moonlight_health.stdout"
+          - "'WEBSOCKIFY=yes' in _moonlight_health.stdout"
+          - "'DISPLAY_SVC=enabled' in _moonlight_health.stdout"
+          - "'VNC_SVC=enabled' in _moonlight_health.stdout"
+          - "'VNC_WS_SVC=enabled' in _moonlight_health.stdout"
         fail_msg: >-
           Moonlight health check failed on {{ inventory_hostname }}: {{ _moonlight_health.stdout | default('') }}.
-          moonlight-embedded binary or config missing.
+          moonlight-embedded binary, config, or headless VNC stack missing.
       when:
         - _moonlight_health is defined and _moonlight_health is not skipped
+
+    - name: Check moonlight-vnc-proxy service on host
+      ansible.builtin.command:
+        cmd: systemctl is-active moonlight-vnc-proxy
+      register: _moonlight_vnc_proxy
+      changed_when: false
+      failed_when: false
+
+    - name: Assert moonlight-vnc-proxy is running
+      ansible.builtin.assert:
+        that: "'active' in _moonlight_vnc_proxy.stdout"
+        fail_msg: "moonlight-vnc-proxy not active on {{ inventory_hostname }}"
+      when: "'running' in _moonlight_cfg.stdout"
 
     - name: Assert stamp contains moonlight_lxc
       ansible.builtin.assert:
@@ -2213,6 +2253,18 @@
       ansible.builtin.assert:
         that: "'desktop_vm' in stamp.plays"
         fail_msg: "deploy_stamp missing desktop_vm on {{ inventory_hostname }}"
+
+    - name: Check desktop-vnc-ws service
+      ansible.builtin.command:
+        cmd: systemctl is-active desktop-vnc-ws
+      register: _desktop_vnc_ws
+      changed_when: false
+      failed_when: false
+
+    - name: Assert desktop-vnc-ws proxy is running
+      ansible.builtin.assert:
+        that: "'active' in _desktop_vnc_ws.stdout"
+        fail_msg: "desktop-vnc-ws (websockify) not active on {{ inventory_hostname }}"
 
 # ── Play 12: Kiosk health (kiosk_nodes) ──────────────────────────
 # Deep Kiosk checks (Cage, Chromium, dashboard file, systemd service)
@@ -2414,6 +2466,79 @@
       ansible.builtin.assert:
         that: "'kiosk_lxc' in stamp.plays"
         fail_msg: "deploy_stamp missing kiosk_lxc entry"
+
+    - name: Check VNC services enabled inside kiosk container
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ kiosk_ct_id }} -- /bin/sh -c '
+          echo "VNC_SVC=$(systemctl is-enabled kiosk-vnc 2>/dev/null || echo disabled)";
+          echo "VNC_WS_SVC=$(systemctl is-enabled kiosk-vnc-ws 2>/dev/null || echo disabled)";
+          echo "WAYVNC=$(command -v wayvnc >/dev/null 2>&1 && echo yes || echo no)";
+          echo "WEBSOCKIFY=$(command -v websockify >/dev/null 2>&1 && echo yes || echo no)"
+          '
+      register: _kiosk_vnc_health
+      changed_when: false
+
+    - name: Assert VNC services enabled and packages present
+      ansible.builtin.assert:
+        that:
+          - "'VNC_SVC=enabled' in _kiosk_vnc_health.stdout"
+          - "'VNC_WS_SVC=enabled' in _kiosk_vnc_health.stdout"
+          - "'WAYVNC=yes' in _kiosk_vnc_health.stdout"
+          - "'WEBSOCKIFY=yes' in _kiosk_vnc_health.stdout"
+        fail_msg: "VNC stack not properly baked on {{ inventory_hostname }}: {{ _kiosk_vnc_health.stdout }}"
+
+    - name: Verify VNC WebSocket port forwarding (WAN hosts)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          iptables -t nat -S PREROUTING 2>/dev/null | grep -c '{{ kiosk_vnc_ws_port }}' || echo 0
+        executable: /bin/bash
+      register: _vnc_dnat
+      changed_when: false
+      when:
+        - inventory_hostname not in groups.get('router_nodes', [])
+        - inventory_hostname not in groups.get('lan_hosts', [])
+
+    - name: Assert VNC DNAT rule exists on WAN hosts
+      ansible.builtin.assert:
+        that: (_vnc_dnat.stdout | trim | int) > 0
+        fail_msg: "Missing VNC DNAT rule for port {{ kiosk_vnc_ws_port }} on {{ inventory_hostname }}"
+      when:
+        - inventory_hostname not in groups.get('router_nodes', [])
+        - inventory_hostname not in groups.get('lan_hosts', [])
+
+    - name: Verify VNC socat proxy on LAN hosts
+      ansible.builtin.command:
+        cmd: systemctl is-active kiosk-vnc-proxy
+      register: _vnc_proxy
+      changed_when: false
+      failed_when: false
+      when: inventory_hostname in groups.get('router_nodes', []) or inventory_hostname in groups.get('lan_hosts', [])
+
+    - name: Assert VNC socat proxy running on LAN hosts
+      ansible.builtin.assert:
+        that: "'active' in _vnc_proxy.stdout"
+        fail_msg: "VNC socat proxy (kiosk-vnc-proxy) not active on LAN host {{ inventory_hostname }}"
+      when: inventory_hostname in groups.get('router_nodes', []) or inventory_hostname in groups.get('lan_hosts', [])
+
+    - name: Verify VNC relay enabled for LAN hosts (router node only)
+      ansible.builtin.command:
+        cmd: "systemctl is-enabled kiosk-vnc-relay-{{ item }}"
+      register: _vnc_relay
+      changed_when: false
+      failed_when: false
+      loop: "{{ groups.get('lan_hosts', []) | intersect(groups.get('kiosk_nodes', [])) }}"
+      when: inventory_hostname in groups.get('router_nodes', [])
+
+    - name: Assert VNC relay enabled for each LAN host
+      ansible.builtin.assert:
+        that: "'enabled' in item.stdout"
+        fail_msg: "VNC relay (kiosk-vnc-relay-{{ item.item }}) not enabled on router node"
+      loop: "{{ _vnc_relay.results | default([]) }}"
+      when:
+        - inventory_hostname in groups.get('router_nodes', [])
+        - item is not skipped
 
 # ── Play 13: Gaming LXC health (gaming_nodes) ───────────────────
 # Deep Gaming checks (VA-API profiles, render/card devices, dsda-doom,
@@ -2669,70 +2794,81 @@
           Fix: check MANAGEMENT_SERVER in kiosk config.json,
           manager-api-proxy.service on the router node, and NAT routing.
 
-# ── Image version manifest ─────────────────────────────────────────
-# Verify the manifest exists on the controller and has valid structure.
+# ── Image version pipeline ──────────────────────────────────────────
+# Verify per-image .version sidecar files exist and contain valid semver,
+# and that Node Managers report deployed versions via their API.
 
-- name: Verify image version manifest
+- name: Verify image version pipeline
   hosts: localhost
   connection: local
   gather_facts: false
   vars:
     _project_root: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+    _expected_services:
+      - mesh
+      - router
+      - pihole
+      - rsyslog
+      - jellyfin
+      - netdata
+      - wireguard
+      - homeassistant
+      - kodi
+      - moonlight
+      - kiosk
+      - gaming
+      - sunshine
+      - desktop
   tasks:
-    - name: Load image manifest
-      ansible.builtin.set_fact:
-        _manifest: "{{ lookup('file', _project_root + '/images/manifest.json') | from_json }}"
+    - name: Check sidecar version files exist
+      ansible.builtin.stat:
+        path: "{{ _project_root }}/images/{{ item }}.version"
+      register: _sidecar_stats
+      loop: "{{ _expected_services }}"
 
-    - name: Assert manifest has schema_version
+    - name: Assert all sidecar version files exist
       ansible.builtin.assert:
-        that: _manifest.schema_version is defined and _manifest.schema_version == 1
-        fail_msg: "Image manifest missing or invalid schema_version"
-
-    - name: Assert manifest has all expected image targets
-      ansible.builtin.assert:
-        that: item in _manifest.images
-        fail_msg: "Image manifest missing target: {{ item }}"
-      loop:
-        - mesh
-        - router
-        - pihole
-        - rsyslog
-        - jellyfin
-        - netdata
-        - wireguard
-        - homeassistant
-        - kodi
-        - moonlight
-        - kiosk
-        - gaming
-        - sunshine
-        - desktop
-
-    - name: Assert each manifest entry has required fields
-      ansible.builtin.assert:
-        that:
-          - _manifest.images[item].version is defined
-          - _manifest.images[item].version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
-          - _manifest.images[item].filename is defined
-          - _manifest.images[item].filename | length > 0
+        that: item.stat.exists
         fail_msg: >-
-          Image manifest entry '{{ item }}' is invalid.
-          Expected version (semver) and filename fields.
-      loop:
-        - mesh
-        - router
-        - pihole
-        - rsyslog
-        - jellyfin
-        - netdata
-        - wireguard
-        - homeassistant
-        - kodi
-        - moonlight
-        - kiosk
-        - gaming
-        - sunshine
-        - desktop
+          Missing version sidecar: images/{{ item.item }}.version.
+          Run ./build-images.sh --only {{ item.item }} to create it.
+      loop: "{{ _sidecar_stats.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Read sidecar version contents
+      ansible.builtin.slurp:
+        src: "{{ _project_root }}/images/{{ item }}.version"
+      register: _sidecar_contents
+      loop: "{{ _expected_services }}"
+
+    - name: Assert sidecar versions are valid semver
+      ansible.builtin.assert:
+        that: (item.content | b64decode | trim) is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+        fail_msg: >-
+          Invalid version in images/{{ item.item }}.version:
+          '{{ item.content | b64decode | trim }}'.
+          Expected semver (e.g. 1.0.0).
+      loop: "{{ _sidecar_contents.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Query fleet versions from SuperManager
+      ansible.builtin.uri:
+        url: >-
+          http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}/api/fleet/versions
+        return_content: true
+        timeout: 10
+      register: _fleet_versions
+      failed_when: false
+
+    - name: Report fleet version visibility
+      ansible.builtin.debug:
+        msg: >-
+          Fleet versions API:
+          {{ 'available — ' + (_fleet_versions.json | to_nice_json)
+             if (_fleet_versions.status | default(0)) == 200
+             else 'not available (SuperManager may not be running)' }}
 
 # ── Play: Manager host state assertions ──────────────────────────
 # Verify the Manager has been populated with infrastructure and

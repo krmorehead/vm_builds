@@ -3,13 +3,15 @@ profile: production
 
 # ansible-lint resolves {{ playbook_dir }}/../tasks/ as role-relative at
 # lint time, producing phantom paths like roles/*/tasks/manager_register.yml.
-# The real file lives at tasks/manager_register.yml and works at runtime.
+# The real files live at tasks/ and work at runtime.
 exclude_paths:
   - .venv/
   - collections/
   - molecule/
   - scripts/.image-builder-cache/
   - roles/*/tasks/manager_register.yml
+  - roles/*/tasks/resolve_deployed_version.yml
+  - roles/*/tasks/resolve_kiosk_version.yml
 
 skip_list:
   - command-instead-of-module

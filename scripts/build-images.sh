@@ -20,7 +20,6 @@ set -euo pipefail
 #
 # Usage: ./build-images.sh [--clean] [--host <proxmox-ip>] [--only <target>]
 #                          [--parallel] [--hosts <ip1>,<ip2>,...]
-#                          [--force] [--bump <target> <major|minor|patch>]
 #   --clean          Remove cached Image Builder before downloading fresh copy
 #   --host <ip>      Proxmox host for remote image builds. Required for remote-built templates.
 #   --only <target>  Build only the specified target (mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, kiosk, moonlight, gaming, sunshine, desktop).
@@ -28,12 +27,10 @@ set -euo pipefail
 #                    Reads host IPs from PRIMARY_HOST, AI_HOST, MESH_2_HOST env vars.
 #   --hosts <ips>    Comma-separated list of Proxmox host IPs for parallel builds.
 #                    Implies --parallel.
-#   --force          Rebuild even if image exists (auto-bumps patch version).
-#   --bump T L       Bump version for target T by level L before building.
-#                    L is one of: major, minor, patch.
 #
-# Image versions are tracked in images/manifest.json (committed to git).
+# Image versions are tracked in per-image sidecar files: images/<target>.version
 # Filenames include the semver: pihole-1.0.0-debian-12-amd64.tar.zst
+# Each build auto-bumps the patch version.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGES_DIR="$(cd "${SCRIPT_DIR}/../images" && pwd)"
@@ -66,7 +63,7 @@ sync_shared_scripts() {
     fi
 }
 
-# Output names are computed from the image manifest (see init_output_names)
+# Output names are computed per-build from sidecar .version files
 
 # Shared Debian base template for all Debian-based LXC builds
 DEBIAN_BASE_TEMPLATE="debian-12-standard_12.12-1_amd64.tar.zst"
@@ -95,11 +92,6 @@ SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o Connect
 PARALLEL_MODE=false
 PARALLEL_HOSTS=()
 CLEAN_MODE=false
-FORCE_BUILD=false
-declare -A BUMP_TARGETS
-
-# Image version manifest
-MANIFEST_FILE="${IMAGES_DIR}/manifest.json"
 
 # ── Package lists ────────────────────────────────────────────────────
 
@@ -236,7 +228,7 @@ cleanup_lxc_build() {
 
 check_deps() {
     local missing=()
-    for cmd in wget tar make zstd jq; do
+    for cmd in wget tar make zstd; do
         command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
     if (( ${#missing[@]} > 0 )); then
@@ -244,15 +236,7 @@ check_deps() {
     fi
 }
 
-# ── Image manifest helpers ────────────────────────────────────────────
-
-manifest_version() {
-    jq -r ".images.${1}.version" "$MANIFEST_FILE"
-}
-
-manifest_filename() {
-    jq -r ".images.${1}.filename" "$MANIFEST_FILE"
-}
+# ── Image version helpers ─────────────────────────────────────────────
 
 compute_filename() {
     local target="$1" version="$2"
@@ -287,84 +271,16 @@ bump_version() {
     esac
 }
 
-update_manifest() {
-    local target="$1" version="$2" filename="$3" sha256="$4" built_at="$5"
-    local tmp
-    tmp=$(mktemp)
-    jq --arg t "$target" --arg v "$version" --arg f "$filename" \
-       --arg s "$sha256" --arg ts "$built_at" \
-       '.images[$t] = {version: $v, filename: $f, sha256: $s, built_at: $ts}' \
-       "$MANIFEST_FILE" > "$tmp" && mv "$tmp" "$MANIFEST_FILE"
-}
-
-should_skip_build() {
-    local target="$1" output="$2"
-    if [[ -f "$output" ]] && [[ "$FORCE_BUILD" != true ]]; then
-        local label
-        label="$(echo "${target:0:1}" | tr '[:lower:]' '[:upper:]')${target:1}"
-        log "${label} image v$(manifest_version "$target") exists: $(basename "$output")"
-        log "  Use --force to rebuild or --bump $target <major|minor|patch> to version-bump."
-        return 0
-    fi
-    return 1
+init_build_version() {
+    local target="$1"
+    _CUR_VERSION=$(cat "${IMAGES_DIR}/${target}.version" 2>/dev/null || echo "0.0.0")
+    _NEW_VERSION=$(bump_version "$_CUR_VERSION" "patch")
 }
 
 finalize_build() {
-    local target="$1" output="$2"
-    local sha256 version filename built_at
-    sha256=$(sha256sum "$output" | awk '{print $1}')
-    version=$(manifest_version "$target")
-    filename=$(basename "$output")
-    built_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    update_manifest "$target" "$version" "$filename" "$sha256" "$built_at"
-    log "Manifest updated: ${target} v${version}"
-}
-
-init_output_names() {
-    if [[ ! -f "$MANIFEST_FILE" ]]; then
-        die "Image manifest not found: ${MANIFEST_FILE}
-  This file tracks image versions. It should exist at images/manifest.json."
-    fi
-
-    # Apply explicit version bumps (--bump target level)
-    for target in "${!BUMP_TARGETS[@]}"; do
-        local level="${BUMP_TARGETS[$target]}"
-        local cur new_ver new_file
-        cur=$(manifest_version "$target")
-        new_ver=$(bump_version "$cur" "$level")
-        new_file=$(compute_filename "$target" "$new_ver")
-        update_manifest "$target" "$new_ver" "$new_file" "" ""
-        log "Bumped ${target}: ${cur} -> ${new_ver}"
-    done
-
-    # --force without explicit --bump: auto-bump patch
-    if [[ "$FORCE_BUILD" == true ]]; then
-        for target in "${VALID_TARGETS[@]}"; do
-            if should_build "$target" && [[ -z "${BUMP_TARGETS[$target]:-}" ]]; then
-                local cur new_ver new_file
-                cur=$(manifest_version "$target")
-                new_ver=$(bump_version "$cur" "patch")
-                new_file=$(compute_filename "$target" "$new_ver")
-                update_manifest "$target" "$new_ver" "$new_file" "" ""
-                log "Auto-bumped ${target}: ${cur} -> ${new_ver} (--force)"
-            fi
-        done
-    fi
-
-    MESH_OUTPUT_NAME=$(manifest_filename mesh)
-    ROUTER_OUTPUT_NAME=$(manifest_filename router)
-    PIHOLE_OUTPUT_NAME=$(manifest_filename pihole)
-    RSYSLOG_OUTPUT_NAME=$(manifest_filename rsyslog)
-    JELLYFIN_OUTPUT_NAME=$(manifest_filename jellyfin)
-    NETDATA_OUTPUT_NAME=$(manifest_filename netdata)
-    WIREGUARD_OUTPUT_NAME=$(manifest_filename wireguard)
-    HOMEASSISTANT_OUTPUT_NAME=$(manifest_filename homeassistant)
-    KODI_OUTPUT_NAME=$(manifest_filename kodi)
-    KIOSK_OUTPUT_NAME=$(manifest_filename kiosk)
-    MOONLIGHT_OUTPUT_NAME=$(manifest_filename moonlight)
-    GAMING_OUTPUT_NAME=$(manifest_filename gaming)
-    SUNSHINE_OUTPUT_NAME=$(manifest_filename sunshine)
-    DESKTOP_OUTPUT_NAME=$(manifest_filename desktop)
+    local target="$1" output="$2" version="$3"
+    echo "$version" > "${IMAGES_DIR}/${target}.version"
+    log "Build complete: $(basename "$output") v${version}"
 }
 
 download_imagebuilder() {
@@ -384,14 +300,16 @@ download_imagebuilder() {
 }
 
 build_mesh_lxc() {
-    local output="${IMAGES_DIR}/${MESH_OUTPUT_NAME}"
-    should_skip_build "mesh" "$output" && return
+    init_build_version "mesh"
+    local output="${IMAGES_DIR}/$(compute_filename mesh "$_NEW_VERSION")"
 
     sync_shared_scripts "$MESH_FILES_DIR"
     log "Building mesh LXC rootfs..."
     local ib_dir="${BUILD_DIR}/${IB_NAME}"
     local pkg_list
     pkg_list=$(IFS=' '; echo "${MESH_PACKAGES[*]}")
+
+    echo "${_NEW_VERSION}" > "${MESH_FILES_DIR}/etc/image_version"
 
     local make_log="${BUILD_DIR}/mesh-build.log"
     make -C "$ib_dir" image \
@@ -411,21 +329,23 @@ build_mesh_lxc() {
     fi
 
     mkdir -p "$IMAGES_DIR"
-    cp "$rootfs" "${IMAGES_DIR}/${MESH_OUTPUT_NAME}"
-    finalize_build "mesh" "$output"
+    cp "$rootfs" "$output"
+    finalize_build "mesh" "$output" "$_NEW_VERSION"
     log "Mesh LXC rootfs: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
 
 build_router_vm() {
-    local output="${IMAGES_DIR}/${ROUTER_OUTPUT_NAME}"
-    should_skip_build "router" "$output" && return
+    init_build_version "router"
+    local output="${IMAGES_DIR}/$(compute_filename router "$_NEW_VERSION")"
 
     sync_shared_scripts "$ROUTER_FILES_DIR"
     log "Building router VM image..."
     local ib_dir="${BUILD_DIR}/${IB_NAME}"
     local pkg_list
     pkg_list=$(IFS=' '; echo "${ROUTER_PACKAGES[*]}")
+
+    echo "${_NEW_VERSION}" > "${ROUTER_FILES_DIR}/etc/image_version"
 
     # Clean previous build artifacts to avoid profile collision
     make -C "$ib_dir" clean 2>/dev/null || true
@@ -451,8 +371,8 @@ build_router_vm() {
     fi
 
     mkdir -p "$IMAGES_DIR"
-    cp "$combined" "${IMAGES_DIR}/${ROUTER_OUTPUT_NAME}"
-    finalize_build "router" "$output"
+    cp "$combined" "$output"
+    finalize_build "router" "$output" "$_NEW_VERSION"
     log "Router VM image: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
@@ -460,12 +380,11 @@ build_router_vm() {
 cleanup_pihole_build() { cleanup_lxc_build "${PIHOLE_BUILD_VMID}"; }
 
 build_pihole_lxc() {
+    init_build_version "pihole"
     log "Building Pi-hole LXC template (remote on Proxmox)..."
     local base_template="${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}"
-    local output="${IMAGES_DIR}/${PIHOLE_OUTPUT_NAME}"
+    local output="${IMAGES_DIR}/$(compute_filename pihole "$_NEW_VERSION")"
     local vmid="${PIHOLE_BUILD_VMID}"
-
-    should_skip_build "pihole" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "Pi-hole build requires --host <proxmox-ip>. Example:
@@ -559,7 +478,15 @@ TOML_EOF
         rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
     '"
 
+    log "Configuring Pi-hole for kiosk iframe embedding..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        sed -i \"/X-Frame-Options: DENY/d\" /etc/pihole/pihole.toml
+        sed -i \"s/frame-ancestors .none./frame-ancestors */g\" /etc/pihole/pihole.toml
+    '"
+
     inject_callhome_agent "${vmid}"
+
+    remote_cmd "pct exec ${vmid} -- bash -c 'echo ${_NEW_VERSION} > /etc/image_version'"
 
     log "Stopping build container..."
     remote_cmd "pct stop ${vmid}"
@@ -587,7 +514,7 @@ TOML_EOF
 
     trap - EXIT
 
-    finalize_build "pihole" "$output"
+    finalize_build "pihole" "$output" "$_NEW_VERSION"
     log "Pi-hole LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
@@ -595,12 +522,11 @@ TOML_EOF
 cleanup_rsyslog_build() { cleanup_lxc_build "${RSYSLOG_BUILD_VMID}"; }
 
 build_rsyslog_lxc() {
+    init_build_version "rsyslog"
     log "Building rsyslog LXC template (remote on Proxmox)..."
     local base_template="${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}"
-    local output="${IMAGES_DIR}/${RSYSLOG_OUTPUT_NAME}"
+    local output="${IMAGES_DIR}/$(compute_filename rsyslog "$_NEW_VERSION")"
     local vmid="${RSYSLOG_BUILD_VMID}"
-
-    should_skip_build "rsyslog" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "rsyslog build requires --host <proxmox-ip>. Example:
@@ -658,9 +584,9 @@ build_rsyslog_lxc() {
     local net_retries=0
     while ! remote_cmd "pct exec ${vmid} -- bash -c 'getent hosts deb.debian.org >/dev/null 2>&1'"; do
         net_retries=$((net_retries + 1))
-        if (( net_retries > 15 )); then
+        if (( net_retries > 30 )); then
             remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
-            die "Build container never got network after 30s"
+            die "Build container never got network after 60s"
         fi
         sleep 2
     done
@@ -727,6 +653,8 @@ ROTATE_EOF
 
     inject_callhome_agent "${vmid}"
 
+    remote_cmd "pct exec ${vmid} -- bash -c 'echo ${_NEW_VERSION} > /etc/image_version'"
+
     log "Stopping build container..."
     remote_cmd "pct stop ${vmid}"
     sleep 2
@@ -752,7 +680,7 @@ ROTATE_EOF
 
     trap - EXIT
 
-    finalize_build "rsyslog" "$output"
+    finalize_build "rsyslog" "$output" "$_NEW_VERSION"
     log "rsyslog LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
@@ -763,12 +691,11 @@ JELLYFIN_BUILD_VMID=995
 cleanup_jellyfin_build() { cleanup_lxc_build "${JELLYFIN_BUILD_VMID}"; }
 
 build_jellyfin_lxc() {
+    init_build_version "jellyfin"
     log "Building Jellyfin LXC template (remote on Proxmox)..."
     local base_template="${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}"
-    local output="${IMAGES_DIR}/${JELLYFIN_OUTPUT_NAME}"
+    local output="${IMAGES_DIR}/$(compute_filename jellyfin "$_NEW_VERSION")"
     local vmid="${JELLYFIN_BUILD_VMID}"
-
-    should_skip_build "jellyfin" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "Jellyfin build requires --host <proxmox-ip>. Example:
@@ -923,6 +850,8 @@ LIBRARY_EOF
 
     inject_callhome_agent "${vmid}"
 
+    remote_cmd "pct exec ${vmid} -- bash -c 'echo ${_NEW_VERSION} > /etc/image_version'"
+
     log "Stopping build container..."
     remote_cmd "pct stop ${vmid}"
     sleep 2
@@ -947,7 +876,7 @@ LIBRARY_EOF
 
     trap - EXIT
 
-    finalize_build "jellyfin" "$output"
+    finalize_build "jellyfin" "$output" "$_NEW_VERSION"
     log "Jellyfin LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
@@ -958,12 +887,12 @@ NETDATA_BUILD_VMID=996
 cleanup_netdata_build() { cleanup_lxc_build "${NETDATA_BUILD_VMID}"; }
 
 build_netdata_lxc() {
+    init_build_version "netdata"
     log "Building Netdata LXC template (remote on Proxmox)..."
     local base_template="${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}"
-    local output="${IMAGES_DIR}/${NETDATA_OUTPUT_NAME}"
+    local output="${IMAGES_DIR}/$(compute_filename netdata "$_NEW_VERSION")"
     local vmid="${NETDATA_BUILD_VMID}"
 
-    should_skip_build "netdata" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "Netdata build requires --host <proxmox-ip>. Example:
@@ -1021,9 +950,9 @@ build_netdata_lxc() {
     local net_retries=0
     while ! remote_cmd "pct exec ${vmid} -- bash -c 'getent hosts deb.debian.org >/dev/null 2>&1'"; do
         net_retries=$((net_retries + 1))
-        if (( net_retries > 15 )); then
+        if (( net_retries > 30 )); then
             remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
-            die "Build container never got network after 30s"
+            die "Build container never got network after 60s"
         fi
         sleep 2
     done
@@ -1104,6 +1033,8 @@ OVERRIDE_EOF
 
     inject_callhome_agent "${vmid}"
 
+    remote_cmd "pct exec ${vmid} -- bash -c 'echo ${_NEW_VERSION} > /etc/image_version'"
+
     log "Stopping build container..."
     remote_cmd "pct stop ${vmid}"
     sleep 2
@@ -1129,7 +1060,7 @@ OVERRIDE_EOF
 
     trap - EXIT
 
-    finalize_build "netdata" "$output"
+    finalize_build "netdata" "$output" "$_NEW_VERSION"
     log "Netdata LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
@@ -1152,12 +1083,11 @@ HOMEASSISTANT_BUILD_VMID=994
 cleanup_kodi_build() { cleanup_lxc_build "${KODI_BUILD_VMID}"; }
 
 build_kodi_lxc() {
+    init_build_version "kodi"
     log "Building Kodi LXC template (remote on Proxmox)..."
     local base_template="${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}"
-    local output="${IMAGES_DIR}/${KODI_OUTPUT_NAME}"
+    local output="${IMAGES_DIR}/$(compute_filename kodi "$_NEW_VERSION")"
     local vmid="${KODI_BUILD_VMID}"
-
-    should_skip_build "kodi" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "Kodi build requires --host <proxmox-ip>. Example:
@@ -1215,15 +1145,15 @@ build_kodi_lxc() {
     local net_retries=0
     while ! remote_cmd "pct exec ${vmid} -- bash -c 'getent hosts deb.debian.org >/dev/null 2>&1'"; do
         net_retries=$((net_retries + 1))
-        if (( net_retries > 15 )); then
+        if (( net_retries > 30 )); then
             remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
-            die "Build container never got network after 30s"
+            die "Build container never got network after 60s"
         fi
         sleep 2
     done
     log "Network ready."
 
-    log "Installing Kodi GBM/DRM stack, Mesa drivers, and libcec..."
+    log "Installing Kodi + headless Wayland VNC stack (sway + wayvnc)..."
     remote_cmd "pct exec ${vmid} -- bash -c '
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
@@ -1233,7 +1163,11 @@ build_kodi_lxc() {
             kodi-peripheral-joystick \
             libcec6 \
             cec-utils \
-            alsa-utils
+            alsa-utils \
+            sway \
+            wayvnc \
+            python3-websockify \
+            xwayland
 
         # VA-API drivers for both Intel and AMD iGPU
         apt-get install -y --no-install-recommends \
@@ -1244,10 +1178,19 @@ build_kodi_lxc() {
         # Create kodi system user for headless operation
         useradd -r -m -G audio,video,input,render -s /bin/bash kodi 2>/dev/null || true
 
-        # Pre-configure kodi-standalone systemd service
-        cat > /etc/systemd/system/kodi-standalone.service << \"SERVICE_EOF\"
+        # Headless Wayland display via sway compositor (virtual input support)
+        mkdir -p /home/kodi/.config/sway
+        cat > /home/kodi/.config/sway/config << \"SWAY_CFG\"
+output HEADLESS-1 resolution 1920x1080 position 0,0
+for_window [app_id=\".*\"] fullscreen enable
+for_window [class=\".*\"] fullscreen enable
+exec /usr/bin/kodi --windowing=wayland
+SWAY_CFG
+        chown -R kodi:kodi /home/kodi/.config
+
+        cat > /etc/systemd/system/kodi-display.service << \"SERVICE_EOF\"
 [Unit]
-Description=Kodi Standalone (GBM/DRM)
+Description=Kodi Headless Wayland Display (sway)
 After=systemd-user-sessions.service network-online.target sound.target
 Wants=network-online.target
 
@@ -1256,20 +1199,62 @@ User=kodi
 Group=kodi
 PAMName=login
 Type=simple
-ExecStart=/usr/bin/kodi-standalone
+Environment=WLR_BACKENDS=headless
+Environment=WLR_LIBINPUT_NO_DEVICES=1
+Environment=WLR_RENDERER=pixman
+Environment=XDG_RUNTIME_DIR=/run/user/999
+ExecStartPre=+/bin/sh -c \"mkdir -p /run/user/999 && chown kodi:kodi /run/user/999 && chmod 700 /run/user/999\"
+ExecStart=/usr/bin/sway
 Restart=on-failure
 RestartSec=5
-StandardInput=tty
-TTYPath=/dev/tty7
-TTYReset=yes
-TTYVHangup=yes
 
 [Install]
 WantedBy=multi-user.target
 SERVICE_EOF
 
+        # VNC capture of the Wayland display
+        cat > /etc/systemd/system/kodi-vnc.service << \"SERVICE_EOF\"
+[Unit]
+Description=Kodi VNC Server (wayvnc)
+After=kodi-display.service
+Requires=kodi-display.service
+
+[Service]
+User=kodi
+Group=kodi
+Type=simple
+Environment=WAYLAND_DISPLAY=wayland-1
+Environment=XDG_RUNTIME_DIR=/run/user/999
+ExecStartPre=/bin/sleep 3
+ExecStart=/usr/bin/wayvnc --render-cursor 0.0.0.0 5900
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+        # WebSocket bridge for noVNC
+        cat > /etc/systemd/system/kodi-vnc-ws.service << \"SERVICE_EOF\"
+[Unit]
+Description=Kodi VNC WebSocket bridge
+After=kodi-vnc.service
+Requires=kodi-vnc.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sleep 2
+ExecStart=/usr/bin/websockify 0.0.0.0:6082 localhost:5900
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+        loginctl enable-linger kodi 2>/dev/null || true
         systemctl daemon-reload
-        systemctl enable kodi-standalone 2>/dev/null || true
+        systemctl enable kodi-display kodi-vnc kodi-vnc-ws 2>/dev/null || true
 
         # Pre-configure advancedsettings.xml template for buffer/cache tuning
         mkdir -p /home/kodi/.kodi/userdata
@@ -1306,7 +1291,7 @@ GUI_EOF
     log "Verifying Kodi installation..."
     remote_cmd "pct exec ${vmid} -- bash -c '
         dpkg -l kodi | grep -c ^ii || { echo FAIL: kodi not installed; exit 1; }
-        test -f /etc/systemd/system/kodi-standalone.service || { echo FAIL: service missing; exit 1; }
+        test -f /etc/systemd/system/kodi-display.service || { echo FAIL: service missing; exit 1; }
         test -f /home/kodi/.kodi/userdata/advancedsettings.xml || { echo FAIL: settings missing; exit 1; }
         id kodi || { echo FAIL: kodi user missing; exit 1; }
         echo ALL CHECKS PASSED
@@ -1314,6 +1299,8 @@ GUI_EOF
     log "Kodi smoke test passed."
 
     inject_callhome_agent "${vmid}"
+
+    remote_cmd "pct exec ${vmid} -- bash -c 'echo ${_NEW_VERSION} > /etc/image_version'"
 
     log "Stopping build container..."
     remote_cmd "pct stop ${vmid}"
@@ -1340,7 +1327,7 @@ GUI_EOF
 
     trap - EXIT
 
-    finalize_build "kodi" "$output"
+    finalize_build "kodi" "$output" "$_NEW_VERSION"
     log "Kodi LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
@@ -1348,12 +1335,11 @@ GUI_EOF
 cleanup_kiosk_build() { cleanup_lxc_build "${KIOSK_BUILD_VMID}"; }
 
 build_kiosk_lxc() {
+    init_build_version "kiosk"
     log "Building Kiosk LXC template (remote on Proxmox)..."
     local base_template="${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}"
-    local output="${IMAGES_DIR}/${KIOSK_OUTPUT_NAME}"
+    local output="${IMAGES_DIR}/$(compute_filename kiosk "$_NEW_VERSION")"
     local vmid="${KIOSK_BUILD_VMID}"
-
-    should_skip_build "kiosk" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "Kiosk build requires --host <proxmox-ip>. Example:
@@ -1412,25 +1398,28 @@ build_kiosk_lxc() {
     local net_retries=0
     while ! remote_cmd "pct exec ${vmid} -- bash -c 'getent hosts deb.debian.org >/dev/null 2>&1'"; do
         net_retries=$((net_retries + 1))
-        if (( net_retries > 15 )); then
+        if (( net_retries > 30 )); then
             remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
-            die "Build container never got network after 30s"
+            die "Build container never got network after 60s"
         fi
         sleep 2
     done
     log "Network ready."
 
-    log "Installing Cage compositor, Chromium, and Mesa drivers..."
+    log "Installing sway compositor, Chromium, and Mesa drivers..."
     remote_cmd "pct exec ${vmid} -- bash -c '
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
 
         apt-get install -y --no-install-recommends \
-            cage \
+            sway \
             chromium \
             fonts-noto \
             fonts-noto-color-emoji \
-            openssh-client
+            openssh-client \
+            xwayland \
+            wayvnc \
+            python3-websockify
 
         # VA-API drivers for both Intel and AMD iGPU
         apt-get install -y --no-install-recommends \
@@ -1480,7 +1469,7 @@ WEB_EOF
     cat > "${tmpdir}/wait-for-hub.sh" << 'WAIT_EOF'
 #!/bin/bash
 for i in $(seq 1 15); do
-    curl -sf http://127.0.0.1:9001/ >/dev/null 2>&1 && exit 0
+    wget -q -O /dev/null http://127.0.0.1:9001/ 2>/dev/null && exit 0
     sleep 1
 done
 echo "Hub server not ready"
@@ -1489,33 +1478,66 @@ WAIT_EOF
 
     cat > "${tmpdir}/kiosk-display.service" << 'DISPLAY_EOF'
 [Unit]
-Description=Kiosk Dashboard (Cage + Chromium)
+Description=Kiosk Dashboard (sway + Chromium)
 After=systemd-user-sessions.service kiosk-web.service
 Wants=network-online.target kiosk-web.service
 
 [Service]
 User=kiosk
 Group=kiosk
-PAMName=login
 Type=simple
 Environment=WLR_LIBINPUT_NO_DEVICES=1
-Environment=XDG_RUNTIME_DIR=/run/user/0
-ExecStartPre=/bin/mkdir -p /run/user/0
+Environment=WLR_BACKENDS=headless
+Environment=WLR_RENDERER=pixman
+Environment=XDG_RUNTIME_DIR=/run/user/999
+ExecStartPre=+/bin/sh -c 'mkdir -p /run/user/999 && chown kiosk:kiosk /run/user/999 && chmod 700 /run/user/999'
 ExecStartPre=/opt/kiosk/wait-for-hub.sh
-ExecStart=/usr/bin/cage -- /usr/bin/chromium --kiosk --no-sandbox --ozone-platform=wayland --disable-gpu-compositing --noerrdialogs --disable-infobars --no-first-run --disable-translate --disable-features=TranslateUI --start-fullscreen http://127.0.0.1:9001/hub
+ExecStart=/usr/bin/sway
 Restart=always
 RestartSec=3
-StandardInput=tty
-TTYPath=/dev/tty7
-TTYReset=yes
-TTYVHangup=yes
 
 [Install]
 WantedBy=multi-user.target
 DISPLAY_EOF
 
+    cat > "${tmpdir}/kiosk-vnc.service" << 'VNC_EOF'
+[Unit]
+Description=Kiosk VNC Server (wayvnc)
+After=kiosk-display.service
+Requires=kiosk-display.service
+
+[Service]
+User=kiosk
+Group=kiosk
+Environment=XDG_RUNTIME_DIR=/run/user/999
+Environment=WAYLAND_DISPLAY=wayland-1
+ExecStartPre=/bin/sleep 2
+ExecStart=/usr/bin/wayvnc --render-cursor 0.0.0.0 5900
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+VNC_EOF
+
+    cat > "${tmpdir}/kiosk-vnc-ws.service" << 'VNCWS_EOF'
+[Unit]
+Description=Kiosk VNC WebSocket Bridge (websockify)
+After=kiosk-vnc.service
+Requires=kiosk-vnc.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/websockify 0.0.0.0:6080 localhost:5900
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+VNCWS_EOF
+
     # Push files into the container
-    for f in kiosk-web.service kiosk-display.service; do
+    for f in kiosk-web.service kiosk-display.service kiosk-vnc.service kiosk-vnc-ws.service; do
         # shellcheck disable=SC2086
         scp $SSH_OPTS "${tmpdir}/${f}" "root@${PROXMOX_HOST}:/tmp/${f}"
         remote_cmd "pct push ${vmid} /tmp/${f} /etc/systemd/system/${f} && rm -f /tmp/${f}"
@@ -1524,6 +1546,19 @@ DISPLAY_EOF
     scp $SSH_OPTS "${tmpdir}/wait-for-hub.sh" "root@${PROXMOX_HOST}:/tmp/wait-for-hub.sh"
     remote_cmd "pct push ${vmid} /tmp/wait-for-hub.sh /opt/kiosk/wait-for-hub.sh && rm -f /tmp/wait-for-hub.sh"
     remote_cmd "pct exec ${vmid} -- chmod +x /opt/kiosk/wait-for-hub.sh"
+
+    # Create sway config for kiosk fullscreen mode
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        mkdir -p /home/kiosk/.config/sway
+        cat > /home/kiosk/.config/sway/config << \"SWAY_CFG\"
+output HEADLESS-1 resolution 1920x1080 position 0,0
+for_window [app_id=\".*\"] fullscreen enable
+for_window [class=\".*\"] fullscreen enable
+exec /usr/bin/chromium --kiosk --no-sandbox --ozone-platform=wayland --disable-gpu-compositing --noerrdialogs --disable-infobars --no-first-run --disable-translate --disable-features=TranslateUI --start-fullscreen http://127.0.0.1:9001/hub
+SWAY_CFG
+        chown -R kiosk:kiosk /home/kiosk/.config
+        loginctl enable-linger kiosk 2>/dev/null || true
+    '"
     remote_cmd "pct exec ${vmid} -- systemctl daemon-reload"
 
     rm -rf "${tmpdir}"
@@ -1534,21 +1569,33 @@ DISPLAY_EOF
     local webui_tar
     webui_tar=$(mktemp)
 
+    # Build list of files to bake into the image
+    local -a tar_files=(
+        __init__.py theme.py data.py heartbeat.py manager.py
+        host_state.py api_client.py metric_controller.py
+        display_transfer.py kiosk_server.py
+        pages/__init__.py pages/hub.py pages/bridge.py pages/mesh.py
+        pages/router.py pages/viewer.py pages/launch.py
+        pages/containers.py pages/cluster_dashboard.py
+        pages/remote_kiosk.py pages/console.py pages/vnc_shared.py
+    )
+    # Include noVNC static assets if present
+    if [[ -d "${SCRIPT_DIR}/webui/static/noVNC" ]]; then
+        while IFS= read -r -d '' f; do
+            tar_files+=("$f")
+        done < <(cd "${SCRIPT_DIR}/webui" && find static/noVNC -type f -print0)
+    fi
+
     tar czf "${webui_tar}" \
         -C "${SCRIPT_DIR}/webui" \
-        __init__.py theme.py data.py heartbeat.py manager.py \
-        host_state.py api_client.py metric_controller.py \
-        kiosk_server.py \
-        pages/__init__.py pages/hub.py pages/bridge.py pages/mesh.py \
-        pages/router.py pages/viewer.py pages/launch.py \
-        pages/containers.py pages/cluster_dashboard.py \
+        "${tar_files[@]}" \
         -C "${SCRIPT_DIR}/.." build.py
 
     # shellcheck disable=SC2086
     scp $SSH_OPTS "${webui_tar}" "root@${PROXMOX_HOST}:/tmp/kiosk_webui.tar.gz"
     remote_cmd "pct push ${vmid} /tmp/kiosk_webui.tar.gz /tmp/kiosk_webui.tar.gz && rm -f /tmp/kiosk_webui.tar.gz"
     remote_cmd "pct exec ${vmid} -- bash -c '
-        mkdir -p /opt/kiosk/scripts/webui/pages
+        mkdir -p /opt/kiosk/scripts/webui/pages /opt/kiosk/scripts/webui/static
         touch /opt/kiosk/scripts/__init__.py
         tar xzf /tmp/kiosk_webui.tar.gz -C /opt/kiosk/scripts/webui/
         mv /opt/kiosk/scripts/webui/build.py /opt/kiosk/build.py 2>/dev/null || true
@@ -1559,16 +1606,20 @@ DISPLAY_EOF
 
     # Enable services so they start on boot
     remote_cmd "pct exec ${vmid} -- bash -c '
-        systemctl enable kiosk-web kiosk-display 2>/dev/null || true
+        systemctl enable kiosk-web kiosk-display kiosk-vnc kiosk-vnc-ws 2>/dev/null || true
     '"
 
     log "Verifying Kiosk installation..."
     remote_cmd "pct exec ${vmid} -- bash -c '
-        dpkg -l cage | grep -c ^ii || { echo FAIL: cage not installed; exit 1; }
+        dpkg -l sway | grep -c ^ii || { echo FAIL: sway not installed; exit 1; }
         dpkg -l chromium | grep -c ^ii || { echo FAIL: chromium not installed; exit 1; }
         python3 -c \"import nicegui\" || { echo FAIL: nicegui not installed; exit 1; }
         test -f /etc/systemd/system/kiosk-display.service || { echo FAIL: display service missing; exit 1; }
         test -f /etc/systemd/system/kiosk-web.service || { echo FAIL: web service missing; exit 1; }
+        test -f /etc/systemd/system/kiosk-vnc.service || { echo FAIL: vnc service missing; exit 1; }
+        test -f /etc/systemd/system/kiosk-vnc-ws.service || { echo FAIL: vnc-ws service missing; exit 1; }
+        dpkg -l wayvnc | grep -c ^ii || { echo FAIL: wayvnc not installed; exit 1; }
+        dpkg -l python3-websockify | grep -c ^ii || { echo FAIL: websockify not installed; exit 1; }
         test -x /opt/kiosk/wait-for-hub.sh || { echo FAIL: wait-for-hub script missing; exit 1; }
         id kiosk || { echo FAIL: kiosk user missing; exit 1; }
         test -d /opt/kiosk/scripts/webui || { echo FAIL: kiosk webui dir missing; exit 1; }
@@ -1579,6 +1630,8 @@ DISPLAY_EOF
     log "Kiosk smoke test passed."
 
     inject_callhome_agent "${vmid}"
+
+    remote_cmd "pct exec ${vmid} -- bash -c 'echo ${_NEW_VERSION} > /etc/image_version'"
 
     log "Stopping build container..."
     remote_cmd "pct stop ${vmid}"
@@ -1605,7 +1658,7 @@ DISPLAY_EOF
 
     trap - EXIT
 
-    finalize_build "kiosk" "$output"
+    finalize_build "kiosk" "$output" "$_NEW_VERSION"
     log "Kiosk LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
@@ -1613,12 +1666,11 @@ DISPLAY_EOF
 cleanup_moonlight_build() { cleanup_lxc_build "${MOONLIGHT_BUILD_VMID}"; }
 
 build_moonlight_lxc() {
+    init_build_version "moonlight"
     log "Building Moonlight LXC template (remote on Proxmox)..."
     local base_template="${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}"
-    local output="${IMAGES_DIR}/${MOONLIGHT_OUTPUT_NAME}"
+    local output="${IMAGES_DIR}/$(compute_filename moonlight "$_NEW_VERSION")"
     local vmid="${MOONLIGHT_BUILD_VMID}"
-
-    should_skip_build "moonlight" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "Moonlight build requires --host <proxmox-ip>. Example:
@@ -1676,30 +1728,31 @@ build_moonlight_lxc() {
     local net_retries=0
     while ! remote_cmd "pct exec ${vmid} -- bash -c 'getent hosts deb.debian.org >/dev/null 2>&1'"; do
         net_retries=$((net_retries + 1))
-        if (( net_retries > 15 )); then
+        if (( net_retries > 30 )); then
             remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
-            die "Build container never got network after 30s"
+            die "Build container never got network after 60s"
         fi
         sleep 2
     done
     log "Network ready."
 
-    log "Installing runtime and build dependencies..."
+    log "Installing runtime and build dependencies + headless VNC stack..."
     remote_cmd "pct exec ${vmid} -- bash -c '
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
 
         # Runtime deps (marked manual — survives autoremove after build)
-        # SDL2 for video output (uses KMSDRM backend in LXC without X11)
-        # FFmpeg for video decode (libavcodec59 + libavutil57 MUST be here
-        # so apt marks them manual; otherwise autoremove deletes them)
+        # SDL2 for video output via Wayland under sway compositor
+        # FFmpeg for video decode
         # VA-API drivers for Intel + AMD hardware decode
+        # sway + wayvnc + websockify for headless VNC streaming
         apt-get install -y --no-install-recommends \
             libopus0 libexpat1 libasound2 libudev1 libavahi-client3 \
             libcurl4 libevdev2 libpulse0 libsdl2-2.0-0 \
             libavcodec59 libavutil57 \
             intel-media-va-driver mesa-va-drivers vainfo \
-            ca-certificates
+            ca-certificates \
+            sway wayvnc python3-websockify xwayland
 
         # Build deps (purged after compilation)
         apt-get install -y --no-install-recommends \
@@ -1737,6 +1790,88 @@ build_moonlight_lxc() {
         rm -rf /tmp/moonlight-embedded /var/lib/apt/lists/* /tmp/* /var/tmp/*
     '"
 
+    log "Creating moonlight user and deploying VNC systemd units..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        useradd -r -m -G audio,video,input,render -s /bin/bash moonlight 2>/dev/null || true
+
+        mkdir -p /home/moonlight/.config/sway
+        cat > /home/moonlight/.config/sway/config << \"SWAY_CFG\"
+output HEADLESS-1 resolution 1920x1080 position 0,0
+for_window [app_id=\".*\"] fullscreen enable
+for_window [class=\".*\"] fullscreen enable
+exec /usr/local/bin/moonlight stream
+SWAY_CFG
+        chown -R moonlight:moonlight /home/moonlight/.config
+        loginctl enable-linger moonlight 2>/dev/null || true
+
+        cat > /etc/systemd/system/moonlight-display.service << \"SERVICE_EOF\"
+[Unit]
+Description=Moonlight Headless Wayland Display (sway)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=moonlight
+Group=moonlight
+PAMName=login
+Type=simple
+Environment=WLR_BACKENDS=headless
+Environment=WLR_LIBINPUT_NO_DEVICES=1
+Environment=WLR_RENDERER=pixman
+Environment=SDL_VIDEODRIVER=wayland
+Environment=XDG_RUNTIME_DIR=/run/user/999
+ExecStartPre=+/bin/sh -c \"mkdir -p /run/user/999 && chown moonlight:moonlight /run/user/999 && chmod 700 /run/user/999\"
+ExecStart=/usr/bin/sway
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+        cat > /etc/systemd/system/moonlight-vnc.service << \"SERVICE_EOF\"
+[Unit]
+Description=Moonlight VNC Server (wayvnc)
+After=moonlight-display.service
+Requires=moonlight-display.service
+
+[Service]
+User=moonlight
+Group=moonlight
+Type=simple
+Environment=WAYLAND_DISPLAY=wayland-1
+Environment=XDG_RUNTIME_DIR=/run/user/999
+ExecStartPre=/bin/sleep 3
+ExecStart=/usr/bin/wayvnc --render-cursor 0.0.0.0 5900
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+        # WebSocket bridge for noVNC
+        cat > /etc/systemd/system/moonlight-vnc-ws.service << \"SERVICE_EOF\"
+[Unit]
+Description=Moonlight VNC WebSocket bridge
+After=moonlight-vnc.service
+Requires=moonlight-vnc.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sleep 2
+ExecStart=/usr/bin/websockify 0.0.0.0:6083 localhost:5900
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+        systemctl daemon-reload
+        systemctl enable moonlight-display moonlight-vnc moonlight-vnc-ws 2>/dev/null || true
+    '"
+
     log "Verifying Moonlight installation..."
     remote_cmd "pct exec ${vmid} -- bash -c '
         test -x /usr/local/bin/moonlight || { echo FAIL: moonlight-embedded not installed; exit 1; }
@@ -1747,6 +1882,8 @@ build_moonlight_lxc() {
     log "Moonlight smoke test passed."
 
     inject_callhome_agent "${vmid}"
+
+    remote_cmd "pct exec ${vmid} -- bash -c 'echo ${_NEW_VERSION} > /etc/image_version'"
 
     log "Stopping build container..."
     remote_cmd "pct stop ${vmid}"
@@ -1773,7 +1910,7 @@ build_moonlight_lxc() {
 
     trap - EXIT
 
-    finalize_build "moonlight" "$output"
+    finalize_build "moonlight" "$output" "$_NEW_VERSION"
     log "Moonlight LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
@@ -1783,12 +1920,11 @@ cleanup_wireguard_build() { cleanup_lxc_build "${WIREGUARD_BUILD_VMID}"; }
 cleanup_homeassistant_build() { cleanup_lxc_build "${HOMEASSISTANT_BUILD_VMID}"; }
 
 build_wireguard_lxc() {
+    init_build_version "wireguard"
     log "Building WireGuard LXC template (remote on Proxmox)..."
     local base_template="${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}"
-    local output="${IMAGES_DIR}/${WIREGUARD_OUTPUT_NAME}"
+    local output="${IMAGES_DIR}/$(compute_filename wireguard "$_NEW_VERSION")"
     local vmid="${WIREGUARD_BUILD_VMID}"
-
-    should_skip_build "wireguard" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "WireGuard build requires --host <proxmox-ip>. Example:
@@ -1847,9 +1983,9 @@ build_wireguard_lxc() {
     local net_retries=0
     while ! remote_cmd "pct exec ${vmid} -- bash -c 'getent hosts deb.debian.org >/dev/null 2>&1'"; do
         net_retries=$((net_retries + 1))
-        if (( net_retries > 15 )); then
+        if (( net_retries > 30 )); then
             remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
-            die "Build container never got network after 30s"
+            die "Build container never got network after 60s"
         fi
         sleep 2
     done
@@ -1885,6 +2021,8 @@ SYSCTL_EOF
 
     inject_callhome_agent "${vmid}"
 
+    remote_cmd "pct exec ${vmid} -- bash -c 'echo ${_NEW_VERSION} > /etc/image_version'"
+
     log "Stopping build container..."
     remote_cmd "pct stop ${vmid}"
     sleep 2
@@ -1910,18 +2048,17 @@ SYSCTL_EOF
 
     trap - EXIT
 
-    finalize_build "wireguard" "$output"
+    finalize_build "wireguard" "$output" "$_NEW_VERSION"
     log "WireGuard LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
 
 build_homeassistant_lxc() {
+    init_build_version "homeassistant"
     log "Building Home Assistant LXC template (remote on Proxmox)..."
     local base_template="${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}"
-    local output="${IMAGES_DIR}/${HOMEASSISTANT_OUTPUT_NAME}"
+    local output="${IMAGES_DIR}/$(compute_filename homeassistant "$_NEW_VERSION")"
     local vmid="${HOMEASSISTANT_BUILD_VMID}"
-
-    should_skip_build "homeassistant" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "Home Assistant build requires --host <proxmox-ip>. Example:
@@ -1980,9 +2117,9 @@ build_homeassistant_lxc() {
     local net_retries=0
     while ! remote_cmd "pct exec ${vmid} -- bash -c 'getent hosts deb.debian.org >/dev/null 2>&1'"; do
         net_retries=$((net_retries + 1))
-        if (( net_retries > 15 )); then
+        if (( net_retries > 30 )); then
             remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
-            die "Build container never got network after 30s"
+            die "Build container never got network after 60s"
         fi
         sleep 2
     done
@@ -2062,9 +2199,12 @@ http:
   ip_ban_enabled: true
   login_attempts_threshold: 5
   use_x_forwarded_for: true
+  use_x_frame_options: false
   trusted_proxies:
     - 127.0.0.1
     - "::1"
+    - 10.10.10.0/24
+    - 10.99.0.0/16
 
 recorder:
   db_url: sqlite:///config/home-assistant_v2.db
@@ -2127,6 +2267,8 @@ HA_SVC_EOF
 
     inject_callhome_agent "${vmid}"
 
+    remote_cmd "pct exec ${vmid} -- bash -c 'echo ${_NEW_VERSION} > /etc/image_version'"
+
     log "Stopping build container..."
     remote_cmd "pct stop ${vmid}"
     sleep 2
@@ -2152,7 +2294,7 @@ HA_SVC_EOF
 
     trap - EXIT
 
-    finalize_build "homeassistant" "$output"
+    finalize_build "homeassistant" "$output" "$_NEW_VERSION"
     log "Home Assistant LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
@@ -2160,12 +2302,11 @@ HA_SVC_EOF
 cleanup_gaming_build() { cleanup_lxc_build "${GAMING_BUILD_VMID}"; }
 
 build_gaming_lxc() {
+    init_build_version "gaming"
     log "Building Gaming LXC template (remote on Proxmox)..."
     local base_rootfs="${IMAGES_DIR}/${GAMING_BASE_ROOTFS}"
-    local output="${IMAGES_DIR}/${GAMING_OUTPUT_NAME}"
+    local output="${IMAGES_DIR}/$(compute_filename gaming "$_NEW_VERSION")"
     local vmid="${GAMING_BUILD_VMID}"
-
-    should_skip_build "gaming" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "Gaming build requires --host <proxmox-ip>. Example:
@@ -2394,6 +2535,8 @@ PEOF
         rm -rf /var/cache/dnf /tmp/* /var/tmp/*
     '"
 
+    remote_cmd "pct exec ${vmid} -- bash -c 'echo ${_NEW_VERSION} > /etc/image_version'"
+
     log "Stopping build container..."
     remote_cmd "pct stop ${vmid}"
     sleep 3
@@ -2418,7 +2561,7 @@ PEOF
 
     trap - EXIT
 
-    finalize_build "gaming" "$output"
+    finalize_build "gaming" "$output" "$_NEW_VERSION"
     log "Gaming LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
@@ -2435,17 +2578,16 @@ cleanup_desktop_build() {
     if [[ -n "$PROXMOX_HOST" ]]; then
         log "Cleaning up Desktop build VM ${vmid}..."
         remote_cmd "qm stop ${vmid} 2>/dev/null; sleep 3; qm destroy ${vmid} --purge 2>/dev/null; true"
-        remote_cmd "rm -f /var/tmp/${DESKTOP_OUTPUT_NAME}; true"
+        remote_cmd "rm -f /var/tmp/desktop-*-debian-12-amd64.qcow2; true"
     fi
 }
 
 build_desktop_vm() {
+    init_build_version "desktop"
     log "Building Desktop VM image (remote on Proxmox)..."
     local base_image="${IMAGES_DIR}/${DESKTOP_BASE_IMAGE}"
-    local output="${IMAGES_DIR}/${DESKTOP_OUTPUT_NAME}"
+    local output="${IMAGES_DIR}/$(compute_filename desktop "$_NEW_VERSION")"
     local vmid="${DESKTOP_BUILD_VMID}"
-
-    should_skip_build "desktop" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "Desktop build requires --host <proxmox-ip>. Example:
@@ -2835,6 +2977,8 @@ CALLHOME_EOF
         log "WARNING: callhome.py not found at ${callhome_src}, skipping agent injection"
     fi
 
+    remote_cmd "ssh -o StrictHostKeyChecking=no root@${vm_ip} 'echo ${_NEW_VERSION} > /etc/image_version'"
+
     # Shutdown VM (use SSH shutdown since guest agent may not be started yet)
     log "Shutting down build VM..."
     remote_cmd "ssh -o StrictHostKeyChecking=no root@${vm_ip} 'shutdown -h now' 2>/dev/null || qm stop ${vmid}"
@@ -2867,21 +3011,23 @@ CALLHOME_EOF
     log "Disk path: ${disk_path}"
     log "Converting to qcow2 and downloading..."
 
-    remote_cmd "rm -f /var/tmp/${DESKTOP_OUTPUT_NAME}"
-    remote_cmd "qemu-img convert -f raw -O qcow2 '${disk_path}' /var/tmp/${DESKTOP_OUTPUT_NAME}"
+    local output_name
+    output_name="$(basename "$output")"
+    remote_cmd "rm -f /var/tmp/${output_name}"
+    remote_cmd "qemu-img convert -f raw -O qcow2 '${disk_path}' /var/tmp/${output_name}"
 
     mkdir -p "$IMAGES_DIR"
     # shellcheck disable=SC2086
-    scp $SSH_OPTS "root@${PROXMOX_HOST}:/var/tmp/${DESKTOP_OUTPUT_NAME}" "$output"
+    scp $SSH_OPTS "root@${PROXMOX_HOST}:/var/tmp/${output_name}" "$output"
 
     # Cleanup
     log "Cleaning up build VM and temporary files..."
     remote_cmd "qm destroy ${vmid} --purge 2>/dev/null; true"
-    remote_cmd "rm -f /var/tmp/${DESKTOP_OUTPUT_NAME} /var/tmp/${DESKTOP_BASE_IMAGE}; true"
+    remote_cmd "rm -f /var/tmp/${output_name} /var/tmp/${DESKTOP_BASE_IMAGE}; true"
 
     trap - EXIT
 
-    finalize_build "desktop" "$output"
+    finalize_build "desktop" "$output" "$_NEW_VERSION"
     log "Desktop VM image: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
@@ -2899,18 +3045,17 @@ cleanup_sunshine_build() {
     if [[ -n "$PROXMOX_HOST" ]]; then
         log "Cleaning up Sunshine build VM ${vmid}..."
         remote_cmd "qm stop ${vmid} 2>/dev/null; sleep 3; qm destroy ${vmid} --purge 2>/dev/null; true"
-        remote_cmd "rm -f /tmp/sunshine-answer.iso /tmp/${SUNSHINE_ISO} /tmp/${SUNSHINE_VIRTIO_ISO} /var/tmp/${SUNSHINE_OUTPUT_NAME}; true"
+        remote_cmd "rm -f /tmp/sunshine-answer.iso /tmp/${SUNSHINE_ISO} /tmp/${SUNSHINE_VIRTIO_ISO} /var/tmp/sunshine-*-win11-amd64.qcow2; true"
     fi
 }
 
 build_sunshine_vm() {
+    init_build_version "sunshine"
     log "Building Sunshine VM image (remote on Proxmox)..."
     local win_iso="${IMAGES_DIR}/${SUNSHINE_ISO}"
     local virtio_iso="${IMAGES_DIR}/isos/${SUNSHINE_VIRTIO_ISO}"
-    local output="${IMAGES_DIR}/${SUNSHINE_OUTPUT_NAME}"
+    local output="${IMAGES_DIR}/$(compute_filename sunshine "$_NEW_VERSION")"
     local vmid="${SUNSHINE_BUILD_VMID}"
-
-    should_skip_build "sunshine" "$output" && return
 
     if [[ -z "$PROXMOX_HOST" ]]; then
         die "Sunshine build requires --host <proxmox-ip>. Example:
@@ -3106,21 +3251,23 @@ build_sunshine_vm() {
     log "Disk path: ${disk_path}"
     log "Converting to qcow2 and downloading..."
 
-    remote_cmd "rm -f /var/tmp/${SUNSHINE_OUTPUT_NAME}"
-    remote_cmd "qemu-img convert -f raw -O qcow2 '${disk_path}' /var/tmp/${SUNSHINE_OUTPUT_NAME}"
+    local output_name
+    output_name="$(basename "$output")"
+    remote_cmd "rm -f /var/tmp/${output_name}"
+    remote_cmd "qemu-img convert -f raw -O qcow2 '${disk_path}' /var/tmp/${output_name}"
 
     mkdir -p "$IMAGES_DIR"
     # shellcheck disable=SC2086
-    scp $SSH_OPTS "root@${PROXMOX_HOST}:/var/tmp/${SUNSHINE_OUTPUT_NAME}" "$output"
+    scp $SSH_OPTS "root@${PROXMOX_HOST}:/var/tmp/${output_name}" "$output"
 
     # Cleanup
     log "Cleaning up build VM and temporary files..."
     remote_cmd "qm destroy ${vmid} --purge 2>/dev/null; true"
-    remote_cmd "rm -f /var/tmp/${SUNSHINE_OUTPUT_NAME} /tmp/sunshine-answer.iso; true"
+    remote_cmd "rm -f /var/tmp/${output_name} /tmp/sunshine-answer.iso; true"
 
     trap - EXIT
 
-    finalize_build "sunshine" "$output"
+    finalize_build "sunshine" "$output" "$_NEW_VERSION"
     log "Sunshine VM image: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
@@ -3182,10 +3329,6 @@ parallel_build() {
     local -a pids=() labels=() log_files=()
     local -a propagate=()
     [[ "$CLEAN_MODE" == true ]] && propagate+=(--clean)
-    # Children must NOT re-bump or re-force; the parent already applied
-    # bumps and force-bumps to the manifest in init_output_names.
-    # Children just need to read the manifest and build.
-    
 
     # Launch local builds (mesh, router) in background
     if [[ ${#local_targets[@]} -gt 0 ]]; then
@@ -3278,24 +3421,9 @@ while [[ $# -gt 0 ]]; do
             PARALLEL_MODE=true
             shift 2
             ;;
-        --force)
-            FORCE_BUILD=true
-            shift
-            ;;
-        --bump)
-            [[ -n "${2:-}" ]] || die "--bump requires <target> <major|minor|patch>"
-            [[ -n "${3:-}" ]] || die "--bump requires <target> <major|minor|patch>"
-            case "$3" in
-                major|minor|patch) ;;
-                *) die "Invalid bump level '$3'. Must be one of: major, minor, patch" ;;
-            esac
-            BUMP_TARGETS["$2"]="$3"
-            shift 3
-            ;;
         *)
             die "Unknown argument: $1
 Usage: $0 [--host <ip>] [--only <target>] [--clean] [--parallel] [--hosts <ip1>,<ip2>,...]
-         [--force] [--bump <target> <major|minor|patch>]
   Targets: mesh, router, pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi, kiosk, moonlight, gaming, sunshine, desktop"
             ;;
     esac
@@ -3313,13 +3441,6 @@ Hint: use 'router' (not 'openwrt') for the OpenWrt router VM image."
     done
 fi
 
-for t in "${!BUMP_TARGETS[@]}"; do
-    if ! printf '%s\n' "${VALID_TARGETS[@]}" | grep -qx "$t"; then
-        die "Unknown bump target: '$t'
-Valid targets: ${VALID_TARGETS[*]}"
-    fi
-done
-
 should_build() {
     [[ ${#BUILD_TARGETS[@]} -eq 0 ]] && return 0
     local target
@@ -3330,7 +3451,6 @@ should_build() {
 }
 
 check_deps
-init_output_names
 
 # ── Parallel dispatch ────────────────────────────────────────────────
 if [[ "$PARALLEL_MODE" == true ]]; then
@@ -3360,12 +3480,5 @@ should_build desktop      && build_desktop_vm
 
 log ""
 log "Done. Custom images in ${IMAGES_DIR}/:"
-ls -lh "${IMAGES_DIR}/${MESH_OUTPUT_NAME}" "${IMAGES_DIR}/${ROUTER_OUTPUT_NAME}" \
-    "${IMAGES_DIR}/${PIHOLE_OUTPUT_NAME}" "${IMAGES_DIR}/${RSYSLOG_OUTPUT_NAME}" \
-    "${IMAGES_DIR}/${JELLYFIN_OUTPUT_NAME}" "${IMAGES_DIR}/${NETDATA_OUTPUT_NAME}" \
-    "${IMAGES_DIR}/${WIREGUARD_OUTPUT_NAME}" "${IMAGES_DIR}/${HOMEASSISTANT_OUTPUT_NAME}" \
-    "${IMAGES_DIR}/${KODI_OUTPUT_NAME}" "${IMAGES_DIR}/${KIOSK_OUTPUT_NAME}" \
-    "${IMAGES_DIR}/${MOONLIGHT_OUTPUT_NAME}" \
-    "${IMAGES_DIR}/${GAMING_OUTPUT_NAME}" "${IMAGES_DIR}/${SUNSHINE_OUTPUT_NAME}" \
-    "${IMAGES_DIR}/${DESKTOP_OUTPUT_NAME}" \
+ls -lh "${IMAGES_DIR}"/*.tar.gz "${IMAGES_DIR}"/*.tar.zst "${IMAGES_DIR}"/*.img.gz "${IMAGES_DIR}"/*.qcow2 \
     2>/dev/null || true

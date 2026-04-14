@@ -88,3 +88,19 @@ M0 (test infra)
 11. When implementing a project, blocked milestones SHOULD be moved to their downstream projects rather than kept as stubs. Stubs in `site.yml`, `cleanup.yml`, and task files create dead code that confuses future maintainers.
 
 12. Previous bug: M5-M7 stubs (pihole_dns, syslog, monitoring) were implemented as task files + site.yml plays + cleanup.yml rollback plays, then had to be removed entirely because they belonged in their respective downstream projects.
+
+## Manual Testing Playbook Requirements
+
+13. When a project includes manual testing (Standard Work Cycle Step 6),
+    load and follow the `manual-testing-playbook-writing` skill for HOW to
+    write the playbook. Key constraints enforced here in the plan structure:
+    - The playbook MUST be written into `docs/manual-testing-playbooks.md`
+      DURING plan creation — not deferred to implementation.
+    - The project plan references the playbook by file path and section
+      number (e.g., "EXECUTE Playbook 13, sections 13.1–13.7"). NEVER
+      duplicates playbook content inline.
+    - The `webui-manual-testing` skill MUST be updated to list the new
+      playbook immediately — not deferred to a later milestone.
+
+    See: `manual-testing-playbook-writing` skill for exhaustive feature
+    enumeration, section structure, prerequisites, and host-awareness rules.

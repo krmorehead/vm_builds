@@ -3,7 +3,6 @@ kodi_ct_hostname: kodi
 kodi_ct_memory: 1024
 kodi_ct_cores: 2
 kodi_ct_disk: "4"
-kodi_ct_template: "{{ kodi_lxc_template }}"
 kodi_ct_template_path: "{{ kodi_lxc_template_path }}"
 kodi_ct_onboot: false
 kodi_ct_unprivileged: false

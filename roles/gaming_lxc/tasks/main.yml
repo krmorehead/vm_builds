@@ -15,6 +15,26 @@
     lxc_net_ip_offset: "{{ gaming_ct_ip_offset }}"
     lxc_net_flavor_group: gaming_nodes
 
+# ── Check container existence ──────────────────────────────────
+
+- name: Check if Gaming container exists
+  ansible.builtin.command:
+    cmd: pct status {{ gaming_ct_id }}
+  register: _ct_status
+  failed_when: false
+  changed_when: false
+
+- name: Set container existence flag
+  ansible.builtin.set_fact:
+    _lxc_exists: "{{ _ct_status.rc == 0 }}"
+
+# ── Resolve deployed version ────────────────────────────────────
+
+- name: Resolve deployed Gaming version
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_deployed_version.yml"
+  vars:
+    _resolve_service_name: gaming
+
 # ── Provision via shared proxmox_lxc role ────────────────────────
 
 - name: Provision Gaming LXC container
@@ -30,7 +50,6 @@
     lxc_ct_disk: "{{ gaming_ct_disk }}"
     lxc_ct_onboot: "{{ gaming_ct_onboot }}"
     lxc_ct_startup_order: "{{ gaming_ct_startup_order }}"
-    lxc_ct_template: "{{ gaming_ct_template }}"
     lxc_ct_template_path: "{{ gaming_ct_template_path }}"
     lxc_ct_ip: "{{ _lxc_net_ip }}/{{ _lxc_net_cidr }}"
     lxc_ct_gateway: "{{ _lxc_net_gateway }}"

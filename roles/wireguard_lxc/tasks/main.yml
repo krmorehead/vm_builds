@@ -19,6 +19,26 @@
     lxc_net_ip_offset: "{{ wireguard_ct_ip_offset }}"
     lxc_net_flavor_group: vpn_nodes
 
+# ── Check container existence ──────────────────────────────────
+
+- name: Check if WireGuard container exists
+  ansible.builtin.command:
+    cmd: pct status {{ wireguard_ct_id }}
+  register: _ct_status
+  failed_when: false
+  changed_when: false
+
+- name: Set container existence flag
+  ansible.builtin.set_fact:
+    _lxc_exists: "{{ _ct_status.rc == 0 }}"
+
+# ── Resolve deployed version ────────────────────────────────────
+
+- name: Resolve deployed WireGuard version
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_deployed_version.yml"
+  vars:
+    _resolve_service_name: wireguard
+
 - name: Provision WireGuard LXC container
   ansible.builtin.include_role:
     name: proxmox_lxc
@@ -35,7 +55,6 @@
     lxc_ct_ip: "{{ _lxc_net_ip }}/{{ _lxc_net_cidr }}"
     lxc_ct_gateway: "{{ _lxc_net_gateway }}"
     lxc_ct_nameserver: "{{ _lxc_net_nameserver }}"
-    lxc_ct_template: "{{ wireguard_ct_template }}"
     lxc_ct_template_path: "{{ wireguard_ct_template_path }}"
     lxc_ct_bridge: "{{ _lxc_net_bridge }}"
     lxc_ct_image_version: "{{ wireguard_image_version }}"

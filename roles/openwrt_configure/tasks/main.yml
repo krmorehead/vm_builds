@@ -248,6 +248,17 @@
     - openwrt_mesh_enabled | bool
     - wifi_radios | default([]) | length > 0
 
+# ── Deploy batman trigger key ──────────────────────────────────
+# MESH_KEY enables HMAC-authenticated batman_trigger.sh mutations.
+
+- name: Deploy MESH_KEY to /etc/batman_key
+  ansible.builtin.raw: >-
+    /bin/sh -c 'echo "{{ openwrt_mesh_key }}" > /etc/batman_key &&
+    chmod 600 /etc/batman_key'
+  when: (openwrt_mesh_key | default('')) | length > 0
+  changed_when: true
+  no_log: true
+
 # ── Phase 2: Apply final LAN settings and restart ───────────────
 
 - name: Set LAN IP address

@@ -11,6 +11,37 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import build  # noqa: E402
+
+
+# ── Session-scoped test.env loading ──────────────────────────────────
+# Loads test.env ONCE at session start, injects all values into
+# os.environ so every test has access to CALLHOME_PUBLIC_KEY,
+# PRIMARY_HOST, etc. without per-file boilerplate.
+
+_TEST_ENV_FILE = PROJECT_ROOT / "test.env"
+
+
+def _load_and_inject_test_env() -> dict[str, str]:
+    """Load test.env and inject values into os.environ."""
+    if not _TEST_ENV_FILE.exists():
+        return {}
+    env = build.load_env(_TEST_ENV_FILE)
+    for key, value in env.items():
+        if key not in os.environ:
+            os.environ[key] = value
+    return env
+
+
+_test_env_cache: dict[str, str] = _load_and_inject_test_env()
+
+
+@pytest.fixture(scope="session")
+def test_env() -> dict[str, str]:
+    """Parsed test.env as a dict — available to any test via fixture."""
+    assert _test_env_cache, "test.env not found or empty"
+    return _test_env_cache
+
 
 # Direct NiceGUI storage to a temp directory so it never writes .nicegui/
 # inside the project tree. The directory persists for the full pytest session

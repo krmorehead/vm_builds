@@ -23,13 +23,45 @@ description: Image management and local storage patterns for VM and LXC images. 
 
 6. ```
    images/                                              (gitignored)
-   ├── openwrt-router-24.10.0-x86-64-combined.img.gz   Custom router VM (build-images.sh)
-   ├── openwrt-mesh-lxc-24.10.0-x86-64-rootfs.tar.gz   Custom mesh LXC (build-images.sh)
-   ├── debian-12-standard_12.12-1_amd64.tar.zst         LXC template
-   └── ...future images...
+   ├── pihole.version                                   Sidecar: "1.0.0"
+   ├── pihole-1.0.0-debian-12-amd64.tar.zst             Built image
+   ├── router.version                                   Sidecar: "1.0.0"
+   ├── openwrt-router-1.0.0-x86-64-combined.img.gz      Built image
+   ├── mesh.version                                     Sidecar: "1.0.0"
+   ├── openwrt-mesh-1.0.0-x86-64-rootfs.tar.gz          Built image
+   └── ...per-service .version + image file...
    ```
 
-7. NEVER commit images to git. The `images/` directory is listed in `.gitignore`. Document the expected image filename and download URL in role defaults and in `docs/architecture/`.
+7. NEVER commit images to git. The `images/` directory is listed in `.gitignore`.
+   The `.version` sidecar files are also gitignored — they are created by
+   `build-images.sh` and read by Ansible via `lookup('file')` in
+   `group_vars/all.yml`. Document the expected image filename and download URL
+   in role defaults and in `docs/architecture/`.
+
+## Image Versioning (Sidecar Pattern)
+
+7b. Each image target has a `images/<service>.version` sidecar file containing
+    a single semver string (e.g., `1.0.0`). This replaces the old centralized
+    `manifest.json` which suffered from race conditions during parallel builds.
+
+    - `build-images.sh` reads the current version from the sidecar, bumps the
+      patch number, builds the image with the new version in the filename,
+      bakes the version into `/etc/image_version` inside the image, and writes
+      the new version back to the sidecar.
+    - `group_vars/all.yml` reads each sidecar via `lookup('file')` to derive
+      template paths and version variables for Ansible roles.
+    - At runtime, containers report their baked `/etc/image_version` via
+      heartbeat to the Node Manager, which stores it in `HostStateStore`.
+    - The Node Manager exposes `GET /api/images/versions` for version queries.
+    - The SuperManager aggregates all Node Managers via `GET /api/fleet/versions`.
+
+    Version flow: sidecar → image filename → `/etc/image_version` → heartbeat →
+    Node Manager → SuperManager.
+
+    Previous bug: centralized `manifest.json` with file locking caused race
+    conditions when building images in parallel across 6 hosts. Each host
+    read-modify-wrote the same file. Replaced with per-image sidecars that
+    are independent and lock-free.
 
 ## NEVER Patch Running Containers (CRITICAL)
 

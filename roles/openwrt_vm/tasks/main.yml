@@ -9,6 +9,12 @@
 - name: Set VM existence flag
   ansible.builtin.set_fact:
     vm_exists: "{{ vm_status.rc == 0 }}"
+    _lxc_exists: "{{ vm_status.rc == 0 }}"
+
+- name: Resolve deployed OpenWrt version
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_deployed_version.yml"
+  vars:
+    _resolve_service_name: openwrt
 
 - name: Reset VM version rebuild flag
   ansible.builtin.set_fact:

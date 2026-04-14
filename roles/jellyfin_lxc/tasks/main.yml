@@ -30,6 +30,26 @@
   ansible.builtin.debug:
     msg: "iGPU: /dev/dri (via lxc.mount.entry), Media: {{ jellyfin_media_path }} → /media"
 
+# ── Check container existence ──────────────────────────────────
+
+- name: Check if Jellyfin container exists
+  ansible.builtin.command:
+    cmd: pct status {{ jellyfin_ct_id }}
+  register: _ct_status
+  failed_when: false
+  changed_when: false
+
+- name: Set container existence flag
+  ansible.builtin.set_fact:
+    _lxc_exists: "{{ _ct_status.rc == 0 }}"
+
+# ── Resolve deployed version ────────────────────────────────────
+
+- name: Resolve deployed Jellyfin version
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_deployed_version.yml"
+  vars:
+    _resolve_service_name: jellyfin
+
 # ── Provision via shared proxmox_lxc role ────────────────────────
 
 - name: Provision Jellyfin LXC container
@@ -44,7 +64,6 @@
     lxc_ct_disk: "{{ jellyfin_ct_disk }}"
     lxc_ct_onboot: "{{ jellyfin_ct_onboot }}"
     lxc_ct_startup_order: "{{ jellyfin_ct_startup_order }}"
-    lxc_ct_template: "{{ jellyfin_ct_template }}"
     lxc_ct_template_path: "{{ jellyfin_ct_template_path }}"
     lxc_ct_ip: "{{ _lxc_ct_ip }}/{{ _lan_cidr }}"
     lxc_ct_gateway: "{{ _lan_gateway }}"

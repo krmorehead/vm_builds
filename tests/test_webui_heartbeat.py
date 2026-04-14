@@ -45,19 +45,6 @@ from scripts.webui.heartbeat import (
 )
 
 
-def _load_test_env() -> dict[str, str]:
-    """Load test.env and return as dict."""
-    env_file = PROJECT_ROOT / "test.env"
-    assert env_file.exists(), f"test.env not found at {env_file}"
-    result: dict[str, str] = {}
-    for line in env_file.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        key, _, val = line.partition("=")
-        result[key.strip()] = val.strip().strip("'\"")
-    return result
-
 
 # ── SubscriptionManager lifecycle ────────────────────────────────────
 
@@ -205,8 +192,8 @@ class TestRealSSH:
     """Verify _ssh_exec works against real Proxmox hosts."""
 
     @pytest.fixture()
-    def env(self):
-        return _load_test_env()
+    def env(self, test_env):
+        return test_env
 
     def test_ssh_to_primary_host(self, env):
         """Basic SSH works to the primary Proxmox host."""
@@ -249,8 +236,8 @@ class TestRealWifiCollectors:
     """
 
     @pytest.fixture()
-    def env(self):
-        return _load_test_env()
+    def env(self, test_env):
+        return test_env
 
     def test_bridge_1_wifi_metrics(self, env):
         """collect_wifi_metrics against bridge-1 returns real data."""
@@ -606,8 +593,8 @@ class TestCollectBatmanMetricsReal:
     """
 
     @pytest.fixture()
-    def env(self):
-        return _load_test_env()
+    def env(self, test_env):
+        return test_env
 
     @staticmethod
     def _wrapper_exists(ip: str) -> bool:

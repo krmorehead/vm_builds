@@ -10,10 +10,12 @@ from nicegui import ui
 
 from scripts.webui import data, theme
 from scripts.webui.data import Fleet, Host, HostBucket, Labels, PageTitles, Routes
+from scripts.webui import manager
+from scripts.webui.pages.vnc_shared import render_app_console_links
 
 
 def register() -> None:
-    @ui.page("/nodes")
+    @ui.page(Routes.NODES)
     def nodes_page() -> None:
         from scripts.webui.app import get_state_dir, load_active_env
 
@@ -37,7 +39,7 @@ def register() -> None:
                     auto_refresh, "active"
                 )
 
-    @ui.page("/nodes/{hostname}")
+    @ui.page(Routes.NODE_DETAIL)
     def node_detail_page(hostname: str) -> None:
         from scripts.webui.app import get_state_dir, load_active_env
 
@@ -278,7 +280,7 @@ def _add_host_form(state_dir: data.Path) -> None:
 def _single_node_card(host: Host, state_dir: data.Path) -> None:
     with ui.card().classes(
         "flex-1 min-w-[260px] max-w-[380px] cursor-pointer hover:brightness-110"
-    ).on("click", lambda _, n=host.name: ui.navigate.to(f"/nodes/{n}")):
+    ).on("click", lambda _, n=host.name: ui.navigate.to(Routes.NODE_DETAIL.replace("{hostname}", n))):
         with ui.row().classes("items-center gap-2 w-full"):
             theme.status_dot(host.status)
             ui.label(host.name).classes("text-base font-semibold font-mono").style(
@@ -437,7 +439,7 @@ def _render_detail(
         fleet = data.build_fleet(env, state_dir)
         host = fleet.get_host(hostname)
 
-        with ui.row().classes("items-center gap-2"):
+        with ui.row().classes("items-center gap-2 w-full"):
             ui.button(icon="arrow_back", on_click=lambda: ui.navigate.to(Routes.NODES)).props(
                 "flat round dense"
             ).style(f"color: {theme.TEXT_SECONDARY}")
@@ -483,6 +485,19 @@ def _detail_header(host: Host) -> None:
                     ui.badge("Healthy", color="green").props("outline")
                 else:
                     ui.badge("Unhealthy", color="red").props("outline")
+
+        mgr = manager.try_get_instance()
+        if mgr:
+            with ui.row().classes("items-center gap-2 mt-2"):
+                node_detail_back = Routes.NODE_DETAIL.replace("{hostname}", host.name)
+                vnc_url = mgr.get_child_vnc_url(host.name)
+                if vnc_url:
+                    kiosk_target = Routes.REMOTE_KIOSK.replace("{node_id}", host.name) + f"?back={node_detail_back}"
+                    ui.button(
+                        Labels.OPEN_KIOSK, icon="cast_connected",
+                        on_click=lambda t=kiosk_target: ui.navigate.to(t),
+                    ).props("flat dense").style(f"color: {theme.ACCENT}")
+                render_app_console_links(host.name, back=node_detail_back)
 
         if host.status == "reachable":
             ui.label("SSH reachable — no callhome heartbeat").classes(

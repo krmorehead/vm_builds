@@ -207,6 +207,54 @@ class TestHostStateQueries:
         assert len(state.wifi_phys_on_host()) == 2
         assert len(state.wifi_phys_in_containers()) == 0
 
+    def test_container_info_image_version_default(self) -> None:
+        ct = _make_container()
+        assert ct.image_version == ""
+
+    def test_container_info_image_version_set(self) -> None:
+        ct = _make_container()
+        ct.image_version = "1.0.5"
+        assert ct.image_version == "1.0.5"
+
+    def test_image_versions_returns_known(self) -> None:
+        state = _make_host_state()
+        state.containers[102].image_version = "1.0.5"
+        state.containers[103].image_version = ""
+        versions = state.image_versions()
+        assert versions == {"pihole": "1.0.5"}
+
+    def test_image_versions_empty_when_none_set(self) -> None:
+        state = _make_host_state()
+        assert state.image_versions() == {}
+
+    def test_image_version_round_trip(self) -> None:
+        state = _make_host_state()
+        state.containers[102].image_version = "2.3.1"
+        raw = state.to_dict()
+        rebuilt = HostState.from_dict(raw)
+        assert rebuilt.containers[102].image_version == "2.3.1"
+
+
+# ── Image version reading ────────────────────────────────────────────
+
+
+class TestGetImageVersion:
+    def test_reads_version_from_file(self, tmp_path: Path) -> None:
+        version_file = tmp_path / "image_version"
+        version_file.write_text("2.1.0\n")
+        from scripts.callhome import get_image_version
+        assert get_image_version(path=str(version_file)) == "2.1.0"
+
+    def test_returns_empty_for_missing_file(self, tmp_path: Path) -> None:
+        from scripts.callhome import get_image_version
+        assert get_image_version(path=str(tmp_path / "nonexistent")) == ""
+
+    def test_strips_whitespace(self, tmp_path: Path) -> None:
+        version_file = tmp_path / "image_version"
+        version_file.write_text("  3.0.0  \n")
+        from scripts.callhome import get_image_version
+        assert get_image_version(path=str(version_file)) == "3.0.0"
+
 
 # ── HostStateStore CRUD ──────────────────────────────────────────────
 

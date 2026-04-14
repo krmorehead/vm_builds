@@ -34,6 +34,26 @@
     msg: "USB devices: {{ homeassistant_usb_devices }} → Mount entries: {{ _ha_mount_entries }}"
   when: homeassistant_usb_devices | length > 0
 
+# ── Check container existence ──────────────────────────────────
+
+- name: Check if Home Assistant container exists
+  ansible.builtin.command:
+    cmd: pct status {{ homeassistant_ct_id }}
+  register: _ct_status
+  failed_when: false
+  changed_when: false
+
+- name: Set container existence flag
+  ansible.builtin.set_fact:
+    _lxc_exists: "{{ _ct_status.rc == 0 }}"
+
+# ── Resolve deployed version ────────────────────────────────────
+
+- name: Resolve deployed Home Assistant version
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_deployed_version.yml"
+  vars:
+    _resolve_service_name: homeassistant
+
 # ── Provision via shared proxmox_lxc role ────────────────────────
 
 - name: Provision Home Assistant LXC container
@@ -49,7 +69,6 @@
     lxc_ct_onboot: "{{ homeassistant_ct_onboot }}"
     lxc_ct_startup_order: "{{ homeassistant_ct_startup_order }}"
     lxc_ct_features: "{{ homeassistant_ct_features }}"
-    lxc_ct_template: "{{ homeassistant_ct_template }}"
     lxc_ct_template_path: "{{ homeassistant_ct_template_path }}"
     lxc_ct_ip: "{{ _lxc_ct_ip }}/{{ _lan_cidr }}"
     lxc_ct_gateway: "{{ _lan_gateway }}"

@@ -23,8 +23,9 @@ from nicegui import app, ui
 from scripts.webui import data, manager
 from scripts.webui.data import PROJECT_ROOT
 from scripts.webui.pages import (
-    bridge, containers, dashboard, deploy, environment, hosts, hub, images,
-    launch, mesh, nodes, router, services, timeline, viewer,
+    bridge, console, containers, dashboard, deploy, environment, hosts, hub,
+    images, launch, mesh, nodes, remote_kiosk, router, services, timeline,
+    viewer,
 )
 
 
@@ -101,6 +102,8 @@ def register_pages() -> None:
     launch.register()
     timeline.register()
     viewer.register()
+    remote_kiosk.register()
+    console.register()
 
 
 # ── Manager integration ──────────────────────────────────────────────
@@ -114,6 +117,11 @@ def _env_node_resolver(node_id: str) -> str | None:
         if h.name == node_id:
             return h.ip
     return None
+
+
+def _env_vnc_relay_resolver(node_id: str) -> tuple[str, int] | None:
+    """Resolve VNC relay for LAN hosts via the active env file."""
+    return data.get_vnc_relay(node_id, load_active_env())
 
 
 def _validate_callhome_token(token: str) -> bool:
@@ -146,6 +154,7 @@ def _init_manager() -> None:
         auth_validator=_validate_callhome_token,
         config=config,
         manager_class=manager.ClusterManager,
+        vnc_relay_resolver=_env_vnc_relay_resolver,
     )
 
 
@@ -474,11 +483,35 @@ def register_api() -> None:
                 status_code=400,
             )
 
+    async def _api_fleet_versions(request: StarletteRequest) -> JSONResponse:
+        """Aggregate deployed image versions from all Node Managers."""
+        import httpx
+
+        state_dir = get_state_dir()
+        registry = data.HostRegistry(state_dir)
+        hosts = registry.all()
+
+        async def _query(client: httpx.AsyncClient,
+                         name: str, ip: str) -> tuple[str, dict]:
+            try:
+                resp = await client.get(f"http://{ip}:9001/api/images/versions")
+                if resp.status_code == 200:
+                    return (name, resp.json().get("versions", {}))
+            except httpx.HTTPError:
+                pass
+            return (name, {"error": "unreachable"})
+
+        async with httpx.AsyncClient(timeout=5) as client:
+            tasks = [_query(client, h.name, h.ip) for h in hosts if h.ip]
+            results = await asyncio.gather(*tasks)
+        return JSONResponse({"fleet_versions": dict(results)})
+
     app.routes.insert(0, Route("/api/checkin", _api_checkin, methods=["POST"]))
     app.routes.insert(0, Route("/api/nodes", _api_nodes, methods=["GET"]))
     app.routes.insert(0, Route("/api/fleet/ready", _api_fleet_ready, methods=["GET"]))
     app.routes.insert(0, Route("/api/fleet/stale", _api_fleet_stale, methods=["GET"]))
     app.routes.insert(0, Route("/api/fleet/health", _api_fleet_health, methods=["GET"]))
+    app.routes.insert(0, Route("/api/fleet/versions", _api_fleet_versions, methods=["GET"]))
     app.routes.insert(0, Route(
         "/api/container/{container_id}/ready",
         _api_container_ready, methods=["GET"],

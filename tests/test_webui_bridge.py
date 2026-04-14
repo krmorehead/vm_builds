@@ -268,7 +268,7 @@ class TestLaunchPage:
     async def test_launch_page_shows_description(self, tmp_path):
         async with launch_ctx(tmp_path) as user:
             await user.open(f"{Routes.LAUNCH}?vmid=302&title=Moonlight&url_key=MOONLIGHT_URL")
-            await user.should_see("takes over this display")
+            await user.should_see("Game streaming client")
 
     async def test_launch_page_shows_launch_button(self, tmp_path):
         async with launch_ctx(tmp_path) as user:
@@ -432,10 +432,10 @@ class TestLaunchStateTransitions:
             await user.should_see("Launch Moonlight")
 
     async def test_launch_button_absent_when_no_vmid(self, tmp_path):
-        """Without VMID, no launch button should appear."""
+        """Without VMID, error message appears instead of launch button."""
         async with launch_ctx(tmp_path) as user:
             await user.open(Routes.LAUNCH)
-            await user.should_not_see("Launch")
+            await user.should_see(Labels.NO_VMID_CONFIGURED)
 
     async def test_unknown_url_key_uses_fallback_icon(self, tmp_path):
         """Unknown url_key should still render with a fallback rocket icon."""

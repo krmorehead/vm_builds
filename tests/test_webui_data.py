@@ -1612,12 +1612,56 @@ class TestDisplayApps:
     def test_display_apps_count(self):
         assert len(data.DISPLAY_APPS) == 3
 
-    def test_display_apps_descriptions_mention_return(self):
-        """Each description should mention the kiosk returning."""
+    def test_display_apps_descriptions_mention_vnc(self):
+        """Each description should reference VNC or remote console access."""
         for url_key, info in data.DISPLAY_APPS.items():
-            assert "return" in info["description"].lower(), (
-                f"{url_key} description should mention kiosk return"
+            desc = info["description"].lower()
+            assert "vnc" in desc or "console" in desc or "remotely" in desc, (
+                f"{url_key} description should reference remote console access"
             )
+
+    def test_display_apps_have_app_id(self):
+        """Each display app should have an app_id for handler registry lookup."""
+        for url_key, info in data.DISPLAY_APPS.items():
+            assert "app_id" in info, f"{url_key} missing app_id"
+            assert info["app_id"], f"{url_key} app_id is empty"
+
+    def test_display_apps_derived_from_configs(self):
+        """DISPLAY_APPS must be derived from DISPLAY_APP_CONFIGS (single source of truth)."""
+        for url_key, info in data.DISPLAY_APPS.items():
+            app_id = info["app_id"]
+            assert app_id in data.DISPLAY_APP_CONFIGS, (
+                f"DISPLAY_APPS[{url_key!r}] references {app_id!r} not in DISPLAY_APP_CONFIGS"
+            )
+            cfg = data.DISPLAY_APP_CONFIGS[app_id]
+            assert info["label"] == cfg.label
+            assert info["icon"] == cfg.icon
+
+
+class TestConsoleUrl:
+    def test_basic(self):
+        url = data.console_url("home", "desktop")
+        expected = data.Routes.CONSOLE.replace("{node_id}", "home").replace("{app_id}", "desktop")
+        assert url == expected
+
+    def test_with_back(self):
+        url = data.console_url("home", "kodi", back="/fleet")
+        expected_prefix = data.Routes.CONSOLE.replace("{node_id}", "home").replace("{app_id}", "kodi")
+        assert url.startswith(f"{expected_prefix}?back=")
+        assert "%2Ffleet" in url
+
+    def test_no_back(self):
+        url = data.console_url("mesh1", "moonlight", back="")
+        expected = data.Routes.CONSOLE.replace("{node_id}", "mesh1").replace("{app_id}", "moonlight")
+        assert url == expected
+
+
+class TestDisplayIcon:
+    def test_vnc(self):
+        assert data.display_icon("vnc") == "tv"
+
+    def test_web(self):
+        assert data.display_icon("web") == "web"
 
 
 # ── SSH connection ────────────────────────────────────────────────────
@@ -3417,25 +3461,24 @@ class TestKioskHostIpRouting:
     container on the LAN bridge couldn't route to.
     """
 
+    _KIOSK_TASKS = PROJECT_ROOT / "roles/kiosk_configure/tasks/main.yml"
+
     def test_kiosk_configure_uses_kiosk_host_ip(self):
         """HOST_IP must reference _kiosk_host_ip, not ansible_host."""
-        from pathlib import Path
-        content = Path("roles/kiosk_configure/tasks/main.yml").read_text()
+        content = self._KIOSK_TASKS.read_text()
         assert '_kiosk_host_ip' in content
         assert 'HOST_IP: "{{ ansible_host }}"' not in content
 
     def test_kiosk_configure_computes_host_ip_for_lan(self):
         """LAN containers should use the LAN management IP, not ansible_host."""
-        from pathlib import Path
-        content = Path("roles/kiosk_configure/tasks/main.yml").read_text()
+        content = self._KIOSK_TASKS.read_text()
         assert "Compute kiosk-reachable host IP" in content
         assert "router_nodes" in content
         assert "lan_hosts" in content
 
     def test_kiosk_configure_computes_host_ip_for_wan(self):
         """WAN containers should use the NAT bridge gateway."""
-        from pathlib import Path
-        content = Path("roles/kiosk_configure/tasks/main.yml").read_text()
+        content = self._KIOSK_TASKS.read_text()
         assert "container_subnet_prefix" in content
         assert "container_subnet_id" in content
 
@@ -3978,8 +4021,12 @@ class TestManagerRelayPost:
             sock.close()
         if not reachable:
             pytest.skip(f"API server not running on port {port}")
-        url = f"http://localhost:{port}/api/checkin"
         token = os.environ.get("CALLHOME_PUBLIC_KEY", "")
+        assert token, (
+            "CALLHOME_PUBLIC_KEY not in os.environ — conftest.py "
+            "should have loaded it from test.env at session start"
+        )
+        url = f"http://localhost:{port}/api/checkin"
         result = self.mgr._post_to_upstream(
             url,
             {"node_id": "relay-test", "hostname": "relay-test",
@@ -4288,3 +4335,172 @@ class TestClusterManagerFleetStorage:
         assert isinstance(mgr, manager.ClusterManager)
         with pytest.raises(ValueError, match="missing node_id"):
             mgr.register_child_checkin({"hostname": ""})
+
+
+class TestVncConstants:
+    """Verify VNC-related constants exist in data.py."""
+
+    def test_ports_class(self):
+        assert hasattr(data, "Ports")
+        assert data.Ports.KIOSK_VNC == 5900
+        assert data.Ports.KIOSK_VNC_WS == 6080
+
+    def test_routes_remote_kiosk(self):
+        assert hasattr(data.Routes, "REMOTE_KIOSK")
+        assert "{node_id}" in data.Routes.REMOTE_KIOSK
+
+    def test_page_titles_remote_kiosk(self):
+        assert hasattr(data.PageTitles, "REMOTE_KIOSK")
+
+    def test_labels_vnc(self):
+        assert hasattr(data.Labels, "OPEN_KIOSK")
+        assert hasattr(data.Labels, "KIOSK_NOT_REACHABLE")
+        assert hasattr(data.Labels, "DRILL_INTO")
+        assert hasattr(data.Labels, "GO_BACK")
+
+
+class TestManagerVncResolution:
+    """Verify VNC URL resolution and child topology via real manager instances."""
+
+    def setup_method(self):
+        from scripts.webui import manager
+        self._mgr_module = manager
+
+    def teardown_method(self):
+        self._mgr_module.reset()
+
+    def test_node_manager_returns_none(self):
+        mgr = self._mgr_module.init(
+            lambda n: None,
+            config={"HOST_IP": "10.99.3.19", "HOST_NAME": "ai", "MESH_KEY": "test"},
+            manager_class=self._mgr_module.NodeManager,
+        )
+        assert mgr.get_child_vnc_url("home") is None
+        assert mgr.get_fleet_children("ai") == []
+
+    def test_cluster_manager_resolves_from_child_managers(self):
+        mgr = self._mgr_module.init(
+            lambda n: None,
+            config={
+                "HOST_IP": "10.10.10.23", "HOST_NAME": "home", "MESH_KEY": "test",
+                "CHILD_MANAGER_IPS": {"mesh1": "10.10.10.210", "ai": "192.168.86.220"},
+            },
+            manager_class=self._mgr_module.ClusterManager,
+        )
+        url = mgr.get_child_vnc_url("mesh1")
+        assert url is not None
+        assert "10.10.10.210" in url
+        assert str(data.Ports.KIOSK_VNC_WS) in url
+
+    def test_cluster_manager_unknown_returns_none(self):
+        mgr = self._mgr_module.init(
+            lambda n: None,
+            config={
+                "HOST_IP": "10.10.10.23", "HOST_NAME": "home", "MESH_KEY": "test",
+                "CHILD_MANAGER_IPS": {"mesh1": "10.10.10.210"},
+            },
+            manager_class=self._mgr_module.ClusterManager,
+        )
+        assert mgr.get_child_vnc_url("nonexistent") is None
+
+    def test_cluster_manager_fleet_children(self):
+        mgr = self._mgr_module.init(
+            lambda n: None,
+            config={
+                "HOST_IP": "10.10.10.23", "HOST_NAME": "home", "MESH_KEY": "test",
+                "CHILD_MANAGER_IPS": {"mesh1": "10.10.10.210", "ai": "192.168.86.220"},
+            },
+            manager_class=self._mgr_module.ClusterManager,
+        )
+        children = mgr.get_fleet_children("home")
+        assert "mesh1" in children
+        assert "ai" in children
+
+    def test_cluster_manager_fleet_children_empty_for_non_self(self):
+        mgr = self._mgr_module.init(
+            lambda n: None,
+            config={
+                "HOST_IP": "10.10.10.23", "HOST_NAME": "home", "MESH_KEY": "test",
+                "CHILD_MANAGER_IPS": {"mesh1": "10.10.10.210"},
+            },
+            manager_class=self._mgr_module.ClusterManager,
+        )
+        children = mgr.get_fleet_children("mesh1")
+        assert children == []
+
+    def test_get_guest_viewstream_url_resolves(self):
+        """get_guest_viewstream_url delegates to DisplayTransferService."""
+        mgr = self._mgr_module.init(
+            lambda n: None,
+            config={
+                "HOST_IP": "10.10.10.23", "HOST_NAME": "home", "MESH_KEY": "test",
+                "CHILD_MANAGER_IPS": {"mesh1": "10.10.10.210"},
+            },
+            manager_class=self._mgr_module.ClusterManager,
+        )
+        url = mgr.get_guest_viewstream_url("mesh1", "desktop")
+        assert url is not None
+        assert "10.10.10.210" in url
+        assert str(data.Ports.DESKTOP_VNC_WS) in url
+
+    def test_get_guest_viewstream_url_unknown_node(self):
+        """Returns None when node cannot be resolved."""
+        mgr = self._mgr_module.init(
+            lambda n: None,
+            config={
+                "HOST_IP": "10.10.10.23", "HOST_NAME": "home", "MESH_KEY": "test",
+                "CHILD_MANAGER_IPS": {},
+            },
+            manager_class=self._mgr_module.ClusterManager,
+        )
+        assert mgr.get_guest_viewstream_url("nonexistent", "desktop") is None
+
+    def test_get_guest_viewstream_url_unknown_app(self):
+        """Returns None when app_id has no registered handler."""
+        mgr = self._mgr_module.init(
+            lambda n: None,
+            config={
+                "HOST_IP": "10.10.10.23", "HOST_NAME": "home", "MESH_KEY": "test",
+                "CHILD_MANAGER_IPS": {"mesh1": "10.10.10.210"},
+            },
+            manager_class=self._mgr_module.ClusterManager,
+        )
+        assert mgr.get_guest_viewstream_url("mesh1", "nonexistent") is None
+
+    def test_supermanager_resolves_from_fleet_nodes(self):
+        """SM resolves VNC IP from _fleet_nodes (heartbeat-populated)."""
+        def resolver(n):
+            return {"mesh1": "10.10.10.210", "ai": "192.168.86.220"}.get(n)
+
+        mgr = self._mgr_module.init(
+            resolver,
+            config={"HOST_IP": "192.168.86.201", "HOST_NAME": "super", "MESH_KEY": "test"},
+            manager_class=self._mgr_module.ClusterManager,
+        )
+        mgr.register_child_checkin({
+            "node_id": "mesh1", "hostname": "mesh1",
+            "local_ips": ["10.10.10.210"],
+        })
+        url = mgr.get_child_vnc_url("mesh1")
+        assert url is not None
+        assert "10.10.10.210" in url
+        assert str(data.Ports.KIOSK_VNC_WS) in url
+
+    def test_supermanager_fleet_children_includes_fleet_nodes(self):
+        """SM's get_fleet_children returns fleet nodes as children."""
+        mgr = self._mgr_module.init(
+            lambda n: None,
+            config={"HOST_IP": "192.168.86.201", "HOST_NAME": "super", "MESH_KEY": "test"},
+            manager_class=self._mgr_module.ClusterManager,
+        )
+        mgr.register_child_checkin({
+            "node_id": "mesh1", "hostname": "mesh1",
+            "local_ips": ["10.10.10.210"],
+        })
+        mgr.register_child_checkin({
+            "node_id": "ai", "hostname": "ai",
+            "local_ips": ["192.168.86.220"],
+        })
+        children = mgr.get_fleet_children("super")
+        assert "mesh1" in children
+        assert "ai" in children

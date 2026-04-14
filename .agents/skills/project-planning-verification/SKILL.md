@@ -46,3 +46,18 @@ description: Project milestone verification and rollback patterns. Use when desi
     - Specify the generated file: `test.env.generated` (test) or `.env.generated` (production)
     - Include a verify assertion checking the generated file exists and contains the expected keys
     - Include cleanup of the generated file in rollback
+
+## Manual Testing Verification Requirements
+
+13. Manual testing milestones verify by EXECUTION — not by confirming a
+    file exists. The verify section MUST require "All N sections of
+    Playbook X executed and passed on real hardware" with specific outcomes
+    for key interactions. NEVER use "verify Playbook exists" as a criterion.
+
+14. The project plan's reference to the playbook MUST include: file path,
+    section numbers, sub-section count, and explicit "EXECUTE" language.
+    NEVER say "walkthrough," "review," or passive voice.
+
+    For HOW to write the playbook itself (exhaustive feature enumeration,
+    per-app steps, host-awareness, error cases), see the
+    `manual-testing-playbook-writing` skill.

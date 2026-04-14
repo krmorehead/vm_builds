@@ -48,9 +48,12 @@ class Routes:
     ENVIRONMENT = "/environment"
     CONTAINERS = "/containers"
     FLEET = "/fleet"
+    FLEET_DETAIL = "/fleet/{node_id}"
     LAUNCH = "/launch"
     TIMELINE = "/timeline"
     VIEW = "/view"
+    REMOTE_KIOSK = "/remote/{node_id}"
+    CONSOLE = "/console/{node_id}/{app_id}"
 
 
 class ApiRoutes:
@@ -60,12 +63,17 @@ class ApiRoutes:
     FLEET_READY = "/api/fleet/ready"
     FLEET_STALE = "/api/fleet/stale"
     FLEET_HEALTH = "/api/fleet/health"
+    FLEET_VERSIONS = "/api/fleet/versions"
     CONTAINER_READY = "/api/container/{container_id}/ready"
     EVENTS = "/api/events"
     TIMELINE_START = "/api/timeline/start"
     TIMELINE_STOP = "/api/timeline/stop"
     TIMELINE_CURRENT = "/api/timeline/current"
     HOST_REGISTER = "/api/hosts/register"
+    DISPLAY_ENTER = "/api/display/{app_id}/enter"
+    DISPLAY_EXIT = "/api/display/{app_id}/exit"
+    DISPLAY_STATUS = "/api/display/{app_id}/status"
+    DISPLAY_LIST = "/api/display/list"
     GUESTS = "/api/guests"
     GUEST_ACTION = "/api/guests/{vmid}/{action}"
     WIFI_MODE = "/api/wifi/mode/{node}/{mode}"
@@ -97,6 +105,7 @@ class PageTitles:
     ENVIRONMENT = "Environment"
     CONTAINERS = "Containers & VMs"
     TIMELINE = "Deploy Timeline"
+    REMOTE_KIOSK = "Remote Kiosk"
 
 
 class Labels:
@@ -145,6 +154,50 @@ class Labels:
     BUCKET_TEST = "Test Units"
     BUCKET_LAB = "Lab Units"
     BUCKET_PRODUCTION = "Production"
+    OPEN_KIOSK = "Open Kiosk"
+    KIOSK_NOT_REACHABLE = "Kiosk not reachable"
+    DRILL_INTO = "Drill into"
+    LAUNCH_PREFIX = "Launch"
+    CONSOLE_SUFFIX = "Console"
+    NO_VMID_CONFIGURED = "No VMID configured for this app"
+    MANAGER_NOT_INITIALIZED = "Manager not initialized"
+    HOST_UNREACHABLE = "Cannot reach host"
+    NO_HANDLER = "No handler registered"
+    VIEW_CONSOLE_FROM_MANAGER = (
+        "started. View the console from the Manager or SuperManager fleet page."
+    )
+    HEADLESS_VNC_EXPLANATION = (
+        "Display apps run as headless VNC streams. Conflicting "
+        "apps are automatically stopped before the new one starts. "
+        "The kiosk stays alive \u2014 view the app's console from the "
+        "Manager's fleet page using the View Console button."
+    )
+    GO_BACK = "Go Back"
+
+
+class Ports:
+    """Well-known port numbers for fleet services."""
+    KIOSK_VNC = 5900
+    KIOSK_VNC_WS = 6080
+    DESKTOP_VNC_WS = 6081
+    KODI_VNC_WS = 6082
+    MOONLIGHT_VNC_WS = 6083
+
+
+@dataclass
+class DisplayAppConfig:
+    """Static configuration for a display app in the handler registry."""
+    app_id: str
+    handler_type: str
+    vnc_ws_port: int = 0
+    vmid: str = ""
+    ct_id: str = ""
+    service_port: int = 0
+    service_path: str = "/"
+    conflicts: list[str] = field(default_factory=list)
+    label: str = ""
+    icon: str = ""
+    description: str = ""
 
 
 NavItem = tuple[str, str, str]  # (label, path, icon)
@@ -174,6 +227,7 @@ CLUSTER_NAV_SECTIONS: list[NavItem] = [
 ]
 
 KIOSK_NAV_ITEMS: list[KioskNavItem] = [
+    ("Fleet", Routes.FLEET, "device_hub"),
     ("Bridge", Routes.BRIDGE, "swap_horiz"),
     ("Mesh", Routes.MESH, "hub"),
     ("Router", Routes.ROUTER, "router"),
@@ -473,6 +527,13 @@ _HOST_VPN_MAP: dict[str, str] = {
     "mesh2": "MESH_2_VPN_IP",
     "bridge-1": "BRIDGE_1_VPN_IP",
     "bridge-2": "BRIDGE_2_VPN_IP",
+}
+
+# LAN hosts need VNC WebSocket relayed through the primary host because
+# the browser can't reach LAN IPs directly. Each entry maps a LAN host
+# name to its relay port on PRIMARY_HOST.
+_LAN_VNC_RELAY_PORTS: dict[str, int] = {
+    "mesh1": 16080,
 }
 
 
@@ -798,6 +859,22 @@ def get_known_hosts(env: dict[str, str]) -> list[HostInfo]:
         vpn_ip=env.get(mesh1_vpn_env, "") if mesh1_vpn_env else "",
     ))
     return hosts
+
+
+def get_vnc_relay(node_id: str, env: dict[str, str]) -> tuple[str, int] | None:
+    """Return (relay_ip, relay_port) for LAN hosts that need VNC relayed.
+
+    LAN hosts (behind the router) aren't directly reachable from the
+    browser. Their VNC WebSocket traffic is relayed through the primary
+    host via a socat proxy on a dedicated port.
+    """
+    relay_port = _LAN_VNC_RELAY_PORTS.get(node_id)
+    if relay_port is None:
+        return None
+    primary_ip = env.get("PRIMARY_HOST", "")
+    if not primary_ip:
+        return None
+    return (primary_ip, relay_port)
 
 
 def probe_all_hosts(hosts: list[HostInfo]) -> list[HostStatus]:
@@ -1718,35 +1795,70 @@ INTERNAL_PAGES: dict[str, str] = {
     "CONTAINERS_PAGE": "/containers",
 }
 
-DISPLAY_APPS: dict[str, dict] = {
-    "MOONLIGHT_URL": {
-        "vmid": "302",
-        "label": "Moonlight",
-        "icon": "\U0001f3ae",
-        "description": (
-            "Starting Moonlight takes over this display for game streaming. "
-            "The kiosk will automatically return when the stream ends."
-        ),
-    },
-    "KODI_URL": {
-        "vmid": "301",
-        "label": "Kodi",
-        "icon": "\U0001f3a6",
-        "description": (
-            "Starting Kodi takes over this display for media playback. "
-            "The kiosk will automatically return when Kodi exits."
-        ),
-    },
-    "DESKTOP_URL": {
-        "vmid": "400",
-        "label": "Desktop",
-        "icon": "\U0001f5a5",
-        "description": (
-            "Starting the desktop VM takes over this display. "
-            "The kiosk will automatically return when the VM stops."
-        ),
-    },
+# ── Display app configuration (single source of truth) ────────────────
+
+DISPLAY_APP_CONFIGS: dict[str, DisplayAppConfig] = {
+    "kiosk": DisplayAppConfig(
+        app_id="kiosk", handler_type="wayland_vnc",
+        ct_id="401", vnc_ws_port=Ports.KIOSK_VNC_WS,
+        conflicts=[],
+        label="Kiosk", icon="\U0001f3e0",
+        description="Home Hub kiosk display (headless, no DRI conflict).",
+    ),
+    "desktop": DisplayAppConfig(
+        app_id="desktop", handler_type="qemu_vnc",
+        vmid="400", vnc_ws_port=Ports.DESKTOP_VNC_WS,
+        conflicts=["kodi", "moonlight"],
+        label="Desktop", icon="\U0001f5a5",
+        description="Full Debian KDE desktop VM \u2014 view remotely via VNC console.",
+    ),
+    "kodi": DisplayAppConfig(
+        app_id="kodi", handler_type="wayland_vnc",
+        ct_id="301", vnc_ws_port=Ports.KODI_VNC_WS,
+        conflicts=["desktop", "moonlight"],
+        label="Kodi", icon="\U0001f3a6",
+        description="Media center with headless Wayland VNC display.",
+    ),
+    "moonlight": DisplayAppConfig(
+        app_id="moonlight", handler_type="wayland_vnc",
+        ct_id="302", vnc_ws_port=Ports.MOONLIGHT_VNC_WS,
+        conflicts=["desktop", "kodi"],
+        label="Moonlight", icon="\U0001f3ae",
+        description="Game streaming client with headless VNC console.",
+    ),
 }
+
+_URL_KEY_TO_APP_ID: dict[str, str] = {
+    "MOONLIGHT_URL": "moonlight",
+    "KODI_URL": "kodi",
+    "DESKTOP_URL": "desktop",
+}
+
+DISPLAY_APPS: dict[str, dict] = {
+    url_key: {
+        "vmid": cfg.vmid or cfg.ct_id,
+        "label": cfg.label,
+        "icon": cfg.icon,
+        "app_id": cfg.app_id,
+        "description": cfg.description,
+    }
+    for url_key, app_id in _URL_KEY_TO_APP_ID.items()
+    if (cfg := DISPLAY_APP_CONFIGS.get(app_id))
+}
+
+
+def console_url(node_id: str, app_id: str, back: str = "") -> str:
+    """Build a /console/{node_id}/{app_id} URL with optional back param."""
+    url = Routes.CONSOLE.replace("{node_id}", node_id).replace("{app_id}", app_id)
+    if back:
+        from urllib.parse import quote
+        url = f"{url}?back={quote(back, safe='')}"
+    return url
+
+
+def display_icon(handler_display_type: str) -> str:
+    """Return the correct icon for a display handler type."""
+    return "tv" if handler_display_type == "vnc" else "web"
 
 
 def get_hub_services() -> list[HubService]:
@@ -1772,8 +1884,8 @@ def get_mesh_nodes() -> tuple[str, list[str]]:
 
 
 def get_router_node() -> str:
-    """Return the router node ID."""
-    return "home"
+    """Return the router node ID (OpenWrt VM, not the Proxmox host)."""
+    return "openwrt"
 
 
 KIOSK_CONFIG_PATH = Path("/opt/kiosk/config.json")

@@ -226,3 +226,26 @@ tests ("might restart a service"), and status_text tests ("can't construct
 NiceGUI element"). Every one of these could be tested for real. The agent
 was writing justification comments for lazy mocks instead of writing real
 tests.
+
+# Kiosk container code layout
+
+The kiosk LXC containers mirror the controller's directory structure under
+`/opt/kiosk/`. The kiosk_server.py imports modules via `from scripts.webui
+import manager`, which resolves to `/opt/kiosk/scripts/webui/manager.py`.
+
+When hot-deploying updated code to kiosk containers:
+- ALWAYS create the tarball with the correct relative path: `tar czf update.tar.gz -C scripts webui/manager.py`, then extract at `/opt/kiosk/scripts/`.
+- NEVER use `tar czf update.tar.gz -C scripts/webui manager.py` and extract at `/opt/kiosk/`. This puts the file at `/opt/kiosk/manager.py` which is NOT on the Python import path.
+- Previous bug (2026-04-13): Updated manager.py (with batman relay code) was extracted to `/opt/kiosk/manager.py` instead of `/opt/kiosk/scripts/webui/manager.py`. All 6 kiosks reported 404 for `/api/batman/enable` because kiosk_server.py imported the OLD code from the correct path.
+
+# Backup retention prevents disk exhaustion
+
+The `proxmox_backup` role MUST auto-prune old vzdump archives after each
+backup run. Without pruning, Desktop VM backups (~1.8GB compressed) accumulate
+rapidly — 25 molecule test cycles = 44GB of old backups.
+
+- `backup_retain` (default: 1) controls how many copies to keep per VMID.
+- Pruning runs AFTER the new backup and BEFORE the manifest is written.
+- Previous bug (2026-04-13): home's root partition hit 92% (60GB/68GB) after
+  124 vzdump files accumulated in `/var/lib/ansible-backup` over one month.
+  The Desktop VM (400) alone accounted for ~38GB across 20+ backups.

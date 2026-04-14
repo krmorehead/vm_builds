@@ -1,0 +1,27 @@
+---
+# Kiosk self-check: can't query its own API during its own deploy.
+# Read /etc/image_version directly from the existing container.
+#
+# Required input variables:
+#   _lxc_exists  (bool) — set by caller via `pct status` before including
+#
+# Output:
+#   _deployed_version  (str) — semver or "" if unknown
+
+- name: Read deployed version from kiosk container (self-check)
+  ansible.builtin.command:
+    cmd: pct exec {{ kiosk_ct_id }} -- cat /etc/image_version
+  register: _pct_version
+  failed_when: false
+  changed_when: false
+  when: _lxc_exists | default(false) | bool
+
+- name: Set deployed version from pct exec
+  ansible.builtin.set_fact:
+    _deployed_version: "{{ _pct_version.stdout | default('') | trim }}"
+  when: _lxc_exists | default(false) | bool
+
+- name: Default deployed version when kiosk container doesn't exist
+  ansible.builtin.set_fact:
+    _deployed_version: ""
+  when: not (_lxc_exists | default(false) | bool)

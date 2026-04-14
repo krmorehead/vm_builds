@@ -204,16 +204,35 @@ When testing the Cluster Manager (`kiosk_server.py --config` with
 Step-by-step runbooks with exact commands for each test scenario are in
 `docs/manual-testing-playbooks.md`. The playbooks cover:
 
-- Kiosk container health checks (all 6 hosts)
-- Cluster Manager fleet verification (API queries)
-- Batman mode enable/disable/status (with verification on real containers)
-- WiFi status on mesh/bridge containers
-- Guest management via Manager API
-- Child Manager direct communication
-- End-to-end heartbeat chain (Container → Manager → Cluster Manager)
+- Playbook 1: Kiosk container health checks (all 6 hosts)
+- Playbook 2: Cluster Manager fleet verification (API queries)
+- Playbook 3: Batman mode enable/disable/status (with verification on real containers)
+- Playbook 4: WiFi status on mesh/bridge containers
+- Playbook 5: Guest management via Manager API
+- Playbook 6: Child Manager direct communication
+- Playbook 7: End-to-end heartbeat chain (Container → Manager → Cluster Manager)
+- Playbook 8: Image version pipeline verification
+- Playbook 9: SuperManager verification (API + fleet health)
+- Playbook 10: Kiosk functionality on each unit (service, HTTP, callhome, config)
+- Playbook 11: Manager kiosk fleet dashboard (home CM)
+- Playbook 12: Browser-based UI verification (SM, CM, NM visual + interactive)
+- Playbook 13: Hierarchical kiosk control via KasmVNC display pipeline
+  (KasmVNC iframe streaming, single-process display service per container/VM,
+  two-level drill-down with back-navigation, EVERY hub app tested via iframe —
+  13.4a: 3 display apps (Desktop, Kodi, Moonlight) via `/console` iframe,
+  13.4b: 8 external web UIs (Jellyfin, Home Assistant, Gaming, OpenWrt,
+  Pi-hole, WireGuard, Netdata, Logs), 13.4c: 4 internal pages (Bridge, Mesh,
+  Router, Containers), 13.4d: two-level drill-down app launch,
+  CM-perspective display, error/edge cases, noVNC absence verification)
 
 ALWAYS use the playbooks for manual testing. They contain the exact commands
-to run against real infrastructure — no improvisation needed.
+to run against real infrastructure — no improvisation needed. EXECUTE every
+section — do not just read through them. Every button, toggle, and action
+must be exercised against real hardware.
+
+When WRITING new playbooks, load the `manual-testing-playbook-writing` skill
+for exhaustive feature enumeration, section structure, host-awareness, and
+per-app test step patterns.
 
 ## Previous bugs found by manual testing
 

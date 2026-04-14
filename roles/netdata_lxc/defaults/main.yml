@@ -3,7 +3,6 @@ netdata_ct_hostname: netdata
 netdata_ct_memory: 128
 netdata_ct_cores: 1
 netdata_ct_disk: "2"
-netdata_ct_template: "{{ netdata_lxc_template }}"
 netdata_ct_template_path: "{{ netdata_lxc_template_path }}"
 netdata_ct_onboot: true
 netdata_ct_startup_order: 3

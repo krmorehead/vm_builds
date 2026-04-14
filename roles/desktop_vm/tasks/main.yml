@@ -9,6 +9,12 @@
 - name: Set VM existence flag
   ansible.builtin.set_fact:
     _desktop_vm_exists: "{{ _desktop_vm_status.rc == 0 }}"
+    _lxc_exists: "{{ _desktop_vm_status.rc == 0 }}"
+
+- name: Resolve deployed Desktop version
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_deployed_version.yml"
+  vars:
+    _resolve_service_name: desktop
 
 - name: Reset VM version rebuild flag
   ansible.builtin.set_fact:
@@ -350,3 +356,55 @@
       bridge: "{{ proxmox_all_bridges[0] | default('') }}"
       hardware: []
       last_deployed: "{{ ansible_date_time.iso8601 }}"
+
+# ── Desktop VNC WebSocket bridge ─────────────────────────────────
+# Proxmox QEMU creates /var/run/qemu-server/{vmid}.vnc when the VM runs.
+# websockify bridges this Unix socket to a WebSocket port for noVNC.
+
+- name: Ensure python3-websockify is installed
+  ansible.builtin.apt:
+    name: python3-websockify
+    state: present
+    cache_valid_time: 86400
+
+- name: Deploy desktop-vnc-ws systemd unit
+  ansible.builtin.copy:
+    content: |
+      [Unit]
+      Description=Desktop VM VNC WebSocket bridge
+      ConditionPathExists=/var/run/qemu-server/{{ desktop_vm_id }}.vnc
+
+      [Service]
+      ExecStart=/usr/bin/websockify 0.0.0.0:{{ desktop_vnc_ws_port }} --unix-target=/var/run/qemu-server/{{ desktop_vm_id }}.vnc
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/desktop-vnc-ws.service
+    mode: "0644"
+
+- name: Enable and start desktop-vnc-ws
+  ansible.builtin.systemd:
+    name: desktop-vnc-ws
+    daemon_reload: true
+    enabled: true
+    state: restarted
+
+# ── Port forwarding for Desktop VNC WebSocket ────────────────────
+
+- name: Add DNAT rule for Desktop VNC WebSocket (WAN hosts)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      WAN_IF="{{ proxmox_wan_bridge }}"
+      if ! iptables -t nat -C PREROUTING -i "$WAN_IF" -p tcp --dport {{ desktop_vnc_ws_port }} \
+           -j DNAT --to-destination 127.0.0.1:{{ desktop_vnc_ws_port }} 2>/dev/null; then
+        iptables -t nat -A PREROUTING -i "$WAN_IF" -p tcp --dport {{ desktop_vnc_ws_port }} \
+          -j DNAT --to-destination 127.0.0.1:{{ desktop_vnc_ws_port }}
+      fi
+    executable: /bin/bash
+  when:
+    - inventory_hostname not in groups.get('router_nodes', [])
+    - inventory_hostname not in groups.get('lan_hosts', [])
+  changed_when: true

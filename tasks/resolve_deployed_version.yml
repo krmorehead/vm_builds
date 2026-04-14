@@ -1,0 +1,32 @@
+---
+# Query the local Node Manager API for the deployed version of a service.
+#
+# Required input variables:
+#   _resolve_service_name  (str) — e.g. "pihole"
+#   _lxc_exists            (bool) — set by caller via `pct status` before including
+#
+# Output:
+#   _deployed_version      (str) — semver or "" if unknown
+
+- name: Query Node Manager for deployed versions
+  ansible.builtin.uri:
+    url: "http://{{ ansible_host }}:9001/api/images/versions"
+    return_content: true
+    timeout: 5
+  register: _nm_versions
+  failed_when: false
+  delegate_to: localhost
+  when: _lxc_exists | default(false) | bool
+
+- name: Extract deployed version from Node Manager
+  ansible.builtin.set_fact:
+    _deployed_version: >-
+      {{ (_nm_versions.json.versions[_resolve_service_name] | default(''))
+         if (_nm_versions.status | default(0)) == 200
+         else '' }}
+  when: _lxc_exists | default(false) | bool
+
+- name: Default deployed version when container doesn't exist
+  ansible.builtin.set_fact:
+    _deployed_version: ""
+  when: not (_lxc_exists | default(false) | bool)

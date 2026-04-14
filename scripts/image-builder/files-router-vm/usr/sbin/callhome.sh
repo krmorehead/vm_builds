@@ -194,7 +194,10 @@ if [ -n "$CALLHOME_CONTAINER" ]; then
     EXT_BLOCK=""
     [ -n "$EXT_JSON" ] && EXT_BLOCK=",\"extensions\":{$EXT_JSON}" || EXT_BLOCK=",\"extensions\":{}"
 
-    CONTAINER_HEALTH=",\"container_health\":{\"container_id\":\"$CONTAINER_ID\",\"systemd_services\":{$SVC_JSON},\"listening_ports\":[$PORTS_JSON],\"ready\":true$EXT_BLOCK}"
+    IMAGE_VERSION=""
+    [ -f /etc/image_version ] && read IMAGE_VERSION < /etc/image_version
+
+    CONTAINER_HEALTH=",\"container_health\":{\"container_id\":\"$CONTAINER_ID\",\"systemd_services\":{$SVC_JSON},\"listening_ports\":[$PORTS_JSON],\"ready\":true,\"image_version\":\"$IMAGE_VERSION\"$EXT_BLOCK}"
 fi
 
 PAYLOAD="{\"node_id\":\"$NODE_ID\",\"hostname\":\"$HOSTNAME\",\"local_ips\":[\"$CURRENT_IP\"],\"uptime_seconds\":$UPTIME,\"services\":[],\"disk_usage_pct\":$DISK_PCT,\"memory_usage_pct\":$MEM_PCT,\"version\":\"\"$CONTAINER_HEALTH}"

@@ -11,6 +11,10 @@
   changed_when: false
   failed_when: false
 
+- name: Set container existence flag
+  ansible.builtin.set_fact:
+    _lxc_exists: "{{ _stale_mesh_ct.rc == 0 }}"
+
 - name: Stop stale mesh container to release WiFi PHY
   ansible.builtin.command:
     cmd: pct stop {{ meshwifi_ct_id }}
@@ -156,6 +160,13 @@
       Run ./build-images.sh to build it.
   when: not (_mesh_lxc_stat.stat.exists | default(false))
 
+# ── Resolve deployed version ────────────────────────────────────
+
+- name: Resolve deployed OpenWrt mesh version
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_deployed_version.yml"
+  vars:
+    _resolve_service_name: openwrt_mesh
+
 # ── Provision LXC container ──────────────────────────────────────
 
 - name: Provision OpenWrt mesh LXC container
@@ -172,7 +183,6 @@
     lxc_ct_startup_order: "{{ openwrt_mesh_ct_startup_order }}"
     lxc_ct_features: "{{ openwrt_mesh_ct_features }}"
     lxc_ct_unprivileged: false
-    lxc_ct_template: "{{ openwrt_lxc_template }}"
     lxc_ct_template_path: "{{ openwrt_lxc_template_path }}"
     lxc_ct_skip_debian_cleanup: true
     lxc_ct_ostype: unmanaged

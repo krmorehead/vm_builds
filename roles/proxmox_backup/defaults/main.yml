@@ -4,3 +4,4 @@ backup_storage: ""
 backup_vms: true
 vzdump_mode: snapshot
 vzdump_compress: zstd
+backup_retain: 1

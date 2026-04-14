@@ -184,6 +184,8 @@ alwaysApply: true
 - Every playbook run should back up host config and existing VMs first (Play 0: `proxmox_backup`).
 - Use `vzdump` for VM backups, tar for host config.
 - Never destroy VMs without a backup manifest confirming they were backed up.
+- The `proxmox_backup` role MUST prune old vzdump archives after each run, keeping only `backup_retain` (default: 1) copies per VM. Without pruning, Desktop VM backups (~1.8GB each) accumulate 44GB+ after ~25 runs, filling the root partition.
+- Previous bug (2026-04-13): home's `/var/lib/ansible-backup` grew to 44GB (124 vzdump files) over one month of molecule test cycles. Root filesystem hit 92% (60GB/68GB). Fix: added auto-prune step after vzdump, keeping only the latest backup per VMID.
 
 ## Clock synchronization before apt operations
 - ALWAYS sync the system clock via NTP before running `apt-get update`. GPG signature verification fails with "Not live until" errors when the node's clock is behind.
@@ -362,6 +364,7 @@ is ALWAYS wrong for infrastructure hosts.
 - OpenWrt LXC provision roles MUST override the default LAN IP to the assigned container IP via `uci set network.lan.ipaddr` during provisioning — not just in the configure role.
 - The `openwrt_vm` role MUST detect already-configured VMs (LAN IP reachable) and skip bootstrap. On re-runs the bootstrap IP (192.168.1.1) no longer exists.
 - Previous bug: Bridge LXC containers on bridge-1/bridge-2 had 192.168.1.1 on vmbr0. The `openwrt_vm` bootstrap SSH connected to a bridge container instead of the VM. Configure failed with "No LAN devices found" because the container only had 1 interface.
+- Previous bug (2026-04-12): CT 103 (openwrt-mesh) on mesh2 had default `192.168.1.1` on br-lan with dnsmasq running on vmbr0. Since all hosts share the same L2 segment via vmbr0, this rogue DHCP server responded to build containers on ANY host with 192.168.1.x addresses, breaking `build-images.sh` image builds fleet-wide. The ISP router's DHCP (192.168.86.x) lost the race. Fix: `uci set dhcp.lan.ignore=1` on the mesh container to disable its DHCP server. Long-term fix: provision roles MUST disable DHCP on OpenWrt LXC containers during provisioning.
 
 ## pmxcfs file operations
 - NEVER use `echo >> /etc/pve/lxc/<CTID>.conf` or any append operation on pmxcfs files. The Proxmox cluster filesystem rejects POSIX append with "File exists" error.
@@ -422,6 +425,39 @@ is ALWAYS wrong for infrastructure hosts.
 - Proxmox's `pve-cluster` service requires the node hostname to resolve to a non-loopback IP in `/etc/hosts`. If the entry is missing or maps to the wrong hostname, `pve-cluster` fails to start and ALL `pct` commands fail with "Connection refused".
 - After OS installation or hostname changes, ALWAYS verify `/etc/hosts` contains `<HOST_IP> <hostname>`.
 - Previous bug (2026-04-09): bridge-1's `/etc/hosts` mapped its IP to `home` (from a previous installation). After power cycle, `pve-cluster` failed because it couldn't resolve `bridge-1`. Fix: updated `/etc/hosts` to map the correct hostname.
+
+## Cage/wayvnc in LXC containers (headless VNC)
+- Cage 0.1.4 (Debian Bookworm) does NOT support the `wlr-virtual-pointer-unstable-v1` protocol. wayvnc MUST use `--disable-input` (view-only mode). Cage 0.2.0+ or wlroots 0.18+ is needed for full input forwarding.
+- NEVER use `StandardInput=tty` or `TTYPath=` with `WLR_BACKENDS=headless`. Headless mode renders to a virtual framebuffer — no TTY needed. LXC containers typically lack `/dev/tty7`.
+- NEVER use `PAMName=login` in the kiosk-display service. PAM sessions retain `CAP_SETUID`, and Cage's security check refuses to start if it can restore root after `setuid()`.
+- ALWAYS set `WLR_RENDERER=pixman` for headless mode in LXC containers without GPU passthrough. Without a DRM render node, the default EGL/GLES2 renderer fails.
+- ALWAYS set `XDG_RUNTIME_DIR=/run/user/<UID>` (not `/run/user/0`) and ensure the directory has `chmod 700` + correct ownership. Without `chmod 700`, Cage creates the Wayland socket but some wlroots versions refuse to bind.
+- The `xwayland` package MUST be installed. Cage 0.1.4 treats missing Xwayland as fatal.
+- The `wait-for-hub.sh` script must use `wget` (available in minimal Debian) not `curl` (not installed by default).
+- Previous bug (2026-04-12): All 7 issues above were discovered simultaneously during manual VNC testing. kiosk-display was crash-looping on all 6 hosts with different errors at each fix stage: status=208/STDIN (TTY), "Unable to drop root" (PAMName), "Permission denied" (mkdir /run/user/0 as kiosk user), "No DRM render node" (missing pixman), "Cannot find Xwayland" (missing package), "Virtual Pointer protocol not supported" (wayvnc input).
+
+## VNC port forwarding must cover ALL host topologies
+- VNC WebSocket forwarding (port 6080) MUST be configured for ALL three host types, not just WAN and router nodes:
+  - **WAN hosts**: iptables DNAT from `proxmox_wan_bridge:6080` to kiosk container IP
+  - **Router node**: socat proxy (cross-bridge hairpin, same as port 9001)
+  - **LAN hosts**: socat proxy from host IP to kiosk container LAN IP
+- The `kiosk_lxc` role uses `_lxc_net_on_lan | bool` to gate socat proxy deployment. This covers both router_nodes AND lan_hosts.
+- NEVER assume LAN host containers are "directly reachable" from the operator's browser. The operator may be on the WAN or behind a VPN — the SM resolves to host IPs, not container IPs.
+- Previous bug (2026-04-12): mesh1 (LAN host) had no VNC forwarding. The SM resolved `ws://10.10.10.210:6080` (host IP) but nothing listened on port 6080. The container at `10.10.10.24:6080` was fine but unreachable via the host. Fix: added socat proxy for LAN hosts.
+
+## Kiosk HOST_IP must be host-specific for LAN hosts
+- The kiosk container's `HOST_IP` config determines which Proxmox host it SSHes back to for `pct status`, `pct exec`, guest management, and batman operations.
+- **Router nodes**: Use the computed LAN management IP (`10.10.10.2` from `_lan_gateway` + `proxmox_lan_mgmt_ip_offset`).
+- **LAN hosts** (mesh1): Use `ansible_host` directly — for `lan_hosts`, `ansible_host` IS the LAN IP (e.g., `10.10.10.210`).
+- **WAN hosts**: Use the NAT bridge gateway (`10.99.{container_subnet_id}.1`).
+- NEVER apply the router node's fixed `.2` offset to ALL LAN hosts. Each LAN host has its own DHCP-assigned IP.
+- Previous bug (2026-04-12): The HOST_IP formula used `_lan_gateway[0:3] + '.2'` for ALL hosts in `router_nodes` OR `lan_hosts`. mesh1's kiosk got HOST_IP=10.10.10.2 (home's IP) instead of 10.10.10.210 (mesh1's IP). All batman status, guest management, and container operations on mesh1 silently failed because the kiosk was SSHing to the wrong host. Fix: split the condition — router_nodes use the computed offset, lan_hosts use ansible_host.
+
+## SuperManager must always be started with --env
+- ALWAYS start the SM with `--env test.env` (or `--env .env`) so that `load_active_env()` can resolve hosts for VNC URLs and fleet management.
+- Without `--env`, the NiceGUI storage `env_path` defaults to whatever was last persisted in `.nicegui/storage-general.json`, which may point to the wrong env file or be empty.
+- `start_test_api.py` (via `build.py`'s `start_api_server`) correctly passes `--env`. When manually restarting the SM (e.g., for UI mode testing), always include `--env`.
+- Previous bug (2026-04-12): SM was restarted for UI-mode manual testing without `--env test.env`. The storage file still pointed to `.env` (production), which lacks `BRIDGE_1_HOST` and `BRIDGE_2_HOST`. VNC resolution returned N/A for both bridge nodes.
 
 ## Documentation accuracy
 - When changing a role's exported facts, bridge names, device paths, or connection patterns, ALWAYS update `docs/architecture/` in the same commit.

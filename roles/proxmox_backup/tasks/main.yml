@@ -52,6 +52,26 @@
     - backup_vms | bool
     - _vm_ids | length > 0
 
+# ── Prune old vzdump backups (keep latest N per VM) ────────────
+
+- name: Prune old vzdump backups
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      for vmid in {{ _vm_ids | join(' ') }}; do
+        ls -t "{{ backup_dir }}"/vzdump-qemu-${vmid}-*.vma* 2>/dev/null \
+          | tail -n +{{ (backup_retain | int + 1) }} \
+          | xargs -r rm -v
+        ls -t "{{ backup_dir }}"/vzdump-qemu-${vmid}-*.log 2>/dev/null \
+          | tail -n +{{ (backup_retain | int + 1) }} \
+          | xargs -r rm -v
+      done
+    executable: /bin/bash
+  changed_when: true
+  when:
+    - backup_vms | bool
+    - _vm_ids | length > 0
+
 # ── Find vzdump files and write manifest ────────────────────────
 
 - name: Find vzdump archive files

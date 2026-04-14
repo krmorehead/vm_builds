@@ -337,6 +337,75 @@
         - _cluster_manager_pubkey | length > 0
         - inventory_hostname not in groups.get('router_nodes', [])
 
+# ── Deploy VNC WebSocket relay for LAN kiosks ───────────────────
+# LAN hosts (behind the router) aren't reachable from the browser.
+# A socat relay on the router node forwards each LAN host's VNC
+# WebSocket (port 6080) to a unique port so the SuperManager's
+# noVNC client can connect.
+
+- name: Deploy VNC relay for LAN kiosk hosts
+  hosts: router_nodes
+  gather_facts: false
+  tags: [kiosk]
+  tasks:
+    - name: Deploy VNC relay unit for each LAN host
+      ansible.builtin.copy:
+        content: |
+          [Unit]
+          Description=VNC relay for {{ item }} ({{ kiosk_vnc_relay_base_port + idx }}->{{ hostvars[item].ansible_host }}:{{ kiosk_vnc_ws_port }})
+          After=network.target
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/socat TCP-LISTEN:{{ kiosk_vnc_relay_base_port + idx }},reuseaddr,fork TCP:{{ hostvars[item].ansible_host }}:{{ kiosk_vnc_ws_port }}
+          Restart=always
+          RestartSec=3
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: "/etc/systemd/system/kiosk-vnc-relay-{{ item }}.service"
+        mode: "0644"
+      loop: "{{ groups.get('lan_hosts', []) | intersect(groups.get('kiosk_nodes', [])) }}"
+      loop_control:
+        index_var: idx
+
+    - name: Enable and start VNC relay for each LAN host
+      ansible.builtin.systemd:
+        name: "kiosk-vnc-relay-{{ item }}"
+        daemon_reload: true
+        enabled: true
+        state: restarted
+      loop: "{{ groups.get('lan_hosts', []) | intersect(groups.get('kiosk_nodes', [])) }}"
+
+# ── Phase 2.6: Node Manager API readiness gate ──────────────────
+# Other services use resolve_deployed_version.yml which queries
+# the Node Manager API (port 9001) for deployed image versions.
+# Wait for every Node Manager to respond before provisioning.
+
+- name: Node Manager API readiness gate
+  hosts: kiosk_nodes
+  gather_facts: false
+  tags: [kiosk]
+  tasks:
+    - name: Wait for Node Manager API to respond
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:9001/api/images/versions"
+        return_content: true
+        timeout: 5
+      register: _nm_ready
+      retries: 12
+      delay: 5
+      until: (_nm_ready.status | default(0)) == 200
+      failed_when: false
+      delegate_to: localhost
+
+    - name: Report Node Manager readiness
+      ansible.builtin.debug:
+        msg: >-
+          Node Manager on {{ inventory_hostname }}:
+          {{ 'READY' if (_nm_ready.status | default(0)) == 200
+             else 'NOT READY — version resolution will default to empty' }}
+
 # ── Phase 3a: Service provisioning (all containers created first) ──
 # Provisions run back-to-back so containers start booting in parallel.
 # The fleet readiness gate (Phase 3b) waits for all containers to
@@ -601,9 +670,8 @@
 
 # ── Attach display-exclusive hookscripts (post-configure) ────────
 # Hookscripts are deployed by kiosk_lxc but not attached until after
-# all configure plays finish. Attaching during provisioning would stop
-# DRI containers (Kodi, Moonlight, Kiosk) when the Desktop VM starts,
-# breaking their configure plays.
+# all configure plays finish. The kiosk is NOT a display-exclusive app
+# (it uses headless rendering and stays alive during display launches).
 
 - name: Attach display-exclusive hookscripts
   hosts: desktop_nodes
@@ -619,7 +687,6 @@
       ansible.builtin.command:
         cmd: pct set {{ item }} --hookscript local:snippets/display-exclusive.sh
       loop:
-        - "{{ kiosk_ct_id }}"
         - "{{ kodi_ct_id }}"
         - "{{ moonlight_ct_id }}"
       loop_control:

@@ -14,6 +14,24 @@
     lxc_net_ip_offset: "{{ kiosk_ct_ip_offset }}"
     lxc_net_flavor_group: kiosk_nodes
 
+# ── Check container existence ──────────────────────────────────
+
+- name: Check if Kiosk container exists
+  ansible.builtin.command:
+    cmd: pct status {{ kiosk_ct_id }}
+  register: _ct_status
+  failed_when: false
+  changed_when: false
+
+- name: Set container existence flag
+  ansible.builtin.set_fact:
+    _lxc_exists: "{{ _ct_status.rc == 0 }}"
+
+# ── Resolve deployed version ──────────────────────────────────
+
+- name: Resolve deployed Kiosk version
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_kiosk_version.yml"
+
 # ── Provision via shared proxmox_lxc role ────────────────────────
 
 - name: Provision Kiosk LXC container
@@ -28,7 +46,6 @@
     lxc_ct_disk: "{{ kiosk_ct_disk }}"
     lxc_ct_onboot: "{{ kiosk_ct_onboot }}"
     lxc_ct_startup_order: 6
-    lxc_ct_template: "{{ kiosk_ct_template }}"
     lxc_ct_template_path: "{{ kiosk_ct_template_path }}"
     lxc_ct_ip: "{{ _lxc_net_ip }}/{{ _lxc_net_cidr }}"
     lxc_ct_gateway: "{{ _lxc_net_gateway }}"
@@ -38,17 +55,10 @@
     lxc_ct_features: "{{ kiosk_ct_features }}"
     lxc_ct_image_version: "{{ kiosk_image_version }}"
 
-# ── Device passthrough via lxc.mount.entry + cgroup allowlists ───
-
-- name: Apply device passthrough (DRI for display output)
-  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_device_passthrough.yml"
-  vars:
-    lxc_dev_ct_id: "{{ kiosk_ct_id }}"
-    lxc_dev_conf_entries:
-      - "lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir"
-      - "lxc.cgroup2.devices.allow: c 226:* rwm"
-
 # ── Deploy display-exclusive hookscript ──────────────────────────
+# The kiosk uses headless rendering (WLR_BACKENDS=headless, pixman)
+# and does NOT need DRI access. It stays alive during display app
+# launches so the remote VNC session is never interrupted.
 
 - name: Ensure snippets directory exists
   ansible.builtin.file:
@@ -60,11 +70,13 @@
   ansible.builtin.copy:
     content: |
       #!/bin/bash
+      # Display-exclusive hookscript: ensures only one display app runs at
+      # a time. The kiosk (CT {{ kiosk_ct_id }}) is NOT in the conflict list —
+      # it uses headless rendering and stays alive during display launches.
       set -o pipefail
       VMID="$1"
       PHASE="$2"
-      KIOSK_ID={{ kiosk_ct_id }}
-      CT_IDS=({{ kodi_ct_id }} {{ moonlight_ct_id }} {{ kiosk_ct_id }})
+      CT_IDS=({{ kodi_ct_id }} {{ moonlight_ct_id }})
       VM_IDS=({{ desktop_vm_id }})
 
       is_display() {
@@ -79,7 +91,6 @@
 
       case "$PHASE" in
           pre-start)
-              [[ "$VMID" == "$KIOSK_ID" ]] && exit 0
               for cid in "${CT_IDS[@]}"; do
                   [[ "$cid" == "$VMID" ]] && continue
                   cnt=$(pct status "$cid" 2>/dev/null | grep -c running || true)
@@ -90,11 +101,6 @@
                   cnt=$(qm status "$vid" 2>/dev/null | grep -c running || true)
                   [ "${cnt:-0}" -gt 0 ] && qm stop "$vid" 2>/dev/null || true
               done
-              ;;
-          post-stop)
-              [[ "$VMID" == "$KIOSK_ID" ]] && exit 0
-              cnt=$(pct status "$KIOSK_ID" 2>/dev/null | grep -c stopped || true)
-              [ "${cnt:-0}" -gt 0 ] && pct start "$KIOSK_ID" 2>/dev/null || true
               ;;
       esac
       exit 0
@@ -181,3 +187,66 @@
     enabled: true
     state: restarted
   when: inventory_hostname in groups.get('router_nodes', [])
+
+# ── Port forwarding for VNC WebSocket ──────────────────────────
+# Same pattern as port 9001 — DNAT for WAN hosts, socat for router.
+
+- name: Add DNAT rule for VNC WebSocket port (WAN hosts only)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      WAN_IF="{{ proxmox_wan_bridge }}"
+      CT_IP="{{ _lxc_net_ip }}"
+      VNC_PORT="{{ kiosk_vnc_ws_port }}"
+      if ! iptables -t nat -C PREROUTING -i "$WAN_IF" -p tcp --dport "$VNC_PORT" \
+           -j DNAT --to-destination "$CT_IP:$VNC_PORT" 2>/dev/null; then
+        iptables -t nat -A PREROUTING -i "$WAN_IF" -p tcp --dport "$VNC_PORT" \
+          -j DNAT --to-destination "$CT_IP:$VNC_PORT"
+      fi
+    executable: /bin/bash
+  when:
+    - not (_lxc_net_on_lan | bool)
+    - inventory_hostname not in groups.get('router_nodes', [])
+  changed_when: true
+
+- name: Add FORWARD rule for VNC DNAT traffic (WAN hosts only)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      CT_IP="{{ _lxc_net_ip }}"
+      if ! iptables -C FORWARD -d "$CT_IP" -p tcp --dport {{ kiosk_vnc_ws_port }} -j ACCEPT 2>/dev/null; then
+        iptables -A FORWARD -d "$CT_IP" -p tcp --dport {{ kiosk_vnc_ws_port }} -j ACCEPT
+      fi
+    executable: /bin/bash
+  when:
+    - not (_lxc_net_on_lan | bool)
+    - inventory_hostname not in groups.get('router_nodes', [])
+  changed_when: true
+
+- name: Deploy VNC WebSocket socat proxy unit (LAN hosts)
+  ansible.builtin.copy:
+    content: |
+      [Unit]
+      Description=VNC WebSocket socat proxy (host:{{ kiosk_vnc_ws_port }} -> kiosk:{{ kiosk_vnc_ws_port }})
+      After=network.target pve-guests.service
+      Wants=pve-guests.service
+
+      [Service]
+      Type=simple
+      ExecStart=/usr/bin/socat TCP-LISTEN:{{ kiosk_vnc_ws_port }},reuseaddr,fork TCP:{{ _lxc_net_ip }}:{{ kiosk_vnc_ws_port }}
+      Restart=always
+      RestartSec=3
+
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/kiosk-vnc-proxy.service
+    mode: "0644"
+  when: _lxc_net_on_lan | bool
+
+- name: Enable and start VNC WebSocket socat proxy (LAN hosts)
+  ansible.builtin.systemd:
+    name: kiosk-vnc-proxy
+    daemon_reload: true
+    enabled: true
+    state: restarted
+  when: _lxc_net_on_lan | bool

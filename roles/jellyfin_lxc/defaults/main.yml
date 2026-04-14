@@ -3,7 +3,6 @@ jellyfin_ct_hostname: jellyfin
 jellyfin_ct_memory: 2048
 jellyfin_ct_cores: 2
 jellyfin_ct_disk: "8"
-jellyfin_ct_template: "{{ jellyfin_lxc_template }}"
 jellyfin_ct_template_path: "{{ jellyfin_lxc_template_path }}"
 jellyfin_ct_onboot: true
 jellyfin_ct_startup_order: 5

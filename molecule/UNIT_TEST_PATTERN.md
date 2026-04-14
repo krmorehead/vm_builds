@@ -39,7 +39,7 @@ the service image if it doesn't already exist in `images/`.
           --host {{ lookup('env', 'PRIMARY_HOST') }}
           --only <target>
       register: _build
-      changed_when: "'already exists' not in _build.stdout"
+      changed_when: true
 ```
 
 Most remote builds use `PRIMARY_HOST`. Services that require specific
@@ -55,39 +55,35 @@ env var (e.g., `AI_HOST`).
   connection: local
   gather_facts: false
   tasks:
-    - name: Build <service> image if not cached
+    - name: Build <service> image
       ansible.builtin.command:
         cmd: >-
           {{ playbook_dir }}/../../scripts/build-images.sh
           --only <target>
       register: _build
-      changed_when: "'already exists' not in _build.stdout"
+      changed_when: true
 ```
 
 ## Day-to-day workflow
 
 ```bash
-# Full unit test (builds image if needed, tests everything, tears down)
+# Full unit test (builds image, tests everything, tears down)
 molecule test -s pihole-lxc
 
 # Quick iteration (skip image build, keep state)
 molecule converge -s pihole-lxc
 molecule verify -s pihole-lxc
-
-# Force image rebuild
-rm images/pihole-debian-12-amd64.tar.zst
-molecule test -s pihole-lxc
 ```
 
-## Image caching
+## Image versioning
 
-- `build-images.sh --only <target>` is idempotent: skips if the output file
-  exists in `images/`.
-- Day-to-day iteration is fast because prepare is a no-op when the image
-  is cached.
-- Images persist across test runs. E2E tests consume the same cached images.
-- Force a rebuild by deleting the cached image file, then re-running the
-  unit test.
+- `build-images.sh --only <target>` auto-bumps the patch version in
+  `images/<target>.version` on each build.
+- The version is baked into the image at `/etc/image_version`.
+- `proxmox_lxc` compares the deployed version (from Node Manager API)
+  against the built version (from sidecar file) and auto-recreates
+  containers when versions differ.
+- Images persist across test runs. E2E tests consume the same images.
 
 ## Verify coverage
 

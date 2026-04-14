@@ -28,54 +28,53 @@
   ansible.builtin.set_fact:
     lxc_exists: "{{ _lxc_status.rc == 0 }}"
 
-- name: Reset version rebuild flag from previous invocations
+# ── Derive template name from path ────────────────────────────────
+
+- name: Derive template name from path
   ansible.builtin.set_fact:
-    _image_version_rebuild: false
+    lxc_ct_template: "{{ lxc_ct_template_path | basename }}"
 
-# ── Image version check (auto-rebuild on version mismatch) ──────
-# When an image version is specified and the container already exists,
-# compare the deployed version against the manifest. If they differ
-# the container is destroyed so the rest of this role recreates it.
+# ── Version mismatch check (caller pre-resolved _deployed_version) ──
 
-- name: Start container for version check
+- name: Check version mismatch
+  ansible.builtin.set_fact:
+    _version_mismatch: >-
+      {{ (_deployed_version | default('')) != lxc_ct_image_version }}
+  when:
+    - lxc_exists | bool
+    - lxc_ct_image_version | default('') | length > 0
+
+- name: Version comparison result
+  ansible.builtin.debug:
+    msg: >-
+      {{ lxc_ct_hostname }}: deployed={{ _deployed_version | default('unknown') }},
+      available={{ lxc_ct_image_version }},
+      {{ 'MISMATCH — will rebuild' if (_version_mismatch | default(false) | bool) else 'up-to-date' }}
+  when:
+    - lxc_exists | bool
+    - lxc_ct_image_version | default('') | length > 0
+
+- name: Stop outdated container
   ansible.builtin.command:
-    cmd: pct start {{ lxc_ct_id }}
+    cmd: pct stop {{ lxc_ct_id }}
   changed_when: true
   failed_when: false
   when:
     - lxc_exists | bool
-    - lxc_ct_image_version | default('') | length > 0
-    - "'stopped' in (_lxc_status.stdout | default(''))"
+    - _version_mismatch | default(false) | bool
 
-- name: Wait for container init (version check)
+- name: Destroy outdated container
   ansible.builtin.command:
-    cmd: pct exec {{ lxc_ct_id }} -- ls /
-  register: _vc_init
-  retries: 5
-  delay: 2
-  until: _vc_init.rc == 0
-  changed_when: false
+    cmd: pct destroy {{ lxc_ct_id }} --purge
+  changed_when: true
   when:
     - lxc_exists | bool
-    - lxc_ct_image_version | default('') | length > 0
-
-- name: Check image version on existing container
-  ansible.builtin.include_tasks:
-    file: "{{ role_path }}/../../tasks/check_image_version.yml"
-  vars:
-    image_version_ct_id: "{{ lxc_ct_id }}"
-    image_version_expected: "{{ lxc_ct_image_version }}"
-    image_version_service: "{{ lxc_ct_hostname }}"
-  when:
-    - lxc_exists | bool
-    - lxc_ct_image_version | default('') | length > 0
+    - _version_mismatch | default(false) | bool
 
 - name: Clear existence flag after version-triggered rebuild
   ansible.builtin.set_fact:
     lxc_exists: "false"
-  when:
-    - _image_version_rebuild is defined
-    - _image_version_rebuild | bool
+  when: _version_mismatch | default(false) | bool
 
 # ── Template upload ───────────────────────────────────────────────
 
@@ -246,18 +245,6 @@
   until: _ct_init.rc == 0
   changed_when: false
 
-# ── Image version stamp ─────────────────────────────────────────
-# Written on every provision so the version-check task can compare
-# the deployed version against the manifest and trigger rebuilds.
-
-- name: Write image version stamp into container
-  ansible.builtin.command:
-    cmd: >-
-      pct exec {{ lxc_ct_id }} -- sh -c
-      'echo "{{ lxc_ct_image_version }}" > /etc/image_version'
-  changed_when: true
-  when: lxc_ct_image_version | default('') | length > 0
-
 # ── Configure callhome agent (early — before readiness wait) ───
 # Push agent + config FIRST so the callhome service starts sending
 # heartbeats while we wait for full readiness via the API.
@@ -384,4 +371,4 @@
       ip: "{{ lxc_ct_ip | default('') }}"
       bridge: "{{ lxc_ct_bridge | default('') }}"
       hardware: []
-      last_deployed: "{{ ansible_date_time.iso8601 }}"
+      last_deployed: "{{ now(utc=true).isoformat() }}"

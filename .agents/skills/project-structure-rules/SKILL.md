@@ -42,7 +42,7 @@ Image-first pattern:
 ```bash
 # Build all packages into image during build-images.sh
 # Build IN PARALLEL across hosts
-./build-images.sh --force --parallel --only <target1> --only <target2>
+./scripts/build-images.sh --host <ip> --only <target>
 
 # Configure role only applies host-specific config
 # roles/<type>_configure/tasks/main.yml

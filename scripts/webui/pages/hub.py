@@ -72,7 +72,7 @@ def _render_card(svc: HubService, url: str) -> None:
             _card_content(svc, available=True)
     elif display_app:
         launch_url = (
-            f"/launch?vmid={display_app['vmid']}"
+            f"{Routes.LAUNCH}?vmid={display_app['vmid']}"
             f"&title={quote(svc.title, safe='')}"
             f"&url_key={quote(svc.url_key, safe='')}"
         )

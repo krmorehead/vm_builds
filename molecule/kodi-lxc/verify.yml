@@ -55,48 +55,32 @@
         that: "'onboot: 0' in _kodi_cfg.stdout"
         fail_msg: "Container {{ kodi_ct_id }} should have onboot: 0"
 
-    # ── Device mounts ────────────────────────────────────────────
+    # ── Headless VNC stack (sway + wayvnc + websockify) ──────────
 
-    - name: Check DRI devices are mounted
-      ansible.builtin.command:
-        cmd: pct exec {{ kodi_ct_id }} -- ls /dev/dri/
-      register: _dri_devices
+    - name: Check headless VNC stack inside container
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ kodi_ct_id }} -- /bin/sh -c '
+          echo "SWAY=$(command -v sway >/dev/null 2>&1 && echo yes || echo no)";
+          echo "WAYVNC=$(command -v wayvnc >/dev/null 2>&1 && echo yes || echo no)";
+          echo "WEBSOCKIFY=$(command -v websockify >/dev/null 2>&1 && echo yes || echo no)";
+          echo "DISPLAY_SVC=$(systemctl is-enabled kodi-display 2>/dev/null || echo missing)";
+          echo "VNC_SVC=$(systemctl is-enabled kodi-vnc 2>/dev/null || echo missing)";
+          echo "VNC_WS_SVC=$(systemctl is-enabled kodi-vnc-ws 2>/dev/null || echo missing)"
+          '
+      register: _kodi_vnc_health
       changed_when: false
 
-    - name: Assert DRI devices exist
+    - name: Assert headless VNC stack is present and enabled
       ansible.builtin.assert:
-        that: _dri_devices.rc == 0
-        fail_msg: "DRI devices not mounted at /dev/dri/"
-
-    - name: Check sound devices are mounted
-      ansible.builtin.command:
-        cmd: pct exec {{ kodi_ct_id }} -- ls /dev/snd/
-      register: _snd_devices
-      changed_when: false
-
-    - name: Assert sound devices exist
-      ansible.builtin.assert:
-        that: _snd_devices.rc == 0
-        fail_msg: "Sound devices not mounted at /dev/snd/"
-
-    - name: Check input devices are mounted
-      ansible.builtin.command:
-        cmd: pct exec {{ kodi_ct_id }} -- ls /dev/input/
-      register: _input_devices
-      changed_when: false
-      failed_when: false
-
-    # ── lxc.mount.entry + cgroup allowlist (from cached config) ────
-
-    - name: Assert device bind mounts are configured
-      ansible.builtin.assert:
-        that: (_kodi_cfg.stdout | regex_findall('lxc\\.mount\\.entry.*dev/') | length) >= 3
-        fail_msg: "Expected at least 3 lxc.mount.entry device rules in container config"
-
-    - name: Assert cgroup allowlist has device rules
-      ansible.builtin.assert:
-        that: (_kodi_cfg.stdout | regex_findall('lxc\\.cgroup2\\.devices\\.allow') | length) >= 3
-        fail_msg: "Expected at least 3 cgroup device rules in container config"
+        that:
+          - "'SWAY=yes' in _kodi_vnc_health.stdout"
+          - "'WAYVNC=yes' in _kodi_vnc_health.stdout"
+          - "'WEBSOCKIFY=yes' in _kodi_vnc_health.stdout"
+          - "'DISPLAY_SVC=enabled' in _kodi_vnc_health.stdout"
+          - "'VNC_SVC=enabled' in _kodi_vnc_health.stdout"
+          - "'VNC_WS_SVC=enabled' in _kodi_vnc_health.stdout"
+        fail_msg: "Headless VNC stack missing or not enabled: {{ _kodi_vnc_health.stdout }}"
 
     # ── Kodi packages and service ────────────────────────────────
 
@@ -111,28 +95,10 @@
       register: _kodi_health
       changed_when: false
 
-    - name: Check kodi-standalone service is enabled
-      ansible.builtin.command:
-        cmd: pct exec {{ kodi_ct_id }} -- systemctl is-enabled kodi-standalone
-      register: _kodi_service
-      changed_when: false
-      when: not (_api_ready | bool)
-
     - name: Assert Kodi package is installed
       ansible.builtin.assert:
         that: "'KODI_PKG=1' in _kodi_health.stdout"
         fail_msg: "kodi package not installed"
-
-    - name: Assert kodi-standalone service is enabled
-      ansible.builtin.assert:
-        that: _kodi_service.stdout | trim == 'enabled'
-        fail_msg: "kodi-standalone service not enabled"
-      when: not (_api_ready | bool)
-
-    - name: Assert advancedsettings.xml exists
-      ansible.builtin.assert:
-        that: "'SETTINGS=exists' in _kodi_health.stdout"
-        fail_msg: "advancedsettings.xml not found"
 
     - name: Assert kodi user exists
       ansible.builtin.assert:
@@ -153,19 +119,19 @@
         that: _gui_settings.rc == 0
         fail_msg: "guisettings.xml not found"
 
-    # ── ALSA config ──────────────────────────────────────────────
+    # ── Host-side VNC proxy ──────────────────────────────────────
 
-    - name: Check ALSA config
+    - name: Check kodi-vnc-proxy service on host
       ansible.builtin.command:
-        cmd: pct exec {{ kodi_ct_id }} -- test -f /home/kodi/.asoundrc
-      register: _alsa_config
+        cmd: systemctl is-active kodi-vnc-proxy
+      register: _kodi_vnc_proxy
       changed_when: false
       failed_when: false
 
-    - name: Assert ALSA config exists
+    - name: Assert kodi-vnc-proxy is running
       ansible.builtin.assert:
-        that: _alsa_config.rc == 0
-        fail_msg: "ALSA config .asoundrc not found"
+        that: "'active' in _kodi_vnc_proxy.stdout"
+        fail_msg: "kodi-vnc-proxy not active on {{ inventory_hostname }}"
 
     # ── Report ───────────────────────────────────────────────────
 
@@ -175,6 +141,5 @@
           Kodi per-feature verify passed:
           ct={{ kodi_ct_id }}, running=yes,
           kodi={{ 'installed' if 'KODI_PKG=1' in _kodi_health.stdout else 'missing' }},
-          service={{ 'api' if (_api_ready | bool) else ('enabled' if (_kodi_service.stdout | default('') | trim == 'enabled') else 'disabled') }},
-          dri={{ 'mounted' if _dri_devices.rc == 0 else 'missing' }},
-          snd={{ 'mounted' if _snd_devices.rc == 0 else 'missing' }}
+          vnc_stack={{ 'complete' if 'SWAY=yes' in _kodi_vnc_health.stdout else 'incomplete' }},
+          proxy={{ 'active' if 'active' in (_kodi_vnc_proxy.stdout | default('')) else 'inactive' }}
