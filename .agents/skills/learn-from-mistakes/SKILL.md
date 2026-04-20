@@ -91,6 +91,42 @@ NEVER continue development when ANY host in the fleet is unreachable
 NEVER deviate from the project plan without explicit user approval
 NEVER co-locate a streaming server and client on the same host
 NEVER assign all services to the same node when 4 nodes are available
+NEVER add retries to verify tasks without understanding WHY the check fails
+NEVER increase retry count or delay as a "fix" — find the root cause
+NEVER leave legacy systemd services running when deploying renamed replacements
+NEVER assume LAN hosts get the same cleanup as primary hosts — they are excluded from `proxmox:!lan_hosts`
+
+## Retries are a symptom, not a fix (CRITICAL)
+
+When a verify task needs retries, there are ONLY two valid reasons:
+1. **Known propagation delay** (heartbeat relay, DNS propagation) — document
+   the expected delay and set retries to exactly cover it.
+2. **Service startup time** (Docker pull, database init) — known and bounded.
+
+Everything else is a bug. Adding retries to a failing check is like adding
+painkillers instead of treating the fracture. The check still fails on every
+molecule run, you just wait longer before it tells you.
+
+**The compounding cost:** A single 6-minute retry block doesn't just waste
+6 minutes once. It wastes 6 minutes on EVERY test run, for EVERY developer,
+for EVERY iteration. Over a month of test cycles, that's HOURS of accumulated
+waste — all to avoid spending 10 minutes diagnosing the actual root cause.
+
+**When you see a check failing with retries:**
+1. SSH into the host and run the check manually — RIGHT NOW.
+2. If it's a service not starting: `systemctl status`, `journalctl -u`, check for port conflicts.
+3. If it's a heartbeat not arriving: check the relay chain hop by hop.
+4. Fix the root cause. Remove the retries. The ideal retry count is zero.
+
+Previous catastrophe (2026-04-14): A legacy VNC proxy held port 6080 on
+mesh1, preventing the new display proxy from starting. Instead of SSHing
+in and checking `systemctl status` (would have shown 957 restarts and the
+port conflict in 10 seconds), retries were added and increased from 30s
+to 100s. The SM heartbeat check used 6 MINUTES of retries. The CM check
+was another 6 minutes. The verify phase burned 12+ minutes of retries on
+EVERY molecule test run, for MULTIPLE runs, never once succeeding. The
+root cause was a one-line fix: stop the old service before starting the
+new one.
 
 ## Use the 4 nodes intelligently
 
@@ -142,3 +178,90 @@ in this project.
 Previous bug: E2E cleanup ran `modprobe -r amdgpu` on `ai` (single AMD GPU, USB ethernet). Kernel panicked, host crashed. Required physical power-on. Now caught by `tests/test_host_safety.py`.
 
 Previous bug: `TestResolveProxmoxHost` (5 tests) monkeypatched `probe_host` with fake IPs. All 5 passed while `ai` was crashed and all 3 WAN hosts were unreachable. Nobody knew because the "host probing tests" never probed any hosts. Replaced with `TestInfrastructureHealth` that probes real hosts. Now `pytest tests/` is the infrastructure early warning system.
+
+## Controller is a bakeable target (2026-04-17)
+
+- The build machine (where molecule runs) is NOT exempt from the "bake,
+  don't configure" principle. wireguard-tools and NOPASSWD sudoers are
+  already installed by `setup.sh`. wg0 is configured automatically by
+  `site.yml` on every converge. No manual steps needed.
+- NEVER use `become: true` on localhost Ansible plays. It prompts for sudo
+  password, blocking non-interactive molecule runs. Use explicit `sudo`
+  calls — the NOPASSWD sudoers entry is already installed.
+- Previous bug (2026-04-17): Controller VPN play used `become: true` on
+  localhost. After 60 minutes of successful converge on all 6 Proxmox hosts,
+  the pipeline failed with "sudo: a password is required" at the very last
+  play. Fix: explicit `sudo` calls with NOPASSWD sudoers (already installed
+  by `setup.sh`).
+
+## Callhome config rewrite must preserve identity (2026-04-17)
+
+- When `kiosk_configure` rewrites callhome config on sibling containers to
+  point them at the local NodeManager, it MUST preserve `CALLHOME_HOSTNAME`
+  and other baked-in variables. Use targeted `sed -i` to update only
+  `CALLHOME_SERVER` and `CALLHOME_PUBLIC_KEY`. NEVER use `printf` or heredoc
+  to overwrite the entire file.
+- This applies to ALL container types (Debian and OpenWrt). OpenWrt containers
+  use `callhome.sh` (BusyBox) instead of the Python callhome agent, and their
+  `/etc/default/callhome` contains additional baked variables like
+  `CALLHOME_HOSTNAME` that determine fleet service identity.
+- Previous bug (2026-04-17): `printf` overwrite on OpenWrt containers destroyed
+  `CALLHOME_HOSTNAME=openwrt-mesh`. Containers heartbeated with wrong identity,
+  fleet readiness API couldn't match them, verify failed.
+
+## Display service resilience to unconfigured endpoints (2026-04-17)
+
+- Display services (moonlight-display, kodi-display, etc.) that depend on a
+  remote server endpoint MUST handle the case where the endpoint is not
+  configured. The xstartup script should check for a valid config before
+  launching the streaming client. If no server is configured, `sleep infinity`
+  is preferable to crash-looping.
+- Previous bug (2026-04-17): `moonlight-display.service` on mesh1 crash-looped
+  because `MOONLIGHT_SERVER_IP` was empty in test.env. The `moonlight stream`
+  command failed immediately, Xvnc restarted, creating a deadlock loop that
+  consumed resources. Fix: xstartup checks `/etc/moonlight.conf` for a
+  configured `address` before launching. If missing, sleeps instead of crashing.
+
+## KasmVNC migration lessons (2026-04-14)
+
+- When removing an enum used in API JSON responses (e.g., `DisplayType`), grep ALL
+  serialization points — not just the model definition. The `manager.py` display API
+  handlers used `handler.display_type.value` which broke at runtime after the enum was
+  removed. Unit tests caught handler logic but not the API serialization path.
+- KasmVNC Xvnc flags are case-sensitive: `-DisableBasicAuth` (capital D) is correct,
+  NOT `-disableBasicAuth`. The lowercase variant silently fails and enables the auth
+  prompt, which blocks iframe embedding.
+- When building images with `build-images.sh`, a shared constant (like `KASMVNC_VERSION`)
+  passed through `bash -s` into SSH heredocs requires only a SINGLE declaration point.
+  Never duplicate constants — pass them as positional arguments to subshells.
+- NiceGUI pages that construct button text from URL query parameters must guard against
+  the default value being the same as the prefix, or you get "Launch Launch" instead
+  of just "Launch".
+- Stale Python bytecache (`__pycache__/*.pyc`) from deleted modules can cause the OLD
+  module's code to be served even after the source file is deleted. Always clear pycache
+  when removing Python modules from a running system.
+- Chromium's NetworkService subprocess crashes on startup in LXC containers when
+  `DBUS_SESSION_BUS_ADDRESS` is not set in the systemd service environment. The crash
+  prevents HTTP page loads, resulting in "Untitled" Chromium windows. Fix: add
+  `Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus` to the
+  KasmVNC systemd service. Additionally, bake `dbus-x11` and `libxtst6` into the
+  kiosk image and add a 5-second delayed F5 reload in xstartup to handle any
+  remaining startup race conditions between the renderer and NetworkService.
+
+## API-driven fleet cutover — no SSH fallbacks (2026-04-18)
+
+- After VPN + heartbeat are established, ALL configure roles and verification
+  MUST use `ansible.builtin.uri` → NM/SM API over VPN. NEVER SSH.
+- NEVER add SSH fallback paths in `verify.yml`. If the API is unreachable,
+  the 4-tier system is broken — hard-fail with INVESTIGATE prompts, don't
+  work around it with `pct exec`.
+- NEVER describe infrastructure failures as "expected" or "known." Every
+  failure represents a broken system that must be fixed.
+- Hard-failure messages MUST include: (1) `HARD FAILURE` prefix, (2) what
+  specifically failed, (3) `INVESTIGATE:` section with concrete diagnostic
+  commands (`curl`, `journalctl`, `wg show`, relay chain tracing).
+- Previous catastrophe (2026-04-18): mesh1 NodeManager was unreachable at
+  10.10.10.210:9001 from the controller. Agent described it as "expected (no
+  L3 route)." User correctly identified this as a hard failure — all 6 units
+  MUST be reachable via VPN+HTTP as the base path. WiFi mesh is a bonus for
+  reachability, not a prerequisite.

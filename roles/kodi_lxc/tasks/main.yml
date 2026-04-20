@@ -1,10 +1,21 @@
 ---
-# ── Verify Kodi template exists ──────────────────────────────────
+# Kodi LXC provisioning via Node Manager API.
+# Version check skips provisioning when the deployed version matches.
+
+# ── Version-aware skip check ──────────────────────────────────────
+- name: Check Kodi version via NM API
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/check_service_version.yml"
+  vars:
+    _check_service_name: kodi
+    _check_image_version: "{{ kodi_image_version }}"
+
+# ── Verify Kodi template exists (skipped when version matches) ───
 - name: Verify Kodi template exists
   ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/verify_lxc_template.yml"
   vars:
     lxc_template_path: "{{ kodi_ct_template_path }}"
     lxc_service_name: Kodi
+  when: not (_service_up_to_date | default(false) | bool)
 
 # ── Determine container network ──────────────────────────────────
 - name: Compute Kodi LAN network
@@ -13,82 +24,77 @@
     lxc_net_service_name: kodi
     lxc_net_ip_offset: "{{ kodi_ct_ip_offset }}"
 
-# ── Check container existence ──────────────────────────────────
+# ── Provision container via NM API (skipped when version matches) ─
+- name: Provision Kodi LXC via NM API
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/kodi"
+    method: POST
+    body_format: json
+    body:
+      vmid: "{{ kodi_ct_id }}"
+      template_path: "{{ kodi_ct_template_path | basename }}"
+      hostname: "{{ kodi_ct_hostname }}"
+      memory: "{{ kodi_ct_memory }}"
+      cores: "{{ kodi_ct_cores }}"
+      disk: "{{ kodi_ct_disk }}"
+      onboot: "{{ kodi_ct_onboot }}"
+      startup_order: 0
+      unprivileged: "{{ kodi_ct_unprivileged }}"
+      features: "{{ kodi_ct_features | join(',') }}"
+      ip: "{{ _lxc_ct_ip }}/{{ _lan_cidr }}"
+      gateway: "{{ _lan_gateway }}"
+      nameserver: "{{ _lan_gateway }}"
+      bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
+      image_version: "{{ kodi_image_version }}"
+    status_code: 200
+    timeout: 180
+  delegate_to: localhost
+  register: _provision_result
+  failed_when: not (_provision_result.json.success | default(false))
+  when: not (_service_up_to_date | default(false) | bool)
 
-- name: Check if Kodi container exists
-  ansible.builtin.command:
-    cmd: pct status {{ kodi_ct_id }}
-  register: _ct_status
-  failed_when: false
-  changed_when: false
+- name: Report provision result
+  ansible.builtin.debug:
+    msg: "Kodi on {{ inventory_hostname }}: {{ _provision_result.json.status }} — {{ _provision_result.json.log | default([]) | join(', ') }}"
+  when: not (_service_up_to_date | default(false) | bool)
 
-- name: Set container existence flag
-  ansible.builtin.set_fact:
-    _lxc_exists: "{{ _ct_status.rc == 0 }}"
-
-# ── Resolve deployed version ──────────────────────────────────
-
-- name: Resolve deployed Kodi version
-  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_deployed_version.yml"
+# ── Configure callhome via NM API (skipped when version matches) ─
+- name: Configure callhome on Kodi
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/configure_callhome_api.yml"
   vars:
-    _resolve_service_name: kodi
+    _callhome_vmid: "{{ kodi_ct_id }}"
 
-# ── Provision via shared proxmox_lxc role ────────────────────────
+# ── Register in dynamic inventory (for configure plays) ──────────
+- name: Add Kodi containers to dynamic inventory group
+  ansible.builtin.add_host:
+    name: "{{ kodi_ct_hostname }}-{{ item }}"
+    groups: kodi
+    ansible_connection: community.proxmox.proxmox_pct_remote
+    ansible_host: "{{ hostvars[item].ansible_host }}"
+    ansible_user: root
+    proxmox_vmid: "{{ kodi_ct_id }}"
+    ansible_paramiko_host_key_checking: false
+    ansible_paramiko_proxy_command: >-
+      {{ 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@'
+         + lookup('env', 'PRIMARY_HOST')
+         if 'lan_hosts' in (hostvars[item].group_names | default([]))
+         else omit }}
+  loop: "{{ ansible_play_hosts }}"
 
-- name: Provision Kodi LXC container
-  ansible.builtin.include_role:
-    name: proxmox_lxc
-  vars:
-    lxc_ct_id: "{{ kodi_ct_id }}"
-    lxc_ct_hostname: "{{ kodi_ct_hostname }}"
-    lxc_ct_dynamic_group: kodi
-    lxc_ct_memory: "{{ kodi_ct_memory }}"
-    lxc_ct_cores: "{{ kodi_ct_cores }}"
-    lxc_ct_disk: "{{ kodi_ct_disk }}"
-    lxc_ct_onboot: "{{ kodi_ct_onboot }}"
-    lxc_ct_startup_order: 0
-    lxc_ct_template_path: "{{ kodi_ct_template_path }}"
-    lxc_ct_ip: "{{ _lxc_ct_ip }}/{{ _lan_cidr }}"
-    lxc_ct_gateway: "{{ _lan_gateway }}"
-    lxc_ct_nameserver: "{{ _lan_gateway }}"
-    lxc_ct_bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
-    lxc_ct_unprivileged: "{{ kodi_ct_unprivileged }}"
-    lxc_ct_features: "{{ kodi_ct_features }}"
-    lxc_ct_image_version: "{{ kodi_image_version }}"
-
-# Kodi runs headless via sway+wayvnc (WLR_BACKENDS=headless, pixman).
-# No DRI/ALSA/input passthrough needed — VNC provides remote display.
-
+# ── Export static IP for downstream roles ─────────────────────────
 - name: Export Kodi static IP for downstream roles
   ansible.builtin.set_fact:
     kodi_static_ip: "{{ _lxc_ct_ip }}"
     cacheable: true
 
-# ── Port forwarding for Kodi VNC WebSocket ───────────────────────
-# The container runs websockify on port 6082. Forward from the host.
+# ── Port forwarding for Kodi display ───────────────────────
+# TODO: Convert lxc_display_proxy to NM API in a future pass.
+# Kept as SSH for now — deploys systemd units and socat proxies on the host.
 
-- name: Deploy Kodi VNC socat proxy unit
-  ansible.builtin.copy:
-    content: |
-      [Unit]
-      Description=Kodi VNC WebSocket proxy (host:{{ kodi_vnc_ws_port }} -> kodi:{{ kodi_vnc_ws_port }})
-      After=network.target pve-guests.service
-      Wants=pve-guests.service
-
-      [Service]
-      Type=simple
-      ExecStart=/usr/bin/socat TCP-LISTEN:{{ kodi_vnc_ws_port }},reuseaddr,fork TCP:{{ _lxc_ct_ip }}:{{ kodi_vnc_ws_port }}
-      Restart=always
-      RestartSec=3
-
-      [Install]
-      WantedBy=multi-user.target
-    dest: /etc/systemd/system/kodi-vnc-proxy.service
-    mode: "0644"
-
-- name: Enable and start Kodi VNC proxy
-  ansible.builtin.systemd:
-    name: kodi-vnc-proxy
-    daemon_reload: true
-    enabled: true
-    state: restarted
+- name: Set up Kodi display proxy
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_display_proxy.yml"
+  vars:
+    _display_proxy_name: kodi-display-proxy
+    _display_proxy_port: "{{ kodi_ws_port }}"
+    _display_proxy_target: "{{ _lxc_ct_ip }}"
+    _display_proxy_legacy: kodi-vnc-proxy

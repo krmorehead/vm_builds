@@ -1,7 +1,7 @@
 ---
 kiosk_ct_hostname: kiosk
-kiosk_ct_memory: 512
-kiosk_ct_cores: 1
+kiosk_ct_memory: 1024
+kiosk_ct_cores: 2
 kiosk_ct_disk: "4"
 kiosk_ct_template_path: "{{ kiosk_lxc_template_path }}"
 kiosk_ct_onboot: true

@@ -36,9 +36,11 @@ This project manages multiple VM and LXC container types on Proxmox. Each servic
 23. **Follow community standards** (see `project-structure.mdc` Design principles). Check upstream tooling before writing custom workarounds.
 24. **Documented exceptions to bake principle**: three cases where runtime installation is acceptable. Each MUST be explicitly documented in the project plan with rationale:
     - **Docker pull of pinned image tag**: deterministic and versioned. Used for Docker-in-LXC services (e.g., Home Assistant pre-pulls `homeassistant/home-assistant:stable`).
-    - **Desktop VMs via cloud image + apt**: full desktop environments (KDE, GNOME, 2-4 GB packages) are too large and hardware-dependent for pre-built images. GPU drivers depend on `igpu_vendor` (Intel vs AMD), known only at runtime. Cloud image + cloud-init is the community standard for VM provisioning.
+    - **Desktop LXC via build-images.sh**: the desktop rootfs tarball is built with all packages (KDE, GNOME, KasmVNC) baked in. GPU drivers are selected at build time based on the target host's `igpu_vendor`.
     - **Windows VMs via ISO + autounattend.xml**: install-from-ISO IS the bake approach for Windows. The ISO + autounattend.xml produce a deterministic, unattended install with virtio drivers pre-injected. This is NOT an exception — it is how Windows images are built.
     Any OTHER runtime package installation (`apt install`, `opkg install`, `pip install` during converge) is rejected. If you need a new package, add it to the image build script.
+25. **Service migration: stop legacy before deploying replacement.** When renaming a systemd service (e.g., `kiosk-vnc-proxy` → `kiosk-display-proxy`), the provisioning role MUST stop and remove the old service BEFORE deploying the new one. Add a pre-deployment task that `systemctl stop/disable` + `rm -f` + `pkill` the legacy service. Without this, the old service holds the port and the new service crash-loops. Applies to host-level socat proxies AND container-internal services.
+26. **LAN host cleanup parity.** The main cleanup play targets `proxmox:!lan_hosts`. LAN hosts ONLY get cleanup via `tasks/cleanup_lan_host.yml`. When adding host-level systemd units in a provisioning role, ALWAYS add the unit name to BOTH `playbooks/cleanup.yml` (primary hosts) AND `tasks/cleanup_lan_host.yml` (LAN hosts).
 
 ## Playbook execution order (site.yml)
 
@@ -67,7 +69,7 @@ plays in `site.yml`:
 ```yaml
 - name: Apply <feature> to <type>
   hosts: <dynamic_group>
-  tags: [<type>-<feature>, never]
+  tags: [<type>-<feature>]
   gather_facts: false
   tasks:
     - name: Include <feature> tasks
@@ -77,7 +79,7 @@ plays in `site.yml`:
 
 - name: Record <feature> deployment
   hosts: <flavor_group>
-  tags: [<type>-<feature>, never]
+  tags: [<type>-<feature>]
   gather_facts: true
   roles:
     - role: deploy_stamp
@@ -85,10 +87,11 @@ plays in `site.yml`:
         deploy_play: <type>_<feature>
 ```
 
-The `never` tag prevents feature plays from running during full converge
-(they are opt-in via `--tags`). The paired `deploy_stamp` play runs on the
+Feature plays run in the default (no-tags) E2E flow AND can be invoked
+individually via `--tags`. The paired `deploy_stamp` play runs on the
 Proxmox host (flavor group), not the VM, because `vm_builds.fact` lives on
-the host.
+the host. NEVER use Ansible's `never` special tag — it silently skips plays
+in the default pipeline, creating untested dead code.
 
 This pattern enables:
 - Per-feature molecule scenarios that converge only the relevant task file
@@ -214,24 +217,38 @@ device bind mounts, auto-start, container start, readiness wait, and
 containers may lack it). For OpenWrt LXC: use `--ostype unmanaged`. See
 proxmox-safety rule.
 
-### LXC configure connection
+### LXC configure connection (API-first, verified 2026-04-18)
 
-Configure plays target the dynamic group populated by `add_host`. The
-connection uses `community.proxmox.proxmox_pct_remote` which SSHes to the
-Proxmox host and runs `pct exec` inside the container. No SSH or bootstrap
-IP needed inside the container.
+Configure roles use `ansible.builtin.uri` to push config via the NodeManager
+API over VPN. 9/10 configure roles are 100% API-first (zero SSH). The NM API
+provides endpoints for container exec, config push, and status queries.
 
 ```yaml
-# In site.yml
+# In site.yml — API-driven configure
 - name: Configure Pi-hole
-  hosts: pihole
-  gather_facts: true
-  roles:
-    - pihole_configure
+  hosts: dns_nodes
+  gather_facts: false
+  tasks:
+    - name: Set Pi-hole password via NM API
+      ansible.builtin.uri:
+        url: "http://{{ vpn_ip }}:9001/api/container/pihole/exec"
+        method: POST
+        body_format: json
+        body:
+          command: "/usr/local/bin/pihole -a -p {{ pihole_password }}"
+      delegate_to: localhost
 ```
 
-The `add_host` in `proxmox_lxc` sets `ansible_connection`,
-`ansible_host`, and `proxmox_vmid` automatically.
+Exceptions (SSH justified):
+- `kiosk_configure` — deploys the NodeManager itself (bootstrap)
+- `openwrt_configure` — OpenWrt VM has no HTTP API
+
+NEVER add SSH fallback paths. If the NM API is unreachable, the 4-tier
+system is broken and must be fixed, not worked around.
+
+Legacy `pct_remote` and `add_host` patterns remain in provisioning roles
+for hypervisor-side operations (`pct config`, `pct status`, `pct create`)
+that require host-level access.
 
 For OpenWrt containers (no Python), use `ansible.builtin.raw` with commands
 wrapped in `/bin/sh -c '...'`. See the `openwrt-build` skill section
@@ -553,8 +570,8 @@ review, not at runtime, because "0 assertions passed" looks the same as
 Every feature MUST define a rollback procedure. See
 `.agents/skills/rollback-architecture/SKILL.md` for full details. Summary:
 
-- Per-feature rollback uses tags in `cleanup.yml`: `--tags <feature>-rollback`
-- Rollback tags use the `never` meta-tag so they don't run during full cleanup
+- Per-feature rollback uses tags in `cleanup.yml`: `--tags <feature>-rollback -e rollback=true`
+- Rollback plays are gated by `when: rollback | default(false) | bool`
 - Each feature's project plan milestone includes inline rollback steps
 - `deploy_stamp` records which features are applied; rollback checks this
 
@@ -562,7 +579,7 @@ Every feature MUST define a rollback procedure. See
 # cleanup.yml pattern for per-feature rollback
 - name: Rollback <feature>
   hosts: <target_group>
-  tags: [<feature>-rollback, never]
+  tags: [<feature>-rollback]
   gather_facts: false
   tasks:
     - name: Revert changes

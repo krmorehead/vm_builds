@@ -75,7 +75,7 @@ When editing or reviewing a project plan, **ALWAYS** run through this checklist:
 ### Cross-Reference Verification
 
 8. **Prerequisite verification**: grep the codebase to confirm claimed prerequisites exist (VMIDs, groups, molecule platforms, .gitignore entries)
-9. **site.yml play ordering**: clarify positioning relative to `never`-tagged plays. State whether the new tag runs during normal converge or is opt-in
+9. **site.yml play ordering**: clarify positioning relative to existing plays. Every service play runs during normal converge — NEVER use Ansible's `never` tag
 10. **Shared tags**: if a tag is shared with another service (e.g., `[monitoring]`), document this is intentional and the implication
 11. **Cleanup coverage**: files deployed by roles must appear in `playbooks/cleanup.yml` (the unified cleanup). Rollback tags must appear in `playbooks/cleanup.yml`. There is only ONE cleanup to check
 12. **Architecture doc consistency**: verify plays, tags, and resources match `overview.md`, `roles.md`, `build-profiles.md`, and `roadmap.md`

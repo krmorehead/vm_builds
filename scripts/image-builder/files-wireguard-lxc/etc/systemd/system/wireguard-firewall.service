@@ -1,0 +1,12 @@
+[Unit]
+Description=WireGuard firewall rules (MASQUERADE + DNAT)
+After=wg-quick@wg0.service
+Requires=wg-quick@wg0.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/wireguard-firewall-setup
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

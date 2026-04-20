@@ -1,9 +1,12 @@
-"""Remote Kiosk viewer — VNC streaming via noVNC.
+"""Remote Kiosk viewer — display streaming via KasmVNC iframe.
 
-Renders a direct WebSocket VNC connection to a target kiosk's
-wayvnc/websockify stack, with hierarchical back-navigation,
-a child node picker for drill-down, and app switcher buttons
-for direct transitions to any registered display app.
+Renders a KasmVNC iframe connecting to a target kiosk's display.
+The SM only needs the node's VPN IP to establish the connection.
+Once connected, all interaction happens through the node's own
+kiosk UI inside the KasmVNC stream.
+
+The viewer bar is a minimal, toggleable overlay for back-navigation
+and an optional child-node picker for drill-down.
 """
 
 from __future__ import annotations
@@ -15,15 +18,15 @@ from nicegui import ui
 
 from scripts.webui import manager, theme
 from scripts.webui.data import Labels, Routes
-from scripts.webui.pages.vnc_shared import (
-    mount_static, render_app_console_links, render_viewer_error,
-    render_vnc_canvas, viewer_base_css,
+from scripts.webui.pages.display_shared import (
+    iframe_passthrough_css,
+    render_display_iframe, render_viewer_error,
+    toggle_viewer_bar_js, viewer_base_css,
 )
 
 
 def register() -> None:
-    """Register the /remote/{node_id} route and static assets."""
-    mount_static()
+    """Register the /remote/{node_id} route."""
 
     @ui.page(Routes.REMOTE_KIOSK)
     def remote_kiosk_page(node_id: str, back: str = Routes.NODES) -> None:
@@ -37,29 +40,35 @@ def register() -> None:
             _render_not_reachable(node_id, back)
             return
 
-        vnc_url = mgr.get_child_vnc_url(node_id)
+        display_url = mgr.get_child_display_url(node_id)
         children = mgr.get_fleet_children(node_id)
 
-        if vnc_url is None:
+        if display_url is None:
             _render_not_reachable(node_id, back)
             return
 
-        _render_vnc_viewer(node_id, vnc_url, children, back)
+        _render_display_viewer(node_id, display_url, children, back)
 
 
 def _render_not_reachable(node_id: str, back: str) -> None:
-    """Render an error state when the kiosk VNC is not reachable."""
+    """Render an error state when the kiosk display is not reachable."""
     render_viewer_error(node_id, Labels.KIOSK_NOT_REACHABLE, back, icon="cast_connected")
 
 
-def _render_vnc_viewer(
+def _render_display_viewer(
     node_id: str,
-    vnc_url: str,
+    display_url: str,
     children: list[str],
     back: str,
 ) -> None:
-    """Render the noVNC canvas with top bar navigation chrome."""
+    """Render a KasmVNC iframe with a minimal, toggleable top bar.
+
+    The SM provides only the VPN connection and back-navigation.
+    All interaction (app launching, session switching, fleet ops)
+    happens through the node's own kiosk UI inside the stream.
+    """
     ui.add_head_html(viewer_base_css())
+    ui.add_head_html(iframe_passthrough_css())
 
     with ui.element("div").classes("viewer-bar"):
         ui.button(
@@ -82,13 +91,16 @@ def _render_vnc_viewer(
                 options=children,
                 label=Labels.DRILL_INTO,
                 on_change=_navigate_child,
-            ).props("dense outlined").style(
+            ).props('dense outlined data-testid="drill-down-select"').style(
                 f"min-width: 140px; color: {theme.TEXT_PRIMARY};"
             )
 
-        kiosk_back = Routes.REMOTE_KIOSK.replace("{node_id}", node_id) + f"?back={quote(back)}"
-        render_app_console_links(node_id, back=kiosk_back)
+        ui.element("div").style("flex: 1;")
+        ui.button(
+            icon="visibility_off",
+            on_click=lambda: toggle_viewer_bar_js(),
+        ).props("flat dense round").tooltip("Toggle bar").style(
+            f"color: {theme.TEXT_SECONDARY}"
+        )
 
-        ui.element("div").props('id="vnc-status-dot"')
-
-    render_vnc_canvas(vnc_url)
+    render_display_iframe(display_url)

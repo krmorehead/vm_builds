@@ -251,21 +251,16 @@
 # The agent skeleton was baked into the image by inject_callhome_agent()
 # in build-images.sh. Containers without /opt/callhome are skipped.
 
-- name: Push latest callhome agent into container
-  ansible.builtin.copy:
-    src: "{{ project_root }}/scripts/callhome.py"
-    dest: "/tmp/callhome_agent.py"
-    mode: "0755"
-  when: callhome_server | default('') | length > 0
-
-- name: Install callhome agent and configure heartbeat
+- name: Push latest callhome agent and configure heartbeat
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
       if ! pct exec {{ lxc_ct_id }} -- test -d /opt/callhome; then
         exit 0
       fi
+      cp "{{ project_root }}/scripts/callhome.py" /tmp/callhome_agent.py
       pct push {{ lxc_ct_id }} /tmp/callhome_agent.py /opt/callhome/callhome.py
+      rm -f /tmp/callhome_agent.py
       pct exec {{ lxc_ct_id }} -- chmod +x /opt/callhome/callhome.py
       KIOSK_IP=$(pct config {{ kiosk_ct_id }} 2>/dev/null | grep -oP 'ip=\K[^/]+' | head -1)
       if [ -n "$KIOSK_IP" ]; then
@@ -273,10 +268,10 @@
       else
         TARGET="{{ callhome_server }}"
       fi
-      pct exec {{ lxc_ct_id }} -- bash -c \
-        "printf 'CALLHOME_SERVER=%s\nCALLHOME_PUBLIC_KEY=%s\n' \
-        '$TARGET' '{{ callhome_public_key }}' \
-        > /etc/default/callhome; \
+      # Use sed to update SERVER/KEY, preserving baked CALLHOME_HTTP_PROBES
+      pct exec {{ lxc_ct_id }} -- bash -c "
+        sed -i 's|^CALLHOME_SERVER=.*|CALLHOME_SERVER=$TARGET|' /etc/default/callhome
+        sed -i 's|^CALLHOME_PUBLIC_KEY=.*|CALLHOME_PUBLIC_KEY={{ callhome_public_key }}|' /etc/default/callhome
         systemctl restart callhome.service 2>/dev/null || true"
     executable: /bin/bash
   changed_when: true
@@ -299,8 +294,8 @@
       pct exec {{ lxc_ct_id }} -- ip -o -4 addr show eth0 2>/dev/null | grep -c "inet "
     executable: /bin/bash
   register: _ct_addr
-  retries: 15
-  delay: 3
+  retries: 20
+  delay: 5
   until: (_ct_addr.stdout | default('0') | trim | int) > 0
   changed_when: false
   when:

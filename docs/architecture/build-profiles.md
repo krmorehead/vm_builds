@@ -20,7 +20,7 @@ container provisioning plays target specific flavor groups.
 | `service_nodes` | Home Assistant | 200 |
 | `media_nodes` | Jellyfin, Kodi | 300-301 |
 | `streaming_nodes` | Moonlight | 302 |
-| `desktop_nodes` | Desktop VM, Custom UX Kiosk | 400-401 |
+| `desktop_nodes` | Desktop LXC, Custom UX Kiosk | 400-401 |
 | `monitoring_nodes` | Netdata, rsyslog | 500-501 |
 | `gaming_nodes` | Gaming LXC (Sunshine + dsda-doom) | 601 |
 
@@ -146,5 +146,5 @@ Each service has a startup priority in `group_vars/all.yml`:
 | 5 | Home Assistant, Jellyfin |
 | 6 | Custom UX Kiosk |
 
-On-demand services (Kodi, Moonlight, Desktop VM) have `onboot: false`
+On-demand services (Kodi, Moonlight, Desktop LXC) have `onboot: false`
 and are started manually or by the display-exclusive hookscript.

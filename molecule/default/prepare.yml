@@ -46,6 +46,45 @@
           Build them with: ./build-images.sh
       when: missing_versions | length > 0
 
+- name: Generate controller VPN keypair
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Check if controller keypair already exists
+      ansible.builtin.set_fact:
+        _ctrl_key_exists: "{{ lookup('env', 'WIREGUARD_PRIVATE_KEY_CONTROLLER') | length > 0 }}"
+
+    - name: Generate controller keypair via Python X25519
+      ansible.builtin.command:
+        cmd: >-
+          {{ playbook_dir }}/../../.venv/bin/python3 -c
+          "from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey;
+          import base64;
+          k = X25519PrivateKey.generate();
+          print(base64.b64encode(k.private_bytes_raw()).decode());
+          print(base64.b64encode(k.public_key().public_bytes_raw()).decode())"
+      register: _ctrl_keygen
+      changed_when: true
+      when: not (_ctrl_key_exists | bool)
+
+    - name: Extract controller keys
+      ansible.builtin.set_fact:
+        _ctrl_privkey: "{{ _ctrl_keygen.stdout_lines[0] }}"
+        _ctrl_pubkey: "{{ _ctrl_keygen.stdout_lines[1] }}"
+      when: not (_ctrl_key_exists | bool)
+
+    - name: Write controller keypair to env.generated
+      ansible.builtin.blockinfile:
+        path: "{{ env_generated_path }}"
+        create: true
+        mode: "0600"
+        marker: "# {mark} WireGuard CONTROLLER (auto-generated)"
+        block: |
+          WIREGUARD_PRIVATE_KEY_CONTROLLER={{ _ctrl_privkey }}
+          WIREGUARD_PUBLIC_KEY_CONTROLLER={{ _ctrl_pubkey }}
+      when: not (_ctrl_key_exists | bool)
+
 - name: Start heartbeat API server
   hosts: localhost
   connection: local

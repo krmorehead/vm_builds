@@ -293,48 +293,77 @@ All mutation endpoints:
 5. Register the route with `starlette_app.routes.insert(0, Route(...))`
 6. Add tests in `tests/test_webui_app.py`
 
-## Fleet readiness gate (verify.yml)
+## API-Driven Architecture (MANDATORY)
 
-The E2E verify playbook uses the manager API as the primary path for
-container liveness checks, with SSH fallback:
+The system is API-first. After VPN and heartbeat are established (the first
+two required plays in site.yml), ALL subsequent operations use VPN + HTTP.
+
+### Configure roles — API status
+
+| Role | Transport | Notes |
+|------|-----------|-------|
+| pihole_configure | 100% `ansible.builtin.uri` → NM API | Zero SSH |
+| rsyslog_configure | 100% `ansible.builtin.uri` → NM API | Zero SSH |
+| netdata_configure | 100% `ansible.builtin.uri` → NM API | Zero SSH |
+| homeassistant_configure | 100% `ansible.builtin.uri` → NM API | Zero SSH |
+| jellyfin_configure | 100% `ansible.builtin.uri` → NM API | Zero SSH |
+| kodi_configure | 100% `ansible.builtin.uri` → NM API | Zero SSH |
+| moonlight_configure | 100% `ansible.builtin.uri` → NM API | Zero SSH |
+| desktop_configure | 100% `ansible.builtin.uri` → NM API | Zero SSH |
+| gaming_lxc_configure | 100% `ansible.builtin.uri` → NM API | Zero SSH |
+| wireguard_configure | `ansible.builtin.uri` + localhost `wg genkey` | Crypto only on controller |
+| kiosk_configure | `pct exec` (SSH) | **Bootstrap exception**: sets up the NM itself |
+| openwrt_configure | `ansible.builtin.raw` (SSH) | **No HTTP API on OpenWrt VM** |
+
+### Verify playbook — API-first, SSH for hypervisor only
+
+The E2E verify playbook uses the 4-tier API as the PRIMARY path. No SSH
+fallbacks — if the API fails, the 4-tier system is broken and must be fixed.
 
 ```yaml
-# Fleet readiness gate
+# Fleet readiness gate — HARD FAIL if any service not heartbeating
 - name: Check fleet API readiness
   ansible.builtin.uri:
     url: "{{ _api_base }}/api/fleet/ready?services=pihole,rsyslog,..."
   register: _fleet_check
-  failed_when: false
+  # NO failed_when: false — API failure IS the failure
 
-- name: Set fleet API ready flag
-  ansible.builtin.set_fact:
-    _fleet_api_ready: "{{ _fleet_check.status | default(0) == 200 }}"
-
-# Per-service: API when fleet ready, SSH fallback
+# Per-service via API (no SSH fallback)
 - name: Check service health via API
   ansible.builtin.uri:
     url: "{{ _api_base }}/api/container/pihole/ready"
-  when: _fleet_api_ready | bool
 
-- name: Check service health via SSH (fallback)
-  ansible.builtin.shell:
-    cmd: pct exec {{ ct_id }} -- ...
-  when: not (_fleet_api_ready | bool)
+# Kiosk config via NM API over VPN (no pct exec)
+- name: Query kiosk config via NM API
+  ansible.builtin.uri:
+    url: "http://{{ vpn_ip }}:9001/api/config/self"
+  delegate_to: localhost
 ```
 
-### When to use the fleet API (primary path)
+### What uses API (all runtime operations)
 
-- Container liveness checks (is the service running?)
-- Service health queries (extensions, systemd_services)
-- Readiness gates before functional tests
+- Container liveness checks (heartbeat `ready`, `systemd_services`)
+- Service health queries (extensions: docker, wireguard, config_files, wifi)
+- Kiosk configuration validation (NM `/api/config/self` over VPN)
+- Display service status (heartbeat `systemd_services.kiosk-display`)
+- Baked content verification (heartbeat `extensions.config_files`)
+- Fleet readiness and circuit breaker gates
 
-### When SSH stays (not replaced by API)
+### What stays SSH (hypervisor and bootstrap ONLY)
 
-- Hypervisor operations: `pct config`, `pct status`, `qm config`, `qm agent`
+- Hypervisor operations: `pct config`, `pct status`, `qm config` — these
+  read Proxmox host state, not container state
 - Host infrastructure: bridges, IOMMU, iGPU, backup manifests
-- L3 integration tests: cross-container connectivity, DNS resolution
-- OpenWrt-specific deep checks: UCI config, `iw` radio state
+- L3 integration tests: cross-service connectivity proofs (logger, ping, DNS)
+- OpenWrt VM deep checks: UCI config, `iw` radio state (no HTTP API)
+- `kiosk_configure` bootstrap: setting up the NM that provides the API
 - QEMU Guest Agent operations
+
+### NEVER add SSH fallbacks
+
+If an API check fails, that means the 4-tier system is broken. The correct
+response is to fix the relay chain, NOT add `pct exec` fallback. Fallbacks
+mask infrastructure failures and violate the bake-not-configure principle.
 
 ## Subscription model (heartbeat.py)
 
@@ -495,6 +524,27 @@ _COLLECTOR_MAP = {
   containers. Update the build scripts or role defaults, rebuild images
   if needed, and run `molecule converge` to push correct config.
 
+### Callhome identity preservation in OpenWrt containers (CRITICAL)
+- `CALLHOME_HOSTNAME` is baked into `/etc/default/callhome` during image
+  build (e.g., `CALLHOME_HOSTNAME=openwrt-mesh`, `CALLHOME_HOSTNAME=openwrt-bridge`).
+  This determines how the container identifies itself to the fleet readiness API.
+- `kiosk_configure` rewrites `CALLHOME_SERVER` and `CALLHOME_PUBLIC_KEY` on
+  ALL sibling containers to point them at the local NodeManager. For Debian
+  containers (with `/opt/callhome/`), it uses `sed` on `/etc/default/callhome`.
+  For OpenWrt containers (with `/usr/sbin/callhome.sh` and NO `/opt/callhome`),
+  it MUST also use `sed` — NEVER `printf` or heredoc rewrites.
+- NEVER overwrite the entire `/etc/default/callhome` on any container. Only
+  update `CALLHOME_SERVER` and `CALLHOME_PUBLIC_KEY` via targeted `sed` commands.
+  This preserves `CALLHOME_HOSTNAME` and other baked-in variables.
+- Previous bug (2026-04-17): `kiosk_configure` used `printf` to overwrite
+  the entire `/etc/default/callhome` on OpenWrt containers with only
+  `CALLHOME_SERVER`, `CALLHOME_PUBLIC_KEY`, and `CALLHOME_CONTAINER=1`. This
+  destroyed `CALLHOME_HOSTNAME=openwrt-mesh` / `CALLHOME_HOSTNAME=openwrt-bridge`.
+  Containers then heartbeated with their CT hostname (e.g., "openwrt-mesh-home")
+  instead of the expected fleet service name ("openwrt-mesh"). The fleet
+  readiness API couldn't find them, causing verify to fail. Fix: use `sed -i`
+  to update only the two changed values, preserving all baked variables.
+
 ### Previous bugs
 - Manager `bridge/restart-wifi` used raw `wifi down && wifi up` instead of
   `wifi_setup.sh restart`. When the script got a bug fix, the raw command
@@ -507,3 +557,17 @@ _COLLECTOR_MAP = {
   because it was fed valid JSON. Batman mode was never actually triggered.
   Bridge WiFi restart was never tested. The entire manual test was theater
   that proved nothing about real functionality.
+- (2026-04-16) SM display pipeline (`_resolve_display_ip`) falls back to
+  LAN IP for mesh1 when the controller has no VPN interface. The browser
+  gets `http://10.10.10.210:6080` which is unreachable from the WAN-side
+  controller. In production with VPN, this resolves to `10.0.0.2:6080`.
+  This is NOT a bug — it's expected behavior when VPN is absent.
+- (2026-04-16) SM Hub "Launch" tiles use shared code from NM-level kiosks.
+  On the SM, `try_get_instance().host_name` is "super" (not a real node),
+  so console links point to `/console/super/desktop` which fails. Remote
+  app launching MUST go through the remote kiosk viewer (Open Kiosk on
+  node detail page → interact with the kiosk's own Hub inside the iframe).
+- (2026-04-16) SM `_make_http_collector` factory simplified 6 repetitive
+  `http_collect_*` functions into a single factory. Each collector calls
+  `_resolve_collector_ip()` → HTTP GET to the NodeManager's metric
+  endpoint. The SM never SSHes — HTTP over VPN exclusively.

@@ -1,34 +1,34 @@
-"""Unified display console — VNC or web view for any display app.
+"""Unified display console — KasmVNC iframe for any display app.
 
 Routes:
-    /console/{node_id}/{app_id}  — renders noVNC canvas or iframe based
-                                    on the handler's DisplayType.
+    /console/{node_id}/{app_id}  — renders a KasmVNC iframe for the
+                                    display app's stream endpoint.
 
-The browser connects DIRECTLY to the app's stream endpoint — no nesting.
-The SM/CM provides routing and URL discovery but never proxies VNC traffic.
+The browser connects DIRECTLY to the app's KasmVNC endpoint — no nesting.
+The SM only needs the node's VPN IP to establish the KasmVNC connection.
+Once connected, all interaction (session switching, app navigation) happens
+through the node's own kiosk UI inside the stream.
 
-The viewer bar includes an app switcher that shows all other registered
-display apps, enabling direct app-to-app transitions without navigating
-back to the node detail page. Conflict resolution is handled automatically
-by the DisplayTransferService.
+The viewer bar is a minimal, toggleable overlay providing just:
+- Back navigation to the SM
+- App/node label for orientation
+- Toggle to hide the bar for full-screen immersion
 """
 
 from __future__ import annotations
 
-from html import escape as html_escape
-from urllib.parse import quote, unquote
+from urllib.parse import unquote
 
 from nicegui import ui
 
 from scripts.webui import manager, theme
 from scripts.webui.data import (
-    DISPLAY_APP_CONFIGS, Labels, Routes, console_url,
+    DISPLAY_APP_CONFIGS, Labels, Routes,
 )
-from scripts.webui.display_transfer import DisplayType
-from scripts.webui.pages.vnc_shared import (
-    VIEWER_BAR_HEIGHT, mount_static, pointer_passthrough_css,
-    render_app_console_links, render_viewer_error, render_vnc_canvas,
-    viewer_base_css,
+from scripts.webui.pages.display_shared import (
+    iframe_passthrough_css,
+    render_display_iframe, render_viewer_error,
+    toggle_viewer_bar_js, viewer_base_css,
 )
 
 
@@ -37,15 +37,12 @@ def _viewer_bar(
     node_id: str,
     icon: str,
     back: str,
-    *,
-    current_app_id: str = "",
-    show_kiosk_button: bool = False,
-    show_status_dot: bool = False,
 ) -> None:
-    """Render the top navigation bar shared across all console views.
+    """Minimal, toggleable top bar — just back + label + toggle.
 
-    When current_app_id is set, renders app switcher buttons for all other
-    registered display apps, enabling direct transitions.
+    The SM only provides navigation chrome.  All app-level controls
+    (session switching, launching) happen inside the node's kiosk UI
+    via the KasmVNC stream.
     """
     with ui.element("div").classes("viewer-bar"):
         ui.button(
@@ -56,25 +53,17 @@ def _viewer_bar(
         ui.label(f"{label} on {node_id}").style(
             f"color: {theme.TEXT_PRIMARY}; font-weight: 600;"
         )
-
-        if show_kiosk_button:
-            kiosk_back = quote(console_url(node_id, current_app_id, back=back))
-            kiosk_target = Routes.REMOTE_KIOSK.replace("{node_id}", node_id) + f"?back={kiosk_back}"
-            ui.button(
-                Labels.OPEN_KIOSK, icon="home",
-                on_click=lambda t=kiosk_target: ui.navigate.to(t),
-            ).props("flat dense").style(f"color: {theme.ACCENT}")
-
-        if current_app_id:
-            render_app_console_links(node_id, back, skip=current_app_id)
-
-        if show_status_dot:
-            ui.element("div").props('id="vnc-status-dot"')
+        ui.element("div").style("flex: 1;")
+        ui.button(
+            icon="visibility_off",
+            on_click=lambda: toggle_viewer_bar_js(),
+        ).props("flat dense round").tooltip("Toggle bar").style(
+            f"color: {theme.TEXT_SECONDARY}"
+        )
 
 
 def register() -> None:
     """Register the /console/{node_id}/{app_id} route."""
-    mount_static()
 
     @ui.page(Routes.CONSOLE)
     def console_page(
@@ -97,9 +86,8 @@ def register() -> None:
             _render_error(label, node_id, back, Labels.MANAGER_NOT_INITIALIZED)
             return
 
-        handler = mgr.display_transfer.get_handler(app_id)
-        if not handler:
-            _render_error(label, node_id, back, f"{Labels.NO_HANDLER} for {app_id!r}")
+        if config and config.target_hosts and node_id not in config.target_hosts:
+            _render_error(label, node_id, back, f"{label} is not available on {node_id}")
             return
 
         viewstream_url = mgr.get_guest_viewstream_url(node_id, app_id)
@@ -107,10 +95,7 @@ def register() -> None:
             _render_error(label, node_id, back, f"{Labels.HOST_UNREACHABLE}: {node_id}")
             return
 
-        if handler.display_type is DisplayType.VNC:
-            _render_vnc_console(node_id, app_id, label, icon, viewstream_url, back)
-        else:
-            _render_web_console(node_id, app_id, label, icon, viewstream_url, back)
+        _render_display_console(node_id, app_id, label, icon, viewstream_url, back)
 
 
 def _render_error(
@@ -120,68 +105,23 @@ def _render_error(
     render_viewer_error(f"{label} on {node_id}", message, back)
 
 
-def _render_vnc_console(
+def _render_display_console(
     node_id: str,
     app_id: str,
     label: str,
     icon: str,
-    vnc_url: str,
+    display_url: str,
     back: str,
 ) -> None:
-    """Render a noVNC canvas for a VNC-backed display app."""
+    """Render a KasmVNC iframe for a display app.
+
+    The SM provides only the connection and a minimal toggleable bar.
+    All app-level interaction happens inside the node's own kiosk UI
+    through the KasmVNC stream.
+    """
     ui.add_head_html(viewer_base_css())
+    ui.add_head_html(iframe_passthrough_css())
 
-    _viewer_bar(
-        label, node_id, icon, back,
-        current_app_id=app_id,
-        show_kiosk_button=True,
-        show_status_dot=True,
-    )
+    _viewer_bar(label, node_id, icon, back)
 
-    render_vnc_canvas(vnc_url)
-
-
-def _render_web_console(
-    node_id: str,
-    app_id: str,
-    label: str,
-    icon: str,
-    web_url: str,
-    back: str,
-) -> None:
-    """Render an iframe for a web-based display app."""
-    ui.add_head_html(viewer_base_css())
-    ui.add_head_html(pointer_passthrough_css())
-    ui.add_head_html(f"""
-    <style>
-        .web-frame-wrap {{
-                        position: fixed; top: {VIEWER_BAR_HEIGHT}; left: 0; right: 0; bottom: 0;
-                        z-index: 9990; pointer-events: auto;
-                    }}
-        .web-frame-wrap iframe {{
-            width: 100%; height: 100%; border: none;
-        }}
-    </style>
-    """)
-
-    _viewer_bar(label, node_id, icon, back, current_app_id=app_id)
-
-    ui.add_body_html(
-        f'<div class="web-frame-wrap">'
-        f'<iframe src="{html_escape(web_url, quote=True)}"></iframe>'
-        f'</div>'
-    )
-    ui.add_body_html("""
-    <script>
-    (function() {
-        function reposition() {
-            var wrap = document.querySelector('.web-frame-wrap');
-            if (wrap && wrap.nextElementSibling) document.body.appendChild(wrap);
-        }
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', reposition);
-        } else { reposition(); }
-        setTimeout(reposition, 500);
-    })();
-    </script>
-    """)
+    render_display_iframe(display_url)

@@ -4,3 +4,4 @@ pci_passthrough_allow_reboot: true
 wol_capable: true
 wifi_role: sta
 container_subnet_id: 4
+vpn_ip: 10.0.0.4

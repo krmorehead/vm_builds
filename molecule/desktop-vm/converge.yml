@@ -6,17 +6,17 @@
     - proxmox_bridges
     - proxmox_igpu
 
-- name: Provision Desktop VM
+- name: Provision Desktop LXC
   hosts: desktop_nodes
   gather_facts: false
   roles:
-    - desktop_vm
+    - desktop_lxc
     - role: deploy_stamp
       vars:
-        deploy_stamp_play: desktop_vm
+        deploy_stamp_play: desktop_lxc
 
-- name: Configure Desktop
-  hosts: desktop
-  gather_facts: true
+- name: Configure Desktop LXC
+  hosts: desktop_nodes
+  gather_facts: false
   roles:
     - desktop_configure

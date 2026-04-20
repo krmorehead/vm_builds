@@ -2,8 +2,8 @@
 
 The kiosk stays alive during display app launches (headless rendering).
 The display transfer service handles conflict resolution between mutually
-exclusive display apps. Remote users view the app via VNC console from
-the SuperManager or ClusterManager.
+exclusive display apps. Remote users view the app via KasmVNC console
+from the SuperManager or ClusterManager.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ def register() -> None:
         app_id = app_info.get("app_id", "")
 
         mgr = try_get_instance()
-        node_id = mgr._host_name if mgr else ""
+        node_id = mgr.host_name if mgr else ""
 
         with ui.column().classes(
             "w-full max-w-[600px] mx-auto items-center justify-center gap-6 kiosk-body-offset"
@@ -72,8 +72,9 @@ def register() -> None:
             status_label = ui.label("").classes("text-sm").style(
                 f"color: {theme.TEXT_SECONDARY}"
             )
+            btn_label = title if title == Labels.LAUNCH_PREFIX else f"{Labels.LAUNCH_PREFIX} {title}"
             launch_btn = ui.button(
-                f"{Labels.LAUNCH_PREFIX} {title}", icon="play_arrow",
+                btn_label, icon="play_arrow",
             ).classes("action-btn text-lg px-8 py-3")
 
             console_link = console_url(node_id, app_id, back=Routes.HUB) if (node_id and app_id) else ""
@@ -83,7 +84,7 @@ def register() -> None:
                 status_label.text = f"Starting VMID {vmid}..."
                 status_label.style(f"color: {theme.COLOR_WARNING}")
                 result = await _launch_guest(vmid)
-                if result.get("success", True):
+                if result.get("success"):
                     status_label.text = f"{title} is running."
                     status_label.style(f"color: {theme.ACCENT}")
                     if console_link:
@@ -99,11 +100,11 @@ def register() -> None:
                 ui.button(
                     f"View {title} Console", icon="cast",
                     on_click=lambda: ui.navigate.to(console_link),
-                ).classes("action-btn-outline mt-2")
+                ).classes("outline-btn mt-2")
 
             ui.separator().classes("w-full max-w-sm")
 
             ui.button(
                 Labels.BACK_TO_HUB, icon="home",
                 on_click=lambda: ui.navigate.to(Routes.HUB),
-            ).classes("action-btn-outline")
+            ).classes("outline-btn")

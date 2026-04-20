@@ -74,10 +74,23 @@
     /etc/init.d/dnsmasq restart
   when: pihole_static_ip is defined
   changed_when: true
+  failed_when: false
+  ignore_unreachable: true
+
+- name: Reset SSH after dnsmasq restart
+  ansible.builtin.meta: reset_connection
 
 - name: Wait for DNS to stabilize
   ansible.builtin.pause:
-    seconds: 3
+    seconds: 8
+    prompt: Waiting for dnsmasq to settle after Pi-hole DNS config
+
+- name: Reconnect to OpenWrt after dnsmasq restart
+  ansible.builtin.raw: echo alive
+  register: _pihole_dns_reconnect
+  retries: 6
+  delay: 5
+  until: _pihole_dns_reconnect.rc == 0
 
 # ── Verify DNS works through Pi-hole ─────────────────────────────
 

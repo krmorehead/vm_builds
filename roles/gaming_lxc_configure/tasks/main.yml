@@ -1,56 +1,8 @@
 ---
-# ── Verify GPU device access ────────────────────────────────────
-- name: Detect render device on host
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      ls /dev/dri/renderD* 2>/dev/null | head -1 | xargs basename
-    executable: /bin/bash
-  register: _host_render_device
-  changed_when: false
-
-- name: Check GPU render device is accessible
-  ansible.builtin.command:
-    cmd: pct exec {{ gaming_ct_id }} -- ls -l /dev/dri/{{ _host_render_device.stdout | trim }}
-  register: _gpu_check
-  changed_when: false
-
-- name: Detect card device on host
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      ls /dev/dri/card* 2>/dev/null | head -1 | xargs basename
-    executable: /bin/bash
-  register: _host_card_device
-  changed_when: false
-
-- name: Check GPU card device is accessible
-  ansible.builtin.command:
-    cmd: pct exec {{ gaming_ct_id }} -- ls -l /dev/dri/{{ _host_card_device.stdout | trim }}
-  register: _gpu_card_check
-  changed_when: false
-  failed_when: false
-
-- name: Report GPU device status
-  ansible.builtin.debug:
-    msg: >-
-      GPU devices: {{ _host_render_device.stdout | trim }}={{ 'present' if _gpu_check.rc == 0 else 'MISSING' }},
-      {{ _host_card_device.stdout | trim }}={{ 'present' if _gpu_card_check.rc == 0 else 'MISSING' }}
-
-# ── Verify VA-API encoding support ──────────────────────────────
-- name: Check VA-API encoding profiles
-  ansible.builtin.command:
-    cmd: pct exec {{ gaming_ct_id }} -- bash -c 'vainfo --display drm 2>&1 || true'
-  register: _vainfo_check
-  changed_when: false
-  failed_when: false
-
-- name: Report VA-API status
-  ansible.builtin.debug:
-    msg: >-
-      VA-API: {{ 'hardware encoding available'
-        if 'VAProfileH264' in (_vainfo_check.stdout | default(''))
-        else 'software fallback (no encode profiles)' }}
+# GPU device passthrough, Xorg, Sunshine, dsda-doom, and Freedoom WADs
+# are baked into the image by build-images.sh. This role handles ONLY
+# host-specific config: Sunshine credentials and service start.
+# All in-container operations go through the Node Manager API over VPN.
 
 # ── Configure Sunshine credentials ──────────────────────────────
 - name: Generate Sunshine password if not set
@@ -72,63 +24,29 @@
   delegate_to: localhost
   when: sunshine_password | default('', true) | length == 0
 
-- name: Set Sunshine credentials via CLI
-  ansible.builtin.command:
-    cmd: >-
-      pct exec {{ gaming_ct_id }} --
-      bash -c '/usr/bin/sunshine --creds {{ sunshine_user }} {{ _sunshine_password }}'
+# ── Set credentials and start services via NM API ────────────────
+- name: Set Sunshine credentials and start display services
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ gaming_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: >-
+        bash -c '
+        /usr/bin/sunshine --creds {{ sunshine_user }} {{ _sunshine_password }};
+        systemctl start xorg-virtual.service;
+        systemctl start sunshine.service'
+      timeout: 30
+    status_code: 200
+  delegate_to: localhost
   no_log: true
-  changed_when: true
-  failed_when: false
+  register: _gaming_setup
+  failed_when: >-
+    _gaming_setup.status | default(0) != 200
+    or not (_gaming_setup.json.success | default(false))
 
-# ── Start display and streaming services ─────────────────────────
-# Service enablement is baked into the image. Just start them.
-- name: Start Xorg virtual display
-  ansible.builtin.command:
-    cmd: pct exec {{ gaming_ct_id }} -- systemctl start xorg-virtual.service
-  changed_when: true
-  failed_when: false
-
-- name: Start Sunshine service
-  ansible.builtin.command:
-    cmd: pct exec {{ gaming_ct_id }} -- systemctl start sunshine.service
-  changed_when: true
-  failed_when: false
-
-- name: Wait for Sunshine to initialize
-  ansible.builtin.pause:
-    seconds: 5
-
-- name: Check Sunshine service status
-  ansible.builtin.command:
-    cmd: pct exec {{ gaming_ct_id }} -- systemctl is-active sunshine.service
-  register: _sunshine_status
-  changed_when: false
-  failed_when: false
-
-# ── Verify game installation ────────────────────────────────────
-- name: Check dsda-doom is installed
-  ansible.builtin.command:
-    cmd: pct exec {{ gaming_ct_id }} -- which dsda-doom
-  register: _dsdadoom_check
-  changed_when: false
-  failed_when: false
-
-- name: Check Freedoom WADs are installed
-  ansible.builtin.command:
-    cmd: pct exec {{ gaming_ct_id }} -- bash -c 'ls /usr/share/doom/*.wad 2>/dev/null | head -1'
-  register: _freedoom_check
-  changed_when: false
-  failed_when: false
-
-# ── Report configuration summary ────────────────────────────────
 - name: Report Gaming LXC configuration
   ansible.builtin.debug:
     msg: >-
       Gaming LXC configured.
-      GPU: {{ 'render device available' if _gpu_check.rc == 0 else 'NO GPU' }}.
-      VA-API: {{ 'H.264 encode' if 'VAProfileH264' in (_vainfo_check.stdout | default('')) else 'software only' }}.
-      Sunshine: {{ _sunshine_status.stdout | default('unknown') }}.
-      dsda-doom: {{ 'installed' if _dsdadoom_check.rc == 0 else 'not found' }}.
-      Freedoom: {{ 'installed' if _freedoom_check.rc == 0 else 'not found' }}.
       Credentials: {{ sunshine_user }}/{{ '(auto-generated)' if sunshine_password | default('', true) | length == 0 else '(from env)' }}.

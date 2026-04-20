@@ -284,7 +284,10 @@ alwaysApply: true
 - For heredocs with quoted delimiters (`<< "EOF"`), NO expansion happens inside. Content is written literally.
 - To get a literal `$var` in the file: use `\$var` in the source (single backslash-dollar). Local bash expands `\$` → `$`, then it passes through SSH, single quotes, and quoted heredoc unchanged.
 - NEVER use `\\\$var` (triple backslash-dollar) — it produces `\$var` in the file (backslash-dollar), not `$var`.
+- NEVER use unescaped `"` inside heredoc content within `remote_cmd "..."`. The `"` closes the outer double-quoted string, causing awk programs, variable quotes, and conditionals to be mangled by local shell expansion. For scripts with `$variables`, `awk`, or shell quoting, ALWAYS use standalone script files copied via `scp` + `pct push` instead of heredocs.
+- For scripts longer than ~5 lines or containing awk/sed/shell quoting: create standalone files under `scripts/image-builder/files-<service>-lxc/` (same pattern as `wifi_setup.sh` and `batman_trigger.sh`), then `scp` to the Proxmox host and `pct push` into the container. This eliminates ALL escaping issues.
 - Previous bug: `\\\$AllowedSender` produced `\$AllowedSender` in the file, which was silently ignored by rsyslog (deprecated directive). `\\\$inputname` produced `\$inputname` which caused a config parse error, preventing rsyslog from starting.
+- Previous bug (2026-04-15): WireGuard firewall setup script used `awk "{print \\\$3}"` inside a heredoc within `remote_cmd "..."`. The unescaped `"` around the awk program closed the outer double-quoted string, and `\\\$3` became `\$3` through local bash expansion. The baked script contained `awk {print \$3}` (no quotes, backslash-dollar) which silently produced empty output. `$GATEWAY` was always empty, the script exited early, and no MASQUERADE/DNAT rules were ever applied. The build's smoke test only checked `test -x` (file exists), not that the script actually worked. Fix: moved script to standalone file, added `grep -q "awk.*print"` content check to smoke test.
 - ALWAYS verify baked config by creating a test container from the template and inspecting the actual file content with `pct exec -- cat /path/to/config`.
 - The Proxmox Debian 12 standard template does NOT include rsyslog. The build script MUST install it with `apt-get install -y --no-install-recommends rsyslog`.
 - ALWAYS wait for network readiness inside the build container (`getent hosts deb.debian.org`) before running `apt-get`.
@@ -465,3 +468,87 @@ is ALWAYS wrong for infrastructure hosts.
 - NEVER document planned/future exports (e.g., `gpu_pci_devices`) as if they already exist. Mark them explicitly with "(future)" or omit them.
 - NEVER hardcode bridge names (e.g., `vmbr0`, `vmbr1`) in architecture docs. Use descriptive terms ("WAN bridge", "LAN bridge") since bridges are auto-detected at runtime.
 - Previous bug: `overview.md` listed `gpu_pci_devices` as an export of `proxmox_pci_passthrough`, but the role only exports `wifi_pci_devices`. The `proxmox_igpu` export list was also incomplete (missing `igpu_pci_address`, `igpu_card_device`, `igpu_video_gid`). `openwrt-build.md` hardcoded `vmbr0` as the bootstrap bridge when it's actually auto-detected.
+
+## Legacy service port conflicts during migrations
+- When renaming systemd services (e.g., `kiosk-vnc-proxy` → `kiosk-display-proxy`), the OLD service may still be running and holding the port. The NEW service fails to bind and crash-loops.
+- ALWAYS stop and remove the legacy service BEFORE deploying the replacement. Use a pre-deployment shell task: `systemctl stop <old> && systemctl disable <old> && rm -f /etc/systemd/system/<old>.service && pkill -f 'socat.*TCP-LISTEN:<port>'`.
+- LAN host cleanup (`tasks/cleanup_lan_host.yml`) MUST include host-level systemd unit cleanup. The main cleanup play targets `proxmox:!lan_hosts`, so LAN hosts never get the host-level cleanup from `playbooks/cleanup.yml`.
+- Previous bug (2026-04-14): KasmVNC migration renamed `kiosk-vnc-proxy` to `kiosk-display-proxy`. mesh1's old `kiosk-vnc-proxy` survived cleanup (LAN host excluded from main cleanup play) and held port 6080. New `kiosk-display-proxy` crashed 957 times in a row, stuck in "activating" state with `Result=exit-code`. The verify task retried for 100 seconds without diagnosing the root cause.
+
+## Verify retries: fail fast, fix root causes
+- NEVER use retries to paper over timing issues. Understand the propagation delay and set tight bounds.
+- Heartbeat relay interval is 10 seconds. Worst-case propagation: Container(5s) → NM(10s) → CM(10s) → SM = 25s. Retries beyond 60s indicate a broken relay chain, not timing.
+- NEVER use `retries: 12, delay: 30` (6 minutes). If something isn't ready after 60 seconds, it's broken — fail and diagnose.
+- Remove debug/diagnostic tasks from verify.yml after fixing the root cause. Permanent diagnostics go in the converge roles, not verify.
+- Previous bug (2026-04-14): `kiosk-display-proxy` verify had `retries: 10, delay: 10` (100s) to work around a port conflict. Real fix: stop the legacy VNC proxy before deploying the replacement.
+
+## KasmVNC in LXC containers
+- KasmVNC's ICE module queries STUN servers to detect the public IP on startup. On LAN hosts (behind OpenWrt, no direct internet), all STUN servers fail and KasmVNC exits with code 29 (fatal).
+- ALWAYS set `public_ip: 0.0.0.0` in the `network.udp` section of `kasmvnc.yaml` for all containers. This disables STUN and prevents fatal exits on LAN hosts.
+- Chromium's NetworkService crashes on startup inside LXC containers (even with `nesting=1`). On fast hosts it recovers quickly; on slow hosts the renderer fails to establish WebSocket connections to the NiceGUI SPA.
+- ALWAYS start D-Bus via `dbus-daemon --session --fork --print-address` in the xstartup, NOT via the systemd `Environment=DBUS_SESSION_BUS_ADDRESS` directive (which points to a non-existent socket path).
+- ALWAYS add `--enable-features=NetworkServiceInProcess` to Chromium flags. This runs the NetworkService in-process, reducing crash severity.
+- ALWAYS deploy a background watchdog in xstartup that sends Ctrl+L+F5 keypresses via Python XTest until WebSocket connections to NiceGUI (port 9001) are established. Plain F5 is insufficient; Ctrl+L focuses the address bar first, forcing a more reliable reload.
+- The watchdog MUST run as a background subshell (`( ... ) &`) and retry for at least 2 minutes (24 iterations × 5 seconds) to cover slow hosts where the NetworkService crash is delayed.
+- LAN hosts' KasmVNC is unreachable from the SM's browser. Deploy a cross-host socat proxy on the router node: `router:6180 → lan_host:6080`. The SM resolves LAN hosts to the primary host IP + proxy port.
+- Previous bug (2026-04-15): mesh1 KasmVNC exited code 29 because STUN failed (LAN host, no internet). bridge-1/bridge-2 showed blank displays because F5 watchdog finished before NetworkService crash (65s delay on slow hardware). mesh1 display was unreachable from SM because 10.10.10.210 is behind OpenWrt.
+
+## OpenWrt service restarts: failed_when vs ignore_unreachable
+- When an OpenWrt task restarts DNS services (dnsmasq, https-dns-proxy) or network services, the SSH ProxyJump connection may drop because DNS resolution is briefly interrupted.
+- `ignore_unreachable: true` alone is INSUFFICIENT. If the `raw` command completes but SSH closes during result capture, Ansible returns rc=1 (FAILED), not UNREACHABLE. The `ignore_unreachable` directive only catches UNREACHABLE events.
+- ALWAYS pair `ignore_unreachable: true` with `failed_when: false` on tasks that restart DNS/network services on OpenWrt. Follow with `meta: reset_connection`, a `pause` for stabilization, and a `raw: echo alive` reconnect task with retries.
+- Previous bug (2026-04-14): `dns.yml` "Enable and start https-dns-proxy" had `ignore_unreachable: true` but no `failed_when: false`. The command succeeded (all ✓ marks in stdout) but SSH closed during result capture, giving rc=1. Ansible treated it as FAILED, skipping the reconnect sequence. The entire per-feature converge failed.
+
+## Desktop LXC DRI render node sharing
+- Desktop LXC (`desktop_lxc` role) shares the iGPU DRI render node via bind mount, NOT exclusive PCI passthrough. This is safe on both Intel and AMD hosts.
+- The display-exclusive hookscript manages DRI sharing conflicts between Desktop, Kodi, Moonlight, and Kiosk containers on the same host.
+
+## KasmVNC stale X lock files
+- ALWAYS add `ExecStartPre=/bin/sh -c 'rm -f /tmp/.X${display_num}-lock /tmp/.X11-unix/X${display_num}'` to KasmVNC systemd service units.
+- Without this, the vncserver Perl wrapper detects the stale lock and refuses to start ("A VNC server is already running as :1"), crash-looping the service.
+- Previous bug (2026-04-15): All 6 hosts' kiosk-display services crash-looped with exit code 29 because `/tmp/.X1-lock` was stale from a previous Xvnc instance.
+
+## Stale pmxcfs node directories after hostname changes
+- When a Proxmox host's hostname changes (OS reinstall, manual edit), the old node directory persists under `/etc/pve/nodes/<old_name>/` with stale LXC/VM config files.
+- These stale configs cause "CT already exists on node <old_name>" errors when creating containers with the same VMID on the current hostname.
+- `playbooks/cleanup.yml` MUST remove stale configs from non-local pmxcfs node directories. Iterate `/etc/pve/nodes/*/`, skip the local hostname, delete `lxc/*.conf` and `qemu-server/*.conf` in other directories.
+- The same cleanup runs via `tasks/cleanup_lan_host.yml` for LAN hosts behind the router.
+- Previous bug (2026-04-15): mesh1's `/etc/pve/nodes/home/lxc/401.conf` persisted from a previous installation where mesh1 was named "home". CT 401 creation failed with "already exists on node home."
+
+## LXC disk size format for pct create
+- `pct create --rootfs local-lvm:SIZE` expects SIZE as a NUMERIC value in GB (e.g., `16`), NOT with a unit suffix (e.g., `16G`).
+- Using `16G` produces "no such logical volume pve/16G" because Proxmox treats the entire string as an LVM volume name.
+- Previous bug (2026-04-15): `desktop_ct_disk: 16G` caused "unable to create CT 400 - no such logical volume pve/16G". Fix: changed to `desktop_ct_disk: "16"`.
+
+## OpenWrt LXC default LAN IP collision (openwrt_mesh_lxc)
+- OpenWrt mesh LXC containers MUST override the default 192.168.1.1 on br-lan during provisioning, just like bridge LXC containers do. Set `uci set network.lan.ipaddr=<assigned_ip>` and `uci set dhcp.lan.ignore=1` immediately after container creation.
+- Without this override, the mesh container answers SSH connections intended for the router VM's bootstrap IP (192.168.1.1) on the shared L2 segment.
+- Previous bug (2026-04-15): CT 103 (openwrt-mesh) on mesh2 had default 192.168.1.1 on br-lan on vmbr0. The `openwrt_vm` LAN probe at 10.10.10.1 timed out (5s was too short), fell back to bootstrap IP 192.168.1.1, and connected to the mesh container instead of the router VM. The configure role then saw only 1 interface (eth0) and failed.
+
+## VPN IPs unreachable from inside LXC containers
+- WireGuard runs on the Proxmox HOST, not inside LXC containers. Containers on NAT bridges (10.99.x.x) CANNOT reach VPN IPs (10.0.0.x) because there's no route from the container's bridge to the host's wg0 interface.
+- NEVER use VPN IPs as MANAGEMENT_SERVER or CHILD_MANAGER_IPS in kiosk container config. Use the host's WAN IP (ansible_host) instead. Each WAN host has a `kiosk-manager-proxy` that forwards port 9001 to the local kiosk container, making NodeManagers reachable via their WAN IP.
+- VPN-first architecture applies to DISPLAY traffic (KasmVNC WebSocket streams), NOT to management/heartbeat traffic.
+- Previous bug (2026-04-15): MANAGEMENT_SERVER was set to `http://10.0.0.1:9001` (VPN IP of home). All 5 non-home kiosks couldn't relay heartbeats to the ClusterManager. SuperManager showed only 1 of 6 physical hosts.
+
+## SSH reverse tunnel persistence
+- The SSH reverse tunnel from controller to PRIMARY_HOST (used by the SuperManager relay) can die during long idle periods between converge runs.
+- `start_test_api.py` deploys a socat systemd unit on the host (`supermanager-relay.service`) to relay port 52525 → 52526 (the tunnel). If the tunnel dies, socat has no backend.
+- ALWAYS re-run `start_test_api.py` before a converge if significant time has passed since the last run. Check by SSHing to PRIMARY_HOST: `ss -tlnp | grep 52526` (the tunnel port).
+- Previous bug (2026-04-15): Tunnel died between converge runs. Heartbeats reached home's socat on 52525 but had nowhere to go (52526 not listening). All services appeared stale on the SuperManager despite running correctly.
+
+## Build machine VPN — explicit sudo, never become
+- The build machine (where molecule runs) needs a wg0 VPN tunnel for display streaming. The "Configure controller VPN tunnel" play in site.yml targets `localhost`.
+- NEVER use `become: true` on localhost plays. It prompts for sudo password, blocking non-interactive molecule runs.
+- ALWAYS use explicit `sudo` in shell/command tasks (e.g., `sudo wg-quick up wg0`). The NOPASSWD sudoers entry (`/etc/sudoers.d/vm-builds-wireguard`) is already installed by `setup.sh` — it grants only `wg-quick`, `wg`, and `install`.
+- This is a solved problem. `setup.sh` installs wireguard-tools and the sudoers entry during first-time bootstrap. No manual intervention needed on subsequent runs.
+- Previous bug (2026-04-17): Controller VPN play used `become: true`. After 60 minutes of successful converge on all 6 Proxmox hosts, the last play failed with "sudo: a password is required". Fix: explicit `sudo` + NOPASSWD sudoers.
+
+## Callhome config rewrite must preserve baked identity
+- When `kiosk_configure` rewrites `/etc/default/callhome` on sibling containers, it MUST preserve `CALLHOME_HOSTNAME` and other baked-in variables. Use targeted `sed -i` to update ONLY `CALLHOME_SERVER` and `CALLHOME_PUBLIC_KEY`.
+- NEVER use `printf` or heredoc to overwrite the entire file. OpenWrt containers' callhome identity (`CALLHOME_HOSTNAME=openwrt-mesh`, `CALLHOME_HOSTNAME=openwrt-bridge`) is baked into the image and must survive runtime config updates.
+- Previous bug (2026-04-17): `printf` overwrite destroyed `CALLHOME_HOSTNAME` on OpenWrt containers. They heartbeated with wrong identity, fleet readiness API couldn't match them, verify failed.
+
+## Display service resilience to unconfigured endpoints
+- Display services (moonlight-display, kodi-display) that depend on a remote server MUST handle the case where the endpoint is not configured. The xstartup script should `sleep infinity` instead of crash-looping when no server address is present.
+- Previous bug (2026-04-17): `moonlight-display.service` on mesh1 crash-looped because `MOONLIGHT_SERVER_IP` was empty. Xvnc deadlock from continuous restarts. Fix: xstartup checks `/etc/moonlight.conf` for configured `address` before launching.

@@ -11,8 +11,8 @@ from __future__ import annotations
 from nicegui import ui
 
 from scripts.webui import manager, theme
-from scripts.webui.data import Labels, Routes, format_uptime
-from scripts.webui.pages.vnc_shared import render_app_console_links
+from scripts.webui.data import Labels, Routes, format_uptime, usage_level
+from scripts.webui.pages.display_shared import render_app_console_links
 
 
 def register() -> None:
@@ -53,8 +53,8 @@ def register() -> None:
             hostname = payload.get("hostname", node_id)
             theme.page_header(f"Node: {hostname}", f"Detail view for {node_id}")
 
-            _vnc_url = mgr.get_child_vnc_url(node_id)
-            if _vnc_url is not None:
+            _display_url = mgr.get_child_display_url(node_id)
+            if _display_url is not None:
                 _fleet_detail_back = Routes.FLEET_DETAIL.replace("{node_id}", node_id)
                 _kiosk_target = Routes.REMOTE_KIOSK.replace("{node_id}", node_id) + f"?back={_fleet_detail_back}"
                 with ui.row().classes("items-center gap-2 mb-2"):
@@ -152,7 +152,7 @@ def _render_fleet(container: ui.column) -> None:
                     with ui.row().classes("items-center gap-4"):
                         ui.label(f"D:{disk:.0f}%").classes("text-xs")
                         ui.label(f"M:{mem:.0f}%").classes("text-xs")
-                        if mgr.get_child_vnc_url(nid) is not None:
+                        if mgr.get_child_display_url(nid) is not None:
                             kiosk_target = Routes.REMOTE_KIOSK.replace("{node_id}", nid) + f"?back={Routes.FLEET}"
                             with ui.link(
                                 target=kiosk_target,
@@ -185,7 +185,7 @@ def _render_fleet(container: ui.column) -> None:
 
 
 def _resource_gauge(label: str, pct: float) -> None:
-    color = "green" if pct < 70 else "orange" if pct < 90 else "red"
+    color = theme.usage_color(usage_level(pct))
     with ui.column().classes("items-center"):
         ui.circular_progress(
             value=pct / 100, show_value=False, size="60px", color=color,

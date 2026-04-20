@@ -1,0 +1,71 @@
+# Deploy socat relays on the router node for LAN host display ports.
+#
+# LAN hosts (behind OpenWrt) are unreachable from the operator's browser.
+# The router node relays KasmVNC traffic from offset ports to LAN hosts:
+#   home:6180 -> mesh1:6080 (kiosk)
+#   home:6181 -> mesh1:6081 (desktop)
+#   home:6182 -> mesh1:6082 (kodi)
+#   home:6183 -> mesh1:6083 (moonlight)
+#
+# The offset (100) matches data.Ports.LAN_DISPLAY_RELAY_OFFSET.
+#
+# Required host_vars on the router node:
+#   ansible_host — the router node's WAN IP
+#
+# Uses: groups['lan_hosts'], display port vars from group_vars/all.yml
+
+---
+
+- name: Build LAN display relay list
+  ansible.builtin.set_fact:
+    _lan_display_relays: >-
+      {{
+        _lan_display_relays | default([]) + [
+          {
+            'name': item.0 + '-' + item.1.name + '-relay',
+            'listen_port': item.1.port + lan_display_relay_offset,
+            'target_ip': hostvars[item.0].ansible_host,
+            'target_port': item.1.port,
+          }
+        ]
+      }}
+  loop: "{{ groups['lan_hosts'] | product(_display_services) | list }}"
+  loop_control:
+    label: "{{ item.0 }}:{{ item.1.name }}"
+  vars:
+    _display_services:
+      - { name: kiosk, port: "{{ kiosk_ws_port }}" }
+      - { name: desktop, port: "{{ desktop_ws_port }}" }
+      - { name: kodi, port: "{{ kodi_ws_port }}" }
+      - { name: moonlight, port: "{{ moonlight_ws_port }}" }
+
+- name: Deploy LAN display relay units
+  ansible.builtin.copy:
+    content: |
+      [Unit]
+      Description=LAN display relay {{ item.name }} ({{ item.listen_port }} -> {{ item.target_ip }}:{{ item.target_port }})
+      After=network.target
+
+      [Service]
+      Type=simple
+      ExecStart=/usr/bin/socat TCP-LISTEN:{{ item.listen_port }},reuseaddr,fork TCP:{{ item.target_ip }}:{{ item.target_port }}
+      Restart=always
+      RestartSec=3
+
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/{{ item.name }}.service
+    mode: "0644"
+  loop: "{{ _lan_display_relays }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Enable and start LAN display relays
+  ansible.builtin.systemd:
+    name: "{{ item.name }}"
+    daemon_reload: true
+    enabled: true
+    state: restarted
+  loop: "{{ _lan_display_relays }}"
+  loop_control:
+    label: "{{ item.name }}"

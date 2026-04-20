@@ -223,7 +223,21 @@ Step-by-step runbooks with exact commands for each test scenario are in
   13.4b: 8 external web UIs (Jellyfin, Home Assistant, Gaming, OpenWrt,
   Pi-hole, WireGuard, Netdata, Logs), 13.4c: 4 internal pages (Bridge, Mesh,
   Router, Containers), 13.4d: two-level drill-down app launch,
-  CM-perspective display, error/edge cases, noVNC absence verification)
+  CM-perspective display, error/edge cases, legacy VNC absence verification)
+- Playbook 14: Cluster Manager sidebar and submenu navigation (full nav tree)
+- Playbook 15: NodeManager kiosk navigation on individual unit
+- Playbook 16: SuperManager full page navigation (all SM pages: Dashboard,
+  Environment, Hosts, Services, Images, Deploy, Timeline, Nodes)
+- Playbook 17: Display app launch flow end-to-end (hub tile → launch page →
+  guest start → console page → KasmVNC iframe. Session switching KDE↔GNOME,
+  app switcher round-trips, display conflict resolution)
+- Playbook 18: External web UI testing via hub tiles (Jellyfin, Home Assistant,
+  Router, Pi-hole, WireGuard, Netdata, Logs, Gaming — iframe viewer + X-Frame-Options)
+- Playbook 19: Internal kiosk pages — CM interactive elements deep test
+  (Bridge WiFi restart, Mesh batman cycle, Router data verification,
+  Containers guest lifecycle)
+- Playbook 20: SuperManager display pipeline — every host verification
+  (6-host × 4-app matrix, child picker drill-down, non-available app errors)
 
 ALWAYS use the playbooks for manual testing. They contain the exact commands
 to run against real infrastructure — no improvisation needed. EXECUTE every
@@ -248,3 +262,46 @@ per-app test step patterns.
   SSH deployment.
 - Color semantics violated: red used for "no WoL", "stopped", "no data".
   Fix: systematic audit using grey/orange per semantic rules.
+- Stale `vnc_shared.cpython-312.pyc` in `__pycache__` caused the running SM
+  to serve legacy noVNC JavaScript (`rfb.js`, `vnc-container`) even after
+  `vnc_shared.py` was deleted. The SM process started before the migration was
+  using cached bytecode. Fix: delete stale `.pyc` files and restart the SM
+  process after code changes. ALWAYS restart long-running Python processes
+  after source code deletions — `__pycache__` keeps serving deleted modules.
+- Orphan socat process (from previous session) held port 16080 on the primary
+  host, causing `kiosk-display-relay-mesh1.service` to crash-loop with "Address
+  already in use" (1720+ restarts). Fix: kill the orphan, restart the service.
+  ALWAYS check for orphan socat processes before investigating service failures.
+- Router VM (VMID 100) was stopped during manual testing session. Batman status
+  returned "No route to host" for all child Managers because the router provides
+  LAN↔WAN routing. Fix: always verify the router VM is running before starting
+  batman/WiFi tests. The router may stop between molecule test runs.
+- SSH tunnels for DNAT hosts (ai, mesh2) must target the container's NAT IP
+  directly (`10.99.x.20:6080`) not `127.0.0.1:6080`. DNAT only matches on
+  the external interface, not loopback.
+- mesh1 KasmVNC display is blank from the SM when the controller has no VPN
+  interface (wg0). The `_env_node_resolver` falls back to LAN IP (10.10.10.210)
+  which the browser can't reach directly — it's behind the OpenWrt router.
+  In production with VPN, this resolves to the VPN IP (10.0.0.2) and works.
+  This is expected behavior in the non-VPN development environment.
+- SM Hub "Launch" buttons are shared code designed for kiosk (NM) usage.
+  On the SM, the launch page renders correctly but the "View Console" link
+  is absent because the SM has no `host_name` set. The correct flow for
+  remote app launching is SM → Open Kiosk (remote display) → use the kiosk's
+  own Hub to launch apps within the KasmVNC iframe.
+- SM Hub external service tiles (Jellyfin, HA, Pi-hole, Netdata) show
+  "Not available" because those URLs come from kiosk `config.json` which the
+  SM doesn't have. Test these tiles through the remote kiosk viewer by clicking
+  "Open Kiosk" on a node detail page and interacting within the KasmVNC iframe.
+- CM tunnel via socat + nsenter is required for browser testing. Direct SSH
+  tunnels to the kiosk LAN IP (10.10.10.23) can fail due to IP collisions.
+  Use: `lxc-info -n 401` to get PID, `nsenter -t $PID -n socat` to relay
+  through the container's network namespace.
+- KasmVNC iframe content cannot be interacted with via browser automation tools
+  (Playwright/Puppeteer). The iframe renders a VNC stream, not DOM elements.
+  Mouse/keyboard interaction must be verified manually or via VNC-specific APIs.
+  Browser automation can verify the iframe loads (non-blank) and the viewer bar
+  controls work, but NOT the content inside the stream.
+- Quasar QSelect components with opacity:0 inputs cannot be clicked via browser
+  automation refs. Use coordinate-based clicks on the visible label/arrow area,
+  or test via direct URL navigation instead.

@@ -10,13 +10,17 @@ description: Molecule verify assertion patterns. completeness requirements, batc
 1. Every configured feature MUST have assertion in verify.yml.
 2. Assert IP non-empty and no collision BEFORE functional tests.
 3. SINGLE `pct config` call per container, then assert on cached output.
-4. Batch independent `pct exec` calls with key=value output.
+4. Use `ansible.builtin.uri` → NM/SM API for runtime status checks. `pct exec` is ONLY for hypervisor-side operations that have no API equivalent.
 5. NEVER use `failed_when: false` on client sends — let errors surface.
 6. Per-feature verify MUST reconstruct dynamic groups (separate invocation).
-7. Use the fleet readiness API as the **primary** path for container liveness;
-   `pct exec` is the **fallback** when the API is unavailable.
-8. New service verify blocks MUST follow the `_fleet_api_ready` dual-path
-   pattern. See the `manager-api-pattern` skill for details.
+7. Use the fleet readiness API as the **sole** path for container liveness:
+   `/api/fleet/ready`, `/api/container/{id}/ready`, `/api/config/self`.
+   NEVER add SSH fallback paths — if the API is unreachable, the 4-tier
+   system is broken and must be fixed.
+8. Hard-failure messages MUST include INVESTIGATE prompts with specific
+   diagnostic steps (curl commands, journalctl checks, relay chain tracing).
+9. All API calls in verify use `vpn_ip` for NM communication (VPN-only
+   post-bootstrap). NEVER use `ansible_host` for API queries.
 
 ## Completeness requirements
 
@@ -316,8 +320,8 @@ Previous bug: Batched rsyslog/gaming verify tasks used `regex_search('MATCH=(\\S
 
 ## Display-exclusive container assertions
 
-When containers share a display device (iGPU render node), a hookscript may stop
-one container when another starts (e.g., Kiosk stopped when Desktop VM starts).
+When containers share a display device (iGPU DRI render node), a hookscript may stop
+one container when another starts (e.g., Kiosk stopped when Desktop LXC starts).
 Assert container config separately from running state:
 
 ```yaml
@@ -327,9 +331,9 @@ Assert container config separately from running state:
       - "'onboot: 1' in _cfg.stdout"
       - _cfg.stdout is regex('startup:.*order=6')
 
-- name: Check if competing VM is running
+- name: Check if competing container is running
   ansible.builtin.command:
-    cmd: qm status {{ desktop_vm_id }}
+    cmd: pct status {{ desktop_ct_id }}
   register: _desktop_status
   changed_when: false
   failed_when: false
@@ -342,8 +346,8 @@ Assert container config separately from running state:
 ```
 
 Previous bug: Kodi and Kiosk assertions required 'running' state, but the
-display-exclusive hookscript correctly stopped them when the Desktop VM started.
-Fix: accept 'stopped' when the competing VM is running.
+display-exclusive hookscript correctly stopped them when the Desktop LXC started.
+Fix: accept 'stopped' when the competing container is running.
 
 ## Multi-instance container IP from API
 
@@ -370,6 +374,54 @@ data MUST accept both values:
 ```yaml
 - _api.json.systemd_services.get('service', '') in ['active', 'running']
 ```
+
+## CRITICAL: Retries are a code smell — fix root causes, don't add wait time
+
+NEVER use retries to paper over timing or infrastructure issues. Retries mask
+root causes and waste minutes per test cycle — compounding across every
+developer and every run.
+
+**The retry audit rule:** Every `retries:` in verify.yml MUST have a comment
+explaining (1) what exact propagation delay it accounts for, and (2) the
+expected time. If you can't state both, the retry is hiding a bug.
+
+**Known propagation times (after relay interval fix):**
+- Container → NodeManager heartbeat: 5s (startup burst)
+- NM → CM relay: 10s
+- CM → SM relay: 10s
+- Total container → SM: ~25s worst case
+- Services already running by verify start: most checks should pass immediately
+
+**Hard rules:**
+- NEVER use `retries > 6` for any check. If it doesn't work after 60s, it's broken.
+- NEVER use `delay > 10` for any check. Short polling finds fast successes.
+- NEVER add retries when a service fails to start. Diagnose WHY it fails.
+- REMOVE retries when the root cause is fixed. Zero retries is the ideal.
+- NEVER add debug/diagnostic tasks as permanent verify fixtures. Fix the
+  root cause, then remove the debug task.
+
+**Previous catastrophe (2026-04-14):**
+`kiosk-display-proxy` on mesh1 was crash-looping with 957 restarts because
+a legacy `kiosk-vnc-proxy` from before the KasmVNC migration was still
+holding port 6080. Instead of diagnosing the root cause, retries were
+repeatedly increased (from 3×10s to 10×10s = 100 seconds). Debug tasks
+were added to capture `systemctl show` output. The SM heartbeat check
+used `retries: 12, delay: 30` (6 MINUTES). The CM check was another
+6 minutes. The verify phase alone burned 12+ minutes on retries that
+were NEVER going to succeed because the underlying issue was a port
+conflict, not timing.
+
+Fix: (1) Added legacy VNC proxy cleanup before deploying new display
+proxies — service now starts on first attempt with zero retries.
+(2) Reduced relay heartbeat interval from 30s to 10s — SM/CM heartbeats
+arrive within seconds of verify starting, not minutes.
+(3) SM and CM checks: `retries: 6, delay: 10` (60s max vs 360s before).
+Both now succeed on the FIRST attempt.
+
+**The real cost:** These retries were silently burning 12+ minutes on EVERY
+molecule test run. Over dozens of test cycles, that's HOURS of wasted time.
+And the retries never surfaced the root cause — they just delayed the
+inevitable failure.
 
 ## Common failures
 

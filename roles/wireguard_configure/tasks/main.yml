@@ -1,19 +1,23 @@
 ---
-# ── Key generation (when WIREGUARD_PRIVATE_KEY is empty) ────────
+# ── Per-host key generation ───────────────────────────────────
+# Each WireGuard container gets a unique keypair. Keys are persisted
+# to env.generated with per-host markers so they survive across runs.
+# Key generation runs on the controller (wg tools installed by setup.sh).
 
 - name: Check if key generation is needed
   ansible.builtin.set_fact:
     _wg_needs_keygen: "{{ wireguard_private_key | length == 0 }}"
 
-- name: Generate client private key
+- name: Generate container private key
   ansible.builtin.command:
     cmd: wg genkey
   register: _wg_client_privkey
   changed_when: true
   no_log: true
+  delegate_to: localhost
   when: _wg_needs_keygen | bool
 
-- name: Derive client public key
+- name: Derive container public key
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
@@ -22,96 +26,260 @@
   register: _wg_client_pubkey
   changed_when: false
   no_log: true
+  delegate_to: localhost
   when: _wg_needs_keygen | bool
 
-- name: Generate dummy server keypair for config validity
-  ansible.builtin.command:
-    cmd: wg genkey
-  register: _wg_dummy_server_privkey
-  changed_when: false
-  no_log: true
-  when:
-    - _wg_needs_keygen | bool
-    - wireguard_server_public_key | length == 0
-
-- name: Derive dummy server public key
+- name: Derive public key from existing private key
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
-      echo "{{ _wg_dummy_server_privkey.stdout }}" | wg pubkey
+      echo "{{ wireguard_private_key }}" | wg pubkey
     executable: /bin/bash
-  register: _wg_dummy_server_pubkey
+  register: _wg_existing_pubkey
   changed_when: false
   no_log: true
-  when:
-    - _wg_needs_keygen | bool
-    - wireguard_server_public_key | length == 0
-
-- name: Set generated key facts
-  ansible.builtin.set_fact:
-    _wg_private_key: "{{ _wg_client_privkey.stdout }}"
-    _wg_public_key: "{{ _wg_client_pubkey.stdout }}"
-    _wg_server_pubkey: >-
-      {{ wireguard_server_public_key
-         if wireguard_server_public_key | length > 0
-         else _wg_dummy_server_pubkey.stdout }}
-  when: _wg_needs_keygen | bool
-
-- name: Set provided key facts
-  ansible.builtin.set_fact:
-    _wg_private_key: "{{ wireguard_private_key }}"
-    _wg_server_pubkey: "{{ wireguard_server_public_key }}"
+  delegate_to: localhost
   when: not (_wg_needs_keygen | bool)
 
-- name: Write generated keys to env.generated on controller
+- name: Set key facts
+  ansible.builtin.set_fact:
+    _wg_private_key: "{{ _wg_client_privkey.stdout if (_wg_needs_keygen | bool) else wireguard_private_key }}"
+    _wg_public_key: "{{ _wg_client_pubkey.stdout if (_wg_needs_keygen | bool) else _wg_existing_pubkey.stdout }}"
+
+- name: Export public key and VPN IP as cacheable facts
+  ansible.builtin.set_fact:
+    wg_public_key: "{{ _wg_public_key }}"
+    wg_vpn_ip: "{{ vpn_ip }}"
+    cacheable: true
+
+- name: Write per-host keys to env.generated on controller
   ansible.builtin.blockinfile:
     path: "{{ env_generated_path }}"
     create: true
     mode: "0600"
-    marker: "# {mark} WireGuard (auto-generated)"
+    marker: "# {mark} WireGuard {{ _wg_host_suffix }} (auto-generated)"
     block: |
-      WIREGUARD_PRIVATE_KEY={{ _wg_private_key }}
-      WIREGUARD_PUBLIC_KEY={{ _wg_public_key }}
-      WIREGUARD_CLIENT_ADDRESS={{ wireguard_client_address }}
-      WIREGUARD_SERVER_PUBLIC_KEY={{ _wg_server_pubkey }}
-      WIREGUARD_SERVER_ENDPOINT={{ wireguard_server_endpoint }}
-      WIREGUARD_ALLOWED_IPS={{ wireguard_allowed_ips }}
+      WIREGUARD_PRIVATE_KEY_{{ _wg_host_suffix }}={{ _wg_private_key }}
+      WIREGUARD_PUBLIC_KEY_{{ _wg_host_suffix }}={{ _wg_public_key }}
   delegate_to: localhost
   when: _wg_needs_keygen | bool
 
-# ── WireGuard configuration ────────────────────────────────────
-
-- name: Template wg0 configuration
-  ansible.builtin.template:
-    src: wg0.conf.j2
-    dest: /etc/wireguard/wg0.conf
+# ── Hub: write hub public key for clients to reference ────────
+- name: Write hub public key to env.generated
+  ansible.builtin.blockinfile:
+    path: "{{ env_generated_path }}"
+    create: true
     mode: "0600"
+    marker: "# {mark} WireGuard Hub (auto-generated)"
+    block: |
+      WIREGUARD_HUB_PUBLIC_KEY={{ _wg_public_key }}
+  delegate_to: localhost
+  when:
+    - wireguard_is_hub | bool
+    - _wg_needs_keygen | bool
 
-# Service enablement and sysctl are baked into the image.
-# Just start the service after writing the host-specific wg0.conf.
-- name: Start wg-quick@wg0
-  ansible.builtin.systemd:
-    name: wg-quick@wg0
-    state: started
+# ── Build peer list (hub only) ────────────────────────────────
+# The hub needs [Peer] blocks for every client. Clients only need
+# the hub's public key (from wireguard_server_public_key).
 
-# ── NAT (MASQUERADE on wg0) ───────────────────────────────────
+- name: Initialize hub peer list
+  ansible.builtin.set_fact:
+    _wg_peers: []
+  when: wireguard_is_hub | bool
 
-- name: Check if MASQUERADE rule exists
+- name: Collect hub peer entries
+  ansible.builtin.set_fact:
+    _wg_peers: "{{ _wg_peers | default([]) + [_entry] }}"
+  vars:
+    _entry:
+      public_key: "{{ hostvars[item].wg_public_key }}"
+      vpn_ip: "{{ hostvars[item].wg_vpn_ip }}"
+  loop: >-
+    {{ groups['vpn_nodes']
+       | reject('equalto', inventory_hostname)
+       | select('in', hostvars | dict2items | selectattr('value.wg_public_key', 'defined') | map(attribute='key') | list)
+       | list }}
+  when: wireguard_is_hub | bool
+
+- name: Read controller public key from env.generated (fallback)
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
-      iptables -t nat -C POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null && echo present || echo absent
+      grep '^WIREGUARD_PUBLIC_KEY_CONTROLLER=' "{{ env_generated_path }}" 2>/dev/null | cut -d= -f2-
     executable: /bin/bash
-  register: _nat_check
+  register: _ctrl_pubkey_from_file
   changed_when: false
+  failed_when: false
+  delegate_to: localhost
+  when: wireguard_is_hub | bool
 
-- name: Add MASQUERADE rule
-  ansible.builtin.command:
-    cmd: iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE
-  when: "'absent' in _nat_check.stdout"
-  changed_when: true
+- name: Resolve controller public key
+  ansible.builtin.set_fact:
+    _ctrl_pubkey_resolved: >-
+      {{ lookup('env', 'WIREGUARD_PUBLIC_KEY_CONTROLLER')
+         | default(_ctrl_pubkey_from_file.stdout | default(''), true) | trim }}
+  when: wireguard_is_hub | bool
 
-- name: Save iptables rules
-  ansible.builtin.command:
-    cmd: netfilter-persistent save
-  changed_when: true
+- name: Add controller peer to hub
+  ansible.builtin.set_fact:
+    _wg_peers: >-
+      {{ _wg_peers | default([]) + [{
+        'public_key': _ctrl_pubkey_resolved,
+        'vpn_ip': lookup('env', 'CONTROLLER_VPN_IP') | default('10.0.0.7', true)
+      }] }}
+  when:
+    - wireguard_is_hub | bool
+    - _ctrl_pubkey_resolved | default('') | length > 0
+
+# ── Client: resolve hub's public key ─────────────────────────
+- name: Resolve hub public key for clients
+  ansible.builtin.set_fact:
+    _wg_server_pubkey: >-
+      {{ wireguard_server_public_key
+         if wireguard_server_public_key | length > 0
+         else hostvars[_hub_host].wg_public_key | default('') }}
+  vars:
+    _hub_host: >-
+      {{ groups['vpn_nodes']
+         | select('in', hostvars | dict2items
+             | selectattr('value.wg_vpn_ip', 'defined')
+             | selectattr('value.wg_vpn_ip', 'equalto', wireguard_hub_vpn_ip)
+             | map(attribute='key') | list)
+         | first | default('') }}
+  when: not (wireguard_is_hub | bool)
+
+# ── Build wg0 configuration content ─────────────────────────────
+
+- name: Build hub wg0 configuration content
+  ansible.builtin.set_fact:
+    _wg0_content: |
+      [Interface]
+      PrivateKey = {{ _wg_private_key }}
+      Address = {{ wireguard_client_address }}
+      ListenPort = 51820
+      {% if wireguard_dns | length > 0 %}
+      DNS = {{ wireguard_dns }}
+      {% endif %}
+      {% for peer in _wg_peers %}
+
+      [Peer]
+      PublicKey = {{ peer.public_key }}
+      AllowedIPs = {{ peer.vpn_ip }}/32
+      {% if peer.preshared_key | default('') | length > 0 %}
+      PresharedKey = {{ peer.preshared_key }}
+      {% endif %}
+      {% endfor %}
+  no_log: true
+  when: wireguard_is_hub | bool
+
+- name: Build client wg0 configuration content
+  ansible.builtin.set_fact:
+    _wg0_content: |
+      [Interface]
+      PrivateKey = {{ _wg_private_key }}
+      Address = {{ wireguard_client_address }}
+      {% if wireguard_dns | length > 0 %}
+      DNS = {{ wireguard_dns }}
+      {% endif %}
+
+      [Peer]
+      PublicKey = {{ _wg_server_pubkey }}
+      Endpoint = {{ wireguard_server_endpoint }}
+      AllowedIPs = {{ wireguard_allowed_ips }}
+      PersistentKeepalive = {{ wireguard_keepalive }}
+      {% if wireguard_preshared_key | length > 0 %}
+      PresharedKey = {{ wireguard_preshared_key }}
+      {% endif %}
+  no_log: true
+  when: not (wireguard_is_hub | bool)
+
+# ── Push wg0.conf via NM API ───────────────────────────────────
+
+- name: Push wg0.conf via NM API
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ wireguard_ct_id }}/file"
+    method: POST
+    body_format: json
+    body:
+      path: /etc/wireguard/wg0.conf
+      content: "{{ _wg0_content }}"
+      mode: "0600"
+    status_code: 200
+  delegate_to: localhost
+  no_log: true
+
+# ── Start tunnel and apply firewall ──────────────────────────
+
+- name: Restart WireGuard tunnel via NM API
+  vars:
+    _nm_base: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}"
+  ansible.builtin.uri:
+    url: "{{ _nm_base }}/api/config/{{ wireguard_ct_id }}/service/wg-quick@wg0/restart"
+    method: POST
+    body_format: json
+    body: {}
+    status_code: 200
+  delegate_to: localhost
+
+- name: Read LAN gateway from env.generated
+  ansible.builtin.set_fact:
+    _lan_gateway: >-
+      {{ lookup('pipe', 'grep "^LAN_GATEWAY=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2') }}
+  when: "'router_nodes' in group_names or 'lan_hosts' in group_names"
+
+- name: Compute VPN DNAT target (Proxmox host IP reachable from WG container)
+  ansible.builtin.set_fact:
+    _wg_dnat_target: >-
+      {{ _lan_gateway.split('.')[0:3] | join('.') + '.' +
+         (proxmox_lan_mgmt_ip_offset | default(2) | string)
+         if ('router_nodes' in group_names)
+            and (_lan_gateway | default('')) | length > 0
+         else ansible_host
+              if ('lan_hosts' in group_names)
+         else container_subnet_prefix + '.' + (container_subnet_id | string) + '.1' }}
+
+- name: Push firewall.env with DNAT target
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ wireguard_ct_id }}/file"
+    method: POST
+    body_format: json
+    body:
+      path: /etc/wireguard/firewall.env
+      content: "DNAT_TARGET={{ _wg_dnat_target | trim }}\n"
+      mode: "0644"
+    status_code: 200
+  delegate_to: localhost
+
+- name: Push updated firewall setup script
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ wireguard_ct_id }}/file"
+    method: POST
+    body_format: json
+    body:
+      path: /usr/sbin/wireguard-firewall-setup
+      content: "{{ lookup('file', playbook_dir + '/../scripts/image-builder/files-wireguard-lxc/usr/sbin/wireguard-firewall-setup') }}"
+      mode: "0755"
+    status_code: 200
+  delegate_to: localhost
+
+- name: Flush old iptables rules before reapplying
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ wireguard_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: "iptables -t nat -F && iptables -F FORWARD"
+      timeout: 10
+    status_code: 200
+  delegate_to: localhost
+
+- name: Apply firewall rules (MASQUERADE + DNAT)
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ wireguard_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: "/usr/sbin/wireguard-firewall-setup"
+      timeout: 30
+    status_code: 200
+  delegate_to: localhost

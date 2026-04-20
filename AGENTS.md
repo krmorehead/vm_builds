@@ -148,8 +148,8 @@ This tree organizes all skills by domain area to help agents quickly find releva
 - **lxc-container-patterns** — LXC container provisioning and configuration patterns
 - **windows-vm-patterns** — Windows 11 VM provisioning, iGPU PCI passthrough, QEMU Guest Agent, PowerShell configuration
 
-### **Fleet Management & Runtime Operations (4-Tier Architecture)**
-- **manager-api-pattern** — 4-tier Manager hierarchy (SuperManager → ClusterManager → NodeManager → container scripts), event-driven batman/bridge propagation, fleet readiness gate, container-side script pattern (wifi_setup.sh, batman_trigger.sh), subscription model, cluster definition and inter-manager communication
+### **Fleet Management & Runtime Operations (4-Tier, API-Driven Architecture)**
+- **manager-api-pattern** — 4-tier Manager hierarchy (SuperManager → ClusterManager → NodeManager → container scripts), event-driven batman/bridge propagation, fleet readiness gate, container-side script pattern (wifi_setup.sh, batman_trigger.sh), subscription model, cluster definition and inter-manager communication. **API-driven as of 2026-04-18**: 9/10 configure roles use 100% `ansible.builtin.uri` → NM API (zero SSH). Verification uses `/api/fleet/ready`, `/api/container/{id}/ready`, `/api/config/self` over VPN. No SSH fallbacks — API failure = 4-tier system broken
 
 ### **Learning & Development**
 - **learn-from-mistakes** — Update skills and rules when encountering new issues to prevent recurrence
@@ -319,11 +319,14 @@ pytest tests/ -v
 - **Bake, don't configure**: NEVER install packages during configure roles — this applies to containers AND Proxmox hosts. Host-level packages (socat), systemd units, and iptables rules are infrastructure that gets deployed, not hand-configured
 - **Two-role pattern**: Every service has `<type>_vm/lxc` + `<type>_configure`
 - **One path, no fallbacks**: Never add fallback logic - fail with clear messages
+- **API-driven fleet operations**: After VPN + heartbeat are established (first two plays), ALL configure roles use `ansible.builtin.uri` → NM API. 9/10 configure roles are 100% API-first (zero SSH). Verification uses fleet API (`/api/fleet/ready`, `/api/container/{id}/ready`, `/api/config/self` over VPN). NEVER add SSH fallbacks — if the API fails, the 4-tier system is broken and must be fixed. Remaining SSH: `kiosk_configure` (bootstrap exception — deploys the NM itself), `openwrt_configure` (no HTTP API on OpenWrt VM), hypervisor operations (`pct config/status`)
 - **Deploy_stamp pattern**: Include as last role in provision plays
-- **Hard-fail over graceful degradation**: Expected hardware (iGPU, WiFi) must be present
+- **Hard-fail over graceful degradation**: Expected hardware (iGPU, WiFi) must be present. Hard-failure messages include INVESTIGATE prompts with specific diagnostic steps so agents don't add workarounds
 - **Docker-in-LXC configure**: Target the HOST group (e.g., `service_nodes`), NOT the container dynamic group. `pct exec` only exists on the Proxmox host
 - **Jinja2 vs Docker templates**: Docker `--format "{{.X}}"` conflicts with Jinja2. Use `docker image inspect` or escape with `{{ "{{" }}`
 - **Proxmox = bakeable target**: Host-level systemd units, iptables rules, kernel parameters are all deployable infrastructure. NEVER use `nohup &` for persistent services — systemd units with `Restart=always`
+- **Build machine = bakeable target**: The build/test machine is managed by the pipeline. wireguard-tools and NOPASSWD sudoers are already installed (via `setup.sh`). wg0 is configured automatically by `site.yml` on every converge, torn down by `cleanup.yml`. NEVER use `become: true` on localhost — use explicit `sudo` (sudoers entry already handles it)
+- **Callhome identity preservation**: When rewriting `/etc/default/callhome` on sibling containers, use targeted `sed -i` — NEVER overwrite the entire file. Baked `CALLHOME_HOSTNAME` determines fleet identity
 
 ### Network and Bridge Management
 - WAN bridge auto-detected via host default route device
@@ -338,6 +341,14 @@ pytest tests/ -v
 - Cleanup removes ONLY files playbook deployed, NEVER operator-created credentials
 - Remove generated env files: `test.env.generated`, `.env.generated`
 - Use explicit VMID destruction, NEVER iterate `qm list`/`pct list`
+- **LAN host gap**: Main cleanup targets `proxmox:!lan_hosts`. LAN hosts ONLY get cleanup via `tasks/cleanup_lan_host.yml`. Host-level systemd units MUST be added to BOTH files.
+- **Service migration**: When renaming a systemd service, provisioning roles MUST stop/remove the old service BEFORE deploying the replacement. Without this, the old service holds the port indefinitely.
+
+### Verify Retries: Fail Fast
+- NEVER add retries to mask infrastructure failures. Diagnose the root cause.
+- NEVER use `retries > 6` or `delay > 10`. If it doesn't work in 60s, it's broken.
+- NEVER increase retry counts as a "fix." Find why the check fails and fix that.
+- Remove debug tasks from verify after fixing the root cause.
 
 ## Task Ordering Patterns
 

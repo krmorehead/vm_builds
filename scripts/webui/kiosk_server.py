@@ -42,18 +42,13 @@ def _build_node_resolver(config: dict) -> Callable[[str], str | None]:
     return resolver
 
 
-_kiosk_config: dict = {}
-
-
 def create_app(config_path: Path | None = None) -> None:
     """Register pages, init manager, mount API endpoints.
 
     NodeManager by default (per-host scope). Set IS_CLUSTER_MANAGER=true
     in config.json to get ClusterManager (subnet-scoped fleet view).
     """
-    global _kiosk_config
     urls = load_kiosk_config(config_path)
-    _kiosk_config = urls
 
     is_cluster = str(urls.get("IS_CLUSTER_MANAGER", "")).lower() in ("true", "1", "yes")
     mgr_class = manager.ClusterManager if is_cluster else manager.NodeManager
@@ -116,6 +111,11 @@ def create_app(config_path: Path | None = None) -> None:
     from scripts.webui.pages import launch, viewer
     launch.register()
     viewer.register()
+
+    @ui.page("/{_:path}")
+    def _catch_all_redirect(_: str) -> None:
+        """Redirect unknown routes to the hub instead of showing 404."""
+        ui.navigate.to("/hub")
 
 
 def main() -> None:

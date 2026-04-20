@@ -1,0 +1,54 @@
+---
+# Configure callhome on an LXC container via NM API.
+# Pushes server URL + public key, then restarts the callhome service.
+# Skipped when container is already up-to-date or callhome is not configured.
+#
+# Required input variables:
+#   _callhome_vmid         (str) — container VMID
+#   _service_up_to_date    (bool) — set by check_service_version.yml
+
+- name: Update callhome server in container
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ _callhome_vmid }}/sed"
+    method: POST
+    body_format: json
+    body:
+      path: /etc/default/callhome
+      pattern: "^CALLHOME_SERVER=.*"
+      replacement: "CALLHOME_SERVER={{ callhome_server }}"
+    status_code: 200
+  delegate_to: localhost
+  when:
+    - not (_service_up_to_date | default(false) | bool)
+    - callhome_server | default('') | length > 0
+  failed_when: false
+
+- name: Update callhome public key in container
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ _callhome_vmid }}/sed"
+    method: POST
+    body_format: json
+    body:
+      path: /etc/default/callhome
+      pattern: "^CALLHOME_PUBLIC_KEY=.*"
+      replacement: "CALLHOME_PUBLIC_KEY={{ callhome_public_key }}"
+    status_code: 200
+  delegate_to: localhost
+  when:
+    - not (_service_up_to_date | default(false) | bool)
+    - callhome_server | default('') | length > 0
+  failed_when: false
+
+- name: Restart callhome service in container
+  ansible.builtin.uri:
+    url: >-
+      http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ _callhome_vmid }}/service/callhome/restart
+    method: POST
+    body_format: json
+    body: {}
+    status_code: 200
+  delegate_to: localhost
+  when:
+    - not (_service_up_to_date | default(false) | bool)
+    - callhome_server | default('') | length > 0
+  failed_when: false

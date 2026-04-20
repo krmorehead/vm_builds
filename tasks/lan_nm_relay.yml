@@ -1,0 +1,70 @@
+# Deploy socat relays on the router node for LAN host Node Manager APIs.
+#
+# LAN hosts (behind OpenWrt) are unreachable from the controller via HTTP.
+# The router node relays NM API traffic from offset ports to LAN hosts:
+#   home:19001 -> mesh1:9001 (NM API)
+#
+# The offset (10000) is added to the kiosk_manager_port (9001) to produce
+# unique relay ports per LAN host. With only one LAN host (mesh1), this
+# gives 19001.
+#
+# Required: groups['lan_hosts'], kiosk_manager_port from group_vars/all.yml
+
+---
+
+- name: Build LAN NM relay list
+  ansible.builtin.set_fact:
+    _lan_nm_relays: >-
+      {{
+        _lan_nm_relays | default([]) + [
+          {
+            'name': 'nm-relay-' + item,
+            'listen_port': (kiosk_manager_port | int) + 10000 + idx,
+            'target_ip': hostvars[item].ansible_host,
+            'target_port': kiosk_manager_port,
+            'host_name': item,
+          }
+        ]
+      }}
+  loop: "{{ groups['lan_hosts'] }}"
+  loop_control:
+    index_var: idx
+    label: "{{ item }}"
+
+- name: Deploy LAN NM relay units
+  ansible.builtin.copy:
+    content: |
+      [Unit]
+      Description=NM API relay {{ item.name }} ({{ item.listen_port }} -> {{ item.target_ip }}:{{ item.target_port }})
+      After=network.target
+
+      [Service]
+      Type=simple
+      ExecStart=/usr/bin/socat TCP-LISTEN:{{ item.listen_port }},reuseaddr,fork TCP:{{ item.target_ip }}:{{ item.target_port }}
+      Restart=always
+      RestartSec=3
+
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/{{ item.name }}.service
+    mode: "0644"
+  loop: "{{ _lan_nm_relays }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Enable and start LAN NM relays
+  ansible.builtin.systemd:
+    name: "{{ item.name }}"
+    daemon_reload: true
+    enabled: true
+    state: restarted
+  loop: "{{ _lan_nm_relays }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Report LAN NM relay endpoints
+  ansible.builtin.debug:
+    msg: "{{ item.host_name }} NM API reachable at {{ ansible_host }}:{{ item.listen_port }}"
+  loop: "{{ _lan_nm_relays }}"
+  loop_control:
+    label: "{{ item.host_name }}"

@@ -3,3 +3,4 @@ ansible_host: "{{ lookup('env', 'PRIMARY_HOST') }}"
 pci_passthrough_allow_reboot: true
 wol_capable: true
 container_subnet_id: 1
+vpn_ip: 10.0.0.1

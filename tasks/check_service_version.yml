@@ -1,0 +1,37 @@
+---
+# Pre-flight version check via NM API.
+# Queries the Node Manager for deployed image versions and sets
+# _service_up_to_date when the deployed version matches expected.
+#
+# Required input variables:
+#   _check_service_name    (str) — e.g. "pihole"
+#   _check_image_version   (str) — expected version from group_vars
+#
+# Output:
+#   _service_up_to_date    (bool) — true if deployed == expected
+
+- name: Query NM for service version
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/images/versions"
+    return_content: true
+    timeout: 5
+  register: _nm_version_check
+  delegate_to: localhost
+  failed_when: false
+
+- name: Check service version match
+  ansible.builtin.set_fact:
+    _service_up_to_date: >-
+      {{ (_nm_version_check.status | default(0)) == 200
+         and (_nm_version_check.json.versions | default({}))[_check_service_name] | default('')
+             == _check_image_version
+         and _check_image_version | length > 0 }}
+
+- name: Report service version status
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: {{ _check_service_name }}
+      deployed={{ (_nm_version_check.json.versions | default({}))[_check_service_name] | default('unknown') }},
+      expected={{ _check_image_version }},
+      {{ 'UP-TO-DATE — skipping' if (_service_up_to_date | bool) else 'NEEDS UPDATE' }}
+  when: (_nm_version_check.status | default(0)) == 200

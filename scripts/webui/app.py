@@ -12,6 +12,7 @@ import logging
 import os
 import secrets
 import sys
+import time as _time
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -23,10 +24,12 @@ from nicegui import app, ui
 from scripts.webui import data, manager
 from scripts.webui.data import PROJECT_ROOT
 from scripts.webui.pages import (
-    bridge, console, containers, dashboard, deploy, environment, hosts, hub,
-    images, launch, mesh, nodes, remote_kiosk, router, services, timeline,
-    viewer,
+    bridge, cluster_dashboard, console, containers, dashboard, deploy,
+    environment, hosts, hub, images, launch, logs, mesh, nodes, remote_kiosk,
+    router, services, timeline, viewer, wireguard,
 )
+
+log = logging.getLogger(__name__)
 
 
 def _resolve_env_path() -> Path:
@@ -59,6 +62,22 @@ def configure(
     app.storage.general["state_dir"] = str(resolved_state)
     app.storage.general.setdefault("selected_tags", [])
 
+    _configure_hub_urls(resolved_env)
+
+
+def _configure_hub_urls(env_path: Path) -> None:
+    """Compute and store external service URLs from the env file at configure time."""
+    if not env_path.is_file():
+        return
+    env = data.load_environment(env_path).values
+    gen_path = env_path.parent / (env_path.name + ".generated")
+    if gen_path.is_file():
+        from build import load_env
+        env.update(load_env(gen_path))
+    urls = data.generate_sm_hub_urls(env)
+    if urls:
+        app.storage.general["hub_urls"] = urls
+
 
 def get_env_path() -> Path:
     raw = app.storage.general.get("env_path", "")
@@ -76,13 +95,24 @@ def get_state_dir() -> Path:
 
 
 def load_active_env() -> dict[str, str]:
-    """Load the active env file and return its values (empty dict if missing)."""
+    """Load the active env file and its .generated companion.
+
+    Auto-generated secrets (WireGuard keys, LAN_GATEWAY, etc.) live in
+    a companion file (e.g. test.env.generated alongside test.env). Both
+    files are merged, with the generated file taking precedence.
+    """
     raw = app.storage.general.get("env_path", "")
-    if raw:
-        env_path = Path(raw)
-        if env_path.is_file():
-            return data.load_environment(env_path).values
-    return {}
+    if not raw:
+        return {}
+    env_path = Path(raw)
+    if not env_path.is_file():
+        return {}
+    env = data.load_environment(env_path).values
+    gen_path = env_path.parent / (env_path.name + ".generated")
+    if gen_path.is_file():
+        from build import load_env
+        env.update(load_env(gen_path))
+    return env
 
 
 def register_pages() -> None:
@@ -99,29 +129,88 @@ def register_pages() -> None:
     containers.register()
     mesh.register()
     router.register()
+    wireguard.register()
+    logs.register()
     launch.register()
     timeline.register()
     viewer.register()
     remote_kiosk.register()
     console.register()
+    cluster_dashboard.register()
 
 
 # ── Manager integration ──────────────────────────────────────────────
 
 
+_HAS_VPN: bool | None = None
+
+
+def _controller_has_vpn() -> bool:
+    """Cache whether this controller has a wg0 interface (VPN peer).
+
+    Checked once at process start; not refreshed if WireGuard is
+    toggled without restarting the SM.
+    """
+    global _HAS_VPN  # noqa: PLW0603
+    if _HAS_VPN is None:
+        _HAS_VPN = Path("/sys/class/net/wg0").exists()
+    return _HAS_VPN
+
+
 def _env_node_resolver(node_id: str) -> str | None:
-    """Resolve a node_id to an IP via the active .env / test.env file."""
+    """Resolve a node_id to its VPN IP for SM-to-node communication.
+
+    The SuperManager uses VPN exclusively after initial registration.
+    When a host has a VPN IP configured, that IP is ALWAYS returned —
+    regardless of whether the controller currently has a wg0 interface.
+    This ensures the SM never silently falls back to unreachable LAN
+    IPs (which produce confusing blank iframes instead of clear errors).
+
+    Hosts without VPN IPs (e.g., openwrt router VM) use their direct IP.
+    """
+    if node_id == "openwrt":
+        return manager.ROUTER_VM_LAN_IP
+    env = load_active_env()
+    known = data.get_known_hosts(env)
+    has_vpn = _controller_has_vpn()
+    for h in known:
+        if h.name == node_id:
+            if h.vpn_ip:
+                if not has_vpn:
+                    log.warning(
+                        "VPN IP configured for %s (%s) but controller "
+                        "has no wg0 — connection will fail until VPN is up",
+                        node_id, h.vpn_ip,
+                    )
+                return h.vpn_ip
+            return h.ip or None
+    return None
+
+
+def _env_display_resolver(node_id: str) -> tuple[str, int] | None:
+    """Resolve a node_id to a browser-reachable (ip, port_offset) for KasmVNC.
+
+    Display URLs are loaded in the user's browser, so they must use IPs
+    the browser can reach directly. WAN hosts use their WAN IP with
+    port offset 0 (standard ports).
+
+    LAN hosts (mesh1) are behind the OpenWrt router and unreachable from
+    the browser. Their displays are relayed through the primary host via
+    socat proxies at offset ports (e.g., 6080+100=6180 for kiosk).
+    """
+    if node_id == "openwrt":
+        return (manager.ROUTER_VM_LAN_IP, 0)
     env = load_active_env()
     known = data.get_known_hosts(env)
     for h in known:
         if h.name == node_id:
-            return h.ip
+            if h.is_lan:
+                primary_ip = env.get("PRIMARY_HOST", "")
+                if not primary_ip:
+                    return None
+                return (primary_ip, data.Ports.LAN_DISPLAY_RELAY_OFFSET)
+            return (h.ip, 0) if h.ip else None
     return None
-
-
-def _env_vnc_relay_resolver(node_id: str) -> tuple[str, int] | None:
-    """Resolve VNC relay for LAN hosts via the active env file."""
-    return data.get_vnc_relay(node_id, load_active_env())
 
 
 def _validate_callhome_token(token: str) -> bool:
@@ -154,19 +243,15 @@ def _init_manager() -> None:
         auth_validator=_validate_callhome_token,
         config=config,
         manager_class=manager.ClusterManager,
-        vnc_relay_resolver=_env_vnc_relay_resolver,
+        is_supermanager=True,
+        display_resolver=_env_display_resolver,
     )
+
 
 
 def _get_callhome_private_key() -> str:
     """Load the call-home private key from the active env file."""
-    raw = app.storage.general.get("env_path", "")
-    if raw:
-        env_path = Path(raw)
-        if env_path.is_file():
-            env = data.load_environment(env_path).values
-            return env.get("CALLHOME_PRIVATE_KEY", "")
-    return ""
+    return load_active_env().get("CALLHOME_PRIVATE_KEY", "")
 
 
 def _merge_cluster_containers(state_dir: Path, checkin_node_id: str, cluster_nodes: dict) -> None:
@@ -215,14 +300,14 @@ def _merge_cluster_containers(state_dir: Path, checkin_node_id: str, cluster_nod
     existing_containers = parent.container_health.extensions.get("containers", {})
     existing_containers.update(all_child_containers)
     parent.container_health.extensions["containers"] = existing_containers
-    data._save_node_registry(state_dir, nodes)
+    data.save_node_registry(state_dir, nodes)
 
 
 def register_api() -> None:
     """Register REST endpoints (call-home + heartbeat via manager).
 
-    Ensures manager is initialized so heartbeat routes work even when
-    called from tests that bypass main().
+    Always (re)initializes the manager so tests that call register_api()
+    multiple times with different env configs get a fresh manager each time.
     """
     _init_manager()
 
@@ -435,7 +520,6 @@ def register_api() -> None:
         tl = data.get_active_timeline()
         if not tl:
             return JSONResponse({"active": False})
-        import time as _time
         services = {}
         for sid, svc in tl.services.items():
             entry: dict = {"service_id": sid}
@@ -494,11 +578,13 @@ def register_api() -> None:
         async def _query(client: httpx.AsyncClient,
                          name: str, ip: str) -> tuple[str, dict]:
             try:
-                resp = await client.get(f"http://{ip}:9001/api/images/versions")
+                resp = await client.get(f"http://{ip}:{data.Ports.MANAGER}/api/images/versions")
                 if resp.status_code == 200:
                     return (name, resp.json().get("versions", {}))
-            except httpx.HTTPError:
-                pass
+            except httpx.HTTPError as exc:
+                logging.getLogger("vm_builds.fleet").debug(
+                    "Version query failed for %s: %s", name, exc,
+                )
             return (name, {"error": "unreachable"})
 
         async with httpx.AsyncClient(timeout=5) as client:
@@ -522,7 +608,7 @@ def register_api() -> None:
     app.routes.insert(0, Route("/api/timeline/current", _api_timeline_current, methods=["GET"]))
     app.routes.insert(0, Route("/api/hosts/register", _api_host_register, methods=["POST"]))
 
-    manager.register_api(app, include_fleet_storage=False)
+    manager.register_sm_api(app)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -575,7 +661,6 @@ def main(argv: list[str] | None = None) -> None:
     env_path = Path(args.env) if args.env else None
     configure(env_path=env_path)
     data.set_server_port(args.port)
-    _init_manager()
     if not args.headless:
         register_pages()
     register_api()

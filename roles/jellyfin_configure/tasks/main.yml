@@ -1,78 +1,41 @@
 ---
-# Render group, /etc/jellyfin, network.xml, library.xml, and service
-# enablement are baked into the image by build-images.sh. This role
-# handles ONLY host-specific config: render GID override, transcoding
+# Render group, /etc/jellyfin, network.xml, library.xml, VA-API drivers,
+# and service enablement are baked into the image by build-images.sh. This
+# role handles ONLY host-specific config: render GID override, transcoding
 # device path, password, and service start.
+# All in-container operations go through the Node Manager API over VPN.
 
-# ── Ensure container is running ──────────────────────────────────
+# ── Configure iGPU access + start service (batched) ──────────────
 
-- name: Check Jellyfin container status
-  ansible.builtin.command:
-    cmd: pct status {{ jellyfin_ct_id }}
-  register: _jellyfin_ct_status
-  changed_when: false
-  failed_when: false
-
-- name: Start Jellyfin container if stopped
-  ansible.builtin.command:
-    cmd: pct start {{ jellyfin_ct_id }}
-  when: "'stopped' in (_jellyfin_ct_status.stdout | default(''))"
-  changed_when: true
-
-- name: Wait for Jellyfin container to be ready
-  ansible.builtin.command:
-    cmd: pct exec {{ jellyfin_ct_id }} -- ls /
-  register: _jellyfin_ready
-  retries: 10
-  delay: 3
-  until: _jellyfin_ready.rc == 0
-  changed_when: false
-  when: "'stopped' in (_jellyfin_ct_status.stdout | default(''))"
-
-# ── Configure iGPU access (host-specific GID) ──────────────────
-
-- name: Update render group GID to match host
-  ansible.builtin.shell:
-    cmd: |
-      pct exec {{ jellyfin_ct_id }} -- bash -c '
-        groupmod -g {{ igpu_render_gid }} render 2>/dev/null || true
-        usermod -a -G render jellyfin 2>/dev/null || true
-      '
-    executable: /bin/bash
-  changed_when: true
-
-- name: Verify VA-API drivers are working
-  ansible.builtin.command:
-    cmd: pct exec {{ jellyfin_ct_id }} -- vainfo --display drm
-  register: _vainfo_check
-  changed_when: false
-  failed_when: false
+- name: Update render group GID and start Jellyfin
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ jellyfin_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: >-
+        bash -c '
+        groupmod -g {{ igpu_render_gid }} render 2>/dev/null || true;
+        usermod -a -G render jellyfin 2>/dev/null || true;
+        systemctl start jellyfin 2>/dev/null || true'
+      timeout: 30
+    status_code: 200
+  delegate_to: localhost
 
 # ── Generate admin password if not provided ───────────────────────
 
-- name: Set provided admin password
+- name: Set admin password
   ansible.builtin.set_fact:
-    _jellyfin_admin_password: "{{ jellyfin_admin_password }}"
-  when: jellyfin_admin_password | length > 0
-
-- name: Generate random admin password for testing
-  ansible.builtin.command:
-    cmd: pct exec {{ jellyfin_ct_id }} -- openssl rand -base64 24
-  register: _generated_password
-  changed_when: false
-  no_log: true
-  when: jellyfin_admin_password | length == 0
-
-- name: Set generated admin password
-  ansible.builtin.set_fact:
-    _jellyfin_admin_password: "{{ _generated_password.stdout | trim }}"
-  when: jellyfin_admin_password | length == 0
+    _jellyfin_admin_password: >-
+      {{ jellyfin_admin_password
+         if jellyfin_admin_password | length > 0
+         else lookup('password', '/dev/null chars=ascii_letters,digits length=24') }}
 
 # ── Deploy host-specific transcoding config ─────────────────────
 
-- name: Write transcoding config to host temp
-  ansible.builtin.copy:
-    content: |
+- name: Build transcoding config content
+  ansible.builtin.set_fact:
+    _jellyfin_transcoding_xml: |
       <?xml version="1.0" encoding="UTF-8"?>
       <Transcoding>
         <TempPath>/var/lib/jellyfin/transcodes</TempPath>
@@ -81,44 +44,37 @@
         <HardwareAccelerationType>vaapi</HardwareAccelerationType>
         <VaApiDevice>{{ igpu_render_device }}</VaApiDevice>
       </Transcoding>
-    dest: /tmp/jellyfin_transcoding.xml
-    mode: "0644"
 
-- name: Push transcoding config into container
-  ansible.builtin.command:
-    cmd: pct push {{ jellyfin_ct_id }} /tmp/jellyfin_transcoding.xml /etc/jellyfin/transcoding.xml
-  changed_when: true
+- name: Push transcoding config via NM API
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ jellyfin_ct_id }}/file"
+    method: POST
+    body_format: json
+    body:
+      path: /etc/jellyfin/transcoding.xml
+      content: "{{ _jellyfin_transcoding_xml }}"
+      mode: "0644"
+    status_code: 200
+  delegate_to: localhost
 
-- name: Clean up host temp files
-  ansible.builtin.file:
-    path: /tmp/jellyfin_transcoding.xml
-    state: absent
-
-# ── Start Jellyfin service ─────────────────────────────────────
-
-- name: Start Jellyfin service
-  ansible.builtin.command:
-    cmd: pct exec {{ jellyfin_ct_id }} -- systemctl start jellyfin
-  changed_when: true
+# ── Wait for web interface ───────────────────────────────────────
 
 - name: Wait for Jellyfin web interface to be ready
-  ansible.builtin.shell:
-    cmd: |
-      pct exec {{ jellyfin_ct_id }} -- bash -c '
-        for i in $(seq 1 30); do
-          if curl -s http://127.0.0.1:8096 >/dev/null 2>&1; then
-            echo "Jellyfin web interface is ready"
-            exit 0
-          fi
-          sleep 2
-        done
-        echo "Jellyfin web interface failed to start"
-        exit 1
-      '
-    executable: /bin/bash
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ jellyfin_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8096"
+      timeout: 10
+    status_code: 200
+  delegate_to: localhost
   register: _jellyfin_ready
-  changed_when: false
-  failed_when: _jellyfin_ready.rc != 0
+  retries: 30
+  delay: 2
+  until: >-
+    (_jellyfin_ready.json.success | default(false)) | bool
+    and (_jellyfin_ready.json.output | default('') | trim) in ['200', '302']
 
 # ── Report completion ──────────────────────────────────────────────
 
@@ -128,8 +84,6 @@
       Jellyfin configured successfully!
       Web interface: http://{{ jellyfin_static_ip }}:8096
       iGPU device: {{ igpu_render_device }}
-      Media path: /media
-      VA-API: {{ 'Enabled' if 'VAProfile' in _vainfo_check.stdout else 'Software fallback' }}
 
 - name: Write admin password to generated env file
   ansible.builtin.blockinfile:

@@ -55,30 +55,28 @@
         that: "'onboot: 0' in _moonlight_cfg.stdout"
         fail_msg: "Container {{ moonlight_ct_id }} should have onboot: 0"
 
-    # ── Headless VNC stack (sway + wayvnc + websockify) ──────────
+    # ── KasmVNC display stack ────────────────────────────────────
 
-    - name: Check headless VNC stack inside container
+    - name: Check KasmVNC display stack inside container
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ moonlight_ct_id }} -- /bin/sh -c '
           echo "SWAY=$(command -v sway >/dev/null 2>&1 && echo yes || echo no)";
-          echo "WAYVNC=$(command -v wayvnc >/dev/null 2>&1 && echo yes || echo no)";
-          echo "WEBSOCKIFY=$(command -v websockify >/dev/null 2>&1 && echo yes || echo no)";
-          echo "VNC_SVC=$(systemctl is-enabled moonlight-vnc 2>/dev/null || echo missing)";
-          echo "VNC_WS_SVC=$(systemctl is-enabled moonlight-vnc-ws 2>/dev/null || echo missing)"
+          echo "VNCSERVER=$(command -v vncserver >/dev/null 2>&1 && echo yes || echo no)";
+          echo "KASMVNC_PKG=$(dpkg-query -s kasmvncserver >/dev/null 2>&1 && echo yes || echo no)";
+          echo "DISPLAY_SVC=$(systemctl is-enabled moonlight-display 2>/dev/null || echo missing)"
           '
-      register: _moonlight_vnc_health
+      register: _moonlight_display_health
       changed_when: false
 
-    - name: Assert headless VNC stack is present and enabled
+    - name: Assert KasmVNC display stack is present and enabled
       ansible.builtin.assert:
         that:
-          - "'SWAY=yes' in _moonlight_vnc_health.stdout"
-          - "'WAYVNC=yes' in _moonlight_vnc_health.stdout"
-          - "'WEBSOCKIFY=yes' in _moonlight_vnc_health.stdout"
-          - "'VNC_SVC=enabled' in _moonlight_vnc_health.stdout"
-          - "'VNC_WS_SVC=enabled' in _moonlight_vnc_health.stdout"
-        fail_msg: "Headless VNC stack missing or not enabled: {{ _moonlight_vnc_health.stdout }}"
+          - "'SWAY=no' in _moonlight_display_health.stdout"
+          - "'VNCSERVER=yes' in _moonlight_display_health.stdout"
+          - "'KASMVNC_PKG=yes' in _moonlight_display_health.stdout"
+          - "'DISPLAY_SVC=enabled' in _moonlight_display_health.stdout"
+        fail_msg: "KasmVNC display stack missing or not enabled: {{ _moonlight_display_health.stdout }}"
 
     # ── Moonlight binary and config ──────────────────────────────
 
@@ -128,19 +126,19 @@
         that: _moonlight_verify_ip.stdout | trim | length > 0
         fail_msg: "Moonlight container has no IP address"
 
-    # ── Host-side VNC proxy ──────────────────────────────────────
+    # ── Host-side display proxy ──────────────────────────────────
 
-    - name: Check moonlight-vnc-proxy service on host
+    - name: Check moonlight-display-proxy service on host
       ansible.builtin.command:
-        cmd: systemctl is-active moonlight-vnc-proxy
-      register: _moonlight_vnc_proxy
+        cmd: systemctl is-active moonlight-display-proxy
+      register: _moonlight_display_proxy
       changed_when: false
       failed_when: false
 
-    - name: Assert moonlight-vnc-proxy is running
+    - name: Assert moonlight-display-proxy is running
       ansible.builtin.assert:
-        that: "'active' in _moonlight_vnc_proxy.stdout"
-        fail_msg: "moonlight-vnc-proxy not active on {{ inventory_hostname }}"
+        that: "'active' in _moonlight_display_proxy.stdout"
+        fail_msg: "moonlight-display-proxy not active on {{ inventory_hostname }}"
 
     # ── Report ───────────────────────────────────────────────────
 
@@ -151,6 +149,6 @@
           ct={{ moonlight_ct_id }}, running=yes,
           moonlight={{ 'api' if (_api_ready | bool) else ('installed' if 'MOONLIGHT=installed' in (_moonlight_health.stdout | default('')) else 'missing') }},
           config={{ 'api' if (_api_ready | bool) else ('deployed' if 'CONFIG=exists' in (_moonlight_health.stdout | default('')) else 'missing') }},
-          vnc_stack={{ 'complete' if 'SWAY=yes' in _moonlight_vnc_health.stdout else 'incomplete' }},
-          proxy={{ 'active' if 'active' in (_moonlight_vnc_proxy.stdout | default('')) else 'inactive' }},
+          display_stack={{ 'complete' if 'KASMVNC_PKG=yes' in _moonlight_display_health.stdout else 'incomplete' }},
+          proxy={{ 'active' if 'active' in (_moonlight_display_proxy.stdout | default('')) else 'inactive' }},
           ip={{ _moonlight_verify_ip.stdout | trim }}

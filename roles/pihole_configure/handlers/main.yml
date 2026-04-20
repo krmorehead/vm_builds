@@ -1,5 +1,3 @@
 ---
-- name: _restart_ftl
-  ansible.builtin.systemd:
-    name: pihole-FTL
-    state: restarted
+# Service restarts are handled via NM API (ansible.builtin.uri).
+# No handlers needed for API-driven configure roles.

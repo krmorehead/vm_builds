@@ -1,0 +1,53 @@
+# Shared display proxy setup for LXC containers with KasmVNC.
+#
+# Deploys a socat TCP proxy on the Proxmox host that forwards
+# traffic from the host's listen port to the container's KasmVNC.
+# Cross-host reachability is handled by WireGuard VPN — no DNAT
+# rules needed. The VPN container DNAT routes VPN traffic to the
+# host, and this proxy handles the last hop to the container.
+#
+# Required variables (set by the calling role before include_tasks):
+#   _display_proxy_name     - systemd service name (e.g. "desktop-display-proxy")
+#   _display_proxy_port     - port to listen on / forward to (e.g. 6081)
+#   _display_proxy_target   - container IP address
+#   _display_proxy_legacy   - optional legacy service name to clean up
+
+---
+
+- name: "Clean up legacy proxy for {{ _display_proxy_name }}"
+  ansible.builtin.shell:
+    cmd: |
+      systemctl stop {{ _display_proxy_legacy }} 2>/dev/null || true
+      systemctl disable {{ _display_proxy_legacy }} 2>/dev/null || true
+      rm -f /etc/systemd/system/{{ _display_proxy_legacy }}.service
+      pkill -f 'socat.*TCP-LISTEN:{{ _display_proxy_port }}' 2>/dev/null || true
+    executable: /bin/bash
+  changed_when: true
+  failed_when: false
+  when: _display_proxy_legacy is defined and _display_proxy_legacy | length > 0
+
+- name: "Deploy socat proxy unit for {{ _display_proxy_name }}"
+  ansible.builtin.copy:
+    content: |
+      [Unit]
+      Description={{ _display_proxy_name }} (host:{{ _display_proxy_port }} -> container:{{ _display_proxy_port }})
+      After=network.target pve-guests.service
+      Wants=pve-guests.service
+
+      [Service]
+      Type=simple
+      ExecStart=/usr/bin/socat TCP-LISTEN:{{ _display_proxy_port }},reuseaddr,fork TCP:{{ _display_proxy_target }}:{{ _display_proxy_port }}
+      Restart=always
+      RestartSec=3
+
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/{{ _display_proxy_name }}.service
+    mode: "0644"
+
+- name: "Enable and start {{ _display_proxy_name }}"
+  ansible.builtin.systemd:
+    name: "{{ _display_proxy_name }}"
+    daemon_reload: true
+    enabled: true
+    state: restarted

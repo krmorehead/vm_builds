@@ -1,33 +1,113 @@
 """Manager hierarchy for the 4-tier fleet architecture.
 
 Inheritance:
-    BaseManager — heartbeat polling, metric cache, SSH helper
-        NodeManager — single-host ops, local container batman, guest mgmt
+    BaseManager — heartbeat polling, metric cache, collector map
+        NodeManager — single-host ops (SSH to local host), guest mgmt
             ClusterManager — subnet-scoped fleet view, event broadcast
-                (SuperManager is app.py calling ClusterManager with global visibility)
+                (SuperManager is app.py calling ClusterManager with
+                 is_supermanager=True — HTTP-only, no SSH, VPN transport)
 
 kiosk_server.py instantiates NodeManager (default) or ClusterManager
-(when IS_CLUSTER_MANAGER=true in config.json).
-app.py instantiates ClusterManager with a fleet-level node resolver.
+(when IS_CLUSTER_MANAGER=true in config.json). These tiers SSH to
+their own localhost for pct exec / qm commands.
+
+app.py instantiates ClusterManager with is_supermanager=True which:
+- Replaces SSH collectors with HTTP collectors (SM_COLLECTOR_MAP)
+- Skips display handler registration (proxied to NMs via HTTP)
+- Uses register_sm_api() instead of register_api() for HTTP-only routes
+- All SM-to-node communication goes over VPN (never LAN after registration)
 """
 
 from __future__ import annotations
 
 import asyncio
+import errno as _errno
 import hashlib
+import hmac as _hmac
 import json as _json
 import logging
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
 
-from pathlib import Path
+from abc import ABC, abstractmethod
 
 from scripts.webui import heartbeat
 from scripts.webui.data import Ports, event_bus
 from scripts.webui.display_transfer import (
     DisplayTransferService, SshExecFn, build_handler,
 )
-from scripts.webui.host_state import HostState, HostStateStore
+from scripts.webui.host_state import ContainerInfo, HostState, HostStateStore
+
+
+# ── Metric Route Handlers ────────────────────────────────────────────
+#
+# The SM is HTTP-only — it proxies metric requests to NMs via VPN.
+# Each handler resolves two things:
+#   1. Which NM host to send the HTTP request to (VPN-routed)
+#   2. What container the NM should collect from locally (SSH on its host)
+#
+# Three reusable handlers cover all routing patterns:
+#   LocalContainerRoute — NM is the host, collect from a named container
+#   HostedServiceRoute  — service name → remap to the host that runs it
+#   DirectRoute         — node IS the target (default fallback)
+
+
+class MetricRouteHandler(ABC):
+    """Resolves a page-level node_id to NM routing + collection target."""
+
+    @abstractmethod
+    def resolve(self, node_id: str) -> tuple[str, str]:
+        """Return (nm_host_id, container_target).
+
+        nm_host_id:       Host whose NM receives the HTTP request.
+                          Resolved to VPN IP by the node resolver.
+        container_target: subscribe_node_id sent to the NM. The NM
+                          resolves this locally for SSH collection.
+        """
+
+
+class LocalContainerRoute(MetricRouteHandler):
+    """Node IS the NM host; collect from a named container on that host.
+
+    Used when the metric source is a container running on the same
+    host as the NM.  Example: bridge-1's NM collects from its local
+    ``openwrt-bridge`` container.
+    """
+
+    def __init__(self, container_hostname: str) -> None:
+        self._container_hostname = container_hostname
+
+    def resolve(self, node_id: str) -> tuple[str, str]:
+        return node_id, self._container_hostname
+
+
+class HostedServiceRoute(MetricRouteHandler):
+    """Service identified by name; route to the host that runs it.
+
+    Used when the page's node_id is a service name (e.g. ``openwrt``)
+    rather than a Proxmox host name.  Maps to the hosting NM so the
+    SM can reach it over VPN.
+    """
+
+    def __init__(self, host_id: str) -> None:
+        self._host_id = host_id
+
+    def resolve(self, node_id: str) -> tuple[str, str]:
+        return self._host_id, node_id
+
+
+class DirectRoute(MetricRouteHandler):
+    """Node IS the NM host AND the collection target.  Default fallback."""
+
+    def resolve(self, node_id: str) -> tuple[str, str]:
+        return node_id, node_id
+
+
+_DIRECT_ROUTE = DirectRoute()
 
 
 # ── Base Manager ─────────────────────────────────────────────────────
@@ -44,6 +124,7 @@ class BaseManager:
         node_resolver: Callable[[str], str | None],
         *,
         auth_validator: Callable[[str], bool] | None = None,
+        display_resolver: Callable[[str], tuple[str, int] | None] | None = None,
         host_ip: str = "",
         host_name: str = "",
         management_server: str = "",
@@ -57,6 +138,7 @@ class BaseManager:
         if state_dir:
             self.host_state_store = HostStateStore(Path(state_dir))
         self._node_resolver = node_resolver
+        self._display_resolver = display_resolver
         self._auth_validator = auth_validator
         self._host_ip = host_ip
         self._host_name = host_name
@@ -64,9 +146,7 @@ class BaseManager:
         self._callhome_public_key = callhome_public_key
         self._mesh_key = mesh_key
         self._container_checkins: dict[str, dict] = {}
-        self._display_ssh: SshExecFn = (
-            lambda ip, cmd, timeout=10: heartbeat._ssh_exec(ip, cmd, timeout=timeout)
-        )
+        self._display_ssh: SshExecFn = heartbeat._ssh_exec
         self.display_transfer = DisplayTransferService()
         self._collector_map: dict[str, Any] = {
             "wifi": heartbeat.collect_wifi_metrics,
@@ -75,6 +155,25 @@ class BaseManager:
             "mesh": heartbeat.collect_mesh_metrics,
             "batman": heartbeat.collect_batman_metrics,
         }
+        self._metric_routes: dict[tuple[str, str], MetricRouteHandler] = {}
+        self._sm_tier: bool = False
+
+    def register_metric_route(
+        self, node_id: str, metric_type: str, handler: MetricRouteHandler,
+    ) -> None:
+        """Register a routing handler for a (node_id, metric_type) pair."""
+        self._metric_routes[(node_id, metric_type)] = handler
+
+    def resolve_collection_target(
+        self, node_id: str, metric_type: str,
+    ) -> tuple[str, str]:
+        """Resolve where to route and what to collect.
+
+        Returns (nm_host_id, container_target) using the registered
+        handler, falling back to DirectRoute if none is registered.
+        """
+        handler = self._metric_routes.get((node_id, metric_type), _DIRECT_ROUTE)
+        return handler.resolve(node_id)
 
     @property
     def host_ip(self) -> str:
@@ -108,48 +207,59 @@ class BaseManager:
             return JSONResponse({"error": "unauthorized"}, status_code=403)
         return None
 
-    # ── VNC and hierarchy ────────────────────────────────────────
+    # ── Display streaming and hierarchy ─────────────────────────
 
-    def _resolve_vnc_ip(self, node_id: str) -> str | None:
-        """Resolve the routable IP for a node's VNC websockify.
+    def _resolve_display_target(self, node_id: str) -> tuple[str, int] | None:
+        """Resolve the browser-reachable (ip, port_offset) for a node's display.
+
+        Returns (ip, port_offset) where port_offset is added to the app's
+        base display port. LAN hosts use a relay on the primary host at
+        offset ports (e.g., 6080+100=6180 for kiosk).
 
         Base implementation returns None (leaf NodeManager).
-        ClusterManager overrides to read _child_managers.
-        SuperManager (app.py) overrides to read _fleet_nodes.
+        ClusterManager overrides to read _child_managers and _display_resolver.
         """
         return None
 
-    def get_child_vnc_url(self, node_id: str) -> str | None:
-        """Build the WebSocket URL for a node's kiosk websockify.
+    def get_child_display_url(self, node_id: str) -> str | None:
+        """Build the display URL for a node's kiosk KasmVNC.
 
-        LAN hosts need VNC relayed through the primary host because the
-        browser can't reach LAN IPs directly. The relay is a socat proxy
-        on PRIMARY_HOST at a dedicated port per LAN host.
+        The browser connects directly to the resolved IP and port.
+        Port offsets handle LAN hosts relayed through the primary host.
         """
-        relay = self._get_vnc_relay(node_id)
-        if relay:
-            ip, port = relay
-            return f"ws://{ip}:{port}"
-        ip = self._resolve_vnc_ip(node_id)
-        if not ip:
+        target = self._resolve_display_target(node_id)
+        if not target:
             return None
-        return f"ws://{ip}:{Ports.KIOSK_VNC_WS}"
-
-    def _get_vnc_relay(self, node_id: str) -> tuple[str, int] | None:
-        """Check if this node needs VNC relayed. Override in subclasses."""
-        return None
+        ip, offset = target
+        return f"http://{ip}:{Ports.KIOSK_DISPLAY + offset}"
 
     def get_guest_viewstream_url(self, node_id: str, app_id: str) -> str | None:
         """Build the viewstream URL for a display app on a node.
 
-        Uses the DisplayTransferService registry to look up the correct
-        endpoint (VNC WebSocket or HTTP) for the given app_id, and resolves
-        the node IP via the standard VNC IP resolver.
+        Resolves the display target and applies any port offset for
+        LAN host relays before constructing the URL.
+
+        When no display handler is registered (SM tier), falls back to
+        DISPLAY_APP_CONFIGS for the app's base port.
         """
-        ip = self._resolve_vnc_ip(node_id)
-        if not ip:
+        target = self._resolve_display_target(node_id)
+        if not target:
             return None
-        return self.display_transfer.get_viewstream_url(app_id, ip)
+        ip, offset = target
+        handler = self.display_transfer.get_handler(app_id)
+        if handler:
+            base_url = handler.get_viewstream_url(ip)
+            if not base_url or offset == 0:
+                return base_url
+            from urllib.parse import urlparse, urlunparse
+            parsed = urlparse(base_url)
+            new_port = int(parsed.port or 0) + offset
+            return urlunparse(parsed._replace(netloc=f"{parsed.hostname}:{new_port}"))
+        from scripts.webui.data import DISPLAY_APP_CONFIGS
+        config = DISPLAY_APP_CONFIGS.get(app_id)
+        if config and config.display_port:
+            return f"http://{ip}:{config.display_port + offset}"
+        return None
 
     def get_fleet_children(self, node_id: str) -> list[str]:
         """Return child node IDs for a given parent.
@@ -173,14 +283,19 @@ class BaseManager:
                 self.subscription_mgr.cleanup_expired()
                 active = self.subscription_mgr.get_active_nodes()
                 for node_id, metric_type in active:
-                    ip = self.resolve_node_ip(node_id)
+                    nm_host, container_target = self.resolve_collection_target(
+                        node_id, metric_type,
+                    )
+                    ip = self._resolve_collector_ip(nm_host, container_target)
                     if not ip:
                         continue
                     collector = self._collector_map.get(metric_type)
                     if not collector:
                         continue
                     try:
-                        result = await asyncio.to_thread(collector, ip)
+                        result = await asyncio.to_thread(
+                            collector, ip, container_target,
+                        )
                         result.node_id = node_id
                         self.metric_cache.store(result)
                     except (OSError, ValueError, TypeError, RuntimeError) as exc:
@@ -188,6 +303,25 @@ class BaseManager:
             except (OSError, ValueError, TypeError, RuntimeError) as exc:
                 log.error("Heartbeat poller error: %s", exc)
             await asyncio.sleep(5)
+
+    def _resolve_collector_ip(
+        self, nm_host: str, container_target: str,
+    ) -> str | None:
+        """Resolve the IP to pass to the collector function.
+
+        SM (HTTP collectors): resolves nm_host — the NM's VPN/management
+        IP for HTTP routing.  container_target is only used as a
+        subscribe_node_id query parameter, not for IP resolution.
+        NM (SSH collectors): prefers container_target — a container name
+        that maps to a local IP in NODE_IPS for direct SSH access.
+        Falls back to nm_host if the container isn't in NODE_IPS.
+        """
+        if self._sm_tier:
+            return self.resolve_node_ip(nm_host)
+        return (
+            self.resolve_node_ip(container_target)
+            or self.resolve_node_ip(nm_host)
+        )
 
     def _collect_host_metrics(self, host_ip: str) -> dict:
         metrics: dict[str, Any] = {
@@ -210,8 +344,8 @@ class BaseManager:
                     metrics["disk_usage_pct"] = int(lines[0].replace("%", ""))
                     metrics["memory_usage_pct"] = int(lines[1])
                     metrics["uptime_seconds"] = int(lines[2])
-                except (ValueError, IndexError):
-                    pass
+                except (ValueError, IndexError) as exc:
+                    logging.debug("Metric parse for %s: %s", host_ip, exc)
         ok_ct, ct_out = heartbeat._ssh_exec(
             host_ip, "pct list 2>/dev/null || true", timeout=10,
         )
@@ -272,8 +406,6 @@ class BaseManager:
         }
 
     def _post_to_upstream(self, url: str, payload: dict, token: str = "") -> bool:
-        import urllib.request
-        import urllib.error
         log = logging.getLogger("vm_builds.relay")
         body = _json.dumps(payload).encode("utf-8")
         headers = {"Content-Type": "application/json"}
@@ -292,15 +424,15 @@ class BaseManager:
 
     async def _relay_heartbeat(self) -> None:
         log = logging.getLogger("vm_builds.relay")
-        await asyncio.sleep(5)
+        await asyncio.sleep(3)
         while True:
             try:
                 if not self._management_server:
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(10)
                     continue
                 if not self._host_name or not self._host_ip:
                     log.warning("HOST_NAME or HOST_IP not configured, skipping relay")
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(10)
                     continue
                 host_metrics = await asyncio.to_thread(
                     self._collect_host_metrics, self._host_ip,
@@ -319,7 +451,7 @@ class BaseManager:
                     log.warning("Failed relay for %s to %s", self._host_name, self._management_server)
             except (OSError, ValueError, TypeError, RuntimeError) as exc:
                 log.error("Relay heartbeat error: %s", exc)
-            await asyncio.sleep(30)
+            await asyncio.sleep(10)
 
     def start_poller(self) -> None:
         asyncio.create_task(self._heartbeat_poller())
@@ -377,8 +509,9 @@ class BaseManager:
 
 _MESH_CT_ID = 103
 _BRIDGE_CT_ID = 104
-_ROUTER_VM_LAN_IP = "10.10.10.1"
-_KIOSK_PORT = 9001
+_DESKTOP_CT_ID = 400
+ROUTER_VM_LAN_IP = "10.10.10.1"
+_VALID_DESKTOP_SESSIONS = ("kde", "gnome")
 
 
 class NodeManager(BaseManager):
@@ -401,8 +534,6 @@ class NodeManager(BaseManager):
         """
         if not self._management_server or not self._host_name:
             return
-        import urllib.request
-        import urllib.error
         log = logging.getLogger("vm_builds.node_state")
         url = f"{self._management_server.rstrip('/')}/api/host/{self._host_name}/state"
         try:
@@ -478,6 +609,34 @@ class NodeManager(BaseManager):
                 statuses[f"{host}/{label}-{vmid}"] = {"active": False, "error": out[:200]}
         return statuses
 
+    async def switch_desktop_session(self, session: str) -> dict:
+        """Switch the Desktop container's KasmVNC session between KDE and GNOME."""
+        if session not in _VALID_DESKTOP_SESSIONS:
+            return {"success": False, "error": f"Invalid session: {session!r} (use kde or gnome)"}
+        if not self._host_ip:
+            return {"success": False, "error": "HOST_IP not configured"}
+        cmd = f"pct exec {_DESKTOP_CT_ID} -- /usr/sbin/switch-desktop-session {session}"
+        ok, out = await asyncio.to_thread(
+            heartbeat._ssh_exec, self._host_ip, cmd, timeout=30,
+        )
+        if ok and f"SESSION={session}" in out:
+            return {"success": True, "session": session}
+        return {"success": False, "error": out[:300]}
+
+    async def get_desktop_session(self) -> dict:
+        """Query the current desktop session (kde or gnome)."""
+        if not self._host_ip:
+            return {"session": "unknown", "error": "HOST_IP not configured"}
+        cmd = f"pct exec {_DESKTOP_CT_ID} -- /usr/sbin/switch-desktop-session status"
+        ok, out = await asyncio.to_thread(
+            heartbeat._ssh_exec, self._host_ip, cmd, timeout=10,
+        )
+        if ok:
+            for line in out.splitlines():
+                if line.startswith("SESSION="):
+                    return {"session": line.split("=", 1)[1]}
+        return {"session": "unknown"}
+
     def _relay_to_cluster_manager(
         self, path: str, *, method: str = "POST", token: str = "",
     ) -> dict:
@@ -487,9 +646,6 @@ class NodeManager(BaseManager):
         enable/disable/status) UP to the CM, which then broadcasts to all
         children.  Returns the CM's JSON response or an error dict.
         """
-        import urllib.request
-        import urllib.error
-
         if not self._management_server:
             return {"error": "MANAGEMENT_SERVER not configured"}
 
@@ -547,7 +703,16 @@ class NodeManager(BaseManager):
             metric_type = request.path_params.get("metric_type", "")
             cached = mgr.metric_cache.get(node_id, metric_type)
             if cached is None:
-                return JSONResponse({"error": "No data available"}, status_code=404)
+                return JSONResponse({
+                    "status": "no_data",
+                    "node_id": node_id,
+                    "metric_type": metric_type,
+                    "data": {},
+                    "success": False,
+                    "error": f"No {metric_type} metrics collected yet for {node_id}. "
+                             f"Ensure the Node Manager is running and the metric "
+                             f"subscription is active.",
+                })
             return JSONResponse({
                 "node_id": cached.node_id,
                 "metric_type": cached.metric_type,
@@ -634,7 +799,6 @@ class NodeManager(BaseManager):
                 return auth_err
             if not mgr._mesh_key:
                 return JSONResponse({"error": "MESH_KEY not configured"}, status_code=500)
-            import hmac as _hmac
             token = _hmac.new(
                 mgr._mesh_key.encode(), f"{action}_batman".encode(), hashlib.sha256,
             ).hexdigest()
@@ -721,6 +885,28 @@ class NodeManager(BaseManager):
         starlette_app.routes.insert(0, Route(
             "/api/batman/status", _api_batman_status, methods=["GET"],
         ))
+
+        # ── Desktop session switching ─────────────────────────────
+
+        async def _api_desktop_session_switch(request: StarletteRequest) -> JSONResponse:
+            session = request.path_params.get("session", "")
+            result = await mgr.switch_desktop_session(session)
+            code = 200 if result.get("success") else 400
+            return JSONResponse(result, status_code=code)
+
+        async def _api_desktop_session_status(request: StarletteRequest) -> JSONResponse:
+            result = await mgr.get_desktop_session()
+            return JSONResponse(result)
+
+        starlette_app.routes.insert(0, Route(
+            "/api/desktop/session/{session}",
+            _api_desktop_session_switch, methods=["POST"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/desktop/session",
+            _api_desktop_session_status, methods=["GET"],
+        ))
+
         starlette_app.routes.insert(0, Route(
             "/api/heartbeat/subscribe", _api_heartbeat_subscribe, methods=["POST"],
         ))
@@ -732,9 +918,58 @@ class NodeManager(BaseManager):
             "/api/heartbeat/{node_id}/{metric_type}",
             _api_heartbeat_metrics, methods=["GET"],
         ))
+        async def _api_heartbeat_latest(request: StarletteRequest) -> JSONResponse:
+            """Return this node's latest cached metric of the given type.
+
+            Used by the SuperManager to collect metrics via HTTP instead
+            of SSH. The SM doesn't know this NM's node_id, so this
+            endpoint searches the cache for any entry matching the type.
+
+            Query params:
+              subscribe_node_id — auto-subscribe this node_id for the
+              requested metric_type so the NM's poller starts collecting
+              data for subsequent requests.
+            """
+            metric_type = request.path_params.get("metric_type", "")
+            subscribe_node = request.query_params.get("subscribe_node_id", "")
+            if subscribe_node and metric_type in mgr._collector_map:
+                ip = mgr.resolve_node_ip(subscribe_node)
+                if ip:
+                    mgr.subscription_mgr.subscribe(subscribe_node, metric_type, ttl_seconds=60)
+            cached = None
+            for sub in mgr.subscription_mgr.list_subscriptions():
+                if sub.metric_type == metric_type:
+                    cached = mgr.metric_cache.get(sub.node_id, metric_type)
+                    if cached:
+                        break
+            if not cached and mgr._host_name:
+                cached = mgr.metric_cache.get(mgr._host_name, metric_type)
+            if cached is None:
+                return JSONResponse({
+                    "status": "no_data",
+                    "metric_type": metric_type,
+                    "data": {},
+                    "success": False,
+                    "error": f"No {metric_type} metrics collected yet. "
+                             f"Ensure a subscription is active and the "
+                             f"collector has run at least once.",
+                })
+            return JSONResponse({
+                "node_id": cached.node_id,
+                "metric_type": cached.metric_type,
+                "data": cached.data,
+                "collected_at": cached.collected_at,
+                "success": cached.success,
+                "error": cached.error,
+            })
+
         starlette_app.routes.insert(0, Route(
             "/api/heartbeat/subscriptions",
             _api_heartbeat_subscriptions, methods=["GET"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/heartbeat/latest/{metric_type}",
+            _api_heartbeat_latest, methods=["GET"],
         ))
         starlette_app.routes.insert(0, Route(
             "/api/guests", _api_guests, methods=["GET"],
@@ -742,6 +977,27 @@ class NodeManager(BaseManager):
         starlette_app.routes.insert(0, Route(
             "/api/guests/{vmid}/{action}",
             _api_guest_action, methods=["POST"],
+        ))
+
+        # ── Self-config endpoint (exposes kiosk config without SSH) ──
+
+        async def _api_config_self(request: StarletteRequest) -> JSONResponse:
+            """Return this kiosk's own config.json keys and 4-tier settings.
+
+            Eliminates the need for pct exec to read config.json during verify.
+            """
+            from scripts.webui.data import load_kiosk_config
+            config = load_kiosk_config()
+            return JSONResponse({
+                "keys": sorted(config.keys()),
+                "MANAGEMENT_SERVER": config.get("MANAGEMENT_SERVER", ""),
+                "IS_CLUSTER_MANAGER": config.get("IS_CLUSTER_MANAGER", "false"),
+                "HOST_NAME": config.get("HOST_NAME", ""),
+                "HOST_IP": config.get("HOST_IP", ""),
+            })
+
+        starlette_app.routes.insert(0, Route(
+            "/api/config/self", _api_config_self, methods=["GET"],
         ))
 
         # ── Display transfer endpoints ────────────────────────────
@@ -755,10 +1011,11 @@ class NodeManager(BaseManager):
                 return auth_err
             result = mgr.display_transfer.enter(app_id, mgr._host_ip)
             status_code = 200 if result.success else 502
+            handler = mgr.display_transfer.get_handler(app_id)
             return JSONResponse({
                 "app_id": app_id, "success": result.success,
                 "viewstream_url": result.viewstream_url,
-                "display_type": result.display_type.value,
+                "handler_type": handler.handler_type if handler else None,
                 "error": result.error,
             }, status_code=status_code)
 
@@ -787,7 +1044,7 @@ class NodeManager(BaseManager):
             url = handler.get_viewstream_url(mgr._host_ip) if active else None
             return JSONResponse({
                 "app_id": app_id, "active": active,
-                "display_type": handler.display_type.value,
+                "handler_type": handler.handler_type,
                 "viewstream_url": url,
             })
 
@@ -942,6 +1199,564 @@ class NodeManager(BaseManager):
             _api_host_phy_patch, methods=["PATCH"],
         ))
 
+        # ── Container provisioning endpoints ──────────────────────
+        # NM executes pct create/destroy locally. The controller calls
+        # these via HTTP over VPN instead of SSH.
+
+        async def _api_provision_create(request: StarletteRequest) -> JSONResponse:
+            """Full container lifecycle: version check, create/rebuild, start, wait."""
+            auth_err = mgr.check_mutation_auth(request)
+            if auth_err:
+                return auth_err
+            if not mgr._host_ip:
+                return JSONResponse({"error": "HOST_IP not configured"}, status_code=500)
+            body = await request.json()
+            vmid = body.get("vmid")
+            template = body.get("template_path", "")
+            hostname = body.get("hostname", "")
+            memory = body.get("memory", 512)
+            swap = body.get("swap", 256)
+            cores = body.get("cores", 1)
+            disk = body.get("disk", "4")
+            storage = body.get("storage", "local-lvm")
+            ip = body.get("ip", "")
+            gateway = body.get("gateway", "")
+            bridge = body.get("bridge", "vmbr0")
+            nameserver = body.get("nameserver", "")
+            features = body.get("features", "")
+            unprivileged = body.get("unprivileged", True)
+            onboot = body.get("onboot", True)
+            startup_order = body.get("startup_order", 0)
+            ostype = body.get("ostype", "")
+            mount_entries = body.get("mount_entries", [])
+            image_version = body.get("image_version", "")
+            force_rebuild = body.get("force_rebuild", False)
+            if not vmid or not template:
+                return JSONResponse(
+                    {"error": "vmid and template_path are required"}, status_code=400,
+                )
+            host = mgr._host_ip
+            log = []
+
+            async def _exec(cmd: str, timeout: int = 30) -> tuple[bool, str]:
+                return await asyncio.to_thread(
+                    heartbeat._ssh_exec, host, cmd, timeout=timeout,
+                )
+
+            ok_status, status_out = await _exec(f"pct status {vmid} 2>/dev/null", 10)
+            ct_exists = ok_status and ("running" in status_out.lower() or "stopped" in status_out.lower())
+            need_create = not ct_exists
+
+            if ct_exists and (force_rebuild or image_version):
+                version_check = f"pct exec {vmid} -- cat /etc/image_version 2>/dev/null || echo ''"
+                ok_v, deployed_ver = await _exec(version_check, 10)
+                deployed_ver = deployed_ver.strip()
+                if force_rebuild or (image_version and deployed_ver != image_version):
+                    log.append(f"Version mismatch: deployed={deployed_ver}, target={image_version}")
+                    await _exec(f"pct stop {vmid} 2>/dev/null", 30)
+                    await _exec(f"pct destroy {vmid} --purge", 30)
+                    need_create = True
+                else:
+                    log.append(f"Version match: {deployed_ver}")
+
+            if not need_create:
+                if "stopped" in status_out.lower():
+                    ok_s, out_s = await _exec(f"pct start {vmid}", 30)
+                    log.append(f"Started existing: {out_s[:200]}")
+                    return JSONResponse({
+                        "success": ok_s, "vmid": vmid, "status": "started",
+                        "log": log, "output": out_s[:500],
+                    })
+                return JSONResponse({
+                    "success": True, "vmid": vmid, "status": "already_running",
+                    "log": log,
+                })
+
+            tmpl_ref = f"local:vztmpl/{template}" if "/" not in template else template
+            net_spec = f"name=eth0,bridge={bridge},firewall=0"
+            if ip:
+                net_spec += f",ip={ip}"
+            if gateway:
+                net_spec += f",gw={gateway}"
+            priv_flag = 1 if unprivileged else 0
+            cmd_parts = [
+                f"pct create {vmid}",
+                tmpl_ref,
+                f"--hostname {hostname}" if hostname else "",
+                f"--memory {memory}",
+                f"--swap {swap}",
+                f"--cores {cores}",
+                f"--rootfs {storage}:{disk}",
+                f"--net0 {net_spec}",
+                f"--unprivileged {priv_flag}",
+                f"--onboot {'1' if onboot else '0'}",
+                f"--nameserver {nameserver}" if nameserver else "",
+                f"--features {features}" if features else "",
+                f"--startup order={startup_order}" if startup_order else "",
+                f"--ostype {ostype}" if ostype else "",
+                "--start false",
+            ]
+            create_cmd = " ".join(p for p in cmd_parts if p)
+            ok_c, out_c = await _exec(create_cmd, 120)
+            if not ok_c:
+                return JSONResponse({
+                    "success": False, "vmid": vmid, "status": "create_failed",
+                    "log": log, "output": out_c[:500],
+                }, status_code=500)
+            log.append("Container created")
+
+            for idx, mount in enumerate(mount_entries):
+                ok_m, out_m = await _exec(f"pct set {vmid} -mp{idx} {mount}", 15)
+                if not ok_m:
+                    log.append(f"Mount {idx} failed: {out_m[:200]}")
+                else:
+                    log.append(f"Mount {idx}: {mount}")
+
+            await _exec(
+                f"pct set {vmid} --onboot {'1' if onboot else '0'}"
+                f" --startup order={startup_order}", 15,
+            )
+
+            ok_br, _ = await _exec(
+                "test -f /proc/sys/net/bridge/bridge-nf-call-iptables && "
+                "sysctl -w net.bridge.bridge-nf-call-iptables=0 2>/dev/null || true", 10,
+            )
+
+            ok_start, start_out = await _exec(f"pct start {vmid}", 30)
+            if not ok_start:
+                return JSONResponse({
+                    "success": False, "vmid": vmid, "status": "start_failed",
+                    "log": log, "output": start_out[:500],
+                }, status_code=500)
+            log.append("Container started")
+
+            for attempt in range(10):
+                ok_init, _ = await _exec(f"pct exec {vmid} -- ls / 2>/dev/null", 10)
+                if ok_init:
+                    break
+                await asyncio.sleep(3)
+            else:
+                log.append("WARNING: init wait timed out after 30s")
+
+            if ostype != "unmanaged":
+                for attempt in range(20):
+                    ok_net, net_out = await _exec(
+                        f"pct exec {vmid} -- ip -o -4 addr show eth0 2>/dev/null | grep -c 'inet '", 10,
+                    )
+                    if ok_net and net_out.strip().isdigit() and int(net_out.strip()) > 0:
+                        log.append("Networking ready")
+                        break
+                    await asyncio.sleep(5)
+                else:
+                    log.append("WARNING: networking wait timed out after 100s")
+
+            svc_type = request.path_params.get("service_type", "")
+            if image_version and svc_type and mgr.host_state_store and mgr._host_name:
+                state = mgr.host_state_store.get(mgr._host_name)
+                if state is not None:
+                    state.containers[int(vmid)] = ContainerInfo(
+                        vmid=int(vmid),
+                        service_type=svc_type,
+                        hostname=hostname or svc_type,
+                        state="running",
+                        image_version=image_version,
+                    )
+                    mgr.host_state_store.save(state)
+                    log.append(f"Registered version {image_version} for {svc_type}")
+
+            return JSONResponse({
+                "success": True, "vmid": vmid, "status": "created",
+                "log": log,
+            })
+
+        async def _api_provision_destroy(request: StarletteRequest) -> JSONResponse:
+            vmid = request.path_params.get("vmid", "")
+            if not vmid.isdigit():
+                return JSONResponse({"error": f"Invalid VMID: {vmid}"}, status_code=400)
+            auth_err = mgr.check_mutation_auth(request)
+            if auth_err:
+                return auth_err
+            if not mgr._host_ip:
+                return JSONResponse({"error": "HOST_IP not configured"}, status_code=500)
+            cmd = f"pct stop {vmid} 2>/dev/null; sleep 2; pct destroy {vmid} --purge 2>/dev/null"
+            ok, out = await asyncio.to_thread(
+                heartbeat._ssh_exec, mgr._host_ip, cmd, timeout=60,
+            )
+            does_not_exist = "does not exist" in out.lower()
+            return JSONResponse({
+                "success": ok or does_not_exist, "vmid": vmid,
+                "output": out[:300],
+            })
+
+        async def _api_provision_status(request: StarletteRequest) -> JSONResponse:
+            vmid = request.path_params.get("vmid", "")
+            if not vmid.isdigit():
+                return JSONResponse({"error": f"Invalid VMID: {vmid}"}, status_code=400)
+            if not mgr._host_ip:
+                return JSONResponse({"error": "HOST_IP not configured"}, status_code=500)
+            ok, out = await asyncio.to_thread(
+                heartbeat._ssh_exec, mgr._host_ip,
+                f"pct status {vmid} 2>/dev/null || qm status {vmid} 2>/dev/null",
+                timeout=10,
+            )
+            status = "unknown"
+            if "running" in out.lower():
+                status = "running"
+            elif "stopped" in out.lower():
+                status = "stopped"
+            elif "does not exist" in out.lower():
+                status = "absent"
+            return JSONResponse({"vmid": vmid, "status": status, "output": out[:200]})
+
+        async def _api_provision_exec(request: StarletteRequest) -> JSONResponse:
+            """Execute a command inside a container via pct exec."""
+            vmid = request.path_params.get("vmid", "")
+            if not vmid.isdigit():
+                return JSONResponse({"error": f"Invalid VMID: {vmid}"}, status_code=400)
+            auth_err = mgr.check_mutation_auth(request)
+            if auth_err:
+                return auth_err
+            if not mgr._host_ip:
+                return JSONResponse({"error": "HOST_IP not configured"}, status_code=500)
+            body = await request.json()
+            cmd = body.get("cmd", "")
+            timeout = min(body.get("timeout", 30), 300)
+            if not cmd:
+                return JSONResponse({"error": "cmd is required"}, status_code=400)
+            ok, out = await asyncio.to_thread(
+                heartbeat._ssh_exec, mgr._host_ip,
+                f"pct exec {vmid} -- {cmd}", timeout=timeout,
+            )
+            return JSONResponse({"success": ok, "vmid": vmid, "output": out[:2000]})
+
+        async def _api_provision_pct_set(request: StarletteRequest) -> JSONResponse:
+            """Modify container config via pct set."""
+            vmid = request.path_params.get("vmid", "")
+            if not vmid.isdigit():
+                return JSONResponse({"error": f"Invalid VMID: {vmid}"}, status_code=400)
+            auth_err = mgr.check_mutation_auth(request)
+            if auth_err:
+                return auth_err
+            if not mgr._host_ip:
+                return JSONResponse({"error": "HOST_IP not configured"}, status_code=500)
+            body = await request.json()
+            args = body.get("args", "")
+            if not args:
+                return JSONResponse({"error": "args is required"}, status_code=400)
+            ok, out = await asyncio.to_thread(
+                heartbeat._ssh_exec, mgr._host_ip,
+                f"pct set {vmid} {args}", timeout=30,
+            )
+            return JSONResponse({"success": ok, "vmid": vmid, "output": out[:500]})
+
+        async def _api_provision_stop_start(request: StarletteRequest) -> JSONResponse:
+            """Stop or start a container."""
+            vmid = request.path_params.get("vmid", "")
+            action = request.path_params.get("action", "")
+            if not vmid.isdigit():
+                return JSONResponse({"error": f"Invalid VMID: {vmid}"}, status_code=400)
+            if action not in ("stop", "start", "restart"):
+                return JSONResponse({"error": f"Invalid action: {action}"}, status_code=400)
+            auth_err = mgr.check_mutation_auth(request)
+            if auth_err:
+                return auth_err
+            if not mgr._host_ip:
+                return JSONResponse({"error": "HOST_IP not configured"}, status_code=500)
+            if action == "restart":
+                cmd = f"pct stop {vmid} 2>/dev/null; sleep 2; pct start {vmid}"
+            else:
+                cmd = f"pct {action} {vmid}"
+            ok, out = await asyncio.to_thread(
+                heartbeat._ssh_exec, mgr._host_ip, cmd, timeout=60,
+            )
+            return JSONResponse({"success": ok, "vmid": vmid, "action": action, "output": out[:300]})
+
+        starlette_app.routes.insert(0, Route(
+            "/api/provision/{vmid}/{action}",
+            _api_provision_stop_start, methods=["POST"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/provision/{vmid}",
+            _api_provision_destroy, methods=["DELETE"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/provision/{service_type}",
+            _api_provision_create, methods=["POST"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/provision/{vmid}/set",
+            _api_provision_pct_set, methods=["POST"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/provision/{vmid}/exec",
+            _api_provision_exec, methods=["POST"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/provision/{vmid}/status",
+            _api_provision_status, methods=["GET"],
+        ))
+
+        # ── Config push endpoints ─────────────────────────────────
+        # Push files, edit configs, and manage services inside containers.
+        # Replaces Ansible SSH + pct exec / pct push for post-bootstrap config.
+
+        async def _api_config_file(request: StarletteRequest) -> JSONResponse:
+            vmid = request.path_params.get("vmid", "")
+            if not vmid.isdigit():
+                return JSONResponse({"error": f"Invalid VMID: {vmid}"}, status_code=400)
+            auth_err = mgr.check_mutation_auth(request)
+            if auth_err:
+                return auth_err
+            if not mgr._host_ip:
+                return JSONResponse({"error": "HOST_IP not configured"}, status_code=500)
+            body = await request.json()
+            path = body.get("path", "")
+            content = body.get("content", "")
+            mode = body.get("mode", "0644")
+            if not path or content is None:
+                return JSONResponse(
+                    {"error": "path and content are required"}, status_code=400,
+                )
+            tmp_name = f"/tmp/_nm_push_{vmid}_{hashlib.md5(path.encode()).hexdigest()[:8]}"
+            write_cmd = f"cat > {tmp_name} << 'NM_FILE_EOF'\n{content}\nNM_FILE_EOF"
+            ok_write, write_out = await asyncio.to_thread(
+                heartbeat._ssh_exec, mgr._host_ip, write_cmd, timeout=15,
+            )
+            if not ok_write:
+                return JSONResponse({
+                    "success": False, "error": f"Failed to write temp file: {write_out[:200]}",
+                }, status_code=500)
+            push_cmd = (
+                f"pct push {vmid} {tmp_name} {path} && "
+                f"pct exec {vmid} -- chmod {mode} {path} && "
+                f"rm -f {tmp_name}"
+            )
+            ok, out = await asyncio.to_thread(
+                heartbeat._ssh_exec, mgr._host_ip, push_cmd, timeout=30,
+            )
+            return JSONResponse({
+                "success": ok, "vmid": vmid, "path": path, "output": out[:300],
+            })
+
+        async def _api_config_sed(request: StarletteRequest) -> JSONResponse:
+            vmid = request.path_params.get("vmid", "")
+            if not vmid.isdigit():
+                return JSONResponse({"error": f"Invalid VMID: {vmid}"}, status_code=400)
+            auth_err = mgr.check_mutation_auth(request)
+            if auth_err:
+                return auth_err
+            if not mgr._host_ip:
+                return JSONResponse({"error": "HOST_IP not configured"}, status_code=500)
+            body = await request.json()
+            path = body.get("path", "")
+            pattern = body.get("pattern", "")
+            replacement = body.get("replacement", "")
+            if not path or not pattern:
+                return JSONResponse(
+                    {"error": "path and pattern are required"}, status_code=400,
+                )
+            escaped_pattern = pattern.replace("'", "'\\''")
+            escaped_replacement = replacement.replace("'", "'\\''")
+            cmd = (
+                f"pct exec {vmid} -- sed -i "
+                f"'s|{escaped_pattern}|{escaped_replacement}|g' {path}"
+            )
+            ok, out = await asyncio.to_thread(
+                heartbeat._ssh_exec, mgr._host_ip, cmd, timeout=15,
+            )
+            return JSONResponse({
+                "success": ok, "vmid": vmid, "path": path, "output": out[:300],
+            })
+
+        async def _api_config_service(request: StarletteRequest) -> JSONResponse:
+            vmid = request.path_params.get("vmid", "")
+            service = request.path_params.get("service", "")
+            action = request.path_params.get("action", "")
+            if not vmid.isdigit():
+                return JSONResponse({"error": f"Invalid VMID: {vmid}"}, status_code=400)
+            if action not in ("start", "stop", "restart", "status"):
+                return JSONResponse({"error": f"Invalid action: {action}"}, status_code=400)
+            if action != "status":
+                auth_err = mgr.check_mutation_auth(request)
+                if auth_err:
+                    return auth_err
+            if not mgr._host_ip:
+                return JSONResponse({"error": "HOST_IP not configured"}, status_code=500)
+            cmd = f"pct exec {vmid} -- systemctl {action} {service}"
+            ok, out = await asyncio.to_thread(
+                heartbeat._ssh_exec, mgr._host_ip, cmd, timeout=30,
+            )
+            return JSONResponse({
+                "success": ok, "vmid": vmid,
+                "service": service, "action": action,
+                "output": out[:500],
+            })
+
+        starlette_app.routes.insert(0, Route(
+            "/api/config/{vmid}/file",
+            _api_config_file, methods=["POST"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/config/{vmid}/sed",
+            _api_config_sed, methods=["POST"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/config/{vmid}/service/{service}/{action}",
+            _api_config_service, methods=["POST", "GET"],
+        ))
+
+        # ── Host-level operations ─────────────────────────────────
+        # Manage iptables and systemd units on the Proxmox host itself.
+
+        async def _api_host_iptables_add(request: StarletteRequest) -> JSONResponse:
+            auth_err = mgr.check_mutation_auth(request)
+            if auth_err:
+                return auth_err
+            if not mgr._host_ip:
+                return JSONResponse({"error": "HOST_IP not configured"}, status_code=500)
+            body = await request.json()
+            rules = body.get("rules", [])
+            if not rules:
+                return JSONResponse({"error": "rules list required"}, status_code=400)
+            results = []
+            for rule in rules:
+                chain = rule.get("chain", "PREROUTING")
+                table = rule.get("table", "nat")
+                protocol = rule.get("protocol", "tcp")
+                dport = rule.get("dport", "")
+                destination = rule.get("destination", "")
+                interface = rule.get("interface", "")
+                if not dport or not destination:
+                    results.append({"error": "dport and destination required", "rule": rule})
+                    continue
+                iface_flag = f"-i {interface} " if interface else ""
+                check_cmd = (
+                    f"iptables -t {table} -C {chain} "
+                    f"{iface_flag}-p {protocol} --dport {dport} "
+                    f"-j DNAT --to-destination {destination} 2>/dev/null"
+                )
+                ok_check, _ = await asyncio.to_thread(
+                    heartbeat._ssh_exec, mgr._host_ip, check_cmd, timeout=10,
+                )
+                if ok_check:
+                    results.append({"dport": dport, "status": "exists"})
+                    continue
+                add_cmd = (
+                    f"iptables -t {table} -A {chain} "
+                    f"{iface_flag}-p {protocol} --dport {dport} "
+                    f"-j DNAT --to-destination {destination}"
+                )
+                ok, out = await asyncio.to_thread(
+                    heartbeat._ssh_exec, mgr._host_ip, add_cmd, timeout=10,
+                )
+                results.append({
+                    "dport": dport, "status": "added" if ok else "failed",
+                    "output": out[:200] if not ok else "",
+                })
+            forward_rules = body.get("forward_rules", [])
+            for fwd in forward_rules:
+                in_iface = fwd.get("in_interface", "")
+                out_iface = fwd.get("out_interface", "")
+                protocol = fwd.get("protocol", "tcp")
+                dport = fwd.get("dport", "")
+                if not all([in_iface, out_iface, dport]):
+                    continue
+                check_cmd = (
+                    f"iptables -C FORWARD -i {in_iface} -o {out_iface} "
+                    f"-p {protocol} --dport {dport} -j ACCEPT 2>/dev/null"
+                )
+                ok_check, _ = await asyncio.to_thread(
+                    heartbeat._ssh_exec, mgr._host_ip, check_cmd, timeout=10,
+                )
+                if not ok_check:
+                    add_cmd = (
+                        f"iptables -A FORWARD -i {in_iface} -o {out_iface} "
+                        f"-p {protocol} --dport {dport} -j ACCEPT"
+                    )
+                    await asyncio.to_thread(
+                        heartbeat._ssh_exec, mgr._host_ip, add_cmd, timeout=10,
+                    )
+            return JSONResponse({"success": True, "results": results})
+
+        async def _api_host_iptables_list(request: StarletteRequest) -> JSONResponse:
+            if not mgr._host_ip:
+                return JSONResponse({"error": "HOST_IP not configured"}, status_code=500)
+            table = request.query_params.get("table", "nat")
+            cmd = f"iptables -t {table} -S 2>/dev/null"
+            ok, out = await asyncio.to_thread(
+                heartbeat._ssh_exec, mgr._host_ip, cmd, timeout=10,
+            )
+            rules = out.strip().split("\n") if ok and out.strip() else []
+            return JSONResponse({"table": table, "rules": rules})
+
+        async def _api_host_systemd(request: StarletteRequest) -> JSONResponse:
+            unit = request.path_params.get("unit", "")
+            action = request.path_params.get("action", "")
+            if action not in ("start", "stop", "restart", "enable", "disable", "status"):
+                return JSONResponse({"error": f"Invalid action: {action}"}, status_code=400)
+            if action != "status":
+                auth_err = mgr.check_mutation_auth(request)
+                if auth_err:
+                    return auth_err
+            if not mgr._host_ip:
+                return JSONResponse({"error": "HOST_IP not configured"}, status_code=500)
+            cmd = f"systemctl {action} {unit}"
+            ok, out = await asyncio.to_thread(
+                heartbeat._ssh_exec, mgr._host_ip, cmd, timeout=30,
+            )
+            return JSONResponse({
+                "success": ok, "unit": unit, "action": action,
+                "output": out[:500],
+            })
+
+        starlette_app.routes.insert(0, Route(
+            "/api/host/iptables",
+            _api_host_iptables_add, methods=["POST"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/host/iptables",
+            _api_host_iptables_list, methods=["GET"],
+        ))
+        starlette_app.routes.insert(0, Route(
+            "/api/host/systemd/{unit}/{action}",
+            _api_host_systemd, methods=["POST", "GET"],
+        ))
+
+        # ── Host file write endpoint ─────────────────────────────
+        # Write files on the Proxmox host filesystem (not inside containers).
+        # Used by deploy_stamp and other host-level config.
+
+        async def _api_host_file(request: StarletteRequest) -> JSONResponse:
+            auth_err = mgr.check_mutation_auth(request)
+            if auth_err:
+                return auth_err
+            if not mgr._host_ip:
+                return JSONResponse({"error": "HOST_IP not configured"}, status_code=500)
+            body = await request.json()
+            path = body.get("path", "")
+            content = body.get("content", "")
+            mode = body.get("mode", "0644")
+            mkdir = body.get("mkdir", False)
+            if not path:
+                return JSONResponse({"error": "path is required"}, status_code=400)
+            cmd_parts = []
+            if mkdir:
+                parent = "/".join(path.split("/")[:-1])
+                cmd_parts.append(f"mkdir -p {parent}")
+            tmp = f"/tmp/_nm_hostfile_{hashlib.md5(path.encode()).hexdigest()[:8]}"
+            cmd_parts.append(f"cat > {tmp} << 'NM_HOSTFILE_EOF'\n{content}\nNM_HOSTFILE_EOF")
+            cmd_parts.append(f"mv {tmp} {path} && chmod {mode} {path}")
+            cmd = " && ".join(cmd_parts)
+            ok, out = await asyncio.to_thread(
+                heartbeat._ssh_exec, mgr._host_ip, cmd, timeout=15,
+            )
+            return JSONResponse({"success": ok, "path": path, "output": out[:300]})
+
+        starlette_app.routes.insert(0, Route(
+            "/api/host/file",
+            _api_host_file, methods=["POST"],
+        ))
+
         # ── Image version endpoint ────────────────────────────────
         # Uses add_api_route() instead of routes.insert() because
         # NiceGUI's page system can interfere with raw starlette Route
@@ -982,6 +1797,7 @@ class ClusterManager(NodeManager):
         node_resolver: Callable[[str], str | None],
         *,
         auth_validator: Callable[[str], bool] | None = None,
+        display_resolver: Callable[[str], tuple[str, int] | None] | None = None,
         host_ip: str = "",
         host_name: str = "",
         management_server: str = "",
@@ -989,11 +1805,11 @@ class ClusterManager(NodeManager):
         mesh_key: str = "",
         state_dir: str = "",
         child_managers: dict[str, str] | None = None,
-        vnc_relay_resolver: Callable[[str], tuple[str, int] | None] | None = None,
     ) -> None:
         super().__init__(
             node_resolver,
             auth_validator=auth_validator,
+            display_resolver=display_resolver,
             host_ip=host_ip,
             host_name=host_name,
             management_server=management_server,
@@ -1003,24 +1819,27 @@ class ClusterManager(NodeManager):
         )
         self._child_managers: dict[str, str] = child_managers or {}
         self._fleet_nodes: dict[str, dict] = {}
-        self._vnc_relay_resolver = vnc_relay_resolver
 
-    def _get_vnc_relay(self, node_id: str) -> tuple[str, int] | None:
-        if self._vnc_relay_resolver:
-            return self._vnc_relay_resolver(node_id)
-        return None
+    def _resolve_display_target(self, node_id: str) -> tuple[str, int] | None:
+        """Resolve browser-reachable (ip, port_offset) for a node's display.
 
-    def _resolve_vnc_ip(self, node_id: str) -> str | None:
-        """Resolve VNC IP from child_managers, then fleet-wide resolver.
+        Display URLs are loaded in the USER's browser via iframe, so they
+        must resolve to IPs the browser can reach (WAN IPs with port
+        forwarding). This is distinct from _node_resolver which resolves
+        management IPs (VPN) for server-side SSH operations.
 
-        CM uses _child_managers (config-provided children).
-        SM (app.py) may have empty _child_managers but resolves all nodes
-        via _node_resolver (env-based fleet-wide lookup).
+        CM checks: own host first, then _child_managers, then _display_resolver.
+        The display_resolver returns (ip, port_offset) where offset > 0
+        indicates the host's displays are relayed through another host.
         """
+        if node_id == self._host_name and self._host_ip:
+            return (self._host_ip, 0)
         ip = self._child_managers.get(node_id)
         if ip:
-            return ip
-        return self._node_resolver(node_id)
+            return (ip, 0)
+        if self._display_resolver is None:
+            return None
+        return self._display_resolver(node_id)
 
     def get_fleet_children(self, node_id: str) -> list[str]:
         """Return child node IDs when node_id matches this CM.
@@ -1093,6 +1912,48 @@ class ClusterManager(NodeManager):
         payload["cluster_nodes"] = fleet_summary
         return payload
 
+    @staticmethod
+    def _http_with_enetunreach_retry(
+        url: str, *, host_label: str, method: str = "GET",
+        body: bytes | None = None, timeout: int = 30,
+    ) -> tuple[Any | None, Exception | None]:
+        """Issue an HTTP request, retrying once on ENETUNREACH.
+
+        The LAN container's ARP entry for the default gateway goes STALE
+        between Phase 1 SSH calls and Phase 2 broadcasts, causing the
+        kernel to return ENETUNREACH before the ARP probe completes.
+        A single 0.5 s retry is sufficient for the ARP refresh.
+
+        Returns (response_body, None) on success or (None, exception) on
+        failure.
+        """
+        log = logging.getLogger("vm_builds.cluster")
+        headers = {"Content-Type": "application/json"} if body else {}
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            req = urllib.request.Request(
+                url, data=body, headers=headers, method=method,
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    raw = resp.read().decode()
+                    if not raw:
+                        return {}, None
+                    return _json.loads(raw), None
+            except (_json.JSONDecodeError, ValueError) as exc:
+                return None, exc
+            except OSError as exc:
+                last_exc = exc
+                if getattr(exc, "errno", None) == _errno.ENETUNREACH and attempt == 0:
+                    log.info("ENETUNREACH to %s, retrying after ARP refresh", host_label)
+                    time.sleep(0.5)
+                    continue
+                break
+            except (urllib.error.HTTPError, urllib.error.URLError) as exc:
+                last_exc = exc
+                break
+        return None, last_exc
+
     def _broadcast_event_to_managers_sync(
         self, event_payload: dict,
     ) -> dict[str, dict]:
@@ -1102,37 +1963,28 @@ class ClusterManager(NodeManager):
         NOT _fleet_nodes (which contains container heartbeats).
         Synchronous — called via asyncio.to_thread from async context.
         """
-        import urllib.request
-        import urllib.error
         log = logging.getLogger("vm_builds.cluster")
         results: dict[str, dict] = {}
         for host_name, host_ip in self._child_managers.items():
-            url = f"http://{host_ip}:{_KIOSK_PORT}/api/manager/events"
+            url = f"http://{host_ip}:{Ports.MANAGER}/api/manager/events"
             body = _json.dumps(event_payload).encode("utf-8")
-            req = urllib.request.Request(
-                url, data=body,
-                headers={"Content-Type": "application/json"},
-                method="POST",
+            resp_body, exc = self._http_with_enetunreach_retry(
+                url, host_label=host_name, method="POST", body=body, timeout=30,
             )
-            try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    resp_body = _json.loads(resp.read().decode())
-                    results[host_name] = {"success": True, "response": resp_body}
-            except (urllib.error.HTTPError, urllib.error.URLError, OSError) as exc:
+            if exc is not None:
                 log.warning("Event broadcast to %s (%s) failed: %s", host_name, host_ip, exc)
                 results[host_name] = {"success": False, "error": str(exc)[:200]}
+            else:
+                results[host_name] = {"success": True, "response": resp_body}
         return results
 
     async def batman_fleet(self, action: str) -> dict:
         """Orchestrate batman across ALL nodes in this cluster.
 
-        Uses a two-phase approach:
-        1. Execute locally on this node's containers + router VM
-        2. Broadcast the batman event to all child Managers (they
-           execute locally on THEIR containers)
+        Phase 1: Broadcast to child Managers (must complete before local
+                 router batman, which can transiently disrupt WAN routing).
+        Phase 2: Execute locally on this node's containers + router VM.
         """
-        import hmac as _hmac
-
         if not self._mesh_key:
             return {"error": "MESH_KEY not configured"}
 
@@ -1143,17 +1995,8 @@ class ClusterManager(NodeManager):
         host = self._host_name or "unknown"
         results: dict[str, dict] = {}
 
-        # Phase 1: Local execution (router VM + this node's containers)
-        cmd = f"/usr/sbin/batman_trigger.sh {action} {token}"
-        ok, out = await asyncio.to_thread(
-            heartbeat._ssh_exec, _ROUTER_VM_LAN_IP, cmd, timeout=30,
-        )
-        results[f"{host}/router-100"] = {"success": ok, "output": out[:300]}
-
-        local_result = await self.batman_local(action, token)
-        results.update(local_result)
-
-        # Phase 2: Broadcast to child Managers
+        # Phase 1: Broadcast to child Managers first (before local
+        # router batman disrupts WAN routing to child nodes)
         event_payload = {
             "type": "batman",
             "action": action,
@@ -1164,6 +2007,16 @@ class ClusterManager(NodeManager):
         ) if self._child_managers else {}
         for nid, r in broadcast_results.items():
             results[nid] = r
+
+        # Phase 2: Local execution (router VM + this node's containers)
+        cmd = f"/usr/sbin/batman_trigger.sh {action} {token}"
+        ok, out = await asyncio.to_thread(
+            heartbeat._ssh_exec, ROUTER_VM_LAN_IP, cmd, timeout=30,
+        )
+        results[f"{host}/router-100"] = {"success": ok, "output": out[:300]}
+
+        local_result = await self.batman_local(action, token)
+        results.update(local_result)
 
         event_bus.emit({
             "type": "batman_event",
@@ -1184,7 +2037,7 @@ class ClusterManager(NodeManager):
 
         # Phase 1: local — router VM on this node
         ok, out = await asyncio.to_thread(
-            heartbeat._ssh_exec, _ROUTER_VM_LAN_IP,
+            heartbeat._ssh_exec, ROUTER_VM_LAN_IP,
             "/usr/sbin/batman_trigger.sh status", timeout=10,
         )
         if ok:
@@ -1214,24 +2067,21 @@ class ClusterManager(NodeManager):
     def _query_child_batman_status_sync(self) -> dict[str, dict]:
         """GET /api/batman/local/status from each child Manager.
 
-        Uses _child_managers (kiosk container IPs on the LAN) to reach
-        child Managers directly. Keys in the response are already
-        host-qualified (e.g. "mesh1/mesh-103").
+        Uses _child_managers (Proxmox host IPs) to reach child Managers.
+        Keys in the response are host-qualified (e.g. "mesh1/mesh-103").
         """
-        import urllib.request
-        import urllib.error
         log = logging.getLogger("vm_builds.cluster")
         results: dict[str, dict] = {}
         for host_name, host_ip in self._child_managers.items():
-            url = f"http://{host_ip}:{_KIOSK_PORT}/api/batman/local/status"
-            req = urllib.request.Request(url, method="GET")
-            try:
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    resp_body = _json.loads(resp.read().decode())
-                    results.update(resp_body)
-            except (urllib.error.HTTPError, urllib.error.URLError, OSError) as exc:
+            url = f"http://{host_ip}:{Ports.MANAGER}/api/batman/local/status"
+            resp_body, exc = self._http_with_enetunreach_retry(
+                url, host_label=host_name, timeout=10,
+            )
+            if exc is not None:
                 log.warning("Batman status query to %s (%s) failed: %s", host_name, host_ip, exc)
                 results[host_name] = {"active": False, "error": str(exc)[:200]}
+            else:
+                results.update(resp_body)
         return results
 
     def register_api(  # noqa: C901
@@ -1381,7 +2231,7 @@ class ClusterManager(NodeManager):
             try:
                 body = await request.json()
             except (ValueError, TypeError):
-                pass
+                body = {}
             target = body.get("target", "all")
             nodes = get_bridge_nodes()
             if target == "sta":
@@ -1438,13 +2288,17 @@ class ClusterManager(NodeManager):
             return JSONResponse({"node_id": node_id, **status})
 
         async def _api_wifi_status_all(request: StarletteRequest) -> JSONResponse:
-            """Aggregate WiFi status across all nodes with mesh/bridge containers."""
+            """Aggregate WiFi status across all nodes with mesh/bridge containers.
+
+            Excludes the router node (home) — its WiFi is in the OpenWrt VM,
+            not a mesh LXC container. Only nodes with CT 103/104 are queried.
+            """
             from scripts.webui.data import get_bridge_nodes, get_mesh_nodes
             targets: dict[str, int] = {}
             for bn in get_bridge_nodes():
                 targets[bn["node_id"]] = _BRIDGE_CT_ID
-            ap_node, sta_nodes = get_mesh_nodes()
-            for n in [ap_node, *sta_nodes]:
+            _ap_node, sta_nodes = get_mesh_nodes()
+            for n in sta_nodes:
                 if n not in targets:
                     targets[n] = _MESH_CT_ID
             results: dict[str, dict] = {}
@@ -1518,7 +2372,614 @@ class ClusterManager(NodeManager):
         ))
 
 
-# ── Module-level singleton for backward compatibility ────────────────
+# ── HTTP-based collectors for SuperManager tier ──────────────────────
+# The SM NEVER SSHes — it collects metrics by querying NM API endpoints
+# over VPN. These replace the SSH-based heartbeat.collect_* functions.
+
+
+def _http_get_json(ip: str, path: str, *, timeout: int = 10) -> dict:
+    """GET a JSON endpoint on a NodeManager, return parsed body or error."""
+    url = f"http://{ip}:{Ports.MANAGER}{path}"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return _json.loads(resp.read().decode())
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as exc:
+        return {"error": str(exc)}
+
+
+def _http_post_json(
+    ip: str, path: str, body: dict | None = None, *,
+    timeout: int = 30, token: str = "",
+) -> dict:
+    """POST to a NodeManager endpoint, return parsed body or error."""
+    url = f"http://{ip}:{Ports.MANAGER}{path}"
+    payload = _json.dumps(body or {}).encode()
+    req = urllib.request.Request(url, data=payload, method="POST")
+    req.add_header("Content-Type", "application/json")
+    if token:
+        req.add_header("x-callhome-token", token)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return _json.loads(resp.read().decode())
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as exc:
+        return {"error": str(exc)}
+
+
+def _http_collect(
+    ip: str, node_id: str, metric_type: str,
+) -> heartbeat.HeartbeatCache:
+    """Shared HTTP collector — GETs cached data from a NM and ensures a
+    remote subscription exists so the NM's poller starts collecting.
+
+    The NM returns a serialized HeartbeatCache: ``{data, success, error,
+    collected_at, ...}``.  We unwrap it so the SM's cache stores only the
+    inner metric payload, matching what local SSH collectors produce.
+    """
+    qs = f"?subscribe_node_id={node_id}" if node_id else ""
+    raw = _http_get_json(ip, f"/api/heartbeat/latest/{metric_type}{qs}")
+    if raw.get("data") is None:
+        return heartbeat.HeartbeatCache(
+            node_id="", metric_type=metric_type, data={},
+            collected_at=str(time.monotonic()),
+            success=False, error=raw.get("error", "Not reachable"),
+        )
+    return heartbeat.HeartbeatCache(
+        node_id="", metric_type=metric_type,
+        data=raw["data"],
+        collected_at=raw.get("collected_at", str(time.monotonic())),
+        success=raw.get("success", True),
+        error=raw.get("error", ""),
+    )
+
+
+def _make_http_collector(
+    metric_type: str,
+) -> Callable[[str, str], heartbeat.HeartbeatCache]:
+    """Factory: create an HTTP collector for a given metric type."""
+    def collector(ip: str, node_id: str = "") -> heartbeat.HeartbeatCache:
+        return _http_collect(ip, node_id, metric_type)
+    collector.__name__ = f"http_collect_{metric_type}"
+    return collector
+
+
+SM_COLLECTOR_MAP: dict[str, Any] = {
+    mt: _make_http_collector(mt) for mt in ("wifi", "bridge", "router", "mesh", "batman")
+}
+
+
+def register_sm_api(starlette_app: Any) -> None:
+    """Register SuperManager-specific API routes.
+
+    The SM is an HTTP-only tier — it NEVER SSHes. This function registers:
+    - Non-SSH endpoints directly (heartbeat subscriptions, host state store)
+    - HTTP proxy endpoints that forward to CM/NM over VPN
+
+    Does NOT call NodeManager.register_api() which contains SSH-using
+    endpoints (guests, batman local, display enter/exit, desktop session).
+    """
+    from starlette.requests import Request as StarletteRequest
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    mgr = get_instance()
+
+    # ── Heartbeat subscription endpoints (no SSH) ─────────────
+
+    async def _api_heartbeat_subscribe(request: StarletteRequest) -> JSONResponse:
+        try:
+            body = await request.json()
+            node_id = body["node_id"]
+            metric_type = body.get("metric_type", "wifi")
+            ttl = float(body.get("ttl", 30))
+        except (KeyError, TypeError, _json.JSONDecodeError, ValueError) as exc:
+            return JSONResponse({"error": f"Invalid payload: {exc}"}, status_code=400)
+        if metric_type not in mgr._collector_map:
+            return JSONResponse(
+                {"error": f"Unknown metric_type: {metric_type}"}, status_code=400,
+            )
+        ip = mgr.resolve_node_ip(node_id)
+        if not ip:
+            return JSONResponse({"error": f"Unknown node: {node_id}"}, status_code=404)
+        sub = mgr.subscription_mgr.subscribe(node_id, metric_type, ttl)
+        return JSONResponse({
+            "subscription_id": sub.subscription_id,
+            "node_id": sub.node_id,
+            "metric_type": sub.metric_type,
+            "expires_at": sub.expires_at.isoformat(timespec="seconds"),
+        })
+
+    async def _api_heartbeat_unsubscribe(request: StarletteRequest) -> JSONResponse:
+        sub_id = request.path_params.get("subscription_id", "")
+        removed = mgr.subscription_mgr.unsubscribe(sub_id)
+        return JSONResponse({"removed": removed})
+
+    async def _api_heartbeat_metrics(request: StarletteRequest) -> JSONResponse:
+        node_id = request.path_params.get("node_id", "")
+        metric_type = request.path_params.get("metric_type", "")
+        cached = mgr.metric_cache.get(node_id, metric_type)
+        if cached is None:
+            return JSONResponse({
+                "status": "no_data",
+                "node_id": node_id,
+                "metric_type": metric_type,
+                "data": {},
+                "success": False,
+                "error": f"No {metric_type} metrics collected yet for {node_id}. "
+                         f"Ensure the Node Manager is running and the metric "
+                         f"subscription is active.",
+            })
+        return JSONResponse({
+            "node_id": cached.node_id,
+            "metric_type": cached.metric_type,
+            "data": cached.data,
+            "collected_at": cached.collected_at,
+            "success": cached.success,
+            "error": cached.error,
+        })
+
+    async def _api_heartbeat_subscriptions(request: StarletteRequest) -> JSONResponse:
+        subs = mgr.subscription_mgr.list_subscriptions()
+        return JSONResponse([{
+            "subscription_id": s.subscription_id,
+            "node_id": s.node_id,
+            "metric_type": s.metric_type,
+            "expires_at": s.expires_at.isoformat(timespec="seconds"),
+        } for s in subs])
+
+    starlette_app.routes.insert(0, Route(
+        "/api/heartbeat/subscribe", _api_heartbeat_subscribe, methods=["POST"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/heartbeat/subscribe/{subscription_id}",
+        _api_heartbeat_unsubscribe, methods=["DELETE"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/heartbeat/{node_id}/{metric_type}",
+        _api_heartbeat_metrics, methods=["GET"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/heartbeat/subscriptions",
+        _api_heartbeat_subscriptions, methods=["GET"],
+    ))
+
+    # ── HTTP proxy endpoints (forward to CM/NM over VPN) ──────
+
+    def _resolve_cm_ip() -> str | None:
+        """Resolve the Cluster Manager IP (always the 'home' node)."""
+        return mgr.resolve_node_ip("home")
+
+    async def _proxy_batman_enable(request: StarletteRequest) -> JSONResponse:
+        cm_ip = _resolve_cm_ip()
+        if not cm_ip:
+            return JSONResponse({"error": "CM IP not resolved"}, status_code=502)
+        token = request.headers.get("x-callhome-token", "")
+        result = await asyncio.to_thread(
+            _http_post_json, cm_ip, "/api/batman/enable", token=token,
+        )
+        code = 502 if "error" in result else 200
+        return JSONResponse(result, status_code=code)
+
+    async def _proxy_batman_disable(request: StarletteRequest) -> JSONResponse:
+        cm_ip = _resolve_cm_ip()
+        if not cm_ip:
+            return JSONResponse({"error": "CM IP not resolved"}, status_code=502)
+        token = request.headers.get("x-callhome-token", "")
+        result = await asyncio.to_thread(
+            _http_post_json, cm_ip, "/api/batman/disable", token=token,
+        )
+        code = 502 if "error" in result else 200
+        return JSONResponse(result, status_code=code)
+
+    async def _proxy_batman_status(request: StarletteRequest) -> JSONResponse:
+        cm_ip = _resolve_cm_ip()
+        if not cm_ip:
+            return JSONResponse({"error": "CM IP not resolved"}, status_code=502)
+        result = await asyncio.to_thread(_http_get_json, cm_ip, "/api/batman/status")
+        code = 502 if "error" in result else 200
+        return JSONResponse(result, status_code=code)
+
+    async def _proxy_bridge_restart_wifi(request: StarletteRequest) -> JSONResponse:
+        cm_ip = _resolve_cm_ip()
+        if not cm_ip:
+            return JSONResponse({"error": "CM IP not resolved"}, status_code=502)
+        body = {}
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            pass
+        token = request.headers.get("x-callhome-token", "")
+        result = await asyncio.to_thread(
+            _http_post_json, cm_ip, "/api/bridge/restart-wifi", body, token=token,
+        )
+        code = 502 if "error" in result else 200
+        return JSONResponse(result, status_code=code)
+
+    async def _proxy_wifi_status(request: StarletteRequest) -> JSONResponse:
+        cm_ip = _resolve_cm_ip()
+        if not cm_ip:
+            return JSONResponse({"error": "CM IP not resolved"}, status_code=502)
+        result = await asyncio.to_thread(_http_get_json, cm_ip, "/api/wifi/status")
+        code = 502 if "error" in result else 200
+        return JSONResponse(result, status_code=code)
+
+    async def _proxy_wifi_status_node(request: StarletteRequest) -> JSONResponse:
+        node = request.path_params.get("node", "")
+        cm_ip = _resolve_cm_ip()
+        if not cm_ip:
+            return JSONResponse({"error": "CM IP not resolved"}, status_code=502)
+        result = await asyncio.to_thread(
+            _http_get_json, cm_ip, f"/api/wifi/status/{node}",
+        )
+        code = 502 if "error" in result else 200
+        return JSONResponse(result, status_code=code)
+
+    async def _proxy_wifi_mode(request: StarletteRequest) -> JSONResponse:
+        node = request.path_params.get("node", "")
+        mode = request.path_params.get("mode", "")
+        cm_ip = _resolve_cm_ip()
+        if not cm_ip:
+            return JSONResponse({"error": "CM IP not resolved"}, status_code=502)
+        token = request.headers.get("x-callhome-token", "")
+        result = await asyncio.to_thread(
+            _http_post_json, cm_ip, f"/api/wifi/mode/{node}/{mode}", token=token,
+        )
+        code = 502 if "error" in result else 200
+        return JSONResponse(result, status_code=code)
+
+    async def _proxy_guests(request: StarletteRequest) -> JSONResponse:
+        """Proxy guest list to a specific NM. Requires node_id query param."""
+        node_id = request.query_params.get("node_id", "")
+        if not node_id:
+            return JSONResponse({"error": "node_id query param required"}, status_code=400)
+        nm_ip = mgr.resolve_node_ip(node_id)
+        if not nm_ip:
+            return JSONResponse({"error": f"Unknown node: {node_id}"}, status_code=404)
+        result = await asyncio.to_thread(_http_get_json, nm_ip, "/api/guests")
+        code = 502 if "error" in result else 200
+        return JSONResponse(result, status_code=code)
+
+    async def _proxy_guest_action(request: StarletteRequest) -> JSONResponse:
+        node_id = request.query_params.get("node_id", "")
+        vmid = request.path_params.get("vmid", "")
+        action = request.path_params.get("action", "")
+        if not node_id:
+            return JSONResponse({"error": "node_id query param required"}, status_code=400)
+        nm_ip = mgr.resolve_node_ip(node_id)
+        if not nm_ip:
+            return JSONResponse({"error": f"Unknown node: {node_id}"}, status_code=404)
+        token = request.headers.get("x-callhome-token", "")
+        result = await asyncio.to_thread(
+            _http_post_json, nm_ip, f"/api/guests/{vmid}/{action}", token=token,
+        )
+        code = 502 if "error" in result else 200
+        return JSONResponse(result, status_code=code)
+
+    async def _proxy_display_enter(request: StarletteRequest) -> JSONResponse:
+        app_id = request.path_params.get("app_id", "")
+        node_id = request.query_params.get("node_id", "")
+        if not node_id:
+            return JSONResponse({"error": "node_id query param required"}, status_code=400)
+        nm_ip = mgr.resolve_node_ip(node_id)
+        if not nm_ip:
+            return JSONResponse({"error": f"Unknown node: {node_id}"}, status_code=404)
+        token = request.headers.get("x-callhome-token", "")
+        result = await asyncio.to_thread(
+            _http_post_json, nm_ip, f"/api/display/{app_id}/enter", token=token,
+        )
+        code = 502 if "error" in result else 200
+        return JSONResponse(result, status_code=code)
+
+    async def _proxy_display_exit(request: StarletteRequest) -> JSONResponse:
+        app_id = request.path_params.get("app_id", "")
+        node_id = request.query_params.get("node_id", "")
+        if not node_id:
+            return JSONResponse({"error": "node_id query param required"}, status_code=400)
+        nm_ip = mgr.resolve_node_ip(node_id)
+        if not nm_ip:
+            return JSONResponse({"error": f"Unknown node: {node_id}"}, status_code=404)
+        token = request.headers.get("x-callhome-token", "")
+        result = await asyncio.to_thread(
+            _http_post_json, nm_ip, f"/api/display/{app_id}/exit", token=token,
+        )
+        code = 502 if "error" in result else 200
+        return JSONResponse(result, status_code=code)
+
+    async def _proxy_display_status(request: StarletteRequest) -> JSONResponse:
+        app_id = request.path_params.get("app_id", "")
+        node_id = request.query_params.get("node_id", "")
+        if not node_id:
+            return JSONResponse({"error": "node_id query param required"}, status_code=400)
+        nm_ip = mgr.resolve_node_ip(node_id)
+        if not nm_ip:
+            return JSONResponse({"error": f"Unknown node: {node_id}"}, status_code=404)
+        result = await asyncio.to_thread(
+            _http_get_json, nm_ip, f"/api/display/{app_id}/status",
+        )
+        code = 502 if "error" in result else 200
+        return JSONResponse(result, status_code=code)
+
+    async def _proxy_display_list(request: StarletteRequest) -> JSONResponse:
+        node_id = request.query_params.get("node_id", "")
+        if not node_id:
+            return JSONResponse({"error": "node_id query param required"}, status_code=400)
+        nm_ip = mgr.resolve_node_ip(node_id)
+        if not nm_ip:
+            return JSONResponse({"error": f"Unknown node: {node_id}"}, status_code=404)
+        result = await asyncio.to_thread(_http_get_json, nm_ip, "/api/display/list")
+        code = 502 if "error" in result else 200
+        return JSONResponse(result, status_code=code)
+
+    async def _proxy_desktop_session_switch(request: StarletteRequest) -> JSONResponse:
+        session = request.path_params.get("session", "")
+        node_id = request.query_params.get("node_id", "")
+        if not node_id:
+            return JSONResponse({"error": "node_id query param required"}, status_code=400)
+        nm_ip = mgr.resolve_node_ip(node_id)
+        if not nm_ip:
+            return JSONResponse({"error": f"Unknown node: {node_id}"}, status_code=404)
+        token = request.headers.get("x-callhome-token", "")
+        result = await asyncio.to_thread(
+            _http_post_json, nm_ip, f"/api/desktop/session/{session}", token=token,
+        )
+        code = 200 if result.get("success") else 400
+        return JSONResponse(result, status_code=code)
+
+    async def _proxy_desktop_session_status(request: StarletteRequest) -> JSONResponse:
+        node_id = request.query_params.get("node_id", "")
+        if not node_id:
+            return JSONResponse({"error": "node_id query param required"}, status_code=400)
+        nm_ip = mgr.resolve_node_ip(node_id)
+        if not nm_ip:
+            return JSONResponse({"error": f"Unknown node: {node_id}"}, status_code=404)
+        result = await asyncio.to_thread(
+            _http_get_json, nm_ip, "/api/desktop/session",
+        )
+        code = 502 if "error" in result else 200
+        return JSONResponse(result, status_code=code)
+
+    async def _proxy_nm_config(request: StarletteRequest) -> JSONResponse:
+        """Proxy NM config query. Requires node_id query param."""
+        node_id = request.query_params.get("node_id", "")
+        if not node_id:
+            return JSONResponse({"error": "node_id query param required"}, status_code=400)
+        nm_ip = mgr.resolve_node_ip(node_id)
+        if not nm_ip:
+            return JSONResponse({"error": f"Unknown node: {node_id}"}, status_code=404)
+        result = await asyncio.to_thread(_http_get_json, nm_ip, "/api/config/self")
+        code = 502 if "error" in result else 200
+        return JSONResponse(result, status_code=code)
+
+    starlette_app.routes.insert(0, Route(
+        "/api/config/self", _proxy_nm_config, methods=["GET"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/batman/enable", _proxy_batman_enable, methods=["POST"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/batman/disable", _proxy_batman_disable, methods=["POST"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/batman/status", _proxy_batman_status, methods=["GET"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/bridge/restart-wifi", _proxy_bridge_restart_wifi, methods=["POST"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/wifi/status", _proxy_wifi_status, methods=["GET"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/wifi/status/{node}", _proxy_wifi_status_node, methods=["GET"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/wifi/mode/{node}/{mode}", _proxy_wifi_mode, methods=["POST"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/guests", _proxy_guests, methods=["GET"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/guests/{vmid}/{action}", _proxy_guest_action, methods=["POST"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/display/{app_id}/enter", _proxy_display_enter, methods=["POST"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/display/{app_id}/exit", _proxy_display_exit, methods=["POST"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/display/{app_id}/status", _proxy_display_status, methods=["GET"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/display/list", _proxy_display_list, methods=["GET"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/desktop/session/{session}",
+        _proxy_desktop_session_switch, methods=["POST"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/desktop/session", _proxy_desktop_session_status, methods=["GET"],
+    ))
+
+    # ── Host state endpoints (data-only, no SSH) ──────────────
+    # These are needed on the SM tier for nodes.json-backed state.
+
+    def _no_store() -> JSONResponse:
+        return JSONResponse(
+            {"error": "state store not configured"}, status_code=501,
+        )
+
+    def _bad_json() -> JSONResponse:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    def _require_store() -> HostStateStore | None:
+        return mgr.host_state_store
+
+    async def _parse_body(request: StarletteRequest) -> dict | None:
+        try:
+            return await request.json()
+        except (ValueError, TypeError, _json.JSONDecodeError):
+            return None
+
+    async def _api_host_state_get(request: StarletteRequest) -> JSONResponse:
+        host_id = request.path_params["id"]
+        store = _require_store()
+        if not store:
+            return _no_store()
+        state = store.get(host_id)
+        if state is None:
+            return JSONResponse({"error": "unknown host"}, status_code=404)
+        return JSONResponse(state.to_dict())
+
+    async def _api_host_hardware_post(request: StarletteRequest) -> JSONResponse:
+        host_id = request.path_params["id"]
+        store = _require_store()
+        if not store:
+            return _no_store()
+        body = await _parse_body(request)
+        if body is None:
+            return _bad_json()
+        store.get_or_create(host_id, body.get("ip", ""))
+        result = store.update_hardware(host_id, body)
+        if result is None:
+            return JSONResponse({"error": "unknown host"}, status_code=404)
+        return JSONResponse(result.to_dict(), status_code=200)
+
+    async def _api_host_bridges_post(request: StarletteRequest) -> JSONResponse:
+        host_id = request.path_params["id"]
+        store = _require_store()
+        if not store:
+            return _no_store()
+        body = await _parse_body(request)
+        if body is None:
+            return _bad_json()
+        store.get_or_create(host_id, body.get("ip", ""))
+        result = store.update_bridges(host_id, body)
+        if result is None:
+            return JSONResponse({"error": "unknown host"}, status_code=404)
+        return JSONResponse(result.to_dict(), status_code=200)
+
+    async def _api_host_container_post(request: StarletteRequest) -> JSONResponse:
+        host_id = request.path_params["id"]
+        vmid_str = request.path_params["vmid"]
+        store = _require_store()
+        if not store:
+            return _no_store()
+        try:
+            vmid = int(vmid_str)
+        except ValueError:
+            return JSONResponse({"error": f"Invalid VMID: {vmid_str}"}, status_code=400)
+        body = await _parse_body(request)
+        if body is None:
+            return _bad_json()
+        result = store.register_container(host_id, vmid, body)
+        if result is None:
+            return JSONResponse({"error": "unknown host"}, status_code=404)
+        return JSONResponse(result.to_dict(), status_code=201)
+
+    async def _api_host_container_delete(request: StarletteRequest) -> JSONResponse:
+        host_id = request.path_params["id"]
+        vmid_str = request.path_params["vmid"]
+        store = _require_store()
+        if not store:
+            return _no_store()
+        try:
+            vmid = int(vmid_str)
+        except ValueError:
+            return JSONResponse({"error": f"Invalid VMID: {vmid_str}"}, status_code=400)
+        result = store.deregister_container(host_id, vmid)
+        if result is None:
+            return JSONResponse({"error": "unknown host"}, status_code=404)
+        return JSONResponse({"status": "ok"}, status_code=200)
+
+    async def _api_host_phy_patch(request: StarletteRequest) -> JSONResponse:
+        host_id = request.path_params["id"]
+        phy_name = request.path_params["name"]
+        store = _require_store()
+        if not store:
+            return _no_store()
+        body = await _parse_body(request)
+        if body is None:
+            return _bad_json()
+        namespace = body.get("namespace")
+        if not namespace:
+            return JSONResponse({"error": "namespace required"}, status_code=400)
+        result = store.update_phy_namespace(host_id, phy_name, namespace)
+        if result is None:
+            return JSONResponse({"error": "unknown host or PHY"}, status_code=404)
+        return JSONResponse(result.to_dict(), status_code=200)
+
+    starlette_app.routes.insert(0, Route(
+        "/api/host/{id}/state", _api_host_state_get, methods=["GET"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/host/{id}/hardware", _api_host_hardware_post, methods=["POST"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/host/{id}/bridges", _api_host_bridges_post, methods=["POST"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/host/{id}/containers/{vmid}",
+        _api_host_container_post, methods=["POST"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/host/{id}/containers/{vmid}",
+        _api_host_container_delete, methods=["DELETE"],
+    ))
+    starlette_app.routes.insert(0, Route(
+        "/api/host/{id}/hardware/phy/{name}",
+        _api_host_phy_patch, methods=["PATCH"],
+    ))
+
+    # ── Image version endpoint (aggregates from NMs via HTTP) ─
+    async def _api_image_versions() -> JSONResponse:
+        state = None
+        if mgr.host_state_store and mgr._host_name:
+            state = mgr.host_state_store.get(mgr._host_name)
+        if state is None:
+            state = mgr.get_local_host_state()
+        if state is None:
+            return JSONResponse({"versions": {}})
+        return JSONResponse({"versions": state.image_versions()})
+
+    starlette_app.add_api_route(
+        "/api/images/versions", _api_image_versions, methods=["GET"],
+        include_in_schema=False,
+    )
+
+
+# ── Metric route registration ─────────────────────────────────────────
+
+
+def _register_default_metric_routes(mgr: BaseManager) -> None:
+    """Register routing handlers from fleet topology.
+
+    Three reusable handler types cover all patterns:
+      LocalContainerRoute  — NM host has a named container to collect from
+      HostedServiceRoute   — service name remaps to the host running it
+      DirectRoute          — identity (automatic fallback, no registration)
+    """
+    from scripts.webui.data import get_bridge_nodes, get_mesh_nodes, get_router_node
+
+    bridge_route = LocalContainerRoute("openwrt-bridge")
+    for node in get_bridge_nodes():
+        nid = node["node_id"]
+        mgr.register_metric_route(nid, "bridge", bridge_route)
+        mgr.register_metric_route(nid, "wifi", bridge_route)
+
+    mesh_ap, mesh_stas = get_mesh_nodes()
+
+    router_node = get_router_node()
+    router_route = HostedServiceRoute(mesh_ap)
+    mgr.register_metric_route(router_node, "router", router_route)
+    mgr.register_metric_route(router_node, "wifi", router_route)
+
+    mgr.register_metric_route(mesh_ap, "mesh", LocalContainerRoute("openwrt"))
+    mesh_sta_route = LocalContainerRoute("openwrt-mesh")
+    for sta in mesh_stas:
+        mgr.register_metric_route(sta, "mesh", mesh_sta_route)
+
+
+# ── Module-level singleton ────────────────────────────────────────────
 # app.py and kiosk_server.py call init() / register_api() / start_poller()
 # at module level. These thin wrappers delegate to the current instance.
 
@@ -1530,12 +2991,24 @@ def init(
     auth_validator: Callable[[str], bool] | None = None,
     config: dict[str, str] | None = None,
     manager_class: type | None = None,
-    vnc_relay_resolver: Callable[[str], tuple[str, int] | None] | None = None,
+    *,
+    is_supermanager: bool = False,
+    display_resolver: Callable[[str], tuple[str, int] | None] | None = None,
 ) -> BaseManager:
     """Create the module-level manager singleton.
 
     The config dict is unpacked into explicit keyword arguments. Callers
     (app.py, kiosk_server.py) must provide all values their tier requires.
+
+    Args:
+        is_supermanager: When True, use HTTP-based collectors instead of
+            SSH and skip display handler registration. The SM tier NEVER
+            SSHes — all operations proxy through downstream managers.
+        display_resolver: Resolves node_id to browser-reachable
+            (ip, port_offset) for KasmVNC iframe URLs. Separate from
+            node_resolver because display traffic goes through the user's
+            browser (needs WAN IP) while management traffic goes
+            server-side (can use VPN IP). Required for SuperManager.
     """
     global _instance
     cls = manager_class or ClusterManager
@@ -1552,6 +3025,7 @@ def init(
 
     kwargs: dict = dict(
         auth_validator=auth_validator,
+        display_resolver=display_resolver,
         host_ip=cfg.get("HOST_IP", ""),
         host_name=cfg.get("HOST_NAME", ""),
         management_server=cfg.get("MANAGEMENT_SERVER", ""),
@@ -1561,16 +3035,20 @@ def init(
     )
     if issubclass(cls, ClusterManager):
         kwargs["child_managers"] = child_mgrs
-        if vnc_relay_resolver:
-            kwargs["vnc_relay_resolver"] = vnc_relay_resolver
 
     _instance = cls(node_resolver, **kwargs)
 
-    from scripts.webui.data import DISPLAY_APP_CONFIGS
-    for app_config in DISPLAY_APP_CONFIGS.values():
-        handler = build_handler(app_config, _instance._display_ssh)
-        _instance.display_transfer.register(handler)
+    if is_supermanager:
+        _instance._collector_map = SM_COLLECTOR_MAP
+        _instance._display_ssh = None  # type: ignore[assignment]
+        _instance._sm_tier = True
+    else:
+        from scripts.webui.data import DISPLAY_APP_CONFIGS
+        for app_config in DISPLAY_APP_CONFIGS.values():
+            handler = build_handler(app_config, _instance._display_ssh)
+            _instance.display_transfer.register(handler)
 
+    _register_default_metric_routes(_instance)
     return _instance
 
 

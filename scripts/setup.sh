@@ -24,6 +24,29 @@ if ! command -v sshpass &>/dev/null; then
     echo "  Install it with: sudo apt install sshpass"
 fi
 
+if ! command -v wg &>/dev/null; then
+    echo ""
+    echo "Installing wireguard-tools for controller VPN..."
+    sudo apt-get install -y -qq wireguard-tools
+fi
+
+SUDOERS_FILE="/etc/sudoers.d/vm-builds-wireguard"
+if [ ! -f "$SUDOERS_FILE" ]; then
+    echo ""
+    echo "Setting up passwordless sudo for WireGuard operations..."
+    CURRENT_USER=$(whoami)
+    sudo tee "$SUDOERS_FILE" > /dev/null << EOF
+$CURRENT_USER ALL=(root) NOPASSWD: /usr/bin/wg-quick *, /usr/bin/wg *, /usr/bin/install *, /usr/bin/rm /etc/wireguard/*
+EOF
+    sudo chmod 440 "$SUDOERS_FILE"
+    echo "  Sudoers rule installed at $SUDOERS_FILE"
+fi
+
+if [ ! -d /etc/wireguard ]; then
+    sudo mkdir -p /etc/wireguard
+    sudo chmod 700 /etc/wireguard
+fi
+
 if [ ! -f .env ]; then
     echo ""
     echo "WARNING: No .env file found."

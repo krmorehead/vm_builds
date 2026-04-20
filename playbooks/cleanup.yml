@@ -11,9 +11,13 @@
 #   1. Selective LAN cleanup       — runs by default
 #   2. Selective service cleanup   — runs by default
 #   3. Test control plane teardown — runs by default (env-gated)
-#   4. Per-feature rollback plays  — tagged [never], opt-in
-#   5. Full host restore           — tagged [never], opt-in via --tags
-#   6. Production LAN cleanup      — tagged [never], opt-in via --tags
+#   4. Per-feature rollback plays  — gated by `rollback` extra-var
+#   5. Full host restore           — gated by `rollback` extra-var
+#   6. Production LAN cleanup      — gated by `rollback` extra-var
+#
+# Rollback/restore invocation:
+#   ansible-playbook cleanup.yml --tags <feature>-rollback -e rollback=true
+#   ansible-playbook cleanup.yml --tags restore -e rollback=true
 # ════════════════════════════════════════════════════════════════════
 
 # ── Play 1: Selective LAN satellite cleanup ──────────────────────
@@ -49,7 +53,6 @@
     backup_dir: /var/lib/ansible-backup
     project_vm_ids:
       - "{{ openwrt_vm_id }}"
-      - "{{ desktop_vm_id }}"
       - "{{ gaming_vm_id }}"
       - "{{ gaming_vm_id | int + 1 }}"
       - "{{ gaming_vm_id | int + 2 }}"
@@ -67,6 +70,7 @@
       - "{{ moonlight_ct_id }}"
       - "{{ kiosk_ct_id }}"
       - "{{ gaming_ct_id }}"
+      - "{{ desktop_ct_id }}"
   tasks:
     - name: Probe host connectivity
       ansible.builtin.ping:
@@ -237,36 +241,44 @@
         - /tmp/desktop_tmp_key
         - /tmp/desktop_tmp_key.pub
 
+    # ── Stale pmxcfs node directory cleanup ────────────────────────
+    # When a Proxmox host's hostname changes, the old node directory
+    # persists under /etc/pve/nodes/<old_name>/ with stale LXC/VM
+    # configs. These cause "CT already exists on node <old_name>"
+    # errors when creating containers with the same VMID.
+
+    - name: Clean stale LXC configs from non-local pmxcfs node dirs
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          local_node=$(hostname)
+          for nodedir in /etc/pve/nodes/*/; do
+            node=$(basename "$nodedir")
+            [ "$node" = "$local_node" ] && continue
+            for conf in "$nodedir"lxc/*.conf "$nodedir"qemu-server/*.conf; do
+              [ -f "$conf" ] && rm -v "$conf"
+            done
+          done
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
     # ── Manager API proxy cleanup ────────────────────────────────────
 
-    - name: Stop and remove Manager API socat proxy (router node)
+    - name: Stop and remove all kiosk proxy services (current + legacy)
       ansible.builtin.shell:
         cmd: |
-          systemctl stop manager-api-proxy 2>/dev/null || true
-          systemctl disable manager-api-proxy 2>/dev/null || true
-          rm -f /etc/systemd/system/manager-api-proxy.service
-          systemctl daemon-reload 2>/dev/null || true
-          pkill -f 'socat.*TCP-LISTEN:9001' || true
-        executable: /bin/bash
-      changed_when: true
-      failed_when: false
-
-    - name: Stop and remove VNC WebSocket socat proxy (LAN hosts)
-      ansible.builtin.shell:
-        cmd: |
-          systemctl stop kiosk-vnc-proxy 2>/dev/null || true
-          systemctl disable kiosk-vnc-proxy 2>/dev/null || true
-          rm -f /etc/systemd/system/kiosk-vnc-proxy.service
-          systemctl daemon-reload 2>/dev/null || true
-          pkill -f 'socat.*TCP-LISTEN:{{ kiosk_vnc_ws_port }}' || true
-        executable: /bin/bash
-      changed_when: true
-      failed_when: false
-
-    - name: Stop and remove VNC relay units for LAN hosts (router node)
-      ansible.builtin.shell:
-        cmd: |
-          for unit in /etc/systemd/system/kiosk-vnc-relay-*.service; do
+          for svc in kiosk-manager-proxy kiosk-display-proxy \
+                     manager-api-proxy kiosk-vnc-proxy; do
+            systemctl stop "$svc" 2>/dev/null || true
+            systemctl disable "$svc" 2>/dev/null || true
+            rm -f "/etc/systemd/system/${svc}.service"
+          done
+          for unit in /etc/systemd/system/*-display-proxy.service \
+                      /etc/systemd/system/*-vnc-proxy.service \
+                      /etc/systemd/system/kiosk-display-relay-*.service \
+                      /etc/systemd/system/kiosk-vnc-relay-*.service \
+                      /etc/systemd/system/nm-relay-*.service; do
             [ -f "$unit" ] || continue
             name=$(basename "$unit")
             systemctl stop "$name" 2>/dev/null || true
@@ -274,83 +286,83 @@
             rm -f "$unit"
           done
           systemctl daemon-reload 2>/dev/null || true
-          pkill -f 'socat.*TCP-LISTEN:1608' || true
+          pkill -f 'socat.*TCP-LISTEN:9001' || true
+          pkill -f 'socat.*TCP-LISTEN:{{ kiosk_ws_port }}' || true
         executable: /bin/bash
       changed_when: true
       failed_when: false
 
-    - name: Remove kiosk VNC DNAT rule (WAN hosts)
+    - name: Stop and remove Desktop display proxy and legacy VNC bridge
+      ansible.builtin.shell:
+        cmd: |
+          for svc in desktop-display-proxy desktop-vnc-ws; do
+            systemctl stop "$svc" 2>/dev/null || true
+            systemctl disable "$svc" 2>/dev/null || true
+            rm -f "/etc/systemd/system/${svc}.service"
+          done
+          systemctl daemon-reload 2>/dev/null || true
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Remove Desktop display DNAT rule
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          iptables -t nat -S PREROUTING 2>/dev/null | grep '{{ kiosk_vnc_ws_port }}' | while read -r rule; do
+          iptables -t nat -S PREROUTING 2>/dev/null | grep '{{ desktop_ws_port }}' | while read -r rule; do
             iptables -t nat $(echo "$rule" | sed 's/^-A/-D/') 2>/dev/null || true
           done
         executable: /bin/bash
       changed_when: true
       failed_when: false
 
-    - name: Remove kiosk VNC FORWARD rule (WAN hosts)
+    - name: Remove Desktop display FORWARD rule
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          iptables -S FORWARD 2>/dev/null | grep '{{ kiosk_vnc_ws_port }}' | while read -r rule; do
+          iptables -S FORWARD 2>/dev/null | grep '{{ desktop_ws_port }}' | while read -r rule; do
             iptables $(echo "$rule" | sed 's/^-A/-D/') 2>/dev/null || true
           done
         executable: /bin/bash
       changed_when: true
       failed_when: false
 
-    - name: Stop and remove Desktop VNC WebSocket bridge
+    - name: Stop and remove Kodi display proxy
       ansible.builtin.shell:
         cmd: |
-          systemctl stop desktop-vnc-ws 2>/dev/null || true
-          systemctl disable desktop-vnc-ws 2>/dev/null || true
-          rm -f /etc/systemd/system/desktop-vnc-ws.service
+          for svc in kodi-display-proxy kodi-vnc-proxy; do
+            systemctl stop "$svc" 2>/dev/null || true
+            systemctl disable "$svc" 2>/dev/null || true
+            rm -f "/etc/systemd/system/${svc}.service"
+          done
           systemctl daemon-reload 2>/dev/null || true
         executable: /bin/bash
       changed_when: true
       failed_when: false
 
-    - name: Remove Desktop VNC DNAT rule
+    - name: Stop and remove Moonlight display proxy
       ansible.builtin.shell:
         cmd: |
-          set -o pipefail
-          iptables -t nat -S PREROUTING 2>/dev/null | grep '{{ desktop_vnc_ws_port }}' | while read -r rule; do
-            iptables -t nat $(echo "$rule" | sed 's/^-A/-D/') 2>/dev/null || true
+          for svc in moonlight-display-proxy moonlight-vnc-proxy; do
+            systemctl stop "$svc" 2>/dev/null || true
+            systemctl disable "$svc" 2>/dev/null || true
+            rm -f "/etc/systemd/system/${svc}.service"
           done
-        executable: /bin/bash
-      changed_when: true
-      failed_when: false
-
-    - name: Remove Desktop VNC FORWARD rule
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          iptables -S FORWARD 2>/dev/null | grep '{{ desktop_vnc_ws_port }}' | while read -r rule; do
-            iptables $(echo "$rule" | sed 's/^-A/-D/') 2>/dev/null || true
-          done
-        executable: /bin/bash
-      changed_when: true
-      failed_when: false
-
-    - name: Stop and remove Kodi VNC WebSocket proxy
-      ansible.builtin.shell:
-        cmd: |
-          systemctl stop kodi-vnc-proxy 2>/dev/null || true
-          systemctl disable kodi-vnc-proxy 2>/dev/null || true
-          rm -f /etc/systemd/system/kodi-vnc-proxy.service
           systemctl daemon-reload 2>/dev/null || true
         executable: /bin/bash
       changed_when: true
       failed_when: false
 
-    - name: Stop and remove Moonlight VNC WebSocket proxy
+    - name: Stop and remove LAN display relay services
       ansible.builtin.shell:
         cmd: |
-          systemctl stop moonlight-vnc-proxy 2>/dev/null || true
-          systemctl disable moonlight-vnc-proxy 2>/dev/null || true
-          rm -f /etc/systemd/system/moonlight-vnc-proxy.service
+          for unit in /etc/systemd/system/*-*-relay.service; do
+            [ -f "$unit" ] || continue
+            name=$(basename "$unit" .service)
+            systemctl stop "$name" 2>/dev/null || true
+            systemctl disable "$name" 2>/dev/null || true
+            rm -f "$unit"
+          done
           systemctl daemon-reload 2>/dev/null || true
         executable: /bin/bash
       changed_when: true
@@ -384,6 +396,13 @@
         cmd: |
           ip link set vmbr_ct down 2>/dev/null || true
           ip link delete vmbr_ct 2>/dev/null || true
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Remove VPN subnet route
+      ansible.builtin.shell:
+        cmd: ip route del {{ vpn_subnet }} 2>/dev/null || true
         executable: /bin/bash
       changed_when: true
       failed_when: false
@@ -468,6 +487,20 @@
       changed_when: true
 
     # ── Controller state ─────────────────────────────────────────
+
+    - name: Tear down controller VPN tunnel
+      ansible.builtin.command:
+        cmd: sudo wg-quick down wg0
+      failed_when: false
+      changed_when: true
+      delegate_to: localhost
+
+    - name: Remove controller wg0 config
+      ansible.builtin.command:
+        cmd: sudo rm -f /etc/wireguard/wg0.conf
+      changed_when: true
+      failed_when: false
+      delegate_to: localhost
 
     - name: Remove local state file from controller
       ansible.builtin.file:
@@ -579,10 +612,14 @@
 # Per-feature rollback plays (opt-in via --tags <feature>-rollback)
 # ════════════════════════════════════════════════════════════════════
 
-# ── Per-feature rollback: reconstruct openwrt dynamic group ──────
-# This play discovers the running VM's LAN IP and registers the
-# openwrt host so rollback plays can target it.  Tagged with ALL
-# rollback tags so it runs before any rollback play.
+# ── Per-feature rollback plays ────────────────────────────────────
+# Rollback plays are destructive (remove packages, destroy containers,
+# undo config). They are gated by `rollback: true` extra-var so they
+# NEVER run during default cleanup. Invoke via:
+#   ansible-playbook cleanup.yml --tags openwrt-security-rollback -e rollback=true
+#
+# The reconstruction play discovers the running VM's LAN IP and
+# registers the openwrt host so rollback plays can target it.
 
 - name: Reconstruct openwrt dynamic group for rollback
   hosts: router_nodes
@@ -594,8 +631,11 @@
     - openwrt-mesh-rollback
     - openwrt-pihole-dns-rollback
     - openwrt-syslog-rollback
-    - never
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Include group reconstruction
       ansible.builtin.include_tasks: ../tasks/reconstruct_openwrt_group.yml
 
@@ -604,8 +644,12 @@
 - name: Rollback security hardening
   hosts: openwrt
   gather_facts: false
-  tags: [openwrt-security-rollback, never]
+  tags: [openwrt-security-rollback]
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Remove banIP package
       ansible.builtin.raw: opkg remove banip 2>/dev/null; true
       changed_when: true
@@ -639,8 +683,12 @@
 - name: Rollback VLAN configuration
   hosts: openwrt
   gather_facts: false
-  tags: [openwrt-vlans-rollback, never]
+  tags: [openwrt-vlans-rollback]
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Delete VLAN interfaces and firewall zones
       ansible.builtin.raw: |
         uci delete network.vlan_iot 2>/dev/null
@@ -666,8 +714,12 @@
 - name: Rollback encrypted DNS
   hosts: openwrt
   gather_facts: false
-  tags: [openwrt-dns-rollback, never]
+  tags: [openwrt-dns-rollback]
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Remove https-dns-proxy and revert dnsmasq
       ansible.builtin.raw: |
         opkg remove https-dns-proxy 2>/dev/null
@@ -687,8 +739,12 @@
 - name: Rollback mesh enhancements
   hosts: openwrt
   gather_facts: false
-  tags: [openwrt-mesh-rollback, never]
+  tags: [openwrt-mesh-rollback]
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Remove Dawn and mesh monitoring
       ansible.builtin.raw: |
         opkg remove dawn 2>/dev/null
@@ -701,8 +757,12 @@
 - name: Rollback Pi-hole container
   hosts: dns_nodes
   gather_facts: false
-  tags: [pihole-rollback, never]
+  tags: [pihole-rollback]
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Stop and destroy Pi-hole container
       ansible.builtin.shell:
         cmd: |
@@ -717,8 +777,12 @@
 - name: Rollback Pi-hole DNS forwarding
   hosts: openwrt
   gather_facts: false
-  tags: [openwrt-pihole-dns-rollback, never]
+  tags: [openwrt-pihole-dns-rollback]
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Remove Pi-hole from dnsmasq and keep https-dns-proxy only
       ansible.builtin.raw: |
         while uci -q delete dhcp.@dnsmasq[0].server 2>/dev/null; do true; done
@@ -732,16 +796,24 @@
 - name: Reconstruct wireguard dynamic group for rollback
   hosts: vpn_nodes
   gather_facts: false
-  tags: [wireguard-rollback, never]
+  tags: [wireguard-rollback]
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Include group reconstruction
       ansible.builtin.include_tasks: ../tasks/reconstruct_wireguard_group.yml
 
 - name: Rollback WireGuard VPN
   hosts: vpn_nodes
   gather_facts: false
-  tags: [wireguard-rollback, never]
+  tags: [wireguard-rollback]
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Stop and destroy WireGuard container
       ansible.builtin.shell:
         cmd: |
@@ -777,8 +849,12 @@
 - name: Rollback rsyslog container
   hosts: monitoring_nodes
   gather_facts: false
-  tags: [rsyslog-rollback, never]
+  tags: [rsyslog-rollback]
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Stop and destroy rsyslog container
       ansible.builtin.shell:
         cmd: |
@@ -793,8 +869,12 @@
 - name: Rollback Netdata container
   hosts: monitoring_nodes
   gather_facts: false
-  tags: [netdata-rollback, never]
+  tags: [netdata-rollback]
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Stop and destroy Netdata container
       ansible.builtin.shell:
         cmd: |
@@ -809,8 +889,12 @@
 - name: Rollback OpenWrt syslog forwarding
   hosts: openwrt
   gather_facts: false
-  tags: [openwrt-syslog-rollback, never]
+  tags: [openwrt-syslog-rollback]
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Remove syslog remote settings
       ansible.builtin.raw: |
         uci delete system.@system[0].log_ip 2>/dev/null
@@ -825,8 +909,12 @@
 - name: Rollback mesh WiFi LXC
   hosts: wifi_nodes:!router_nodes
   gather_facts: false
-  tags: [mesh-wifi-rollback, never]
+  tags: [mesh-wifi-rollback]
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Stop and destroy mesh WiFi container
       ansible.builtin.shell:
         cmd: |
@@ -862,8 +950,12 @@
 - name: Rollback Home Assistant container
   hosts: service_nodes
   gather_facts: false
-  tags: [homeassistant-rollback, never]
+  tags: [homeassistant-rollback]
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Stop and destroy Home Assistant container
       ansible.builtin.shell:
         cmd: |
@@ -878,8 +970,12 @@
 - name: Rollback Jellyfin container
   hosts: media_nodes
   gather_facts: false
-  tags: [jellyfin-rollback, never]
+  tags: [jellyfin-rollback]
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Stop and destroy Jellyfin container
       ansible.builtin.shell:
         cmd: |
@@ -894,8 +990,12 @@
 - name: Rollback Kodi container
   hosts: media_nodes
   gather_facts: false
-  tags: [kodi-rollback, never]
+  tags: [kodi-rollback]
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Stop and destroy Kodi container
       ansible.builtin.shell:
         cmd: |
@@ -910,8 +1010,12 @@
 - name: Rollback Moonlight container
   hosts: streaming_nodes
   gather_facts: false
-  tags: [moonlight-rollback, never]
+  tags: [moonlight-rollback]
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Stop and destroy Moonlight container
       ansible.builtin.shell:
         cmd: |
@@ -926,40 +1030,28 @@
 - name: Rollback Desktop VM
   hosts: desktop_nodes
   gather_facts: false
-  tags: [desktop-rollback, never]
+  tags: [desktop-rollback]
   tasks:
-    - name: Stop and destroy Desktop VM
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
+    - name: Stop and destroy Desktop container
       ansible.builtin.shell:
         cmd: |
-          qm stop {{ desktop_vm_id }} 2>/dev/null || true
-          sleep 3
-          qm destroy {{ desktop_vm_id }} --purge 2>/dev/null || true
+          pct stop {{ desktop_ct_id }} 2>/dev/null || true
+          sleep 2
+          pct destroy {{ desktop_ct_id }} --purge 2>/dev/null || true
         executable: /bin/bash
       changed_when: true
 
-    - name: PCI cleanup - restore iGPU to host
+    - name: Remove desktop display proxy service
       ansible.builtin.shell:
         cmd: |
-          for dev in /sys/bus/pci/drivers/vfio-pci/0000:*/; do
-            [ -d "$dev" ] || continue
-            addr=$(basename "$dev")
-            echo "$addr" > /sys/bus/pci/drivers/vfio-pci/unbind 2>/dev/null || true
-            echo "" > "/sys/bus/pci/devices/${addr}/driver_override" 2>/dev/null || true
-          done
-          echo 1 > /sys/bus/pci/rescan 2>/dev/null || true
-          sleep 2
-          for dev in /sys/bus/pci/devices/0000:*/; do
-            [ -d "$dev" ] || continue
-            addr=$(basename "$dev")
-            class=$(cat "${dev}/class" 2>/dev/null)
-            [ "${class:0:4}" = "0x03" ] || continue
-            [ -e "${dev}/driver" ] && continue
-            vendor=$(cat "${dev}/vendor" 2>/dev/null)
-            case "$vendor" in
-              0x8086) echo "$addr" > /sys/bus/pci/drivers/i915/bind 2>/dev/null || true ;;
-              0x1002) echo "$addr" > /sys/bus/pci/drivers/amdgpu/bind 2>/dev/null || true ;;
-            esac
-          done
+          systemctl stop desktop-display-proxy 2>/dev/null || true
+          systemctl disable desktop-display-proxy 2>/dev/null || true
+          rm -f /etc/systemd/system/desktop-display-proxy.service
+          systemctl daemon-reload
         executable: /bin/bash
       changed_when: true
       failed_when: false
@@ -969,8 +1061,12 @@
 - name: Rollback Kiosk container
   hosts: desktop_nodes
   gather_facts: false
-  tags: [kiosk-rollback, never]
+  tags: [kiosk-rollback]
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Stop and destroy Kiosk container
       ansible.builtin.shell:
         cmd: |
@@ -990,8 +1086,12 @@
 - name: Rollback Gaming LXC
   hosts: gaming_nodes
   gather_facts: false
-  tags: [gaming-lxc-rollback, never]
+  tags: [gaming-lxc-rollback]
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Check if Gaming LXC container exists
       ansible.builtin.command:
         cmd: pct status {{ gaming_ct_id }}
@@ -1014,8 +1114,12 @@
 - name: Rollback Gaming VM
   hosts: gaming_nodes
   gather_facts: false
-  tags: [gaming-vm-rollback, never]
+  tags: [gaming-vm-rollback]
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Compute per-host VMID for Gaming VM
       ansible.builtin.set_fact:
         _gaming_rollback_id: "{{ (gaming_vm_id | int) + groups['gaming_nodes'].index(inventory_hostname) }}"
@@ -1075,8 +1179,12 @@
 - name: Rollback WiFi bridge
   hosts: bridge_nodes
   gather_facts: false
-  tags: [bridge-rollback, never]
+  tags: [bridge-rollback]
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Check if bridge container exists
       ansible.builtin.command:
         cmd: pct status {{ bridge_ct_id }}
@@ -1121,11 +1229,15 @@
 - name: Restore Proxmox host from backup
   hosts: proxmox:!lan_hosts
   gather_facts: false
-  tags: [restore, full-restore, clean, never]
+  tags: [restore, full-restore, clean]
   vars:
     backup_dir: /var/lib/ansible-backup
 
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     # ── Shared: verify backup exists ──────────────────────────────
     - name: Check for backup manifest
       ansible.builtin.stat:
@@ -1403,8 +1515,12 @@
 - name: Production LAN satellite cleanup
   hosts: router_nodes
   gather_facts: false
-  tags: [restore, full-restore, clean, never]
+  tags: [restore, full-restore, clean]
   tasks:
+    - name: Skip unless rollback requested
+      ansible.builtin.meta: end_play
+      when: not (rollback | default(false) | bool)
+
     - name: Process each LAN host
       ansible.builtin.include_tasks: ../tasks/cleanup_lan_host.yml
       vars:

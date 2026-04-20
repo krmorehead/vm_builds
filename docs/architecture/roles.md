@@ -837,68 +837,36 @@ None — Jellyfin is pure userspace. No kernel modules, no host config files. Th
 
 ---
 
-## desktop_vm
+## desktop_lxc
 
-**Purpose:** Provision a Debian 12 Desktop VM on Proxmox with UEFI (OVMF), q35 machine type, cloud-init bootstrap, and exclusive iGPU passthrough via hostpci0. On-demand service (no auto-start).
+**Purpose:** Provision a Debian 12 Desktop LXC container with XFCE desktop and KasmVNC for remote display streaming. Uses shared iGPU bind mount (no exclusive passthrough). All desktop environments, applications, and KasmVNC are baked into the image via `build-images.sh --only desktop`.
 
-**Connection pattern:** Runs on `desktop_nodes` Proxmox hosts, then adds VM to `desktop` dynamic group via SSH (ProxyJump through Proxmox host).
+**Connection pattern:** Runs on `desktop_nodes` Proxmox hosts via `include_role: proxmox_lxc`. Configure play targets `desktop_nodes` (pct exec).
 
 ### How It Works
 
-1. Checks if VM already exists (`qm status`).
-2. Validates cloud image exists locally (`desktop_image_path`).
-3. Validates `igpu_pci_address` is available from `proxmox_igpu`.
-4. Uploads cloud image and creates UEFI/q35 VM via `qm create`.
-5. Imports disk, attaches cloud-init drive with user/SSH key/DHCP.
-6. Attaches NIC to WAN bridge (DHCP from ISP router), configures iGPU passthrough via hostpci0.
-7. Attaches display-exclusive hookscript if available.
-8. Starts VM, waits for DHCP lease and SSH.
-9. Registers VM in `desktop` dynamic group via `add_host`.
+1. Includes `proxmox_lxc` to create the container from the Desktop LXC template.
+2. Container gets shared DRI device bind mount from `lxc_device_passthrough`.
+3. KasmVNC (`Xvnc`) runs inside the container, streaming the desktop on the configured display port.
+4. `lxc_display_proxy` deploys a host-side socat proxy forwarding the display port.
+5. Session switching between KDE and GNOME is handled by `/usr/sbin/switch-desktop-session` (baked into image).
 
 ### Key Variables
 
 | Variable | Env Var | Default | Description |
 |----------|---------|---------|-------------|
-| `desktop_vm_memory` | -- | `4096` | RAM in MB |
-| `desktop_vm_cores` | -- | `2` | CPU cores |
-| `desktop_vm_disk_size` | -- | `32G` | Boot disk size |
-| `desktop_vm_onboot` | -- | `false` | Auto-start on host boot |
-| `desktop_user` | `DESKTOP_USER` | `desktop` | Cloud-init user |
-| `desktop_password` | `DESKTOP_PASSWORD` | `` | Cloud-init password |
-| `desktop_ssh_public_key` | `DESKTOP_SSH_PUBLIC_KEY` | `` | SSH public key |
-
-### Exported Facts
-
-| Fact | Type | Description |
-|------|------|-------------|
-| (via `add_host`) | -- | VM registered in `desktop` dynamic group with SSH + ProxyJump vars |
+| `desktop_user` | `DESKTOP_USER` | `desktop` | Container username |
 
 ---
 
 ## desktop_configure
 
-**Purpose:** Configure the Debian Desktop VM with two desktop sessions: KDE Plasma (Windows-style UX) and GNOME (Mac-style UX). Desktop environments and shared applications are baked into the image (build-images.sh --only desktop). This role installs host-specific GPU drivers and applies per-session polish (shortcuts, dconf, SDDM config, Flameshot autostart).
+**Purpose:** Apply host-specific configuration to the Desktop LXC container. Writes callhome config and starts services. All desktop environments and applications are baked into the image.
 
-**Connection pattern:** Runs on `desktop` dynamic group via SSH (ProxyJump through Proxmox host).
+**Connection pattern:** Runs on `desktop_nodes` via `pct exec`.
 
 ### How It Works
 
-1. Waits for cloud-init to complete.
-2. Updates apt cache and upgrades base system.
-3. Installs vendor-specific GPU drivers (Intel or AMD via `igpu_vendor`).
-4. Installs KDE Plasma and GNOME desktop environments.
-5. Installs SDDM display manager for session switching.
-6. Installs shared applications (Firefox, VLC, LibreOffice, Flameshot).
-7. Configures user groups (video, render, audio, sudo).
-8. Applies KDE polish: dark Breeze theme, bottom taskbar, window shortcuts.
-9. Applies GNOME polish: dark Adwaita, Dash to Dock, Mac-like keybindings.
-10. Configures shared Ctrl+Shift+4 screenshot shortcut via Flameshot autostart.
-11. Configures SDDM default session and optional autologin.
-12. Sets graphical.target as default boot target.
-
-### Key Variables
-
-| Variable | Env Var | Default | Description |
-|----------|---------|---------|-------------|
-| `desktop_autologin` | `DESKTOP_AUTOLOGIN` | `false` | Auto-login at boot |
-| `desktop_default_session` | `DESKTOP_DEFAULT_SESSION` | `plasma` | Default SDDM session |
+1. Writes callhome configuration to the container.
+2. Starts the callhome service and KasmVNC display service.
+3. Zero package installs — all content is baked into the image.

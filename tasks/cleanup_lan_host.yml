@@ -34,7 +34,7 @@
   ansible.builtin.shell:
     cmd: >-
       timeout 180 {{ _cleanup_ssh }} "
-      for vm in {{ desktop_vm_id }} {{ gaming_vm_id }}; do
+      for vm in {{ gaming_vm_id }}; do
         qm status \$vm >/dev/null 2>&1 || continue;
         qm stop \$vm --timeout 15 2>/dev/null || true;
         qm destroy \$vm --purge 2>/dev/null || true;
@@ -43,10 +43,26 @@
       {{ bridge_ct_id }} {{ netdata_ct_id }} {{ rsyslog_ct_id }}
       {{ pihole_ct_id }} {{ homeassistant_ct_id }} {{ jellyfin_ct_id }}
       {{ kodi_ct_id }} {{ moonlight_ct_id }} {{ kiosk_ct_id }}
-      {{ gaming_ct_id }}; do
+      {{ gaming_ct_id }} {{ desktop_ct_id }}; do
         pct status \$ct >/dev/null 2>&1 || continue;
         pct stop \$ct 2>/dev/null || true;
         pct destroy \$ct --purge 2>/dev/null || true;
+      done"
+  when: _host_reachable | bool
+  changed_when: true
+  failed_when: false
+
+- name: Clean stale pmxcfs node configs on LAN host  # noqa command-instead-of-shell
+  ansible.builtin.shell:
+    cmd: >-
+      {{ _cleanup_ssh }} "
+      local_node=\$(hostname);
+      for nodedir in /etc/pve/nodes/*/; do
+        node=\$(basename \"\$nodedir\");
+        [ \"\$node\" = \"\$local_node\" ] && continue;
+        for conf in \"\$nodedir\"lxc/*.conf \"\$nodedir\"qemu-server/*.conf; do
+          [ -f \"\$conf\" ] && rm -v \"\$conf\";
+        done;
       done"
   when: _host_reachable | bool
   changed_when: true
@@ -69,10 +85,39 @@
     - "{{ jellyfin_ct_id }}"
     - "{{ kodi_ct_id }}"
     - "{{ moonlight_ct_id }}"
+    - "{{ desktop_ct_id }}"
     - "{{ kiosk_ct_id }}"
     - "{{ gaming_ct_id }}"
   loop_control:
     loop_var: _deregister_vmid
+
+- name: Stop and remove host-level socat proxy units on LAN host  # noqa command-instead-of-shell
+  ansible.builtin.shell:
+    cmd: >-
+      {{ _cleanup_ssh }} "
+      for svc in kiosk-manager-proxy kiosk-display-proxy
+      kiosk-vnc-proxy manager-api-proxy supermanager-relay
+      desktop-display-proxy desktop-vnc-ws
+      kodi-display-proxy kodi-vnc-proxy
+      moonlight-display-proxy moonlight-vnc-proxy; do
+        systemctl stop \$svc 2>/dev/null || true;
+        systemctl disable \$svc 2>/dev/null || true;
+        rm -f /etc/systemd/system/\${svc}.service;
+      done;
+      for unit in /etc/systemd/system/kiosk-display-relay-*.service
+      /etc/systemd/system/kiosk-vnc-relay-*.service
+      /etc/systemd/system/*-display-proxy.service
+      /etc/systemd/system/*-vnc-proxy.service; do
+        [ -f \"\$unit\" ] || continue;
+        svc=\$(basename \"\$unit\");
+        systemctl stop \"\$svc\" 2>/dev/null || true;
+        systemctl disable \"\$svc\" 2>/dev/null || true;
+        rm -f \"\$unit\";
+      done;
+      systemctl daemon-reload 2>/dev/null || true"
+  when: _host_reachable | bool
+  changed_when: true
+  failed_when: false
 
 - name: Remove ansible-managed files on LAN host  # noqa command-instead-of-shell
   ansible.builtin.shell:

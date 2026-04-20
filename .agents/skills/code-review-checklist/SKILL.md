@@ -101,6 +101,11 @@ Ask these for every diff that touches `scripts/webui/`:
 ### Architecture checks
 
 - Configure roles have ZERO package installs.
+- Configure roles use `ansible.builtin.uri` → NM API (not SSH/pct exec).
+  Only `kiosk_configure` (bootstrap) and `openwrt_configure` (no HTTP API) are exceptions.
+- Verify assertions use fleet API (`/api/fleet/ready`, `/api/container/{id}/ready`)
+  over VPN. No SSH fallback paths.
+- Hard-failure messages include INVESTIGATE prompts with diagnostic commands.
 - Image paths use `role_path`, not bare relative paths.
 - New VMIDs added to both cleanup files.
 - Deploy stamp included in provision plays.

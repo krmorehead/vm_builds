@@ -26,7 +26,17 @@ roles/openwrt_configure/tasks/
 
 **Deploy stamp play**: targets `router_nodes` (Proxmox host) to record feature was applied
 
-3. Both plays share a tag (e.g., `openwrt-security`) so they can be run independently via `--tags`.
+3. Both plays share a tag (e.g., `openwrt-security`) so they can be run individually via `--tags`. They also run in the default (no-tags) flow — every feature runs every time in the E2E pipeline.
+
+## NEVER use Ansible's `never` special tag
+
+NEVER tag plays with `[never]`. The `never` tag causes Ansible to silently skip plays unless `--tags never` is explicitly passed. This creates untested dead code — the play exists in site.yml but is silently skipped during `molecule test`, which runs with no `--tags`.
+
+Previous bug: Gaming LXC was tagged `[gaming, never]` from its first commit (March 2026). It was NEVER deployed or tested in any E2E run for over a month. All per-feature OpenWrt plays (security, VLANs, DNS, mesh, syslog, pihole-dns) were also tagged `[never]` — none of them ran in the default pipeline.
+
+The correct gating mechanism is idempotency, not tag exclusion. Every service is a core service. Every play runs every time. If a configure role is idempotent (and they all are), running it every time is safe and guarantees test coverage.
+
+For rollback plays in `cleanup.yml`, the rollback-specific tag (e.g., `openwrt-security-rollback`) already gates them — you must explicitly pass `--tags openwrt-security-rollback` to invoke them. No `never` needed.
 
 ## Benefits
 

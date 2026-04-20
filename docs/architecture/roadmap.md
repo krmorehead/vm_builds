@@ -206,22 +206,19 @@ Delivered:
 - Rollback plays in `playbooks/cleanup.yml` (`gaming-rollback` tag)
 - Opt-in via `--tags gaming` (mutually exclusive with media container iGPU use)
 
-### `2026-03-09-11` Debian Desktop VM ✓
+### `2026-03-09-11` Debian Desktop LXC ✓
 
-Full Debian 12 VM with KDE Plasma (Windows-style) and GNOME (Mac-style)
-desktop sessions. Takes exclusive iGPU access via hostpci passthrough.
-Users select their preferred UX at the SDDM login screen; both sessions
-share the same home directory.
+Full Debian 12 LXC container with KDE Plasma (Windows-style) and GNOME (Mac-style)
+desktop sessions. Shares iGPU DRI render node via bind mount (managed by
+display-exclusive hookscript). KasmVNC provides remote desktop access.
 
 Delivered:
-- `desktop_vm` role (UEFI/q35 VM, cloud-init, iGPU exclusive passthrough)
-- `desktop_configure` role (KDE + GNOME + SDDM, GPU drivers, shared shortcuts)
+- `desktop_lxc` role (LXC container with DRI render node sharing)
+- `desktop_configure` role (KDE + GNOME, GPU drivers, KasmVNC display service)
 - KDE configured as Windows-style UX (bottom taskbar, dark Breeze theme)
 - GNOME configured as Mac-style UX (Dash to Dock, dark Adwaita, Caps→Super)
-- Shared Ctrl+Shift+4 screenshot shortcut via Flameshot in both sessions
-- Debian cloud image (documented exception to bake principle)
+- LXC rootfs tarball built via `build-images.sh` with KDE, GNOME, KasmVNC baked in
 - Per-feature molecule scenario (`desktop-vm`)
-- `tasks/reconstruct_desktop_group.yml` for dynamic group reconstruction
 - Rollback plays in `playbooks/cleanup.yml` (`desktop-rollback` tag)
 - Display-exclusive hookscript attachment (deployed by Kiosk project)
 

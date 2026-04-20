@@ -4,3 +4,9 @@ pci_passthrough_allow_reboot: true
 wol_capable: true
 wifi_role: sta
 container_subnet_id: 2
+vpn_ip: 10.0.0.2
+# NM API relay — controller reaches mesh1's NM through a socat relay on
+# the primary host (home). home is on both subnets (WAN 192.168.86.201
+# and LAN 10.10.10.2) and relays port 19001 → mesh1:9001.
+nm_api_host: 192.168.86.201
+nm_api_port: "19001"

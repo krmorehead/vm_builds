@@ -195,7 +195,7 @@ if [ -n "$CALLHOME_CONTAINER" ]; then
     [ -n "$EXT_JSON" ] && EXT_BLOCK=",\"extensions\":{$EXT_JSON}" || EXT_BLOCK=",\"extensions\":{}"
 
     IMAGE_VERSION=""
-    [ -f /etc/image_version ] && read IMAGE_VERSION < /etc/image_version
+    [ -f /etc/image_version ] && read IMAGE_VERSION < /etc/image_version 2>/dev/null
 
     CONTAINER_HEALTH=",\"container_health\":{\"container_id\":\"$CONTAINER_ID\",\"systemd_services\":{$SVC_JSON},\"listening_ports\":[$PORTS_JSON],\"ready\":true,\"image_version\":\"$IMAGE_VERSION\"$EXT_BLOCK}"
 fi

@@ -17,6 +17,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -47,6 +48,8 @@ class Routes:
     HOSTS = "/hosts"
     ENVIRONMENT = "/environment"
     CONTAINERS = "/containers"
+    WIREGUARD = "/wireguard"
+    LOGS = "/logs"
     FLEET = "/fleet"
     FLEET_DETAIL = "/fleet/{node_id}"
     LAUNCH = "/launch"
@@ -105,7 +108,6 @@ class PageTitles:
     ENVIRONMENT = "Environment"
     CONTAINERS = "Containers & VMs"
     TIMELINE = "Deploy Timeline"
-    REMOTE_KIOSK = "Remote Kiosk"
 
 
 class Labels:
@@ -166,22 +168,17 @@ class Labels:
     VIEW_CONSOLE_FROM_MANAGER = (
         "started. View the console from the Manager or SuperManager fleet page."
     )
-    HEADLESS_VNC_EXPLANATION = (
-        "Display apps run as headless VNC streams. Conflicting "
-        "apps are automatically stopped before the new one starts. "
-        "The kiosk stays alive \u2014 view the app's console from the "
-        "Manager's fleet page using the View Console button."
-    )
     GO_BACK = "Go Back"
 
 
 class Ports:
     """Well-known port numbers for fleet services."""
-    KIOSK_VNC = 5900
-    KIOSK_VNC_WS = 6080
-    DESKTOP_VNC_WS = 6081
-    KODI_VNC_WS = 6082
-    MOONLIGHT_VNC_WS = 6083
+    MANAGER = 9001
+    KIOSK_DISPLAY = 6080
+    DESKTOP_DISPLAY = 6081
+    KODI_DISPLAY = 6082
+    MOONLIGHT_DISPLAY = 6083
+    LAN_DISPLAY_RELAY_OFFSET = 100
 
 
 @dataclass
@@ -189,8 +186,7 @@ class DisplayAppConfig:
     """Static configuration for a display app in the handler registry."""
     app_id: str
     handler_type: str
-    vnc_ws_port: int = 0
-    vmid: str = ""
+    display_port: int = 0
     ct_id: str = ""
     service_port: int = 0
     service_path: str = "/"
@@ -198,10 +194,10 @@ class DisplayAppConfig:
     label: str = ""
     icon: str = ""
     description: str = ""
+    target_hosts: list[str] = field(default_factory=list)
 
 
 NavItem = tuple[str, str, str]  # (label, path, icon)
-KioskNavItem = tuple[str, str, str]  # (label, path, icon)
 
 NAV_SECTIONS: list[NavItem] = [
     ("Dashboard", Routes.DASHBOARD, "dashboard"),
@@ -226,7 +222,7 @@ CLUSTER_NAV_SECTIONS: list[NavItem] = [
     ("Containers", Routes.CONTAINERS, "view_in_ar"),
 ]
 
-KIOSK_NAV_ITEMS: list[KioskNavItem] = [
+KIOSK_NAV_ITEMS: list[NavItem] = [
     ("Fleet", Routes.FLEET, "device_hub"),
     ("Bridge", Routes.BRIDGE, "swap_horiz"),
     ("Mesh", Routes.MESH, "hub"),
@@ -437,11 +433,7 @@ ENV_TEMPLATE: list[EnvVar] = [
     EnvVar("SUNSHINE_PASSWORD", "Sunshine streaming server password", False, "", True),
     EnvVar("MOONLIGHT_SERVER_IP", "IP of the Sunshine server for Moonlight", False, "", False),
     EnvVar("MOONLIGHT_PAIR_PIN", "Moonlight pairing PIN", False, "", True),
-    EnvVar("DESKTOP_USER", "Desktop VM username", False, "desktop", False),
-    EnvVar("DESKTOP_PASSWORD", "Desktop VM password", False, "", True),
-    EnvVar("DESKTOP_SSH_PUBLIC_KEY", "SSH public key for desktop VM", False, "", False),
-    EnvVar("DESKTOP_AUTOLOGIN", "Enable autologin on desktop VM", False, "false", False),
-    EnvVar("DESKTOP_DEFAULT_SESSION", "Default desktop session (plasma/gnome)", False, "plasma", False),
+    EnvVar("DESKTOP_USER", "Desktop LXC username", False, "desktop", False),
     EnvVar("HA_ADMIN_PASSWORD", "Home Assistant admin password", False, "", True),
     EnvVar("WEBUI_PORT", "Web UI / API port (firewall must allow)", False, "52500", False),
     EnvVar("CALLHOME_SERVER", "Management server URL for fleet call-home (auto-detected)", False, "", False),
@@ -528,14 +520,6 @@ _HOST_VPN_MAP: dict[str, str] = {
     "bridge-1": "BRIDGE_1_VPN_IP",
     "bridge-2": "BRIDGE_2_VPN_IP",
 }
-
-# LAN hosts need VNC WebSocket relayed through the primary host because
-# the browser can't reach LAN IPs directly. Each entry maps a LAN host
-# name to its relay port on PRIMARY_HOST.
-_LAN_VNC_RELAY_PORTS: dict[str, int] = {
-    "mesh1": 16080,
-}
-
 
 # ── Host Registry (persistent identity store) ────────────────────────
 
@@ -861,22 +845,6 @@ def get_known_hosts(env: dict[str, str]) -> list[HostInfo]:
     return hosts
 
 
-def get_vnc_relay(node_id: str, env: dict[str, str]) -> tuple[str, int] | None:
-    """Return (relay_ip, relay_port) for LAN hosts that need VNC relayed.
-
-    LAN hosts (behind the router) aren't directly reachable from the
-    browser. Their VNC WebSocket traffic is relayed through the primary
-    host via a socat proxy on a dedicated port.
-    """
-    relay_port = _LAN_VNC_RELAY_PORTS.get(node_id)
-    if relay_port is None:
-        return None
-    primary_ip = env.get("PRIMARY_HOST", "")
-    if not primary_ip:
-        return None
-    return (primary_ip, relay_port)
-
-
 def probe_all_hosts(hosts: list[HostInfo]) -> list[HostStatus]:
     """Probe each host for TCP connectivity."""
     results: list[HostStatus] = []
@@ -996,6 +964,49 @@ def kickstart_callhome(host: Host) -> KickstartResult:
     )
 
 
+# ── Auto-kickstart for active viewers ────────────────────────────────
+
+_KICKSTART_COOLDOWN: dict[str, float] = {}
+_KICKSTART_COOLDOWN_SECONDS = 300  # 5 minutes between kickstarts per host
+_kickstart_lock = threading.Lock()
+
+
+def auto_kickstart_stale_fleet(fleet: "Fleet") -> list[str]:
+    """Kickstart heartbeats on stale hosts when a user is actively viewing.
+
+    Called from page refresh cycles. For each host that is NOT online but
+    IS reachable (has an IP or VPN IP), restarts callhome on its containers.
+    Rate-limited to once per 5 minutes per host to avoid spamming.
+
+    Returns list of host names where kickstart was triggered.
+    """
+    now = time.monotonic()
+    triggered: list[str] = []
+
+    for host in fleet.hosts:
+        if host.online:
+            continue
+        if not host.reachable_ip:
+            continue
+
+        with _kickstart_lock:
+            last = _KICKSTART_COOLDOWN.get(host.name, 0)
+            if now - last < _KICKSTART_COOLDOWN_SECONDS:
+                continue
+            _KICKSTART_COOLDOWN[host.name] = now
+
+        log = logging.getLogger("vm_builds.auto_kickstart")
+        log.info("Auto-kickstarting stale host: %s via %s", host.name, host.reachable_ip)
+        result = kickstart_callhome(host)
+        if result.success and result.restarted > 0:
+            triggered.append(host.name)
+            log.info("Kickstarted %s: %s", host.name, result.message)
+        elif not result.success:
+            log.warning("Kickstart failed for %s: %s", host.name, result.message)
+
+    return triggered
+
+
 # ── Service tags ─────────────────────────────────────────────────────
 
 
@@ -1022,7 +1033,7 @@ SERVICE_TAGS: list[ServiceTag] = [
     ServiceTag("homeassistant", "Home Assistant", "Services", ["home"]),
     ServiceTag("media", "Jellyfin + Kodi", "Media", ["home"]),
     ServiceTag("moonlight", "Moonlight streaming client", "Media", ["mesh1"]),
-    ServiceTag("desktop", "Debian desktop VM", "Desktop", ["home"]),
+    ServiceTag("desktop", "Debian XFCE desktop LXC", "Desktop", ["home", "mesh1", "ai", "mesh2", "bridge-1", "bridge-2"]),
     ServiceTag("kiosk", "Custom UX kiosk", "Desktop", ["home", "mesh1", "ai", "mesh2"]),
     ServiceTag("mesh-wifi", "Mesh WiFi LXC", "WiFi", ["mesh1", "mesh2"]),
     ServiceTag("bridge", "Dedicated WiFi Bridge", "Network", ["bridge-1", "bridge-2"]),
@@ -1284,9 +1295,7 @@ class Host:
 
     @property
     def reachable_ip(self) -> str:
-        """Best IP to reach this host — primary if reachable, else VPN."""
-        if self.reachable and self.ip and not self.is_lan:
-            return self.ip
+        """Best IP to reach this host — always VPN when available."""
         if self.vpn_ip:
             return self.vpn_ip
         return self.ip
@@ -1706,7 +1715,7 @@ EXPECTED_IMAGES: list[tuple[str, str, str, bool]] = [
     ("Moonlight Streaming", "moonlight-*.tar.zst", "moonlight", True),
     ("Gaming LXC", "gaming-*.tar.zst", "gaming", True),
     ("Sunshine VM", "sunshine-*.qcow2", "sunshine", True),
-    ("Desktop VM", "desktop-*.qcow2", "desktop", True),
+    ("Desktop LXC", "desktop-*.tar.zst", "desktop", True),
 ]
 
 
@@ -1774,7 +1783,7 @@ HUB_SERVICES: list[HubService] = [
     HubService("bridge", "\U0001f4e1", "WiFi Bridge", "Dedicated WDS bridge link status, signal and throughput.", "Bridge", "Infrastructure", "BRIDGE_PAGE"),
     HubService("mesh_detail", "\U0001f4f6", "Mesh WiFi", "Mesh network topology, peer status and signal quality.", "Mesh", "Infrastructure", "MESH_PAGE"),
     HubService("router_detail", "\U0001f5a7", "Router Detail", "Router interfaces, DHCP, firewall and system metrics.", "Router", "Infrastructure", "ROUTER_PAGE"),
-    HubService("desktop", "\U0001f5a5", "Desktop", "Full Debian KDE desktop \u2014 launch via Proxmox or remote control.", "Desktop VM", "Desktop & Media", "DESKTOP_URL"),
+    HubService("desktop", "\U0001f5a5", "Desktop", "Full desktop \u2014 view remotely via KasmVNC. Switch between Windows (KDE) and Mac (GNOME) sessions.", "Desktop LXC", "Desktop & Media", "DESKTOP_URL"),
     HubService("jellyfin", "\U0001f3ac", "Jellyfin", "Stream movies, shows and music from your media library.", "Media Server", "Desktop & Media", "JELLYFIN_URL"),
     HubService("kodi", "\U0001f3a6", "Kodi", "Media center with full-screen playback and remote control.", "Media Player", "Desktop & Media", "KODI_URL"),
     HubService("homeassistant", "\U0001f3e0", "Home Assistant", "Smart home dashboard \u2014 automations, sensors and controls.", "Automation", "Desktop & Media", "HOMEASSISTANT_URL"),
@@ -1793,38 +1802,42 @@ INTERNAL_PAGES: dict[str, str] = {
     "MESH_PAGE": "/mesh",
     "ROUTER_PAGE": "/router",
     "CONTAINERS_PAGE": "/containers",
+    "WIREGUARD_URL": "/wireguard",
+    "RSYSLOG_URL": "/logs",
 }
 
 # ── Display app configuration (single source of truth) ────────────────
 
 DISPLAY_APP_CONFIGS: dict[str, DisplayAppConfig] = {
     "kiosk": DisplayAppConfig(
-        app_id="kiosk", handler_type="wayland_vnc",
-        ct_id="401", vnc_ws_port=Ports.KIOSK_VNC_WS,
+        app_id="kiosk", handler_type="container_display",
+        ct_id="401", display_port=Ports.KIOSK_DISPLAY,
         conflicts=[],
         label="Kiosk", icon="\U0001f3e0",
-        description="Home Hub kiosk display (headless, no DRI conflict).",
+        description="Home Hub kiosk display (KasmVNC, no DRI conflict).",
     ),
     "desktop": DisplayAppConfig(
-        app_id="desktop", handler_type="qemu_vnc",
-        vmid="400", vnc_ws_port=Ports.DESKTOP_VNC_WS,
+        app_id="desktop", handler_type="container_display",
+        ct_id="400", display_port=Ports.DESKTOP_DISPLAY,
         conflicts=["kodi", "moonlight"],
         label="Desktop", icon="\U0001f5a5",
-        description="Full Debian KDE desktop VM \u2014 view remotely via VNC console.",
+        description="Full desktop \u2014 view remotely via KasmVNC. Switch between Windows (KDE) and Mac (GNOME) sessions.",
     ),
     "kodi": DisplayAppConfig(
-        app_id="kodi", handler_type="wayland_vnc",
-        ct_id="301", vnc_ws_port=Ports.KODI_VNC_WS,
+        app_id="kodi", handler_type="container_display",
+        ct_id="301", display_port=Ports.KODI_DISPLAY,
         conflicts=["desktop", "moonlight"],
         label="Kodi", icon="\U0001f3a6",
-        description="Media center with headless Wayland VNC display.",
+        description="Media center with KasmVNC display.",
+        target_hosts=["home"],
     ),
     "moonlight": DisplayAppConfig(
-        app_id="moonlight", handler_type="wayland_vnc",
-        ct_id="302", vnc_ws_port=Ports.MOONLIGHT_VNC_WS,
+        app_id="moonlight", handler_type="container_display",
+        ct_id="302", display_port=Ports.MOONLIGHT_DISPLAY,
         conflicts=["desktop", "kodi"],
         label="Moonlight", icon="\U0001f3ae",
-        description="Game streaming client with headless VNC console.",
+        description="Game streaming client with KasmVNC console.",
+        target_hosts=["mesh1"],
     ),
 }
 
@@ -1836,7 +1849,7 @@ _URL_KEY_TO_APP_ID: dict[str, str] = {
 
 DISPLAY_APPS: dict[str, dict] = {
     url_key: {
-        "vmid": cfg.vmid or cfg.ct_id,
+        "vmid": cfg.ct_id,
         "label": cfg.label,
         "icon": cfg.icon,
         "app_id": cfg.app_id,
@@ -1854,11 +1867,6 @@ def console_url(node_id: str, app_id: str, back: str = "") -> str:
         from urllib.parse import quote
         url = f"{url}?back={quote(back, safe='')}"
     return url
-
-
-def display_icon(handler_display_type: str) -> str:
-    """Return the correct icon for a display handler type."""
-    return "tv" if handler_display_type == "vnc" else "web"
 
 
 def get_hub_services() -> list[HubService]:
@@ -1889,6 +1897,37 @@ def get_router_node() -> str:
 
 
 KIOSK_CONFIG_PATH = Path("/opt/kiosk/config.json")
+
+SM_SERVICE_URLS: dict[str, tuple[int, int, str]] = {
+    "OPENWRT_URL": (1, 80, "http"),
+    "PIHOLE_URL": (10, 80, "http"),
+    "HOMEASSISTANT_URL": (14, 8123, "http"),
+    "JELLYFIN_URL": (15, 8096, "http"),
+    "NETDATA_URL": (40, 19999, "http"),
+    "GAMING_URL": (18, 47990, "https"),
+}
+
+
+def generate_sm_hub_urls(env: dict[str, str]) -> dict[str, str]:
+    """Compute external service URLs for the SuperManager hub from fleet topology.
+
+    Uses LAN_GATEWAY (from env.generated) to derive service IPs.
+    The SM viewer iframes load these URLs in the user's browser, which
+    must be on the fleet LAN or VPN to reach them.
+    """
+    gateway = env.get("LAN_GATEWAY", "")
+    if not gateway:
+        return {}
+    prefix = gateway.rsplit(".", 1)[0]
+    urls: dict[str, str] = {}
+    for key, (offset, port, scheme) in SM_SERVICE_URLS.items():
+        ip = f"{prefix}.{offset}"
+        suffix = f"/admin" if key == "PIHOLE_URL" else ""
+        if port in (80, 443):
+            urls[key] = f"{scheme}://{ip}{suffix}"
+        else:
+            urls[key] = f"{scheme}://{ip}:{port}{suffix}"
+    return urls
 
 
 def load_kiosk_config(path: Path | None = None) -> dict[str, str]:
@@ -2086,7 +2125,7 @@ def load_node_registry(state_dir: Path) -> list[RegisteredNode]:
         return []
 
 
-def _save_node_registry(state_dir: Path, nodes: list[RegisteredNode]) -> None:
+def save_node_registry(state_dir: Path, nodes: list[RegisteredNode]) -> None:
     """Write node registry to JSON and a plain-text IP map."""
     state_dir.mkdir(parents=True, exist_ok=True)
     registry_file = state_dir / "nodes.json"
@@ -2167,7 +2206,7 @@ def register_checkin(state_dir: Path, checkin: NodeCheckin, remote_ip: str) -> R
         existing.version = checkin.version
         existing.container_health = checkin.container_health
         existing.status = "online"
-        _save_node_registry(state_dir, nodes)
+        save_node_registry(state_dir, nodes)
         _append_metric_snapshot(state_dir, checkin)
 
         is_ready = bool(checkin.container_health and checkin.container_health.ready)
@@ -2213,7 +2252,7 @@ def register_checkin(state_dir: Path, checkin: NodeCheckin, remote_ip: str) -> R
         status="online",
     )
     nodes.append(new_node)
-    _save_node_registry(state_dir, nodes)
+    save_node_registry(state_dir, nodes)
     _append_metric_snapshot(state_dir, checkin)
 
     is_ready = bool(checkin.container_health and checkin.container_health.ready)

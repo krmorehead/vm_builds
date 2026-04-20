@@ -19,7 +19,7 @@ description: Dynamic group reconstruction for rollback play patterns. Use when s
    # In playbooks/cleanup.yml — BEFORE any rollback plays
    - name: Reconstruct openwrt dynamic group
      hosts: router_nodes
-     tags: [openwrt-security-rollback, openwrt-vlans-rollback, openwrt-dns-rollback, openwrt-mesh-rollback, never]
+     tags: [openwrt-security-rollback, openwrt-vlans-rollback, openwrt-dns-rollback, openwrt-mesh-rollback]
      gather_facts: true
      tasks:
        - name: Include group reconstruction

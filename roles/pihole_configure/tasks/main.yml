@@ -1,35 +1,47 @@
 ---
-# Pi-hole v6 is pre-installed in the custom LXC template (build-images.sh).
-# v6 uses /etc/pihole/pihole.toml (NOT setupVars.conf or pihole-FTL.conf).
-# This role applies host-specific config via the pihole-FTL CLI:
-#   - Web admin password
-#   - Upstream DNS servers
-#   - Container DNS pointed to itself after setup
+# Pi-hole v6 configuration via Node Manager API.
+# All in-container operations go through POST /api/provision/{vmid}/exec.
 
 # ── Set web password ────────────────────────────────────────────
 
 - name: Set Pi-hole web admin password
-  ansible.builtin.command:
-    cmd: "{{ pihole_bin }} -a -p {{ pihole_web_password }}"
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ pihole_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: "{{ pihole_bin }} -a -p {{ pihole_web_password }}"
+      timeout: 30
+    status_code: 200
+  delegate_to: localhost
   when: pihole_web_password | length > 0
-  changed_when: true
   no_log: true
 
 - name: Set empty password if none provided
-  ansible.builtin.command:
-    cmd: "{{ pihole_bin }} -a -p"
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ pihole_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: "{{ pihole_bin }} -a -p"
+      timeout: 30
+    status_code: 200
+  delegate_to: localhost
   when: pihole_web_password | length == 0
-  changed_when: true
 
 # ── Resolve upstream DNS servers ───────────────────────────────
-# Default: auto-detect container gateway (reliable behind OpenWrt).
-# Override: set pihole_upstream_dns_1/2 to explicit IPs (e.g. 1.1.1.1).
 
 - name: Detect container default gateway
-  ansible.builtin.command:
-    cmd: ip -4 route show default
-  register: _pihole_default_route
-  changed_when: false
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ pihole_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: "ip -4 route show default"
+      timeout: 10
+    status_code: 200
+  delegate_to: localhost
+  register: _pihole_route_result
 
 - name: Compute effective upstream DNS servers
   ansible.builtin.set_fact:
@@ -37,7 +49,7 @@
       {{
         ([pihole_upstream_dns_1, pihole_upstream_dns_2]
          if pihole_upstream_dns_1 | length > 0
-         else [_pihole_default_route.stdout.split()[2]])
+         else [_pihole_route_result.json.output.split()[2]])
         | select('string') | reject('equalto', '') | list
       }}
 
@@ -46,88 +58,91 @@
     msg: "Pi-hole upstreams: {{ _pihole_dns_servers }}"
 
 - name: Read current upstream DNS
-  ansible.builtin.command:
-    cmd: "{{ pihole_ftl_bin }} --config dns.upstreams"
-  register: _current_upstreams
-  changed_when: false
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ pihole_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: "{{ pihole_ftl_bin }} --config dns.upstreams"
+      timeout: 10
+    status_code: 200
+  delegate_to: localhost
+  register: _current_upstreams_result
 
 - name: Set upstream DNS servers
-  ansible.builtin.command:
-    cmd: >-
-      {{ pihole_ftl_bin }} --config
-      dns.upstreams '{{ _pihole_dns_servers | to_json }}'
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ pihole_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: >-
+        {{ pihole_ftl_bin }} --config
+        dns.upstreams '{{ _pihole_dns_servers | to_json }}'
+      timeout: 30
+    status_code: 200
+  delegate_to: localhost
   when: >-
     _pihole_dns_servers | difference(
-      _current_upstreams.stdout | regex_findall('[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+')
+      _current_upstreams_result.json.output | regex_findall('[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')
     ) | length > 0
     or
-    _current_upstreams.stdout | regex_findall('[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+')
+    _current_upstreams_result.json.output | regex_findall('[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')
     | difference(_pihole_dns_servers) | length > 0
-  changed_when: true
-  notify: _restart_ftl
 
-# dhcp.active=false and database.maxDBdays=30 are baked into pihole.toml
-# by build-images.sh. No runtime configuration needed for these.
+# ── Restart FTL and wait for readiness ─────────────────────────
 
-# ── Restart FTL if config changed, then wait for readiness ───────
-
-- name: Flush handlers to restart FTL if config changed
-  ansible.builtin.meta: flush_handlers
+- name: Restart pihole-FTL service
+  ansible.builtin.uri:
+    url: >-
+      http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ pihole_ct_id }}/service/pihole-FTL/restart
+    method: POST
+    body_format: json
+    body: {}
+    status_code: 200
+  delegate_to: localhost
 
 - name: Wait for pihole-FTL to be ready
-  ansible.builtin.command:
-    cmd: "{{ pihole_bin }} status"
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ pihole_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: "{{ pihole_bin }} status"
+      timeout: 10
+    status_code: 200
+  delegate_to: localhost
   register: _ftl_ready
-  changed_when: false
   retries: 10
   delay: 2
-  until: _ftl_ready.rc == 0
+  until: (_ftl_ready.json.success | default(false)) | bool
 
-# ── Update gravity database ─────────────────────────────────────
-# Gravity downloads blocklists from the internet. The container's
-# resolv.conf still points to the OpenWrt gateway at this point,
-# ensuring reliable DNS for the downloads.
+# ── Update gravity database ───────────────────────────────────
 
 - name: Update Pi-hole gravity database
-  ansible.builtin.command:
-    cmd: "{{ pihole_bin }} -g"
-  changed_when: true
-  register: _gravity_update
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ pihole_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: "{{ pihole_bin }} -g"
+      timeout: 120
+    status_code: 200
+  delegate_to: localhost
+  register: _gravity_result
   retries: 3
   delay: 10
-  until: _gravity_update.rc == 0
+  until: (_gravity_result.json.success | default(false)) | bool
 
-# ── Switch container DNS to localhost ────────────────────────────
-# Only safe AFTER gravity succeeds — gravity needs external DNS to
-# download blocklists. Once gravity is populated, FTL can resolve
-# via its configured upstreams and we no longer need the gateway.
+# ── Switch container DNS to localhost ──────────────────────────
 
 - name: Point container DNS to itself
-  ansible.builtin.copy:
-    content: "nameserver 127.0.0.1\n"
-    dest: /etc/resolv.conf
-    mode: "0644"
-
-# ── Post-configure diagnostics ───────────────────────────────────
-
-- name: Check Pi-hole status
-  ansible.builtin.command:
-    cmd: "{{ pihole_bin }} status"
-  register: _pihole_status
-  changed_when: false
-  failed_when: false
-
-- name: Report Pi-hole status
-  ansible.builtin.debug:
-    var: _pihole_status.stdout_lines
-
-- name: Test DNS resolution via Pi-hole
-  ansible.builtin.command:
-    cmd: dig @127.0.0.1 google.com +short +time=5
-  register: _dns_test
-  changed_when: false
-  failed_when: false
-
-- name: Report DNS test result
-  ansible.builtin.debug:
-    msg: "DNS test (google.com): {{ _dns_test.stdout | default('no response') }}"
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ pihole_ct_id }}/file"
+    method: POST
+    body_format: json
+    body:
+      path: /etc/resolv.conf
+      content: "nameserver 127.0.0.1\n"
+      mode: "0644"
+    status_code: 200
+  delegate_to: localhost

@@ -71,6 +71,14 @@ git clone <repo-url> && cd vm_builds
 ./setup.sh                           # creates .venv, installs everything
 ```
 
+`setup.sh` will prompt for your sudo password once to:
+- Install `wireguard-tools` (needed for the VPN tunnel to your fleet)
+- Create `/etc/sudoers.d/vm-builds-wireguard` (passwordless sudo for `wg-quick`, `wg`, `install` only)
+- Create `/etc/wireguard/` directory
+
+This is a one-time setup. After this, `molecule converge` and `site.yml`
+automatically configure the VPN tunnel on this machine without prompting.
+
 ### 2. SSH keys for Proxmox
 
 ```bash
@@ -103,7 +111,7 @@ cp test.env .env      # edit with your Proxmox IPs + API tokens
 | `PIHOLE_WEB_PASSWORD` | No | Pi-hole admin password |
 | `HA_ADMIN_PASSWORD` | No | Home Assistant admin password |
 | `SUNSHINE_USER` / `SUNSHINE_PASSWORD` | No | Gaming LXC Sunshine credentials |
-| `DESKTOP_USER` / `DESKTOP_PASSWORD` | No | Desktop VM login |
+| `DESKTOP_USER` | No | Desktop LXC username |
 
 ### 5. Build images
 
@@ -170,7 +178,7 @@ Phase 2: LAN satellites (reachable after OpenWrt creates the LAN)
 Phase 3: Services (span both primary + LAN hosts)
   Pi-hole → rsyslog → Netdata → Home Assistant → Jellyfin →
   Kodi → Moonlight → WireGuard → Mesh WiFi → WiFi Bridge →
-  Desktop VM → Kiosk → Gaming LXC
+  Desktop LXC → Kiosk → Gaming LXC
 
 Phase 3d: Fleet heartbeat circuit breaker
   Hard-fail if any healthy container stopped heartbeating
@@ -192,7 +200,7 @@ The API starts automatically during production (`build.py`) and test (`molecule 
 | 100-199 | Network | OpenWrt (100), WireGuard (101), Pi-hole (102), Mesh WiFi (103), WiFi Bridge (104) |
 | 200-299 | Services | Home Assistant (200) |
 | 300-399 | Media | Jellyfin (300), Kodi (301), Moonlight (302) |
-| 400-499 | Desktop | Desktop VM (400), Kiosk (401) |
+| 400-499 | Desktop | Desktop LXC (400), Kiosk (401) |
 | 500-599 | Observability | Netdata (500), rsyslog (501) |
 | 600-699 | Gaming | Gaming LXC (601) |
 
@@ -281,7 +289,7 @@ vm_builds/
 | Jellyfin | `jellyfin_lxc` | `jellyfin_configure` |
 | Kodi | `kodi_lxc` | `kodi_configure` |
 | Moonlight | `moonlight_lxc` | `moonlight_configure` |
-| Desktop VM | `desktop_vm` | `desktop_configure` |
+| Desktop | `desktop_lxc` | `desktop_configure` |
 | Kiosk | `kiosk_lxc` | `kiosk_configure` |
 | Gaming LXC | `gaming_lxc` | `gaming_lxc_configure` |
 | Mesh WiFi | `openwrt_mesh_lxc` | `openwrt_mesh_configure` |

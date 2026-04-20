@@ -1,10 +1,21 @@
 ---
-# ── Verify Kiosk template exists ─────────────────────────────────
+# Kiosk LXC provisioning via shared proxmox_lxc role.
+# Version check skips provisioning when the deployed version matches.
+
+# ── Version-aware skip check ──────────────────────────────────────
+- name: Check Kiosk version via NM API
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/check_service_version.yml"
+  vars:
+    _check_service_name: kiosk
+    _check_image_version: "{{ kiosk_image_version }}"
+
+# ── Verify Kiosk template exists (skipped when version matches) ──
 - name: Verify Kiosk template exists
   ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/verify_lxc_template.yml"
   vars:
     lxc_template_path: "{{ kiosk_ct_template_path }}"
     lxc_service_name: Kiosk
+  when: not (_service_up_to_date | default(false) | bool)
 
 # ── Determine container network based on host topology ──────────
 - name: Compute Kiosk container network
@@ -14,7 +25,7 @@
     lxc_net_ip_offset: "{{ kiosk_ct_ip_offset }}"
     lxc_net_flavor_group: kiosk_nodes
 
-# ── Check container existence ──────────────────────────────────
+# ── Check container existence (skipped when version matches) ─────
 
 - name: Check if Kiosk container exists
   ansible.builtin.command:
@@ -22,17 +33,20 @@
   register: _ct_status
   failed_when: false
   changed_when: false
+  when: not (_service_up_to_date | default(false) | bool)
 
 - name: Set container existence flag
   ansible.builtin.set_fact:
-    _lxc_exists: "{{ _ct_status.rc == 0 }}"
+    _lxc_exists: "{{ _ct_status.rc | default(1) == 0 }}"
+  when: not (_service_up_to_date | default(false) | bool)
 
-# ── Resolve deployed version ──────────────────────────────────
+# ── Resolve deployed version (skipped when version matches) ──────
 
 - name: Resolve deployed Kiosk version
   ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_kiosk_version.yml"
+  when: not (_service_up_to_date | default(false) | bool)
 
-# ── Provision via shared proxmox_lxc role ────────────────────────
+# ── Provision via shared proxmox_lxc role (skipped when version matches)
 
 - name: Provision Kiosk LXC container
   ansible.builtin.include_role:
@@ -54,6 +68,24 @@
     lxc_ct_unprivileged: "{{ kiosk_ct_unprivileged }}"
     lxc_ct_features: "{{ kiosk_ct_features }}"
     lxc_ct_image_version: "{{ kiosk_image_version }}"
+  when: not (_service_up_to_date | default(false) | bool)
+
+# ── Register in dynamic inventory (always — configure plays need it)
+- name: Add Kiosk containers to dynamic inventory group
+  ansible.builtin.add_host:
+    name: "{{ kiosk_ct_hostname }}-{{ item }}"
+    groups: kiosk
+    ansible_connection: community.proxmox.proxmox_pct_remote
+    ansible_host: "{{ hostvars[item].ansible_host }}"
+    ansible_user: root
+    proxmox_vmid: "{{ kiosk_ct_id }}"
+    ansible_paramiko_host_key_checking: false
+    ansible_paramiko_proxy_command: >-
+      {{ 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@'
+         + lookup('env', 'PRIMARY_HOST')
+         if 'lan_hosts' in (hostvars[item].group_names | default([]))
+         else omit }}
+  loop: "{{ ansible_play_hosts }}"
 
 # ── Deploy display-exclusive hookscript ──────────────────────────
 # The kiosk uses headless rendering (WLR_BACKENDS=headless, pixman)
@@ -76,12 +108,11 @@
       set -o pipefail
       VMID="$1"
       PHASE="$2"
-      CT_IDS=({{ kodi_ct_id }} {{ moonlight_ct_id }})
-      VM_IDS=({{ desktop_vm_id }})
+      CT_IDS=({{ kodi_ct_id }} {{ moonlight_ct_id }} {{ desktop_ct_id }})
 
       is_display() {
           local id="$1"
-          for cid in "${CT_IDS[@]}" "${VM_IDS[@]}"; do
+          for cid in "${CT_IDS[@]}"; do
               [[ "$id" == "$cid" ]] && return 0
           done
           return 1
@@ -96,11 +127,6 @@
                   cnt=$(pct status "$cid" 2>/dev/null | grep -c running || true)
                   [ "${cnt:-0}" -gt 0 ] && pct stop "$cid" 2>/dev/null || true
               done
-              for vid in "${VM_IDS[@]}"; do
-                  [[ "$vid" == "$VMID" ]] && continue
-                  cnt=$(qm status "$vid" 2>/dev/null | grep -c running || true)
-                  [ "${cnt:-0}" -gt 0 ] && qm stop "$vid" 2>/dev/null || true
-              done
               ;;
       esac
       exit 0
@@ -112,59 +138,39 @@
     kiosk_static_ip: "{{ _lxc_net_ip }}"
     cacheable: true
 
-# ── Port forwarding for Manager API ──────────────────────────────
-# Every host forwards port 9001 to the kiosk container so the
-# 4-tier heartbeat chain works bi-directionally:
-#   - WAN hosts: iptables DNAT on the NAT bridge (container and host
-#     share the same 10.99.x.x subnet — no hairpin issue)
-#   - Router node: socat TCP proxy because the kiosk is on the LAN
-#     bridge (vmbr1) while WAN traffic arrives on vmbr0, creating a
-#     hairpin NAT scenario that iptables conntrack cannot handle
-# LAN hosts (behind the router) don't need forwarding — they share
-# the LAN and reach the kiosk directly.
+# ── Local service proxies ─────────────────────────────────────
+# Every host gets a socat proxy for each service port. These
+# forward from the host's network interfaces (including VPN) to
+# the kiosk container's IP. Cross-host traffic arrives via VPN
+# (WireGuard DNAT routes VPN port traffic to the host), hits
+# these proxies, and reaches the container. One path for all
+# topologies — no DNAT rules, no LAN/WAN conditionals.
 
-- name: Add DNAT rule for Manager API port (WAN hosts only)
+- name: Clean up legacy proxy services
   ansible.builtin.shell:
     cmd: |
-      set -o pipefail
-      WAN_IF="{{ proxmox_wan_bridge }}"
-      CT_IP="{{ _lxc_net_ip }}"
-      if ! iptables -t nat -C PREROUTING -i "$WAN_IF" -p tcp --dport 9001 -j DNAT --to-destination "$CT_IP:9001" 2>/dev/null; then
-        iptables -t nat -A PREROUTING -i "$WAN_IF" -p tcp --dport 9001 -j DNAT --to-destination "$CT_IP:9001"
-      fi
+      for svc in kiosk-vnc-proxy kiosk-display-proxy manager-api-proxy; do
+        systemctl stop "$svc" 2>/dev/null || true
+        systemctl disable "$svc" 2>/dev/null || true
+        rm -f "/etc/systemd/system/${svc}.service"
+      done
+      for f in /etc/systemd/system/*-display-proxy.service; do
+        [ -f "$f" ] || continue
+        svc="$(basename "$f" .service)"
+        systemctl stop "$svc" 2>/dev/null || true
+        systemctl disable "$svc" 2>/dev/null || true
+        rm -f "$f"
+      done
+      systemctl daemon-reload
     executable: /bin/bash
-  when:
-    - not (_lxc_net_on_lan | bool)
-    - inventory_hostname not in groups.get('router_nodes', [])
   changed_when: true
+  failed_when: false
 
-- name: Add FORWARD rule for Manager DNAT traffic (WAN hosts only)
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      CT_IP="{{ _lxc_net_ip }}"
-      if ! iptables -C FORWARD -d "$CT_IP" -p tcp --dport 9001 -j ACCEPT 2>/dev/null; then
-        iptables -A FORWARD -d "$CT_IP" -p tcp --dport 9001 -j ACCEPT
-      fi
-    executable: /bin/bash
-  when:
-    - not (_lxc_net_on_lan | bool)
-    - inventory_hostname not in groups.get('router_nodes', [])
-  changed_when: true
-
-# Router node: socat proxy instead of DNAT. The kiosk container is on
-# vmbr1 (LAN) while child Managers connect via vmbr0 (WAN). DNAT +
-# MASQUERADE between two bridges on the same host creates a hairpin NAT
-# where conntrack cannot reverse the NAT on reply packets (the bridge
-# delivers the reply to the host's local stack, bypassing conntrack's
-# re-routing logic). socat operates in userspace, avoiding this entirely.
-# Deployed as a systemd unit so it survives SSH session teardown and
-# auto-restarts on failure/reboot.
-- name: Deploy Manager API socat proxy unit (router node only)
+- name: Deploy kiosk-manager-proxy (host:9001 → container:9001)
   ansible.builtin.copy:
     content: |
       [Unit]
-      Description=Manager API socat proxy (WAN:9001 -> kiosk:9001)
+      Description=Manager API proxy (host:9001 -> kiosk:9001)
       After=network.target pve-guests.service
       Wants=pve-guests.service
 
@@ -176,77 +182,34 @@
 
       [Install]
       WantedBy=multi-user.target
-    dest: /etc/systemd/system/manager-api-proxy.service
+    dest: /etc/systemd/system/kiosk-manager-proxy.service
     mode: "0644"
-  when: inventory_hostname in groups.get('router_nodes', [])
 
-- name: Enable and start Manager API socat proxy (router node only)
-  ansible.builtin.systemd:
-    name: manager-api-proxy
-    daemon_reload: true
-    enabled: true
-    state: restarted
-  when: inventory_hostname in groups.get('router_nodes', [])
-
-# ── Port forwarding for VNC WebSocket ──────────────────────────
-# Same pattern as port 9001 — DNAT for WAN hosts, socat for router.
-
-- name: Add DNAT rule for VNC WebSocket port (WAN hosts only)
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      WAN_IF="{{ proxmox_wan_bridge }}"
-      CT_IP="{{ _lxc_net_ip }}"
-      VNC_PORT="{{ kiosk_vnc_ws_port }}"
-      if ! iptables -t nat -C PREROUTING -i "$WAN_IF" -p tcp --dport "$VNC_PORT" \
-           -j DNAT --to-destination "$CT_IP:$VNC_PORT" 2>/dev/null; then
-        iptables -t nat -A PREROUTING -i "$WAN_IF" -p tcp --dport "$VNC_PORT" \
-          -j DNAT --to-destination "$CT_IP:$VNC_PORT"
-      fi
-    executable: /bin/bash
-  when:
-    - not (_lxc_net_on_lan | bool)
-    - inventory_hostname not in groups.get('router_nodes', [])
-  changed_when: true
-
-- name: Add FORWARD rule for VNC DNAT traffic (WAN hosts only)
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      CT_IP="{{ _lxc_net_ip }}"
-      if ! iptables -C FORWARD -d "$CT_IP" -p tcp --dport {{ kiosk_vnc_ws_port }} -j ACCEPT 2>/dev/null; then
-        iptables -A FORWARD -d "$CT_IP" -p tcp --dport {{ kiosk_vnc_ws_port }} -j ACCEPT
-      fi
-    executable: /bin/bash
-  when:
-    - not (_lxc_net_on_lan | bool)
-    - inventory_hostname not in groups.get('router_nodes', [])
-  changed_when: true
-
-- name: Deploy VNC WebSocket socat proxy unit (LAN hosts)
+- name: Deploy kiosk display proxy on port {{ kiosk_ws_port }}
   ansible.builtin.copy:
     content: |
       [Unit]
-      Description=VNC WebSocket socat proxy (host:{{ kiosk_vnc_ws_port }} -> kiosk:{{ kiosk_vnc_ws_port }})
+      Description=Kiosk display proxy (host:{{ kiosk_ws_port }} -> kiosk:{{ kiosk_ws_port }})
       After=network.target pve-guests.service
       Wants=pve-guests.service
 
       [Service]
       Type=simple
-      ExecStart=/usr/bin/socat TCP-LISTEN:{{ kiosk_vnc_ws_port }},reuseaddr,fork TCP:{{ _lxc_net_ip }}:{{ kiosk_vnc_ws_port }}
+      ExecStart=/usr/bin/socat TCP-LISTEN:{{ kiosk_ws_port }},reuseaddr,fork TCP:{{ _lxc_net_ip }}:{{ kiosk_ws_port }}
       Restart=always
       RestartSec=3
 
       [Install]
       WantedBy=multi-user.target
-    dest: /etc/systemd/system/kiosk-vnc-proxy.service
+    dest: /etc/systemd/system/kiosk-display-proxy.service
     mode: "0644"
-  when: _lxc_net_on_lan | bool
 
-- name: Enable and start VNC WebSocket socat proxy (LAN hosts)
+- name: Enable kiosk proxy services
   ansible.builtin.systemd:
-    name: kiosk-vnc-proxy
+    name: "{{ item }}"
     daemon_reload: true
     enabled: true
     state: restarted
-  when: _lxc_net_on_lan | bool
+  loop:
+    - kiosk-manager-proxy
+    - kiosk-display-proxy

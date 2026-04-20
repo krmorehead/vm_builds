@@ -194,7 +194,7 @@ def _ssh_exec(
 # ── Metric collectors ────────────────────────────────────────────────
 
 
-def collect_wifi_metrics(ip: str) -> HeartbeatCache:
+def collect_wifi_metrics(ip: str, node_id: str = "") -> HeartbeatCache:
     """Collect WiFi interface and link metrics from an OpenWrt node.
 
     Uses wifi_setup.sh (baked into mesh/bridge images) as the primary
@@ -249,7 +249,7 @@ def collect_wifi_metrics(ip: str) -> HeartbeatCache:
     )
 
 
-def collect_bridge_metrics(ip: str) -> HeartbeatCache:
+def collect_bridge_metrics(ip: str, node_id: str = "") -> HeartbeatCache:
     """Collect WiFi bridge metrics (superset of wifi metrics).
 
     When wifi_setup.sh is available, all data (interfaces, stations,
@@ -289,12 +289,12 @@ def collect_bridge_metrics(ip: str) -> HeartbeatCache:
     )
 
 
-def collect_router_metrics(ip: str) -> HeartbeatCache:
+def collect_router_metrics(ip: str, node_id: str = "") -> HeartbeatCache:
     """Collect router-level metrics from an OpenWrt node."""
     now = datetime.now().isoformat(timespec="seconds")
     data: dict = {}
 
-    ok, wan_out = _ssh_exec(ip, "uci get network.wan.proto 2>/dev/null; ifstatus wan 2>/dev/null | jsonfilter -e '@[\"ipv4-address\"][0].address' -e '@[\"up\"]' -e '@.uptime 2>/dev/null'")
+    ok, wan_out = _ssh_exec(ip, "uci get network.wan.proto 2>/dev/null; ifstatus wan 2>/dev/null | jsonfilter -e '@[\"ipv4-address\"][0].address' -e '@[\"up\"]' -e '@.uptime'")
     if ok:
         lines = wan_out.strip().splitlines()
         data["wan"] = {
@@ -340,7 +340,7 @@ def collect_router_metrics(ip: str) -> HeartbeatCache:
     )
 
 
-def collect_mesh_metrics(ip: str) -> HeartbeatCache:
+def collect_mesh_metrics(ip: str, node_id: str = "") -> HeartbeatCache:
     """Collect mesh network metrics (WiFi + peer info).
 
     Role detection uses wifi_setup.sh when available (baked into the
@@ -675,7 +675,7 @@ def _parse_batman_interfaces(output: str) -> list[dict]:
     return interfaces
 
 
-def collect_batman_metrics(ip: str) -> HeartbeatCache:
+def collect_batman_metrics(ip: str, node_id: str = "") -> HeartbeatCache:
     """Collect batman-adv status from a node via SSH.
 
     batman_trigger.sh lives inside the bridge LXC container (VMID 104),

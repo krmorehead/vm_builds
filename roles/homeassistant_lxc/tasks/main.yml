@@ -1,10 +1,21 @@
 ---
-# ── Verify Home Assistant template exists ─────────────────────────
+# Home Assistant LXC provisioning via Node Manager API.
+# Version check skips provisioning when the deployed version matches.
+
+# ── Version-aware skip check ──────────────────────────────────────
+- name: Check Home Assistant version via NM API
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/check_service_version.yml"
+  vars:
+    _check_service_name: homeassistant
+    _check_image_version: "{{ homeassistant_image_version }}"
+
+# ── Verify Home Assistant template exists (skipped when version matches)
 - name: Verify Home Assistant template exists
   ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/verify_lxc_template.yml"
   vars:
     lxc_template_path: "{{ homeassistant_ct_template_path }}"
     lxc_service_name: Home Assistant
+  when: not (_service_up_to_date | default(false) | bool)
 
 # ── Determine container network ─────────────────────────────────
 - name: Compute Home Assistant LAN network
@@ -34,49 +45,64 @@
     msg: "USB devices: {{ homeassistant_usb_devices }} → Mount entries: {{ _ha_mount_entries }}"
   when: homeassistant_usb_devices | length > 0
 
-# ── Check container existence ──────────────────────────────────
+# ── Provision container via NM API (skipped when version matches) ─
+- name: Provision Home Assistant LXC via NM API
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/homeassistant"
+    method: POST
+    body_format: json
+    body:
+      vmid: "{{ homeassistant_ct_id }}"
+      template_path: "{{ homeassistant_ct_template_path | basename }}"
+      hostname: "{{ homeassistant_ct_hostname }}"
+      memory: "{{ homeassistant_ct_memory }}"
+      cores: "{{ homeassistant_ct_cores }}"
+      disk: "{{ homeassistant_ct_disk }}"
+      onboot: "{{ homeassistant_ct_onboot }}"
+      startup_order: "{{ homeassistant_ct_startup_order }}"
+      features: "{{ homeassistant_ct_features | join(',') }}"
+      ip: "{{ _lxc_ct_ip }}/{{ _lan_cidr }}"
+      gateway: "{{ _lan_gateway }}"
+      nameserver: "{{ _lan_gateway }}"
+      bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
+      mount_entries: "{{ _ha_mount_entries }}"
+      image_version: "{{ homeassistant_image_version }}"
+    status_code: 200
+    timeout: 180
+  delegate_to: localhost
+  register: _provision_result
+  failed_when: not (_provision_result.json.success | default(false))
+  when: not (_service_up_to_date | default(false) | bool)
 
-- name: Check if Home Assistant container exists
-  ansible.builtin.command:
-    cmd: pct status {{ homeassistant_ct_id }}
-  register: _ct_status
-  failed_when: false
-  changed_when: false
+- name: Report provision result
+  ansible.builtin.debug:
+    msg: "Home Assistant on {{ inventory_hostname }}: {{ _provision_result.json.status }} — {{ _provision_result.json.log | default([]) | join(', ') }}"
+  when: not (_service_up_to_date | default(false) | bool)
 
-- name: Set container existence flag
-  ansible.builtin.set_fact:
-    _lxc_exists: "{{ _ct_status.rc == 0 }}"
-
-# ── Resolve deployed version ────────────────────────────────────
-
-- name: Resolve deployed Home Assistant version
-  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_deployed_version.yml"
+# ── Configure callhome via NM API (skipped when version matches) ─
+- name: Configure callhome on Home Assistant
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/configure_callhome_api.yml"
   vars:
-    _resolve_service_name: homeassistant
+    _callhome_vmid: "{{ homeassistant_ct_id }}"
 
-# ── Provision via shared proxmox_lxc role ────────────────────────
+# ── Register in dynamic inventory (for configure plays) ──────────
+- name: Add Home Assistant containers to dynamic inventory group
+  ansible.builtin.add_host:
+    name: "{{ homeassistant_ct_hostname }}-{{ item }}"
+    groups: homeassistant
+    ansible_connection: community.proxmox.proxmox_pct_remote
+    ansible_host: "{{ hostvars[item].ansible_host }}"
+    ansible_user: root
+    proxmox_vmid: "{{ homeassistant_ct_id }}"
+    ansible_paramiko_host_key_checking: false
+    ansible_paramiko_proxy_command: >-
+      {{ 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@'
+         + lookup('env', 'PRIMARY_HOST')
+         if 'lan_hosts' in (hostvars[item].group_names | default([]))
+         else omit }}
+  loop: "{{ ansible_play_hosts }}"
 
-- name: Provision Home Assistant LXC container
-  ansible.builtin.include_role:
-    name: proxmox_lxc
-  vars:
-    lxc_ct_id: "{{ homeassistant_ct_id }}"
-    lxc_ct_hostname: "{{ homeassistant_ct_hostname }}"
-    lxc_ct_dynamic_group: homeassistant
-    lxc_ct_memory: "{{ homeassistant_ct_memory }}"
-    lxc_ct_cores: "{{ homeassistant_ct_cores }}"
-    lxc_ct_disk: "{{ homeassistant_ct_disk }}"
-    lxc_ct_onboot: "{{ homeassistant_ct_onboot }}"
-    lxc_ct_startup_order: "{{ homeassistant_ct_startup_order }}"
-    lxc_ct_features: "{{ homeassistant_ct_features }}"
-    lxc_ct_template_path: "{{ homeassistant_ct_template_path }}"
-    lxc_ct_ip: "{{ _lxc_ct_ip }}/{{ _lan_cidr }}"
-    lxc_ct_gateway: "{{ _lan_gateway }}"
-    lxc_ct_nameserver: "{{ _lan_gateway }}"
-    lxc_ct_bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
-    lxc_ct_mount_entries: "{{ _ha_mount_entries }}"
-    lxc_ct_image_version: "{{ homeassistant_image_version }}"
-
+# ── Export static IP for downstream roles ─────────────────────────
 - name: Export Home Assistant static IP for downstream roles
   ansible.builtin.set_fact:
     homeassistant_static_ip: "{{ _lxc_ct_ip }}"

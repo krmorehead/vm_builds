@@ -99,7 +99,7 @@ if the changes are host-side).
 # In playbooks/cleanup.yml
 - name: Rollback security hardening
   hosts: openwrt
-  tags: [openwrt-security-rollback, never]
+  tags: [openwrt-security-rollback]
   gather_facts: false
   tasks:
     - name: Remove banIP and revert SSH config
@@ -111,8 +111,9 @@ if the changes are host-side).
         /etc/init.d/dropbear restart
 ```
 
-The `never` tag prevents rollback from running during full cleanup.
-It only runs when explicitly requested: `--tags openwrt-security-rollback`.
+Rollback plays are gated by `when: rollback | default(false) | bool` so they
+never run during default cleanup. To invoke:
+`ansible-playbook cleanup.yml --tags openwrt-security-rollback -e rollback=true`
 
 ## Dynamic group reconstruction for rollback
 
@@ -127,7 +128,7 @@ ALL rollback tags so it runs whenever any rollback is invoked:
 # In playbooks/cleanup.yml — BEFORE any rollback plays
 - name: Reconstruct openwrt dynamic group
   hosts: router_nodes
-  tags: [openwrt-security-rollback, openwrt-vlans-rollback, openwrt-dns-rollback, openwrt-mesh-rollback, never]
+  tags: [openwrt-security-rollback, openwrt-vlans-rollback, openwrt-dns-rollback, openwrt-mesh-rollback]
   gather_facts: true
   tasks:
     - name: Include group reconstruction
@@ -206,7 +207,12 @@ Future (added by downstream projects when implemented)
 ```
 
 Apply tags go in `site.yml` plays. Rollback tags go in `cleanup.yml` plays.
-Both use the `never` meta-tag so they don't run unless explicitly requested.
+Rollback plays are gated by `when: rollback | default(false) | bool` AND their
+rollback-specific tag (e.g., `openwrt-security-rollback`). To invoke a rollback:
+`ansible-playbook cleanup.yml --tags <feature>-rollback -e rollback=true`
+
+NEVER use Ansible's `never` special tag — it silently skips plays in the default pipeline,
+creating untested dead code.
 
 NEVER add stub plays/rollback for features that depend on unimplemented
 projects. Integration plays are owned by the downstream project that

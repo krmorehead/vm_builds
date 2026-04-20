@@ -88,7 +88,7 @@ async def stream_process(
                     except RuntimeError:
                         pass
         return await proc.wait()
-    except Exception as exc:
+    except (OSError, asyncio.CancelledError, ValueError) as exc:
         try:
             log.push(f"Error: {exc}")
         except RuntimeError:

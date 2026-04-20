@@ -7,3 +7,4 @@ pci_passthrough_allow_reboot: true
 # PCIe NIC (r8169 nic0) is present but has no cable connected.
 wol_capable: false
 container_subnet_id: 3
+vpn_ip: 10.0.0.3

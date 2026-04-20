@@ -308,10 +308,9 @@ Before considering a plan ready for execution, verify each item.
     groups in `inventory/hosts.yml`, dynamic groups in inventory, platform
     groups in `molecule/default/molecule.yml`.
 16. **site.yml play ordering**: Verify the proposed play position doesn't
-    conflict with existing plays. Count the actual play numbers. Clarify
-    positioning relative to `never`-tagged per-feature plays. If the new
-    plays are NOT tagged `never`, explicitly state they run during normal
-    converge.
+    conflict with existing plays. Count the actual play numbers. Every
+    service play runs during normal converge — NEVER use Ansible's `never`
+    tag. Tags are for selective invocation via `--tags`, not for exclusion.
 17. **Tag collision**: Verify proposed tags don't collide with existing
     tags in `site.yml` or `cleanup.yml`.
 18. **Shared tags**: If the plan uses a tag shared with another service
@@ -377,9 +376,8 @@ Before considering a plan ready for execution, verify each item.
     exception and rationale:
     - **Docker pull of pinned image tag**: deterministic, versioned,
       idempotent (e.g., Home Assistant pre-pulls HA container image)
-    - **Desktop VMs via cloud image + apt**: full desktop environments
-      are too large and hardware-dependent for pre-built images; cloud
-      image + cloud-init is the VM community standard
+    - **Desktop LXC via build-images.sh**: rootfs tarball with all packages
+      (KDE, GNOME, KasmVNC) baked in; GPU drivers selected at build time
     - **Windows VMs via ISO + autounattend.xml**: install-from-ISO IS
       the bake approach for Windows — deterministic, unattended, with
       drivers pre-injected
@@ -389,7 +387,7 @@ Before considering a plan ready for execution, verify each item.
     project OWNS the deployment and which projects only ATTACH. Only one
     project deploys; others reference it. Document the owning project
     explicitly.
-    Previous bug: Kodi, Moonlight, and Desktop VM plans all had tasks to
+    Previous bug: Kodi, Moonlight, and Desktop LXC plans all had tasks to
     deploy the display-exclusive hookscript. Consolidated ownership to
     the Kiosk project.
 31. **Separate hardware topology**: If the service runs on separate

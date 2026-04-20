@@ -173,7 +173,7 @@ site.yml uses tags for selective execution:
 - `[monitoring]` — Netdata and rsyslog monitoring
 - `[wireguard]` — WireGuard VPN service
 - `[mesh-wifi]` — OpenWrt mesh WiFi
-- `[never]` — Per-feature plays (opt-in only)
+- Per-feature plays (security, VLANs, DNS, mesh, syslog, pihole-dns) run in the default flow
 
 cleanup.yml uses tags for rollback operations:
 - `[cleanup]` — Full cleanup

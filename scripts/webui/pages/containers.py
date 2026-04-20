@@ -203,11 +203,12 @@ async def _do_action(vmid: str, action: str, refresh_callback) -> None:
 def register() -> None:
     @ui.page("/containers")
     async def containers_page() -> None:
+        import asyncio
         from scripts.webui.app import get_state_dir, load_active_env
 
         state_dir = get_state_dir()
         env = load_active_env()
-        fleet = data.build_fleet(env, state_dir)
+        fleet = await asyncio.to_thread(data.build_fleet, env, state_dir)
 
         with theme.page_shell("containers"):
             ui.add_head_html(theme.HOVER_CARD_STYLES)

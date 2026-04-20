@@ -2,31 +2,84 @@
 # rsyslog base config (TCP listener, routing, spool dir, logrotate) is
 # baked into the image.  This role only applies host-specific forwarding
 # rules when RSYSLOG_HOME_SERVER is set.
+# All in-container operations go through the Node Manager API over VPN.
 #
 # Config file processing order inside the container:
 #   10-receive.conf     — loads imtcp, defines RemoteLogFile template
 #   20-forward.conf     — (optional) forwards ALL messages to home server
 #   50-remote-route.conf — writes TCP-received msgs to per-host files, stops
 
+# ── Build forwarding config content ─────────────────────────────
+
+- name: Build rsyslog forwarding config content
+  ansible.builtin.set_fact:
+    _rsyslog_fwd_content: |
+      # Forward all received logs to the home server via WireGuard tunnel.
+      # Disk-assisted queue ensures no log loss during tunnel outages.
+      *.* action(type="omfwd"
+          target="{{ rsyslog_home_server }}"
+          port="514"
+          protocol="tcp"
+          queue.type="disk"
+          queue.filename="home_fwd"
+          queue.maxDiskSpace="32m"
+          queue.saveOnShutdown="on"
+          queue.size="5000"
+          queue.discardMark="4750"
+          queue.discardSeverity="8"
+          action.resumeRetryCount="-1")
+  when: rsyslog_home_server | length > 0
+
 # ── Deploy or remove forwarding config ───────────────────────────
 
-- name: Deploy forwarding config to rsyslog
-  ansible.builtin.template:
-    src: 20-forward.conf.j2
-    dest: /etc/rsyslog.d/20-forward.conf
-    mode: "0644"
+- name: Deploy forwarding config to rsyslog via NM API
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ rsyslog_ct_id }}/file"
+    method: POST
+    body_format: json
+    body:
+      path: /etc/rsyslog.d/20-forward.conf
+      content: "{{ _rsyslog_fwd_content }}"
+      mode: "0644"
+    status_code: 200
+  delegate_to: localhost
   when: rsyslog_home_server | length > 0
-  notify: _restart_rsyslog
 
 - name: Remove forwarding config when home server is not set
-  ansible.builtin.file:
-    path: /etc/rsyslog.d/20-forward.conf
-    state: absent
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ rsyslog_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: "rm -f /etc/rsyslog.d/20-forward.conf"
+      timeout: 10
+    status_code: 200
+  delegate_to: localhost
   when: rsyslog_home_server | length == 0
-  notify: _restart_rsyslog
 
-- name: Flush handlers to validate and restart rsyslog
-  ansible.builtin.meta: flush_handlers
+# ── Validate and restart rsyslog ─────────────────────────────────
+
+- name: Validate rsyslog configuration
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ rsyslog_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: "/usr/sbin/rsyslogd -N1"
+      timeout: 10
+    status_code: 200
+  delegate_to: localhost
+  register: _rsyslog_validate
+
+- name: Restart rsyslog service via NM API
+  ansible.builtin.uri:
+    url: >-
+      http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ rsyslog_ct_id }}/service/rsyslog/restart
+    method: POST
+    body_format: json
+    body: {}
+    status_code: 200
+  delegate_to: localhost
 
 # ── Post-restart health check ────────────────────────────────────
 
@@ -42,19 +95,9 @@
   failed_when: false
   when: callhome_server | default('') | length > 0
 
-- name: Wait for rsyslog to be active after config change (SSH fallback)
-  ansible.builtin.command:
-    cmd: systemctl is-active rsyslog
-  register: _rsyslog_status
-  changed_when: false
-  retries: 5
-  delay: 2
-  until: _rsyslog_status.stdout | trim == 'active'
-  when: callhome_server | default('') | length == 0 or not (_rsyslog_api_check.json.ready | default(false)) | bool
-
 - name: Report rsyslog status
   ansible.builtin.debug:
     msg: >-
       rsyslog service: {{ 'ready (via API)' if (_rsyslog_api_check.json.ready | default(false)) | bool
-        else (_rsyslog_status.stdout | default('unknown') | trim) }},
+        else 'unknown' }},
       forwarding={{ 'enabled to ' + rsyslog_home_server if rsyslog_home_server | length > 0 else 'disabled (local only)' }}

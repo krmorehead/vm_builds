@@ -44,7 +44,7 @@ For project structure and architecture patterns: .agents/skills/project-structur
 
 ## What This Project Is
 
-An Ansible project that automates VM and LXC container provisioning on Proxmox VE. Deploys 15 services across 6 nodes — OpenWrt router, WireGuard VPN, Pi-hole DNS, rsyslog + Netdata monitoring, Home Assistant, Jellyfin + Kodi + Moonlight media, Desktop VM, Gaming LXC, Mesh WiFi, WiFi Bridge, and Kiosk — with a NiceGUI Web UI for deployment, fleet monitoring, and kiosk management.
+An Ansible project that automates VM and LXC container provisioning on Proxmox VE. Deploys 15 services across 6 nodes — OpenWrt router, WireGuard VPN, Pi-hole DNS, rsyslog + Netdata monitoring, Home Assistant, Jellyfin + Kodi + Moonlight media, Desktop LXC, Gaming LXC, Mesh WiFi, WiFi Bridge, and Kiosk — with a NiceGUI Web UI for deployment, fleet monitoring, and kiosk management.
 
 ## Core Design Principles
 
@@ -70,11 +70,21 @@ If a prerequisite is missing (image not built, hardware not present, config not 
 
 Before writing custom automation, check if the upstream project already has an official tool or recommended approach for exactly this use case. Use it.
 
+### API-Driven Fleet Operations (MANDATORY — verified 2026-04-18)
+
+After VPN + heartbeat are established (first two plays post-infrastructure),
+ALL operations use `ansible.builtin.uri` → NM/SM API over VPN. No SSH.
+
+- 9/10 configure roles are 100% API-first (zero SSH)
+- Verification uses `/api/fleet/ready`, `/api/container/{id}/ready`, `/api/config/self`
+- NEVER add SSH fallback paths — API failure = 4-tier system broken
+- Exceptions: `kiosk_configure` (bootstrap), `openwrt_configure` (no HTTP API on VM)
+
 ## Architecture Pattern: Two-Role Per Service
 
 Every service type has exactly two roles:
-- `<type>_vm` + `<type>_configure` — for VMs (KVM/QEMU): provision via qm, configure via SSH
-- `<type>_lxc` + `<type>_configure` — for containers: provision via `include_role: proxmox_lxc`, configure via `community.proxmox.proxmox_pct_remote`
+- `<type>_vm` + `<type>_configure` — for VMs: provision via qm, configure via NM API over VPN
+- `<type>_lxc` + `<type>_configure` — for containers: provision via `include_role: proxmox_lxc`, configure via NM API (`ansible.builtin.uri` over VPN)
 - `<type>_mesh_lxc` + `<type>_mesh_configure` — for LXC containers with host device namespace move (e.g., WiFi PHY)
 
 ### Shared Infrastructure Roles
@@ -120,12 +130,12 @@ Run once per host before any service roles:
 - Play 24: `openwrt_mesh_configure` (openwrt_mesh) — tag: `mesh-wifi`
 - Play 25: `openwrt_bridge_lxc` (bridge_nodes) — tag: `bridge`, deploy_stamp: `openwrt_bridge_lxc`
 - Play 26: `openwrt_bridge_configure` (openwrt_bridge) — tag: `bridge`
-- Play 27: `desktop_vm` (desktop_nodes) — tag: `desktop`, deploy_stamp: `desktop_vm`
-- Play 28: `desktop_configure` (desktop) — tag: `desktop`
+- Play 27: `desktop_lxc` (desktop_nodes) — tag: `desktop`, deploy_stamp: `desktop_lxc`
+- Play 28: `desktop_configure` (desktop_nodes) — tag: `desktop`
 - Play 29: `kiosk_lxc` (desktop_nodes) — tag: `kiosk`, deploy_stamp: `kiosk_lxc`
 - Play 30: `kiosk_configure` (desktop_nodes) — tag: `kiosk`
-- Play 31: `gaming_lxc` (gaming_nodes) — tag: `gaming`, `never`, deploy_stamp: `gaming_lxc`
-- Play 32: `gaming_lxc_configure` (gaming_nodes) — tag: `gaming`, `never`
+- Play 31: `gaming_lxc` (gaming_nodes) — tag: `gaming`, deploy_stamp: `gaming_lxc`
+- Play 32: `gaming_lxc_configure` (gaming_nodes) — tag: `gaming`
 
 ## Network Topology
 
@@ -160,7 +170,7 @@ Hosts belong to child groups under `proxmox` that determine which services they 
 - `service_nodes` — Home Assistant
 - `media_nodes` — Jellyfin, Kodi
 - `streaming_nodes` — Moonlight
-- `desktop_nodes` — Desktop VM, UX Kiosk
+- `desktop_nodes` — Desktop LXC, UX Kiosk
 - `gaming_nodes` — Gaming LXC (separate physical machine)
 - `kiosk_nodes` — Manager/Kiosk LXC (ALL hosts — MUST equal `proxmox` membership)
 - `bridge_nodes` — Dedicated WiFi Bridge LXC (bridge-1 AP, bridge-2 STA)
@@ -173,7 +183,7 @@ A host can belong to multiple flavor groups.
 - **100-199**: Network (100 OpenWrt, 101 WireGuard, 102 Pi-hole, 103 Mesh WiFi, 104 WiFi Bridge)
 - **200-299**: Services (200 Home Assistant)
 - **300-399**: Media (300 Jellyfin, 301 Kodi, 302 Moonlight)
-- **400-499**: Desktop (400 Desktop VM, 401 Kiosk)
+- **400-499**: Desktop (400 Desktop LXC, 401 Kiosk)
 - **500-599**: Observability (500 Netdata, 501 rsyslog)
 - **600-699**: Gaming (600 Gaming VM legacy, 601 Gaming LXC active)
 - **999**: reserved for molecule test containers

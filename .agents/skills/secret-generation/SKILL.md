@@ -85,9 +85,39 @@ ansible_host: "192.168.86.201"
 
 Every section written to the generated env file SHOULD have a corresponding assertion in `molecule/default/verify.yml`. This ensures the generated values are actually produced during converge and are accessible in subsequent plays.
 
+## Controller VPN key flow
+
+The controller (build/test machine) gets its own WireGuard keypair for the
+VPN tunnel to the hub. The key flow spans two phases:
+
+1. **Key generation** (`prepare.yml` or first converge): Controller private
+   key generated with `wg genkey`, public key derived with `wg pubkey`.
+   Both written to `env_generated_path` under the `Controller WireGuard Keys`
+   marker block: `WIREGUARD_PRIVATE_KEY_CONTROLLER` and
+   `WIREGUARD_PUBLIC_KEY_CONTROLLER`.
+
+2. **Hub pubkey availability** (`wireguard_configure` play): The hub
+   (home WireGuard container) generates its keypair and writes
+   `WIREGUARD_HUB_PUBLIC_KEY` to `env_generated_path`. The controller VPN
+   play reads this via `lookup('env', 'WIREGUARD_HUB_PUBLIC_KEY')`.
+
+3. **Controller VPN setup** (site.yml, after wireguard_configure): Reads
+   both keys from env, templates `/etc/wireguard/wg0.conf`, and brings up
+   `wg0`. Skips gracefully if either key is empty (first run before
+   wireguard_configure has produced the hub key).
+
+4. **Endpoint resolution**: `WIREGUARD_SERVER_ENDPOINT` is computed from
+   the hub's reachable IP + port 51820. Written to `env_generated_path` by
+   the WireGuard configure role.
+
+The build machine VPN play uses explicit `sudo` (not `become: true`).
+The NOPASSWD sudoers entry for `wg-quick`, `wg`, and `install` is already
+installed by `setup.sh`. This is a solved problem — no manual steps needed.
+
 ## Anti-patterns
 
 NEVER explain what secrets are in secret generation rules
 NEVER write the same section from two different roles
 NEVER use bare relative paths - they break with molecule scenarios
 NEVER hardcode test.env.generated vs .env.generated decisions
+NEVER use `become: true` on localhost — use explicit `sudo`. NOPASSWD sudoers is already installed by setup.sh

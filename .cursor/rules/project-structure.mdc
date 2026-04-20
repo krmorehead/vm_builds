@@ -120,6 +120,34 @@ Ansible handles initial provisioning and configuration. The Manager API
 handles everything after: status queries, mode switching, service toggling,
 and fleet health monitoring.
 
+### API-driven fleet operations (MANDATORY)
+After VPN (WireGuard) and heartbeat (callhome) are established — the first
+two required plays in site.yml — ALL subsequent configure roles use
+`ansible.builtin.uri` to push config and trigger operations through the
+NodeManager API. NO SSH to containers. No fallbacks.
+
+**Configure role API status (verified 2026-04-18):**
+- 9/10 configure roles are 100% API-first (zero SSH/pct exec)
+- `wireguard_configure` uses localhost `wg genkey/pubkey` only (crypto, not SSH)
+- `kiosk_configure` is the sole bootstrap exception (sets up the NM itself)
+- `openwrt_configure` uses raw SSH (OpenWrt VM has no HTTP API)
+
+**Verification is API-first:**
+- Fleet readiness gate: `/api/fleet/ready` — HARD FAIL, no SSH fallback
+- Heartbeat circuit breaker: `/api/fleet/stale` — kills the run immediately
+- Per-service health: `/api/container/{id}/ready` — heartbeat extensions
+- Kiosk config: `/api/config/self` over VPN — no `pct exec`
+- Baked content: `extensions.config_files` hashes — no `pct exec`
+
+**What remains SSH (and why):**
+- Hypervisor config: `pct config/status`, `qm config` (Proxmox host-side)
+- Host infrastructure: bridges, IOMMU, iGPU (host access required)
+- L3 integration: cross-service connectivity proofs (logger, ping, DNS)
+- OpenWrt deep checks: UCI config, radio state (no HTTP API on OpenWrt)
+
+NEVER add SSH fallbacks. If an API check fails, the 4-tier system is broken
+and must be fixed — not worked around.
+
 ### INVARIANT: kiosk_nodes = ALL proxmox hosts
 EVERY physical host MUST be in `kiosk_nodes`. A host without a Manager
 (Kiosk LXC) cannot participate in the 4-tier heartbeat system — it is
@@ -219,16 +247,16 @@ Phase 3: Services (flavor groups span both primary + LAN hosts)
   Play 25: openwrt_bridge_lxc (bridge_nodes) tag: bridge
            deploy_stamp: openwrt_bridge_lxc
   Play 26: openwrt_bridge_configure (openwrt_bridge) tag: bridge
-  Play 27: desktop_vm (desktop_nodes)      tag: desktop
-           deploy_stamp: desktop_vm
-  Play 28: desktop_configure (desktop)     tag: desktop
+  Play 27: desktop_lxc (desktop_nodes)      tag: desktop
+           deploy_stamp: desktop_lxc
+  Play 28: desktop_configure (desktop_nodes) tag: desktop
   Play 29: kiosk_lxc (desktop_nodes)       tag: kiosk
            deploy_stamp: kiosk_lxc
   Play 30: kiosk_configure (desktop_nodes) tag: kiosk
   Play 30a: Distribute Cluster Manager SSH key (kiosk_nodes) tag: kiosk
-  Play 31: gaming_lxc (gaming_nodes)       tag: gaming, never
+  Play 31: gaming_lxc (gaming_nodes)       tag: gaming
            deploy_stamp: gaming_lxc
-  Play 32: gaming_lxc_configure (gaming_nodes) tag: gaming, never
+  Play 32: gaming_lxc_configure (gaming_nodes) tag: gaming
 
 Phase 3c: Post-configure hookscript attachment
   Play 33: desktop_nodes — Attach display-exclusive hookscript to
@@ -239,7 +267,7 @@ Phase 3d: Heartbeat circuit breaker (post-configure)
   Play 34: localhost — Query /api/fleet/stale, hard-fail if any
            previously-healthy container stopped heartbeating
 
-Per-feature plays (opt-in via --tags, tagged with [never])
+Per-feature plays (run in default flow; also invocable via --tags)
 Bootstrap cleanup (proxmox:!lan_hosts)    tag: cleanup
 ```
 When adding a new VM type, add a new provision play targeting the appropriate
@@ -250,7 +278,10 @@ run on both primary and LAN hosts.
 Post-baseline features are added as separate task files in the configure role
 (e.g., `roles/openwrt_configure/tasks/security.yml`). Each feature gets a
 PAIR of plays in `site.yml`: (1) configure on the dynamic group, (2) `deploy_stamp`
-on the flavor group. Both share a tag and use `never` so they're opt-in.
+on the flavor group. Both share a tag so they can be invoked individually via
+`--tags`, and they also run in the default (no-tags) flow alongside every other
+service. NEVER use Ansible's `never` special tag — it silently skips plays in
+the default E2E pipeline, creating untested dead code.
 
 Dynamic groups populated by `add_host` are ephemeral. Any entry point that
 runs as a separate `ansible-playbook` invocation (per-feature molecule
@@ -362,7 +393,7 @@ All VMIDs defined in `group_vars/all.yml`.
 | File | Purpose |
 |------|---------|
 | `build.py` | Single entry point: env validation, host probing, API server lifecycle, playbook runner |
-| `setup.sh` | Bootstrap .venv + pip + ansible-galaxy |
+| `setup.sh` | Bootstrap .venv + pip + ansible-galaxy + wireguard-tools + NOPASSWD sudoers for wg/wg-quick/install |
 | `run.sh` | Convenience wrapper — delegates to `build.py` |
 | `cleanup.sh` | Restore / full-restore / clean / rollback — delegates to `build.py` |
 | `build-images.sh` | Builds custom images (mesh LXC, router VM, Pi-hole, rsyslog, Jellyfin, Netdata, WireGuard, Home Assistant, Kodi, Moonlight, Gaming LXC, Sunshine, Desktop VM). Use `--only <target>` for selective rebuilds |
@@ -383,7 +414,6 @@ All VMIDs defined in `group_vars/all.yml`.
 | `tasks/reconstruct_jellyfin_group.yml` | Reusable dynamic group reconstruction for Jellyfin |
 | `tasks/reconstruct_kodi_group.yml` | Reusable dynamic group reconstruction for Kodi |
 | `tasks/reconstruct_moonlight_group.yml` | Reusable dynamic group reconstruction for Moonlight |
-| `tasks/reconstruct_desktop_group.yml` | Reusable dynamic group reconstruction for Desktop VM |
 | `tasks/reconstruct_gaming_group.yml` | Reusable dynamic group reconstruction for Gaming LXC |
 | `tasks/reconstruct_bridge_group.yml` | Reusable dynamic group reconstruction for WiFi Bridge |
 | `tasks/configure_wifi_wds.yml` | Shared WDS WiFi configuration for OpenWrt LXC containers (used by mesh + bridge) |
@@ -693,8 +723,13 @@ returned "No route to host" for WAN hosts. Wasted the entire session.
 - `playbooks/cleanup.yml` is the SINGLE cleanup playbook for all contexts (molecule, CLI, SuperManager). `molecule/default/cleanup.yml` is a one-line import of it.
 - Cleanup MUST destroy VMs/containers using **explicit VMIDs** from `group_vars/all.yml`. NEVER iterate `qm list` / `pct list` to destroy ALL resources. Check existence first with `qm status` / `pct status`, then stop + destroy.
 - When adding a new service, add its VMID to the cleanup lists in `playbooks/cleanup.yml` (`project_ct_ids`/`project_vm_ids`) and `tasks/cleanup_lan_host.yml`. There is only ONE place now.
-- Cleanup MUST NOT restore the host config from backup archive by default. Explicit file removal is sufficient. Backup restore is opt-in via `--tags restore` or `--tags full-restore`.
+- Cleanup MUST NOT restore the host config from backup archive by default. Explicit file removal is sufficient. Backup restore is opt-in via `--tags restore -e rollback=true`.
+- Rollback plays in cleanup.yml are gated by `when: rollback | default(false) | bool`. They NEVER run during default cleanup. Invoke via: `ansible-playbook cleanup.yml --tags <feature>-rollback -e rollback=true`.
+- NEVER use Ansible's `never` special tag on ANY play. It silently skips plays in the default E2E pipeline, creating untested dead code. Every service play runs every time. Idempotency is the gate, not tag exclusion. Previous bug: Gaming LXC was tagged `[gaming, never]` from its first commit and was NEVER tested in any E2E run for over a month. All per-feature OpenWrt plays were also tagged `[never]` — none ran in the default pipeline.
 - Previous bug: blanket `qm list` / `pct list` cleanup destroyed non-project resources, forced full rebuild of every VM/container on every test run, and was slower than explicit VMID lookup.
+- When a provisioning role deploys host-level systemd units (socat proxies, relay services), add the unit name to BOTH `playbooks/cleanup.yml` (primary hosts) AND `tasks/cleanup_lan_host.yml` (LAN hosts). The main cleanup targets `proxmox:!lan_hosts` — LAN hosts are EXCLUDED and only get cleanup via `tasks/cleanup_lan_host.yml`.
+- When RENAMING a systemd service, the provisioning role MUST stop and remove the old service BEFORE deploying the replacement. Without this, the old service holds the port and the new service crash-loops. Add a pre-deployment task: `systemctl stop/disable <old> && rm -f /etc/systemd/system/<old>.service && pkill -f 'socat.*TCP-LISTEN:<port>'`.
+- Previous catastrophe (2026-04-14): KasmVNC migration renamed `kiosk-vnc-proxy` to `kiosk-display-proxy`. mesh1 (LAN host, excluded from main cleanup) kept the old service running on port 6080. New service crash-looped 957 times. Instead of diagnosing the port conflict (10 seconds to find via `systemctl status`), retries were added and increased to 100 seconds. The SM/CM heartbeat checks used 6 minutes EACH of retries. Total wasted time: 12+ minutes per molecule test run, across multiple runs, all because the root cause was never investigated.
 
 ## Systemd sandboxing in LXC containers
 - Many Debian packages ship systemd unit files with sandboxing directives (`LogNamespace`, `ProtectSystem`, `ProtectHome`, `ProtectControlGroups`, `BindReadOnlyPaths`, `RuntimeDirectory`) that require mount namespace creation. Inside LXC containers, these fail with exit code 226 (NAMESPACE) unless the container has `nesting=1` feature.

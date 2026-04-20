@@ -918,6 +918,23 @@
           found {{ wds_iface_count_val }}
       when: (radio_count_val | int) > 0
 
+    # ── LuCI web interface ─────────────────────────────────────────
+
+    - name: Verify LuCI web interface is reachable
+      ansible.builtin.shell:
+        cmd: >-
+          {{ openwrt_ssh }}
+          "wget -q -O /dev/null --timeout=5 http://127.0.0.1/ && echo LUCI_OK || echo LUCI_FAIL"
+      register: _luci_check
+      changed_when: false
+
+    - name: Assert LuCI responds
+      ansible.builtin.assert:
+        that: "'LUCI_OK' in _luci_check.stdout"
+        fail_msg: >-
+          LuCI web interface not reachable on OpenWrt router VM.
+          Ensure luci and uhttpd are in ROUTER_PACKAGES in build-images.sh.
+
     # ── Host address state file ───────────────────────────────────
 
     - name: Check state file exists on controller
@@ -1007,28 +1024,23 @@
           WDS_AP={{ wds_iface_count_val | default('0') }},
           LAN_GATEWAY(generated)={{ _generated_lan_gw.stdout | trim }}
 
-# ── Play 2.5: Fleet readiness gate (API-based) ────────────────────
-# The central management API starts by default (disable with --no-api).
-# Wait for all expected containers to heartbeat ready before running
-# deep per-service assertions. Sets _fleet_api_available for downstream.
+# ── Play 2.5: Fleet readiness gate (API-only, hard-fail) ──────────
+# The management API MUST be running. If it's not, that IS the failure.
+# No SSH fallback. The heartbeat system is the sole verification path.
 
 - name: Fleet readiness gate (event-driven)
   hosts: localhost
   gather_facts: false
   connection: local
   tasks:
-    - name: Check if management API is running
+    - name: Verify management API is running (REQUIRED for 4-tier system)
       ansible.builtin.uri:
         url: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}/api/nodes"
         method: GET
         return_content: true
         status_code: [200, 403]
       register: _api_probe
-      failed_when: false
-
-    - name: Set API availability
-      ansible.builtin.set_fact:
-        _fleet_api_available: "{{ _api_probe.status | default(0) | int in [200, 403] }}"
+      failed_when: _api_probe.status not in [200, 403]
 
     - name: Query fleet readiness from API
       ansible.builtin.uri:
@@ -1039,38 +1051,31 @@
         method: GET
         return_content: true
       register: _fleet_ready
-      retries: 12
+      retries: 5
       delay: 10
       until: (_fleet_ready.json.all_ready | default(false)) | bool
-      failed_when: false
-      when: _fleet_api_available | bool
 
     - name: Set fleet readiness facts
       ansible.builtin.set_fact:
-        _fleet_api_ready: >-
-          {{ (_fleet_ready.json.all_ready | default(false)) | bool
-             if (_fleet_api_available | bool) else false }}
+        _fleet_api_ready: "{{ (_fleet_ready.json.all_ready | default(false)) | bool }}"
 
-    - name: Report fleet readiness
-      ansible.builtin.debug:
-        msg: >-
-          Fleet readiness: {{ 'ALL READY via API — skipping liveness SSH hops'
-          if (_fleet_api_ready | bool) else 'SSH fallback mode (API '
-          ~ ('not running' if not (_fleet_api_available | bool) else 'services not ready')
-          ~ ')' }}
-
-    - name: Report stale services
-      ansible.builtin.debug:
-        msg: >-
-          Stale services: {{
+    - name: Hard-fail if fleet is not ready
+      ansible.builtin.assert:
+        that: _fleet_api_ready | bool
+        fail_msg: >-
+          HARD FAILURE — FLEET NOT READY. The 4-tier heartbeat system reports these services
+          are NOT heartbeating: {{
             _fleet_ready.json.services | dict2items
             | selectattr('value.ready', 'equalto', false)
             | map(attribute='key') | list | join(', ')
-          }}
-      when:
-        - _fleet_api_available | bool
-        - not (_fleet_api_ready | bool)
-        - _fleet_ready.json is defined
+          }}.
+          INVESTIGATE:
+          1. Check SM fleet health: curl http://localhost:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}/api/fleet/health
+          2. Check individual service: curl http://localhost:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}/api/container/<service>/ready
+          3. Verify VPN is up: sudo wg show wg0
+          4. Verify relay chain: Container → NM (port 9001) → CM → SM (port {{ lookup('env', 'WEBUI_PORT') | default('52500', true) }})
+          5. Check each NM: curl http://10.0.0.<N>:9001/api/heartbeat (use VPN IPs)
+          Do NOT add SSH fallbacks. Fix the heartbeat chain.
 
 # ── Play 2.6: Heartbeat circuit breaker ──────────────────────────
 # Hard-fail if any container that was healthy at the readiness gate
@@ -1086,18 +1091,12 @@
     - name: Wait for heartbeat relay chain to settle after configure
       ansible.builtin.pause:
         seconds: 45
-      when:
-        - hostvars['localhost']._fleet_api_available | default(false) | bool
-        - callhome_server | default('') | length > 0
 
     - name: Run heartbeat staleness check
       ansible.builtin.include_tasks: "{{ playbook_dir }}/../../tasks/fleet_heartbeat_gate.yml"
       vars:
         gate_services: "{{ fleet_monitored_services }}"
         gate_max_age_seconds: 300
-      when:
-        - hostvars['localhost']._fleet_api_available | default(false) | bool
-        - callhome_server | default('') | length > 0
 
 # ── Play 3: Pi-hole health + integration (dns_nodes) ─────────────
 # Deep Pi-hole checks (FTL diagnostics, ad-block, DNS retry loops)
@@ -1107,7 +1106,6 @@
   hosts: dns_nodes
   gather_facts: false
   vars:
-    _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
     _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
   tasks:
     - name: Read Pi-hole container state and config
@@ -1135,64 +1133,27 @@
         return_content: true
       register: _pihole_api
       delegate_to: localhost
-      failed_when: false
-      when: _api_ready | bool
 
     - name: Assert Pi-hole via API (heartbeat + service state)
       ansible.builtin.assert:
         that:
           - _pihole_api.json.ready | default(false) | bool
-        fail_msg: "Pi-hole not ready via API: {{ _pihole_api.json | default({}) }}"
-      when:
-        - _api_ready | bool
-        - _pihole_api.status | default(0) == 200
-
-    - name: Check Pi-hole service health (single pct exec, SSH fallback)
-      ansible.builtin.shell:
-        cmd: >-
-          pct exec {{ pihole_ct_id }} -- /bin/sh -c '
-          echo "FTL=$(/usr/local/bin/pihole status 2>/dev/null | head -3)";
-          echo "WEB=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1/admin/ 2>/dev/null)";
-          echo "DNS=$(dig @127.0.0.1 google.com +short +time=5 2>/dev/null | head -1)"
-          '
-      register: pihole_health
-      changed_when: false
-      when: not (_api_ready | bool)
-
-    - name: Assert FTL is active and DNS resolves
-      ansible.builtin.assert:
-        that:
-          - "'FTL' in pihole_health.stdout or 'Enabled' in pihole_health.stdout or 'Active' in pihole_health.stdout"
-          - pihole_health.stdout | regex_search('DNS=\\d') is not none
-        fail_msg: "Pi-hole health check failed on {{ inventory_hostname }}: {{ pihole_health.stdout }}"
-      when: not (_api_ready | bool)
-
-    - name: Verify Pi-hole baked config (dhcp disabled)
-      ansible.builtin.command:
-        cmd: >-
-          pct exec {{ pihole_ct_id }} --
-          grep -c "active = false" /etc/pihole/pihole.toml
-      register: _pihole_dhcp_baked
-      changed_when: false
-
-    - name: Verify Pi-hole baked config (maxDBdays)
-      ansible.builtin.command:
-        cmd: >-
-          pct exec {{ pihole_ct_id }} --
-          grep -c "maxDBdays" /etc/pihole/pihole.toml
-      register: _pihole_dbdays_baked
-      changed_when: false
-
-    - name: Assert Pi-hole baked settings present
-      ansible.builtin.assert:
-        that:
-          - _pihole_dhcp_baked.rc == 0
-          - (_pihole_dhcp_baked.stdout | int) >= 1
-          - _pihole_dbdays_baked.rc == 0
-          - (_pihole_dbdays_baked.stdout | int) >= 1
         fail_msg: >-
-          Pi-hole baked config missing. dhcp.active=false count={{ _pihole_dhcp_baked.stdout | default('0') }},
-          maxDBdays count={{ _pihole_dbdays_baked.stdout | default('0') }}.
+          HARD FAILURE: Pi-hole not ready via heartbeat API on {{ inventory_hostname }}.
+          API response: {{ _pihole_api.json | default({}) }}.
+          INVESTIGATE: Query VPN: curl http://{{ vpn_ip }}:9001/api/heartbeat
+          Check container: pct exec {{ pihole_ct_id }} -- systemctl status callhome
+          Check NM relay: The heartbeat chain is Container → NM → CM → SM.
+
+    - name: Assert Pi-hole config tracked via heartbeat config_files extension
+      ansible.builtin.assert:
+        that:
+          - (_pihole_api.json.extensions.config_files | default(none)) is not none
+          - "'/etc/pihole/pihole.toml' in (_pihole_api.json.extensions.config_files | default({}))"
+        fail_msg: >-
+          HARD FAILURE: Pi-hole on {{ inventory_hostname }} not reporting config_files via heartbeat.
+          INVESTIGATE: Rebuild pihole image with CALLHOME_CONFIG_FILES=/etc/pihole/pihole.toml
+          baked into /etc/default/callhome. Then run molecule converge to recreate containers.
 
     - name: Assert stamp contains pihole_lxc
       ansible.builtin.assert:
@@ -1209,7 +1170,6 @@
   hosts: monitoring_nodes
   gather_facts: false
   vars:
-    _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
     _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
   tasks:
     - name: Check if br_netfilter is loaded
@@ -1251,8 +1211,6 @@
         return_content: true
       register: _rsyslog_api_health
       delegate_to: localhost
-      failed_when: false
-      when: _api_ready | bool
 
     - name: Assert rsyslog via API (heartbeat + service state)
       ansible.builtin.assert:
@@ -1261,28 +1219,6 @@
           - _rsyslog_api_health.json.systemd_services['rsyslog.service'] | default('') in ['active', 'running']
             or _rsyslog_api_health.json.systemd_services['rsyslog'] | default('') in ['active', 'running']
         fail_msg: "rsyslog not ready via API: {{ _rsyslog_api_health.json | default({}) }}"
-      when:
-        - _api_ready | bool
-        - _rsyslog_api_health.status | default(0) == 200
-
-    - name: Check rsyslog service is active and TCP 514 listening (SSH fallback)
-      ansible.builtin.shell:
-        cmd: >-
-          pct exec {{ rsyslog_ct_id }} -- /bin/sh -c '
-          echo "SVC=$(systemctl is-active rsyslog 2>/dev/null || echo inactive)";
-          echo "TCP514=$(ss -tlnp 2>/dev/null | grep -c ":514")"
-          '
-      register: rsyslog_health
-      changed_when: false
-      when: not (_api_ready | bool)
-
-    - name: Assert rsyslog is active and listening
-      ansible.builtin.assert:
-        that:
-          - "'SVC=active' in rsyslog_health.stdout"
-          - rsyslog_health.stdout | regex_search('TCP514=(\d+)', '\\1') | first | int > 0
-        fail_msg: "rsyslog not active or not listening on TCP 514 on {{ inventory_hostname }}"
-      when: not (_api_ready | bool)
 
     # ── Cross-service: log reception from host ─────────────────
     # Use pct config for per-host rsyslog IP (API returns one container's
@@ -1298,8 +1234,8 @@
           logger --tcp -n {{ _rsyslog_verify_ip }} -P 514
           "e2e-integration-rsyslog-$(date +%s)"
       changed_when: true
-      retries: 5
-      delay: 5
+      retries: 3
+      delay: 3
       register: _rsyslog_send
       until: _rsyslog_send.rc == 0
       failed_when: false
@@ -1323,8 +1259,8 @@
       register: rsyslog_log_test
       changed_when: false
       failed_when: false
-      retries: 6
-      delay: 5
+      retries: 3
+      delay: 3
       until: rsyslog_log_test.stdout | trim | length > 0
 
     - name: Assert log reception works (cross-service integration)
@@ -1368,8 +1304,6 @@
         return_content: true
       register: _netdata_api
       delegate_to: localhost
-      failed_when: false
-      when: _api_ready | bool
 
     - name: Assert Netdata via API (heartbeat + service state)
       ansible.builtin.assert:
@@ -1379,28 +1313,6 @@
             or _netdata_api.json.systemd_services.get('netdata', '') in ['active', 'running']
             or (_netdata_api.json.extensions.http_probes | default({})).get('http://127.0.0.1:19999', 0) == 200
         fail_msg: "Netdata not ready via API: {{ _netdata_api.json | default({}) }}"
-      when:
-        - _api_ready | bool
-        - _netdata_api.status | default(0) == 200
-
-    - name: Check Netdata service and dashboard (single pct exec, SSH fallback)
-      ansible.builtin.shell:
-        cmd: >-
-          pct exec {{ netdata_ct_id }} -- /bin/sh -c '
-          echo "SVC=$(systemctl is-active netdata 2>/dev/null || echo inactive)";
-          echo "HTTP=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:19999 2>/dev/null)"
-          '
-      register: netdata_health
-      changed_when: false
-      when: not (_api_ready | bool)
-
-    - name: Assert Netdata is active and dashboard responds (SSH fallback)
-      ansible.builtin.assert:
-        that:
-          - "'SVC=active' in netdata_health.stdout"
-          - netdata_health.stdout | regex_search('HTTP=(\\d+)', '\\1') | first == '200'
-        fail_msg: "Netdata health check failed on {{ inventory_hostname }}: {{ netdata_health.stdout }}"
-      when: not (_api_ready | bool)
 
     - name: Assert stamp contains netdata_lxc
       ansible.builtin.assert:
@@ -1415,7 +1327,6 @@
   hosts: vpn_nodes
   gather_facts: false
   vars:
-    _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
     _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
   tasks:
     - name: Read WireGuard container state and config
@@ -1473,39 +1384,17 @@
         return_content: true
       register: _wg_api
       delegate_to: localhost
-      failed_when: false
-      when: _api_ready | bool
+
+    - name: Assert WireGuard ready via API
+      ansible.builtin.assert:
+        that:
+          - _wg_api.json.ready | default(false) | bool
+        fail_msg: "WireGuard not ready via API: {{ _wg_api.json | default({}) }}"
 
     - name: Set WireGuard peer count from API
       ansible.builtin.set_fact:
         _wg_peer_count: "{{ _wg_api.json.extensions.wireguard.interfaces.wg0.peer_count | default(0) }}"
-      when: _api_ready | bool and (_wg_api.json.extensions.wireguard | default(none)) is not none
-
-    - name: Check WireGuard health and peers via SSH (fallback)
-      ansible.builtin.shell:
-        cmd: >-
-          pct exec {{ wireguard_ct_id }} -- /bin/sh -c '
-          echo "IFACE=$(ip link show wg0 >/dev/null 2>&1 && echo ok || echo missing)";
-          echo "SVC=$(systemctl is-enabled wg-quick@wg0 2>/dev/null || echo unknown)";
-          echo "PEERS=$(wg show wg0 peers 2>/dev/null | wc -l)"
-          '
-      register: _wg_batch
-      changed_when: false
-      failed_when: false
-      when: not (_api_ready | bool)
-
-    - name: Assert wg0 interface exists and service enabled (SSH fallback)
-      ansible.builtin.assert:
-        that:
-          - "'IFACE=ok' in _wg_batch.stdout"
-          - "'SVC=enabled' in _wg_batch.stdout"
-        fail_msg: "WireGuard health check failed on {{ inventory_hostname }}: {{ _wg_batch.stdout }}"
-      when: not (_api_ready | bool)
-
-    - name: Set WireGuard peer count from SSH (fallback)
-      ansible.builtin.set_fact:
-        _wg_peer_count: "{{ _wg_batch.stdout | regex_search('PEERS=(\\d+)', '\\1') | first | default('0') }}"
-      when: not (_api_ready | bool)
+      when: (_wg_api.json.extensions.wireguard | default(none)) is not none
 
     - name: Assert at least one WireGuard peer exists
       ansible.builtin.assert:
@@ -1515,10 +1404,135 @@
           {{ _wg_peer_count | default('0') }}
           peers — expected at least 1 for cross-node connectivity
 
+    - name: Check VPN DNAT rules for each required service port
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ wireguard_ct_id }} -- iptables -t nat -S PREROUTING 2>/dev/null | grep -c 'dport {{ item }}.*DNAT' || echo 0
+        executable: /bin/bash
+      register: _wg_port_dnat
+      changed_when: false
+      loop:
+        - 6080
+        - 6081
+        - 6082
+        - 6083
+        - 9001
+
+    - name: Assert WireGuard container has DNAT for each service port
+      ansible.builtin.assert:
+        that: (item.stdout | trim | int) > 0
+        fail_msg: >-
+          WireGuard container on {{ inventory_hostname }} missing DNAT for
+          port {{ item.item }} — expected PREROUTING DNAT rule
+      loop: "{{ _wg_port_dnat.results }}"
+      loop_control:
+        label: "port {{ item.item }}"
+
+    # ── VPN tunnel health ─────────────────────────────────────────
+    - name: Get WireGuard container VPN IP
+      ansible.builtin.command:
+        cmd: pct exec {{ wireguard_ct_id }} -- ip -4 addr show wg0
+      register: _wg_vpn_addr
+      changed_when: false
+      failed_when: false
+
+    - name: Assert VPN IP matches host_vars vpn_ip
+      ansible.builtin.assert:
+        that: _wg_vpn_addr.stdout is search(vpn_ip)
+        fail_msg: >-
+          WireGuard container on {{ inventory_hostname }} has wrong VPN IP.
+          Expected {{ vpn_ip }}, got: {{ _wg_vpn_addr.stdout }}
+      when: _wg_vpn_addr.rc == 0
+
+    - name: Check WireGuard tunnel transfer stats
+      ansible.builtin.command:
+        cmd: pct exec {{ wireguard_ct_id }} -- wg show wg0 transfer
+      register: _wg_transfer
+      changed_when: false
+      failed_when: false
+
+    - name: Assert hub has received data from peers
+      ansible.builtin.assert:
+        that: _wg_transfer.stdout | length > 0
+        fail_msg: >-
+          WireGuard hub on {{ inventory_hostname }} shows no transfer data.
+          Tunnel may not be connected.
+      when:
+        - vpn_ip == '10.0.0.1'
+        - _wg_transfer.rc == 0
+
+    - name: Ping VPN hub from client containers
+      ansible.builtin.command:
+        cmd: pct exec {{ wireguard_ct_id }} -- ping -c 1 -W 3 10.0.0.1
+      register: _wg_ping_hub
+      changed_when: false
+      failed_when: false
+      when: vpn_ip != '10.0.0.1'
+
+    - name: Assert client can reach hub via VPN
+      ansible.builtin.assert:
+        that: _wg_ping_hub.rc == 0
+        fail_msg: >-
+          WireGuard client on {{ inventory_hostname }} ({{ vpn_ip }}) cannot
+          ping hub (10.0.0.1). Tunnel not connected.
+      when:
+        - vpn_ip != '10.0.0.1'
+        - _wg_ping_hub is defined
+
     - name: Assert stamp contains wireguard_lxc
       ansible.builtin.assert:
         that: "'wireguard_lxc' in stamp.plays"
         fail_msg: "deploy_stamp missing wireguard_lxc entry"
+
+# ── Play 5b: Controller VPN (localhost) ──────────────────────────
+# The controller (build machine) needs a wg0 tunnel to reach display
+# streams on VPN IPs. Verifies the tunnel is baked by site.yml.
+
+- name: Verify controller VPN tunnel
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Check wg0 interface exists on controller
+      ansible.builtin.command:
+        cmd: sudo wg show wg0
+      register: _ctrl_wg0
+      changed_when: false
+      failed_when: false
+
+    - name: Assert controller wg0 is up
+      ansible.builtin.assert:
+        that: _ctrl_wg0.rc == 0
+        fail_msg: >-
+          HARD FAILURE — CONTROLLER VPN NOT UP. This breaks ALL API-driven
+          verification. The entire 4-tier system depends on VPN for NM communication.
+          INVESTIGATE:
+          1. sudo wg-quick up wg0
+          2. Check /etc/wireguard/wg0.conf exists with correct keys
+          3. Verify wireguard_configure ran successfully in site.yml
+          4. Check sudo wg show for handshake status
+          Do NOT proceed without VPN — all NM API queries will fail.
+
+    - name: Ping VPN hub from controller
+      ansible.builtin.command:
+        cmd: ping -c 1 -W 3 10.0.0.1
+      register: _ctrl_ping_hub
+      changed_when: false
+      failed_when: false
+
+    - name: Assert controller can reach VPN hub
+      ansible.builtin.assert:
+        that: _ctrl_ping_hub.rc == 0
+        fail_msg: >-
+          HARD FAILURE — VPN HUB UNREACHABLE from controller. Cannot ping 10.0.0.1.
+          This means the WireGuard tunnel is broken and ALL API verification will fail.
+          INVESTIGATE:
+          1. sudo wg show wg0 — check for recent handshake
+          2. Check VPN hub container: pct exec {{ wireguard_ct_id }} -- wg show wg0
+          3. Verify endpoint is correct in /etc/wireguard/wg0.conf
+          4. Check if ISP/firewall blocks UDP 51820
+          FULL STOP until VPN is working.
 
 # ── Play 6: LAN host assertions (mesh1-specific) ─────────────────
 
@@ -1663,6 +1677,17 @@
           wpad-mesh-openssl not installed in mesh container
           on {{ inventory_hostname }}
 
+    - name: Assert mesh container identity via heartbeat API (no SSH)
+      ansible.builtin.assert:
+        that:
+          - _fleet_api_ready | default(false) | bool
+        fail_msg: >-
+          HARD FAILURE: Mesh container on {{ inventory_hostname }} not heartbeating
+          with correct identity. INVESTIGATE: Fleet readiness gate should have caught
+          openwrt-mesh. Check CALLHOME_HOSTNAME in /etc/default/callhome inside CT
+          {{ meshwifi_ct_id }} — kiosk_configure may have overwritten it.
+      when: _fleet_api_ready is defined
+
     - name: Assert mesh container has deploy_stamp
       ansible.builtin.assert:
         that: "'openwrt_mesh_lxc' in stamp.plays"
@@ -1783,6 +1808,17 @@
         fail_msg: "batman_trigger.sh status failed in bridge container on {{ inventory_hostname }}"
       when: _bridge_health.rc == 0
 
+    - name: Assert bridge container identity via heartbeat API (no SSH)
+      ansible.builtin.assert:
+        that:
+          - _fleet_api_ready | default(false) | bool
+        fail_msg: >-
+          HARD FAILURE: Bridge container on {{ inventory_hostname }} not heartbeating
+          with correct identity. INVESTIGATE: Fleet readiness gate should have caught
+          openwrt-bridge. Check CALLHOME_HOSTNAME in /etc/default/callhome inside CT
+          {{ bridge_ct_id }} — kiosk_configure may have overwritten it.
+      when: _fleet_api_ready is defined
+
     - name: Report bridge LXC verification
       ansible.builtin.debug:
         msg: >-
@@ -1798,7 +1834,6 @@
   hosts: service_nodes
   gather_facts: false
   vars:
-    _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
     _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
   tasks:
     - name: Read Home Assistant container state and config
@@ -1826,62 +1861,23 @@
         return_content: true
       register: _ha_api
       delegate_to: localhost
-      failed_when: false
-      when: _api_ready | bool
 
     - name: Assert Docker active from API extensions
       ansible.builtin.assert:
         that:
+          - _ha_api.json.ready | default(false) | bool
           - _ha_api.json.extensions.docker.active | default(false) | bool
           - _ha_api.json.extensions.docker.running | default(0) | int >= 1
-        fail_msg: "HA Docker not active via API on {{ inventory_hostname }}"
-      when: _api_ready | bool and (_ha_api.json.extensions.docker | default(none)) is not none
+        fail_msg: "HA Docker not active via API on {{ inventory_hostname }}: {{ _ha_api.json | default({}) }}"
 
-    - name: Check Docker + HA health via SSH (fallback)
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          pct exec {{ homeassistant_ct_id }} -- /bin/sh -c '
-          echo "DAEMON=$(systemctl is-active docker 2>/dev/null || echo inactive)";
-          echo "HTTP=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8123 2>/dev/null || echo 000)"
-          '
-        executable: /bin/bash
-      register: _ha_health
-      changed_when: false
-      failed_when: false
-      retries: 3
-      delay: 10
-      until: >-
-        'DAEMON=active' in (_ha_health.stdout | default(''))
-        and (_ha_health.stdout | default('') | regex_search('HTTP=(\\d+)', '\\1') | first | default('000')) in ['200', '301', '302']
-      when: not (_api_ready | bool)
-
-    - name: Assert Docker and HA are healthy (SSH fallback)
+    - name: Assert HA service present via heartbeat (no SSH)
       ansible.builtin.assert:
         that:
-          - "'DAEMON=active' in _ha_health.stdout"
-          - _ha_health.stdout | regex_search('HTTP=(\\d+)', '\\1') | first in ['200', '301', '302']
-        fail_msg: "HA health check failed on {{ inventory_hostname }}: {{ _ha_health.stdout }}"
-      when: not (_api_ready | bool)
-
-    - name: Verify Home Assistant baked content
-      ansible.builtin.shell:
-        cmd: >-
-          pct exec {{ homeassistant_ct_id }} -- /bin/sh -c '
-          echo "COMPOSE=$(test -f /opt/homeassistant/config/docker-compose.yml && echo yes || echo no)";
-          echo "CONFIG=$(test -f /opt/homeassistant/config/configuration.yaml && echo yes || echo no)";
-          echo "UNIT=$(systemctl is-enabled homeassistant-compose 2>/dev/null || echo missing)"
-          '
-      register: _ha_baked
-      changed_when: false
-
-    - name: Assert Home Assistant baked content present
-      ansible.builtin.assert:
-        that:
-          - "'COMPOSE=yes' in _ha_baked.stdout"
-          - "'CONFIG=yes' in _ha_baked.stdout"
-          - "'UNIT=enabled' in _ha_baked.stdout or 'UNIT=disabled' in _ha_baked.stdout"
-        fail_msg: "HA baked content missing: {{ _ha_baked.stdout }}"
+          - _ha_api.json.systemd_services['homeassistant-compose'] | default('') != ''
+        fail_msg: >-
+          HARD FAILURE: Home Assistant compose service not detected via heartbeat on {{ inventory_hostname }}.
+          Services: {{ _ha_api.json.systemd_services | default({}) }}.
+          INVESTIGATE: Rebuild HA image with homeassistant-compose.service baked in.
 
     - name: Assert stamp contains homeassistant_lxc
       ansible.builtin.assert:
@@ -1900,7 +1896,6 @@
   hosts: media_nodes
   gather_facts: false
   vars:
-    _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
     _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
   tasks:
     - name: Read Jellyfin container state and config
@@ -1928,8 +1923,6 @@
         return_content: true
       register: _jellyfin_api
       delegate_to: localhost
-      failed_when: false
-      when: _api_ready | bool
 
     - name: Assert Jellyfin via API (heartbeat + HTTP probe)
       ansible.builtin.assert:
@@ -1938,28 +1931,6 @@
           - _jellyfin_api.json.systemd_services['jellyfin.service'] | default('') in ['active', 'running']
             or _jellyfin_api.json.systemd_services['jellyfin'] | default('') in ['active', 'running']
         fail_msg: "Jellyfin not ready via API: {{ _jellyfin_api.json | default({}) }}"
-      when:
-        - _api_ready | bool
-        - _jellyfin_api.status | default(0) == 200
-
-    - name: Check Jellyfin service is active (single pct exec, SSH fallback)
-      ansible.builtin.shell:
-        cmd: >-
-          pct exec {{ jellyfin_ct_id }} -- /bin/sh -c '
-          echo "SERVICE=$(systemctl is-active jellyfin 2>/dev/null || echo inactive)";
-          echo "WEB=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8096 2>/dev/null || echo 000)"
-          '
-      register: _jellyfin_health
-      changed_when: false
-      when: not (_api_ready | bool)
-
-    - name: Assert Jellyfin service active and web accessible (SSH fallback)
-      ansible.builtin.assert:
-        that:
-          - "'SERVICE=active' in _jellyfin_health.stdout"
-          - _jellyfin_health.stdout | regex_search('WEB=(\\d+)', '\\1') | first in ['200', '302']
-        fail_msg: "Jellyfin health check failed on {{ inventory_hostname }}: {{ _jellyfin_health.stdout }}"
-      when: not (_api_ready | bool)
 
     - name: Verify Jellyfin baked content
       ansible.builtin.shell:
@@ -2015,21 +1986,17 @@
       register: _kodi_api
       delegate_to: localhost
       failed_when: false
-      when: _api_ready | bool
 
-    - name: Assert Kodi ready via API
+    - name: Assert Kodi ready via API (or stopped by display-exclusive hookscript)
       ansible.builtin.assert:
         that:
           - _kodi_api.json.ready | default(false) | bool
         fail_msg: "Kodi not ready via API: {{ _kodi_api.json | default({}) }}"
-      when:
-        - _api_ready | bool
-        - _kodi_api.status | default(0) == 200
-        - "'running' in _kodi_cfg.stdout"
+      when: "'running' in _kodi_cfg.stdout"
 
-    - name: Check if Desktop VM is running (display-exclusive stops Kodi)
+    - name: Check if Desktop container is running (display-exclusive stops Kodi)
       ansible.builtin.command:
-        cmd: qm status {{ desktop_vm_id }}
+        cmd: pct status {{ desktop_ct_id }}
       register: _desktop_status
       changed_when: false
       failed_when: false
@@ -2040,29 +2007,8 @@
           'running' in _kodi_cfg.stdout or
           ('stopped' in _kodi_cfg.stdout and 'running' in (_desktop_status.stdout | default('')))
         fail_msg: >-
-          Kodi container {{ kodi_ct_id }} is stopped but Desktop VM is not running —
+          Kodi container {{ kodi_ct_id }} is stopped but Desktop container is not running —
           expected either Kodi running or Kodi stopped due to display-exclusive hookscript
-
-    - name: Check Kodi service (pct exec, SSH fallback)
-      ansible.builtin.shell:
-        cmd: >-
-          pct exec {{ kodi_ct_id }} -- /bin/sh -c '
-          echo "SERVICE=$(systemctl is-active kodi 2>/dev/null || echo inactive)"
-          '
-      register: _kodi_health
-      changed_when: false
-      when:
-        - not (_api_ready | bool)
-        - "'running' in _kodi_cfg.stdout"
-
-    - name: Assert Kodi service active (SSH fallback)
-      ansible.builtin.assert:
-        that:
-          - "'SERVICE=active' in _kodi_health.stdout"
-        fail_msg: "Kodi health check failed on {{ inventory_hostname }}: {{ _kodi_health.stdout | default('') }}"
-      when:
-        - _kodi_health is defined and _kodi_health is not skipped
-        - "'running' not in (_desktop_status.stdout | default(''))"
 
     - name: Verify Kodi baked content (when container is running)
       ansible.builtin.shell:
@@ -2070,11 +2016,7 @@
           pct exec {{ kodi_ct_id }} -- /bin/sh -c '
           echo "GUISETTINGS=$(test -f /home/kodi/.kodi/userdata/guisettings.xml && echo yes || echo no)";
           echo "DISPLAY_SVC=$(systemctl is-enabled kodi-display 2>/dev/null || echo missing)";
-          echo "VNC_SVC=$(systemctl is-enabled kodi-vnc 2>/dev/null || echo missing)";
-          echo "VNC_WS_SVC=$(systemctl is-enabled kodi-vnc-ws 2>/dev/null || echo missing)";
-          echo "SWAY=$(command -v sway >/dev/null 2>&1 && echo yes || echo no)";
-          echo "WAYVNC=$(command -v wayvnc >/dev/null 2>&1 && echo yes || echo no)";
-          echo "WEBSOCKIFY=$(command -v websockify >/dev/null 2>&1 && echo yes || echo no)"
+          echo "KASMVNC=$(dpkg -l kasmvncserver >/dev/null 2>&1 && echo yes || echo no)"
           '
       register: _kodi_baked
       changed_when: false
@@ -2085,25 +2027,21 @@
         that:
           - "'GUISETTINGS=yes' in _kodi_baked.stdout"
           - "'DISPLAY_SVC=enabled' in _kodi_baked.stdout"
-          - "'VNC_SVC=enabled' in _kodi_baked.stdout"
-          - "'VNC_WS_SVC=enabled' in _kodi_baked.stdout"
-          - "'SWAY=yes' in _kodi_baked.stdout"
-          - "'WAYVNC=yes' in _kodi_baked.stdout"
-          - "'WEBSOCKIFY=yes' in _kodi_baked.stdout"
-        fail_msg: "Kodi headless VNC baked content missing: {{ _kodi_baked.stdout }}"
+          - "'KASMVNC=yes' in _kodi_baked.stdout"
+        fail_msg: "Kodi KasmVNC display baked content missing: {{ _kodi_baked.stdout }}"
       when: "'running' in _kodi_cfg.stdout"
 
-    - name: Check kodi-vnc-proxy service on host
+    - name: Check kodi-display-proxy service on host
       ansible.builtin.command:
-        cmd: systemctl is-active kodi-vnc-proxy
-      register: _kodi_vnc_proxy
+        cmd: systemctl is-active kodi-display-proxy
+      register: _kodi_display_proxy
       changed_when: false
       failed_when: false
 
-    - name: Assert kodi-vnc-proxy is running
+    - name: Assert kodi-display-proxy is running
       ansible.builtin.assert:
-        that: "'active' in _kodi_vnc_proxy.stdout"
-        fail_msg: "kodi-vnc-proxy not active on {{ inventory_hostname }}"
+        that: "'active' in _kodi_display_proxy.stdout"
+        fail_msg: "kodi-display-proxy not active on {{ inventory_hostname }}"
       when: "'running' in _kodi_cfg.stdout"
 
     - name: Assert stamp contains kodi_lxc
@@ -2117,7 +2055,6 @@
   hosts: streaming_nodes
   gather_facts: false
   vars:
-    _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
     _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
   tasks:
     - name: Read Moonlight container state and config
@@ -2143,63 +2080,24 @@
         return_content: true
       register: _moonlight_api
       delegate_to: localhost
-      failed_when: false
-      when: _api_ready | bool
 
     - name: Assert Moonlight ready via API
       ansible.builtin.assert:
         that:
           - _moonlight_api.json.ready | default(false) | bool
         fail_msg: "Moonlight not ready via API: {{ _moonlight_api.json | default({}) }}"
-      when:
-        - _api_ready | bool
-        - _moonlight_api.status | default(0) == 200
 
-    - name: Check Moonlight binary, config, and VNC stack (pct exec, SSH fallback)
-      ansible.builtin.shell:
-        cmd: >-
-          pct exec {{ moonlight_ct_id }} -- /bin/sh -c '
-          echo "BINARY=$(test -x /usr/local/bin/moonlight && echo yes || echo no)";
-          echo "CONFIG=$(test -f /etc/moonlight.conf && echo yes || echo no)";
-          echo "SWAY=$(command -v sway >/dev/null 2>&1 && echo yes || echo no)";
-          echo "WAYVNC=$(command -v wayvnc >/dev/null 2>&1 && echo yes || echo no)";
-          echo "WEBSOCKIFY=$(command -v websockify >/dev/null 2>&1 && echo yes || echo no)";
-          echo "DISPLAY_SVC=$(systemctl is-enabled moonlight-display 2>/dev/null || echo missing)";
-          echo "VNC_SVC=$(systemctl is-enabled moonlight-vnc 2>/dev/null || echo missing)";
-          echo "VNC_WS_SVC=$(systemctl is-enabled moonlight-vnc-ws 2>/dev/null || echo missing)"
-          '
-      register: _moonlight_health
-      changed_when: false
-      when: not (_api_ready | bool)
-
-    - name: Assert Moonlight binary, config, and VNC stack present (SSH fallback)
-      ansible.builtin.assert:
-        that:
-          - "'BINARY=yes' in _moonlight_health.stdout"
-          - "'CONFIG=yes' in _moonlight_health.stdout"
-          - "'SWAY=yes' in _moonlight_health.stdout"
-          - "'WAYVNC=yes' in _moonlight_health.stdout"
-          - "'WEBSOCKIFY=yes' in _moonlight_health.stdout"
-          - "'DISPLAY_SVC=enabled' in _moonlight_health.stdout"
-          - "'VNC_SVC=enabled' in _moonlight_health.stdout"
-          - "'VNC_WS_SVC=enabled' in _moonlight_health.stdout"
-        fail_msg: >-
-          Moonlight health check failed on {{ inventory_hostname }}: {{ _moonlight_health.stdout | default('') }}.
-          moonlight-embedded binary, config, or headless VNC stack missing.
-      when:
-        - _moonlight_health is defined and _moonlight_health is not skipped
-
-    - name: Check moonlight-vnc-proxy service on host
+    - name: Check moonlight-display-proxy service on host
       ansible.builtin.command:
-        cmd: systemctl is-active moonlight-vnc-proxy
-      register: _moonlight_vnc_proxy
+        cmd: systemctl is-active moonlight-display-proxy
+      register: _moonlight_display_proxy
       changed_when: false
       failed_when: false
 
-    - name: Assert moonlight-vnc-proxy is running
+    - name: Assert moonlight-display-proxy is running
       ansible.builtin.assert:
-        that: "'active' in _moonlight_vnc_proxy.stdout"
-        fail_msg: "moonlight-vnc-proxy not active on {{ inventory_hostname }}"
+        that: "'active' in _moonlight_display_proxy.stdout"
+        fail_msg: "moonlight-display-proxy not active on {{ inventory_hostname }}"
       when: "'running' in _moonlight_cfg.stdout"
 
     - name: Assert stamp contains moonlight_lxc
@@ -2207,64 +2105,86 @@
         that: "'moonlight_lxc' in stamp.plays"
         fail_msg: "deploy_stamp missing moonlight_lxc entry on {{ inventory_hostname }}"
 
-# ── Play 11: Desktop VM health (desktop_nodes) ───────────────────
-# Deep Desktop checks (KDE/GNOME shortcuts, apps, dotfiles, VA-API,
-# SDDM, groups) live in molecule/desktop-vm/verify.yml.
+# ── Play 11: Desktop LXC health (desktop_nodes) ──────────────────
 
-- name: Verify Desktop VM
+- name: Verify Desktop LXC
   hosts: desktop_nodes
   gather_facts: false
+  vars:
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
   tasks:
-    - name: Read Desktop VM state and config
+    - name: Read Desktop container state and config
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          qm status {{ desktop_vm_id }}
-          qm config {{ desktop_vm_id }}
+          pct status {{ desktop_ct_id }}
+          pct config {{ desktop_ct_id }}
         executable: /bin/bash
       register: _desktop_e2e_config
       changed_when: false
 
-    - name: Assert Desktop VM is running with correct config
+    - name: Assert Desktop container is running with DRI mount
       ansible.builtin.assert:
         that:
           - "'running' in _desktop_e2e_config.stdout"
-          - "'ovmf' in _desktop_e2e_config.stdout"
-          - "'q35' in _desktop_e2e_config.stdout"
-          - "'hostpci0' in _desktop_e2e_config.stdout"
-        fail_msg: "Desktop VM {{ desktop_vm_id }} config incorrect on {{ inventory_hostname }}"
+          - "'/dev/dri' in _desktop_e2e_config.stdout"
+        fail_msg: "Desktop CT {{ desktop_ct_id }} not running or missing DRI on {{ inventory_hostname }}"
 
-    - name: Check QEMU Guest Agent is responding
-      ansible.builtin.command:
-        cmd: qm agent {{ desktop_vm_id }} ping
-      register: _desktop_e2e_qga
-      changed_when: false
-      failed_when: false
-      retries: 6
-      delay: 10
-      until: _desktop_e2e_qga.rc == 0
-
-    - name: Assert QEMU Guest Agent responding
-      ansible.builtin.assert:
-        that: _desktop_e2e_qga.rc == 0
-        fail_msg: "QEMU Guest Agent not responding on {{ inventory_hostname }}"
-
-    - name: Assert stamp contains desktop_vm
-      ansible.builtin.assert:
-        that: "'desktop_vm' in stamp.plays"
-        fail_msg: "deploy_stamp missing desktop_vm on {{ inventory_hostname }}"
-
-    - name: Check desktop-vnc-ws service
-      ansible.builtin.command:
-        cmd: systemctl is-active desktop-vnc-ws
-      register: _desktop_vnc_ws
-      changed_when: false
+    - name: Query desktop container readiness via heartbeat API (no SSH)
+      ansible.builtin.uri:
+        url: "{{ _api_base }}/api/container/desktop/ready"
+        return_content: true
+      register: _desktop_api
+      delegate_to: localhost
       failed_when: false
 
-    - name: Assert desktop-vnc-ws proxy is running
+    - name: Assert desktop container ready via API
       ansible.builtin.assert:
-        that: "'active' in _desktop_vnc_ws.stdout"
-        fail_msg: "desktop-vnc-ws (websockify) not active on {{ inventory_hostname }}"
+        that:
+          - _desktop_api.json.ready | default(false) | bool
+        fail_msg: >-
+          HARD FAILURE: Desktop container not ready via heartbeat API on {{ inventory_hostname }}.
+          INVESTIGATE: Check callhome service in CT {{ desktop_ct_id }}.
+          API response: {{ _desktop_api.json | default({}) }}"
+
+    - name: Assert stamp contains desktop_lxc
+      ansible.builtin.assert:
+        that: "'desktop_lxc' in stamp.plays"
+        fail_msg: "deploy_stamp missing desktop_lxc on {{ inventory_hostname }}"
+
+    - name: Check desktop-display-proxy service on host
+      ansible.builtin.command:
+        cmd: systemctl is-active desktop-display-proxy
+      register: _desktop_display_proxy
+      changed_when: false
+      failed_when: false
+
+    - name: Assert desktop-display-proxy is running
+      ansible.builtin.assert:
+        that: "'active' in _desktop_display_proxy.stdout"
+        fail_msg: "desktop-display-proxy not active on {{ inventory_hostname }}"
+
+    - name: Verify desktop container has internet access
+      ansible.builtin.command:
+        cmd: pct exec {{ desktop_ct_id }} -- wget -q -O /dev/null --timeout=10 http://www.google.com
+      changed_when: false
+
+    - name: Verify NetworkManager manages eth0
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ desktop_ct_id }} -- nmcli -t -f DEVICE,STATE device status | grep '^eth0:connected'
+        executable: /bin/bash
+      register: _desktop_nm_state
+      changed_when: false
+
+    - name: Verify KDE screen locker is disabled
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ desktop_ct_id }} -- cat /home/desktop/.config/kscreenlockerrc | grep 'Autolock=false'
+        executable: /bin/bash
+      changed_when: false
 
 # ── Play 12: Kiosk health (kiosk_nodes) ──────────────────────────
 # Deep Kiosk checks (Cage, Chromium, dashboard file, systemd service)
@@ -2274,7 +2194,6 @@
   hosts: kiosk_nodes
   gather_facts: false
   vars:
-    _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
     _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
   tasks:
     - name: Read Kiosk container state and config
@@ -2300,13 +2219,15 @@
         that:
           - _kiosk_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/dri')
         fail_msg: >-
-          Kiosk container {{ kiosk_ct_id }} missing DRI passthrough on {{ inventory_hostname }}.
+          HARD FAILURE: Kiosk container {{ kiosk_ct_id }} missing DRI passthrough on {{ inventory_hostname }}.
+          INVESTIGATE: Run 'pct config {{ kiosk_ct_id }}' on {{ inventory_hostname }} and check for
+          lxc.mount.entry lines with /dev/dri. If missing, the display-exclusive hookscript did not
+          attach DRI devices. Check hookscript logs: journalctl -u pvedaemon on {{ inventory_hostname }}.
           Config: {{ _kiosk_cfg.stdout_lines | select('match', '.*lxc\\.mount') | list }}
-      failed_when: false
 
-    - name: Check if Desktop VM is running (display-exclusive stops Kiosk)
+    - name: Check if Desktop container is running (display-exclusive stops Kiosk)
       ansible.builtin.command:
-        cmd: qm status {{ desktop_vm_id }}
+        cmd: pct status {{ desktop_ct_id }}
       register: _desktop_status_for_kiosk
       changed_when: false
       failed_when: false
@@ -2317,60 +2238,8 @@
           'running' in _kiosk_cfg.stdout or
           ('stopped' in _kiosk_cfg.stdout and 'running' in (_desktop_status_for_kiosk.stdout | default('')))
         fail_msg: >-
-          Kiosk container {{ kiosk_ct_id }} is stopped but Desktop VM is not running —
+          Kiosk container {{ kiosk_ct_id }} is stopped but Desktop container is not running —
           expected either Kiosk running or Kiosk stopped due to display-exclusive hookscript
-
-    - name: Check Kiosk services, NiceGUI files, and 4-tier config (single pct exec)
-      ansible.builtin.shell:
-        cmd: >-
-          pct exec {{ kiosk_ct_id }} -- /bin/sh -c '
-          echo "DISPLAY_SVC=$(systemctl is-enabled kiosk-display 2>/dev/null || echo disabled)";
-          echo "WEB_SVC=$(systemctl is-enabled kiosk-web 2>/dev/null || echo disabled)";
-          echo "WEB_ACTIVE=$(systemctl is-active kiosk-web 2>/dev/null || echo inactive)";
-          echo "CONFIG=$(test -f /opt/kiosk/config.json && echo yes || echo no)";
-          echo "BUILD_PY=$(test -f /opt/kiosk/build.py && echo yes || echo no)";
-          echo "SERVER=$(test -f /opt/kiosk/scripts/webui/kiosk_server.py && echo yes || echo no)";
-          echo "HUB=$(test -f /opt/kiosk/scripts/webui/pages/hub.py && echo yes || echo no)";
-          echo "LAUNCH=$(test -f /opt/kiosk/scripts/webui/pages/launch.py && echo yes || echo no)";
-          echo "VIEWER=$(test -f /opt/kiosk/scripts/webui/pages/viewer.py && echo yes || echo no)";
-          echo "MANAGER=$(test -f /opt/kiosk/scripts/webui/manager.py && echo yes || echo no)";
-          echo "API_CLIENT=$(test -f /opt/kiosk/scripts/webui/api_client.py && echo yes || echo no)";
-          echo "METRIC_CTRL=$(test -f /opt/kiosk/scripts/webui/metric_controller.py && echo yes || echo no)";
-          echo "HOST_STATE=$(test -f /opt/kiosk/scripts/webui/host_state.py && echo yes || echo no)";
-          echo "SCRIPTS_INIT=$(test -f /opt/kiosk/scripts/__init__.py && echo yes || echo no)";
-          MGMT=$(python3 -c "import json; print(json.load(open(\"/opt/kiosk/config.json\")).get(\"MANAGEMENT_SERVER\",\"\"))" 2>/dev/null || echo "");
-          echo "MGMT_SERVER=$MGMT";
-          PK=$(python3 -c "import json; print(json.load(open(\"/opt/kiosk/config.json\")).get(\"CALLHOME_PUBLIC_KEY\",\"\"))" 2>/dev/null || echo "");
-          echo "HAS_PUBLIC_KEY=$([ -n \"$PK\" ] && echo yes || echo no)"
-          '
-      register: _kiosk_health
-      changed_when: false
-      retries: 3
-      delay: 5
-      until: "'WEB_ACTIVE=active' in _kiosk_health.stdout"
-      when: not (_api_ready | bool)
-
-    - name: Assert Kiosk services enabled, files present, and 4-tier configured
-      ansible.builtin.assert:
-        that:
-          - "'DISPLAY_SVC=enabled' in _kiosk_health.stdout"
-          - "'WEB_SVC=enabled' in _kiosk_health.stdout"
-          - "'WEB_ACTIVE=active' in _kiosk_health.stdout"
-          - "'CONFIG=yes' in _kiosk_health.stdout"
-          - "'BUILD_PY=yes' in _kiosk_health.stdout"
-          - "'SERVER=yes' in _kiosk_health.stdout"
-          - "'HUB=yes' in _kiosk_health.stdout"
-          - "'LAUNCH=yes' in _kiosk_health.stdout"
-          - "'VIEWER=yes' in _kiosk_health.stdout"
-          - "'MANAGER=yes' in _kiosk_health.stdout"
-          - "'API_CLIENT=yes' in _kiosk_health.stdout"
-          - "'METRIC_CTRL=yes' in _kiosk_health.stdout"
-          - "'HOST_STATE=yes' in _kiosk_health.stdout"
-          - "'SCRIPTS_INIT=yes' in _kiosk_health.stdout"
-          - "'MGMT_SERVER=http' in _kiosk_health.stdout"
-          - "'HAS_PUBLIC_KEY=yes' in _kiosk_health.stdout"
-        fail_msg: "Kiosk health check failed on {{ inventory_hostname }}: {{ _kiosk_health.stdout }}"
-      when: not (_api_ready | bool)
 
     - name: Query kiosk extensions from API
       ansible.builtin.uri:
@@ -2378,78 +2247,83 @@
         return_content: true
       register: _kiosk_api
       delegate_to: localhost
-      when: _api_ready | bool
-      failed_when: false
 
-    - name: Set kiosk config keys from API
+    - name: Assert Kiosk ready via API
+      ansible.builtin.assert:
+        that:
+          - _kiosk_api.json.ready | default(false) | bool
+        fail_msg: "Kiosk not ready via API: {{ _kiosk_api.json | default({}) }}"
+      when: "'running' in _kiosk_cfg.stdout"
+
+    - name: Assert kiosk heartbeat reports config_files extension
+      ansible.builtin.assert:
+        that:
+          - (_kiosk_api.json.extensions.config_files | default(none)) is not none
+        fail_msg: >-
+          HARD FAILURE: Kiosk on {{ inventory_hostname }} is NOT reporting config_files
+          via heartbeat. INVESTIGATE: Check that CALLHOME_CONFIG_FILES=/opt/kiosk/config.json
+          is set in /etc/default/callhome inside the kiosk container (CT {{ kiosk_ct_id }}).
+          Then restart callhome: pct exec {{ kiosk_ct_id }} -- systemctl restart callhome.
+          If missing, rebuild kiosk image with updated inject_callhome_agent.
+      when: "'running' in _kiosk_cfg.stdout"
+
+    - name: Set kiosk config keys from heartbeat API
       ansible.builtin.set_fact:
         _kiosk_config_keys: "{{ _kiosk_api.json.extensions.config_files['/opt/kiosk/config.json']['keys'] }}"
-      when: >-
-        _api_ready | bool
-        and (_kiosk_api.json.extensions.config_files | default(none)) is not none
-
-    - name: Read kiosk config.json via SSH (fallback)
-      ansible.builtin.command:
-        cmd: pct exec {{ kiosk_ct_id }} -- cat /opt/kiosk/config.json
-      register: _kiosk_config
-      changed_when: false
-      when: _kiosk_config_keys is not defined
-
-    - name: Set kiosk config keys from SSH (fallback)
-      ansible.builtin.set_fact:
-        _kiosk_config_keys: "{{ (_kiosk_config.stdout | from_json).keys() | list }}"
-      when: _kiosk_config_keys is not defined
+      when:
+        - "'running' in _kiosk_cfg.stdout"
+        - (_kiosk_api.json.extensions.config_files | default(none)) is not none
 
     - name: Assert kiosk config has all service URL and 4-tier keys
       ansible.builtin.assert:
         that:
-          - "'DESKTOP_URL' in _kiosk_config_keys"
-          - "'JELLYFIN_URL' in _kiosk_config_keys"
-          - "'KODI_URL' in _kiosk_config_keys"
-          - "'HOMEASSISTANT_URL' in _kiosk_config_keys"
-          - "'MOONLIGHT_URL' in _kiosk_config_keys"
-          - "'GAMING_URL' in _kiosk_config_keys"
-          - "'OPENWRT_URL' in _kiosk_config_keys"
-          - "'PIHOLE_URL' in _kiosk_config_keys"
-          - "'WIREGUARD_URL' in _kiosk_config_keys"
-          - "'NETDATA_URL' in _kiosk_config_keys"
-          - "'RSYSLOG_URL' in _kiosk_config_keys"
           - "'MANAGEMENT_SERVER' in _kiosk_config_keys"
           - "'CALLHOME_PUBLIC_KEY' in _kiosk_config_keys"
           - "'HOST_NAME' in _kiosk_config_keys"
           - "'HOST_IP' in _kiosk_config_keys"
-        fail_msg: "Kiosk config missing required keys on {{ inventory_hostname }}: {{ _kiosk_config_keys }}"
+        fail_msg: >-
+          HARD FAILURE: Kiosk config missing required keys on {{ inventory_hostname }}.
+          Got keys: {{ _kiosk_config_keys }}. INVESTIGATE: Check config.json was pushed
+          by kiosk_configure. Run: pct exec {{ kiosk_ct_id }} -- cat /opt/kiosk/config.json
+      when: _kiosk_config_keys is defined
 
-    - name: Read MANAGEMENT_SERVER and IS_CLUSTER_MANAGER from config
-      ansible.builtin.command:
-        cmd: >-
-          pct exec {{ kiosk_ct_id }} -- python3 -c
-          "import json; c=json.load(open('/opt/kiosk/config.json'));
-          print('MGMT=' + c.get('MANAGEMENT_SERVER',''));
-          print('IS_CM=' + str(c.get('IS_CLUSTER_MANAGER','false')))"
-      register: _kiosk_mgmt_info
-      changed_when: false
+    - name: Query kiosk config via NM API over VPN (no SSH — 4-tier architecture)
+      ansible.builtin.uri:
+        url: "http://{{ vpn_ip }}:{{ kiosk_manager_port | default(9001) }}/api/config/self"
+        return_content: true
+        timeout: 15
+      register: _kiosk_config_api
+      delegate_to: localhost
+
+    - name: Set 4-tier config facts from API
+      ansible.builtin.set_fact:
+        _kiosk_is_cm: "{{ _kiosk_config_api.json.IS_CLUSTER_MANAGER | default('') }}"
+        _kiosk_mgmt_server: "{{ _kiosk_config_api.json.MANAGEMENT_SERVER | default('') }}"
 
     - name: Assert ClusterManager (router_nodes) points to SuperManager
       ansible.builtin.assert:
         that:
-          - "'IS_CM=true' in _kiosk_mgmt_info.stdout or 'IS_CM=True' in _kiosk_mgmt_info.stdout"
-          - _kiosk_mgmt_info.stdout is search('MGMT=http.*' + lookup('env', 'WEBUI_PORT') | default('52500', true))
+          - _kiosk_is_cm | string | lower in ['true', '1', 'yes']
+          - _kiosk_mgmt_server is search(lookup('env', 'WEBUI_PORT') | default('52500', true))
         fail_msg: >-
-          ClusterManager on {{ inventory_hostname }} should have IS_CLUSTER_MANAGER=true
-          and MANAGEMENT_SERVER pointing to SuperManager port.
-          Got: {{ _kiosk_mgmt_info.stdout }}
+          HARD FAILURE: ClusterManager on {{ inventory_hostname }} has wrong 4-tier config.
+          IS_CLUSTER_MANAGER={{ _kiosk_is_cm }},
+          MANAGEMENT_SERVER={{ _kiosk_mgmt_server }}.
+          INVESTIGATE: Check kiosk_configure pushed correct config.json.
+          Expected IS_CLUSTER_MANAGER=true and MANAGEMENT_SERVER pointing to SM port.
       when: "'router_nodes' in group_names"
 
     - name: Assert NodeManagers (non-router) point to ClusterManager (kiosk port)
       ansible.builtin.assert:
         that:
-          - "'IS_CM=false' in _kiosk_mgmt_info.stdout or 'IS_CM=False' in _kiosk_mgmt_info.stdout"
-          - _kiosk_mgmt_info.stdout is search('MGMT=http.*:9001')
+          - _kiosk_is_cm | string | lower in ['false', '0', 'no', '']
+          - _kiosk_mgmt_server is search(':9001')
         fail_msg: >-
-          NodeManager on {{ inventory_hostname }} should have IS_CLUSTER_MANAGER=false
-          and MANAGEMENT_SERVER pointing to ClusterManager on port 9001.
-          Got: {{ _kiosk_mgmt_info.stdout }}
+          HARD FAILURE: NodeManager on {{ inventory_hostname }} has wrong 4-tier config.
+          IS_CLUSTER_MANAGER={{ _kiosk_is_cm }},
+          MANAGEMENT_SERVER={{ _kiosk_mgmt_server }}.
+          INVESTIGATE: Check kiosk_configure pushed correct config.json.
+          Expected IS_CLUSTER_MANAGER=false and MANAGEMENT_SERVER pointing to CM port 9001.
       when: "'router_nodes' not in group_names"
 
     - name: Check display-exclusive hookscript exists
@@ -2467,78 +2341,43 @@
         that: "'kiosk_lxc' in stamp.plays"
         fail_msg: "deploy_stamp missing kiosk_lxc entry"
 
-    - name: Check VNC services enabled inside kiosk container
-      ansible.builtin.shell:
-        cmd: >-
-          pct exec {{ kiosk_ct_id }} -- /bin/sh -c '
-          echo "VNC_SVC=$(systemctl is-enabled kiosk-vnc 2>/dev/null || echo disabled)";
-          echo "VNC_WS_SVC=$(systemctl is-enabled kiosk-vnc-ws 2>/dev/null || echo disabled)";
-          echo "WAYVNC=$(command -v wayvnc >/dev/null 2>&1 && echo yes || echo no)";
-          echo "WEBSOCKIFY=$(command -v websockify >/dev/null 2>&1 && echo yes || echo no)"
-          '
-      register: _kiosk_vnc_health
-      changed_when: false
-
-    - name: Assert VNC services enabled and packages present
+    - name: Assert kiosk heartbeat reports display service running
       ansible.builtin.assert:
         that:
-          - "'VNC_SVC=enabled' in _kiosk_vnc_health.stdout"
-          - "'VNC_WS_SVC=enabled' in _kiosk_vnc_health.stdout"
-          - "'WAYVNC=yes' in _kiosk_vnc_health.stdout"
-          - "'WEBSOCKIFY=yes' in _kiosk_vnc_health.stdout"
-        fail_msg: "VNC stack not properly baked on {{ inventory_hostname }}: {{ _kiosk_vnc_health.stdout }}"
+          - _kiosk_api.json.systemd_services['kiosk-display'] | default('') in ['running', 'active']
+        fail_msg: >-
+          HARD FAILURE: KasmVNC display service not running on {{ inventory_hostname }}.
+          Heartbeat reports: {{ _kiosk_api.json.systemd_services | default({}) }}.
+          INVESTIGATE: SSH to host, run: pct exec {{ kiosk_ct_id }} -- systemctl status kiosk-display.
+          If missing, rebuild kiosk image with kiosk-display unit baked in.
 
-    - name: Verify VNC WebSocket port forwarding (WAN hosts)
+    - name: Verify kiosk-manager-proxy is active
+      ansible.builtin.command:
+        cmd: systemctl is-active kiosk-manager-proxy
+      register: _mgr_proxy
+      changed_when: false
+      failed_when: _mgr_proxy.stdout | default('') | trim != 'active'
+
+    - name: Verify kiosk-display-proxy is active
+      ansible.builtin.command:
+        cmd: systemctl is-active kiosk-display-proxy
+      register: _display_proxy
+      changed_when: false
+      failed_when: _display_proxy.stdout | default('') | trim != 'active'
+
+    - name: Verify VPN subnet route exists on host
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          iptables -t nat -S PREROUTING 2>/dev/null | grep -c '{{ kiosk_vnc_ws_port }}' || echo 0
+          ip route show {{ vpn_subnet }} | grep -c via || echo 0
         executable: /bin/bash
-      register: _vnc_dnat
+      register: _vpn_route
       changed_when: false
-      when:
-        - inventory_hostname not in groups.get('router_nodes', [])
-        - inventory_hostname not in groups.get('lan_hosts', [])
 
-    - name: Assert VNC DNAT rule exists on WAN hosts
+    - name: Assert VPN route is configured
       ansible.builtin.assert:
-        that: (_vnc_dnat.stdout | trim | int) > 0
-        fail_msg: "Missing VNC DNAT rule for port {{ kiosk_vnc_ws_port }} on {{ inventory_hostname }}"
-      when:
-        - inventory_hostname not in groups.get('router_nodes', [])
-        - inventory_hostname not in groups.get('lan_hosts', [])
-
-    - name: Verify VNC socat proxy on LAN hosts
-      ansible.builtin.command:
-        cmd: systemctl is-active kiosk-vnc-proxy
-      register: _vnc_proxy
-      changed_when: false
-      failed_when: false
-      when: inventory_hostname in groups.get('router_nodes', []) or inventory_hostname in groups.get('lan_hosts', [])
-
-    - name: Assert VNC socat proxy running on LAN hosts
-      ansible.builtin.assert:
-        that: "'active' in _vnc_proxy.stdout"
-        fail_msg: "VNC socat proxy (kiosk-vnc-proxy) not active on LAN host {{ inventory_hostname }}"
-      when: inventory_hostname in groups.get('router_nodes', []) or inventory_hostname in groups.get('lan_hosts', [])
-
-    - name: Verify VNC relay enabled for LAN hosts (router node only)
-      ansible.builtin.command:
-        cmd: "systemctl is-enabled kiosk-vnc-relay-{{ item }}"
-      register: _vnc_relay
-      changed_when: false
-      failed_when: false
-      loop: "{{ groups.get('lan_hosts', []) | intersect(groups.get('kiosk_nodes', [])) }}"
-      when: inventory_hostname in groups.get('router_nodes', [])
-
-    - name: Assert VNC relay enabled for each LAN host
-      ansible.builtin.assert:
-        that: "'enabled' in item.stdout"
-        fail_msg: "VNC relay (kiosk-vnc-relay-{{ item.item }}) not enabled on router node"
-      loop: "{{ _vnc_relay.results | default([]) }}"
-      when:
-        - inventory_hostname in groups.get('router_nodes', [])
-        - item is not skipped
+        that: (_vpn_route.stdout | trim | int) > 0
+        fail_msg: "Missing VPN subnet route on {{ inventory_hostname }}. WireGuard routing not configured."
 
 # ── Play 13: Gaming LXC health (gaming_nodes) ───────────────────
 # Deep Gaming checks (VA-API profiles, render/card devices, dsda-doom,
@@ -2548,7 +2387,6 @@
   hosts: gaming_nodes
   gather_facts: false
   vars:
-    _api_ready: "{{ hostvars['localhost']._fleet_api_ready | default(false) | bool }}"
     _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
   tasks:
     - name: Check Gaming LXC container exists
@@ -2573,34 +2411,15 @@
         return_content: true
       register: _gaming_api
       delegate_to: localhost
-      when: _api_ready | bool
-      failed_when: false
 
-    - name: Assert Sunshine active from API
+    - name: Assert Gaming ready and Sunshine active from API
       ansible.builtin.assert:
-        that: >-
-          _gaming_api.json.systemd_services['sunshine.service'] | default('') in ['active', 'running']
-          or _gaming_api.json.systemd_services['sunshine'] | default('') in ['active', 'running']
-        fail_msg: "Sunshine not active via API on {{ inventory_hostname }}"
-      when: >-
-        _api_ready | bool
-        and (_gaming_api.json.systemd_services | default(none)) is not none
-
-    - name: Check Sunshine via SSH (fallback)
-      ansible.builtin.shell:
-        cmd: >-
-          pct exec {{ gaming_ct_id }} -- bash -c '
-          echo "SUNSHINE=$(systemctl is-active sunshine.service 2>/dev/null || echo inactive)"
-          '
-      register: _gaming_health
-      changed_when: false
-      when: not (_api_ready | bool) or (_gaming_api.json.systemd_services | default(none)) is none
-
-    - name: Assert Sunshine service is active (SSH fallback)
-      ansible.builtin.assert:
-        that: "'SUNSHINE=active' in _gaming_health.stdout"
-        fail_msg: "Sunshine service not active in Gaming LXC on {{ inventory_hostname }}"
-      when: _gaming_health is defined and _gaming_health is not skipped
+        that:
+          - _gaming_api.json.ready | default(false) | bool
+          - >-
+            _gaming_api.json.systemd_services['sunshine.service'] | default('') in ['active', 'running']
+            or _gaming_api.json.systemd_services['sunshine'] | default('') in ['active', 'running']
+        fail_msg: "Gaming/Sunshine not ready via API on {{ inventory_hostname }}: {{ _gaming_api.json | default({}) }}"
 
     - name: Assert stamp contains gaming_lxc
       ansible.builtin.assert:
@@ -2684,8 +2503,8 @@
         headers:
           X-Callhome-Token: "{{ lookup('env', 'CALLHOME_PUBLIC_KEY') }}"
       register: _sm_nodes
-      retries: 12
-      delay: 30
+      retries: 6
+      delay: 10
       until: >-
         (_sm_nodes.status | default(0)) == 200
         and (_sm_nodes.json | default([])
@@ -2740,42 +2559,36 @@
           Present={{ _sm_physical_hosts | join(', ') }}.
           Missing={{ _expected_hosts | difference(_sm_physical_hosts) | join(', ') }}.
           Container phantoms={{ _sm_hostnames | default([]) | intersect(_container_names) | join(', ') }}.
-          Fix: ensure manager-api-proxy.service is running on the router node
+          Fix: ensure kiosk-manager-proxy.service is running on each host
           and all kiosk containers have correct MANAGEMENT_SERVER config.
 
-    - name: Wait for all 5 child Managers on Cluster Manager
-      ansible.builtin.command:
-        cmd: >-
-          ssh -o StrictHostKeyChecking=no
-          root@{{ hostvars[groups['router_nodes'][0]]['ansible_host'] }}
-          pct exec {{ kiosk_ct_id }} -- wget -qO- http://localhost:9001/api/nodes
+    - name: Wait for all 5 child Managers on Cluster Manager (API)
+      ansible.builtin.uri:
+        url: "http://{{ hostvars[groups['router_nodes'][0]]['vpn_ip'] }}:{{ kiosk_manager_port }}/api/nodes"
+        return_content: true
+        timeout: 10
       register: _cm_nodes_raw
-      changed_when: false
       failed_when: false
-      retries: 12
-      delay: 30
+      retries: 6
+      delay: 10
       until: >-
-        _cm_nodes_raw.rc == 0
-        and ((_cm_nodes_raw.stdout | default('{"nodes":[]}') | from_json)['nodes']
-             | default([]) | length) >= 5
+        (_cm_nodes_raw.status | default(0)) == 200
+        and (_cm_nodes_raw.json.nodes | default([]) | length) >= 5
 
     - name: Parse Cluster Manager fleet response
       ansible.builtin.set_fact:
         _cm_hostnames: >-
-          {{ (_cm_nodes_raw.stdout | default('{"nodes":[]}') | from_json)['nodes']
-             | default([]) | map(attribute='hostname') | list }}
-      when: _cm_nodes_raw.rc == 0
+          {{ _cm_nodes_raw.json.nodes | default([]) | map(attribute='hostname') | list }}
+      when: (_cm_nodes_raw.status | default(0)) == 200
 
     - name: Fail if Cluster Manager API was unreachable
       ansible.builtin.fail:
         msg: >-
-          Cluster Manager API never returned data after retries.
-          rc={{ _cm_nodes_raw.rc | default('undefined') }},
-          stderr={{ _cm_nodes_raw.stderr | default('') | truncate(200) }}.
+          Cluster Manager API never returned 200 after retries.
+          Status={{ _cm_nodes_raw.status | default('none') }}.
           Fix: check kiosk_server is running in CT {{ kiosk_ct_id }},
-          manager-api-proxy.service on the router node, and that wget
-          is available in the kiosk container.
-      when: _cm_nodes_raw is not defined or _cm_nodes_raw.rc != 0
+          kiosk-manager-proxy.service on router node, and VPN routing.
+      when: (_cm_nodes_raw.status | default(0)) != 200
 
     - name: Assert ALL 5 child Managers registered with Cluster Manager
       ansible.builtin.assert:
@@ -2792,7 +2605,7 @@
           Missing={{ ['mesh1','ai','mesh2','bridge-1','bridge-2']
              | difference(_cm_hostnames | default([])) | join(', ') }}.
           Fix: check MANAGEMENT_SERVER in kiosk config.json,
-          manager-api-proxy.service on the router node, and NAT routing.
+          kiosk-manager-proxy.service on each host, and VPN routing.
 
 # ── Image version pipeline ──────────────────────────────────────────
 # Verify per-image .version sidecar files exist and contain valid semver,
@@ -2902,7 +2715,6 @@
           Manager has no state for 'home'. Infrastructure roles did not
           register their findings. Check proxmox_bridges, proxmox_pci_passthrough,
           and proxmox_igpu roles for manager_register.yml include failures.
-      when: _fleet_api_available | default(false) | bool
 
     - name: Assert Manager has bridge topology for home
       ansible.builtin.assert:

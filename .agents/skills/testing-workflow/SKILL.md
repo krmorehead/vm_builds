@@ -49,9 +49,15 @@ Use when running molecule tests, implementing TDD workflow, diagnosing test fail
 17. NEVER rationalize "No route to host" during manual testing as "expected in pre-mesh" — if you see it, converge first
 18. The system ALWAYS ends `molecule test` in a pristine state. Manual testing starts from that pristine state. Build first, test second.
 
+**Controller VPN and localhost plays:**
+15. Controller VPN play in site.yml targets `localhost` with `connection: local`. It uses explicit `sudo` calls (not `become: true`) because `setup.sh` installs a targeted NOPASSWD sudoers entry
+16. `become: true` on localhost requires an interactive password or `ANSIBLE_BECOME_PASSWORD` — both break non-interactive molecule runs. NEVER use `become: true` on localhost for scoped operations
+17. The controller is a bakeable target — wireguard-tools installed by `setup.sh`, wg0 configured by site.yml, torn down by cleanup.yml
+18. Verify assertions for controller VPN use explicit `sudo wg show wg0` (not `become: true`)
+
 **Cleanup and Safety:**
-15. NEVER use blanket cleanup that destroys all resources - use explicit VMIDs
-16. NEVER add graceful degradation for expected hardware (iGPU, WiFi, VT-d)
+19. NEVER use blanket cleanup that destroys all resources - use explicit VMIDs
+20. NEVER add graceful degradation for expected hardware (iGPU, WiFi, VT-d)
 
 **Failure Diagnosis:**
 14. ALWAYS check dmesg first when diagnosing test failures
@@ -352,9 +358,36 @@ NEVER run full E2E to discover a single-image problem — rebuild that one image
 NEVER let E2E runs take 30+ minutes — if they do, images are being re-uploaded or packages installed at runtime, which means the bake pipeline is broken
 NEVER treat Proxmox host config as "not our problem" — host-level systemd units, iptables rules, and packages are deployable and testable infrastructure, same as container images
 NEVER use `nohup ... &` for persistent host services — deploy systemd units with Restart=always. Background processes die when SSH sessions close
+NEVER use `become: true` on localhost plays — use explicit `sudo` in shell/command tasks. The NOPASSWD sudoers entry is already installed by setup.sh (wireguard-tools, wg-quick, wg, install). This is a solved problem
+NEVER treat the build machine as exempt from "bake don't configure" — wireguard-tools and sudoers are already installed by setup.sh; wg0 is configured automatically by site.yml on every converge
 NEVER fabricate test data (curl heartbeats, fake check-ins, simulated nodes) to populate a UI for "manual testing" — this is mocking with extra steps and proves nothing about real functionality
 NEVER claim "manual testing passed" after only VIEWING pages — every interactive feature (buttons, toggles, mode switches) must be ENGAGED against real hardware
 NEVER say "the fleet dashboard shows 5 nodes" when those 5 nodes were curl'd into existence 10 seconds ago — real nodes heartbeat from real kiosk_server instances
+NEVER add retries to a verify task without first diagnosing WHY the check fails — retries mask root causes and waste minutes per test run
+NEVER use `retries > 6` or `delay > 10` in verify — if it isn't ready in 60s it's broken, not slow
+NEVER increase retry count or delay as a "fix" for a failing check — find and fix the root cause, then remove the retries
+NEVER leave debug/diagnostic tasks in verify.yml after the root cause is fixed — permanent diagnostics go in converge roles
+NEVER add SSH fallback paths in verify.yml — if the API check fails, the 4-tier system is broken. Fix the relay chain, don't add `pct exec` fallback
+NEVER use `pct exec` to read container config when `/api/config/self` over VPN is available — the API is faster and proves the NM is functional
+NEVER skip VPN connectivity verification — ALL NM API queries require the controller's wg0 tunnel. If VPN is down, verify will produce confusing failures
+
+### API-first verification (verified 2026-04-18)
+
+The E2E verify playbook uses the 4-tier API as the PRIMARY verification path.
+Every hard failure includes investigation prompts so agents don't go off track:
+
+- **Fleet readiness gate**: `/api/fleet/ready` — HARD FAIL if any service not heartbeating
+- **Heartbeat circuit breaker**: `/api/fleet/stale` — kills the run immediately
+- **Per-service health**: `/api/container/{id}/ready` — extensions prove baked content
+- **Kiosk config validation**: `/api/config/self` over VPN (no `pct exec`)
+- **Display service health**: `systemd_services.kiosk-display` from heartbeat
+- **Baked content**: `extensions.config_files` file hashes via heartbeat
+- **VPN connectivity**: Hard-fail with investigation steps if controller can't reach hub
+
+SSH checks remain ONLY for:
+- Hypervisor validation: `pct config/status` (Proxmox host-side, not container-side)
+- L3 integration proofs: cross-service connectivity (logger, ping, DNS resolution)
+- OpenWrt deep checks: UCI config, `iw` radio state (no HTTP API on OpenWrt VM)
 
 ### Previous catastrophe: fabricated manual test (2026-04-09)
 

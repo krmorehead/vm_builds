@@ -119,6 +119,21 @@
           nat={{ 'present' if 'NAT=present' in _wg_health.stdout else 'absent' }}
       when: not (_api_ready | bool)
 
+    - name: Verify VPN IP matches host_vars
+      ansible.builtin.command:
+        cmd: pct exec {{ wireguard_ct_id }} -- ip -4 addr show wg0
+      register: _wg_vpn_addr
+      changed_when: false
+      failed_when: false
+
+    - name: Assert VPN IP is correct
+      ansible.builtin.assert:
+        that: _wg_vpn_addr.stdout is search(vpn_ip)
+        fail_msg: >-
+          VPN IP mismatch on {{ inventory_hostname }}.
+          Expected {{ vpn_ip }}, got: {{ _wg_vpn_addr.stdout }}
+      when: _wg_vpn_addr.rc == 0
+
     - name: Report per-feature verification (heartbeat API)
       ansible.builtin.debug:
         msg: >-

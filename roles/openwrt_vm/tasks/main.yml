@@ -296,7 +296,7 @@
   ansible.builtin.wait_for:
     host: "{{ openwrt_lan_ip | default('10.10.10.1') }}"
     port: 22
-    timeout: 5
+    timeout: 15
   register: _openwrt_lan_probe
   failed_when: false
   when: vm_exists | bool

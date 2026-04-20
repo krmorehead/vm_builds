@@ -93,7 +93,7 @@ homeassistant_image_path: images/haos.qcow2
 
 10. Three documented exceptions to bake principle (each MUST be explicitly documented):
     - **Docker pull of pinned image tag**: deterministic and versioned
-    - **Desktop VMs via cloud image + apt**: too large and hardware-dependent for pre-built images
+    - **Desktop LXC via build-images.sh**: rootfs tarball with all packages baked in
     - **Windows VMs via ISO + autounattend.xml**: install-from-ISO IS the bake approach for Windows
 
 11. Any OTHER runtime package installation is rejected. If you need a new package, add it to the image build script.

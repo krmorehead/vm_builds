@@ -55,32 +55,26 @@
         that: "'onboot: 0' in _kodi_cfg.stdout"
         fail_msg: "Container {{ kodi_ct_id }} should have onboot: 0"
 
-    # ── Headless VNC stack (sway + wayvnc + websockify) ──────────
+    # ── KasmVNC display stack ───────────────────────────────────
 
-    - name: Check headless VNC stack inside container
+    - name: Check KasmVNC display stack inside container
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ kodi_ct_id }} -- /bin/sh -c '
-          echo "SWAY=$(command -v sway >/dev/null 2>&1 && echo yes || echo no)";
-          echo "WAYVNC=$(command -v wayvnc >/dev/null 2>&1 && echo yes || echo no)";
-          echo "WEBSOCKIFY=$(command -v websockify >/dev/null 2>&1 && echo yes || echo no)";
-          echo "DISPLAY_SVC=$(systemctl is-enabled kodi-display 2>/dev/null || echo missing)";
-          echo "VNC_SVC=$(systemctl is-enabled kodi-vnc 2>/dev/null || echo missing)";
-          echo "VNC_WS_SVC=$(systemctl is-enabled kodi-vnc-ws 2>/dev/null || echo missing)"
+          echo "VNCSERVER=$(command -v vncserver >/dev/null 2>&1 && echo yes || echo no)";
+          echo "KASM_PKG=$(dpkg -l kasmvncserver 2>/dev/null | grep -c ^ii)";
+          echo "DISPLAY_SVC=$(systemctl is-enabled kodi-display 2>/dev/null || echo missing)"
           '
-      register: _kodi_vnc_health
+      register: _kodi_display_health
       changed_when: false
 
-    - name: Assert headless VNC stack is present and enabled
+    - name: Assert KasmVNC display stack is present and enabled
       ansible.builtin.assert:
         that:
-          - "'SWAY=yes' in _kodi_vnc_health.stdout"
-          - "'WAYVNC=yes' in _kodi_vnc_health.stdout"
-          - "'WEBSOCKIFY=yes' in _kodi_vnc_health.stdout"
-          - "'DISPLAY_SVC=enabled' in _kodi_vnc_health.stdout"
-          - "'VNC_SVC=enabled' in _kodi_vnc_health.stdout"
-          - "'VNC_WS_SVC=enabled' in _kodi_vnc_health.stdout"
-        fail_msg: "Headless VNC stack missing or not enabled: {{ _kodi_vnc_health.stdout }}"
+          - "'VNCSERVER=yes' in _kodi_display_health.stdout"
+          - "'KASM_PKG=1' in _kodi_display_health.stdout"
+          - "'DISPLAY_SVC=enabled' in _kodi_display_health.stdout"
+        fail_msg: "KasmVNC display stack missing or not enabled: {{ _kodi_display_health.stdout }}"
 
     # ── Kodi packages and service ────────────────────────────────
 
@@ -119,19 +113,19 @@
         that: _gui_settings.rc == 0
         fail_msg: "guisettings.xml not found"
 
-    # ── Host-side VNC proxy ──────────────────────────────────────
+    # ── Host-side display proxy ───────────────────────────────────
 
-    - name: Check kodi-vnc-proxy service on host
+    - name: Check kodi-display-proxy service on host
       ansible.builtin.command:
-        cmd: systemctl is-active kodi-vnc-proxy
-      register: _kodi_vnc_proxy
+        cmd: systemctl is-active kodi-display-proxy
+      register: _kodi_display_proxy
       changed_when: false
       failed_when: false
 
-    - name: Assert kodi-vnc-proxy is running
+    - name: Assert kodi-display-proxy is running
       ansible.builtin.assert:
-        that: "'active' in _kodi_vnc_proxy.stdout"
-        fail_msg: "kodi-vnc-proxy not active on {{ inventory_hostname }}"
+        that: "'active' in _kodi_display_proxy.stdout"
+        fail_msg: "kodi-display-proxy not active on {{ inventory_hostname }}"
 
     # ── Report ───────────────────────────────────────────────────
 
@@ -141,5 +135,5 @@
           Kodi per-feature verify passed:
           ct={{ kodi_ct_id }}, running=yes,
           kodi={{ 'installed' if 'KODI_PKG=1' in _kodi_health.stdout else 'missing' }},
-          vnc_stack={{ 'complete' if 'SWAY=yes' in _kodi_vnc_health.stdout else 'incomplete' }},
-          proxy={{ 'active' if 'active' in (_kodi_vnc_proxy.stdout | default('')) else 'inactive' }}
+          display_stack={{ 'complete' if 'VNCSERVER=yes' in _kodi_display_health.stdout else 'incomplete' }},
+          proxy={{ 'active' if 'active' in (_kodi_display_proxy.stdout | default('')) else 'inactive' }}

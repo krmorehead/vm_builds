@@ -30,6 +30,7 @@ platforms:
       - wifi_nodes
       - monitoring_nodes
       - streaming_nodes
+      - desktop_nodes
       - kiosk_nodes
   - name: ai
     groups:
@@ -37,6 +38,7 @@ platforms:
       - vpn_nodes
       - monitoring_nodes
       - gaming_nodes
+      - desktop_nodes
       - kiosk_nodes
   - name: mesh2
     groups:
@@ -44,16 +46,21 @@ platforms:
       - vpn_nodes
       - wifi_nodes
       - monitoring_nodes
+      - desktop_nodes
       - kiosk_nodes
   - name: bridge-1
     groups:
       - proxmox
+      - vpn_nodes
       - bridge_nodes
+      - desktop_nodes
       - kiosk_nodes
   - name: bridge-2
     groups:
       - proxmox
+      - vpn_nodes
       - bridge_nodes
+      - desktop_nodes
       - kiosk_nodes
 
 provisioner:
@@ -89,12 +96,13 @@ provisioner:
     MOONLIGHT_SERVER_IP: ${MOONLIGHT_SERVER_IP}
     MOONLIGHT_PAIR_PIN: ${MOONLIGHT_PAIR_PIN}
     DESKTOP_USER: ${DESKTOP_USER}
-    DESKTOP_PASSWORD: ${DESKTOP_PASSWORD}
-    DESKTOP_SSH_PUBLIC_KEY: ${DESKTOP_SSH_PUBLIC_KEY}
-    DESKTOP_AUTOLOGIN: ${DESKTOP_AUTOLOGIN}
-    DESKTOP_DEFAULT_SESSION: ${DESKTOP_DEFAULT_SESSION}
     CALLHOME_PUBLIC_KEY: ${CALLHOME_PUBLIC_KEY}
     CALLHOME_PRIVATE_KEY: ${CALLHOME_PRIVATE_KEY}
+    WIREGUARD_PRIVATE_KEY_CONTROLLER: ${WIREGUARD_PRIVATE_KEY_CONTROLLER}
+    WIREGUARD_PUBLIC_KEY_CONTROLLER: ${WIREGUARD_PUBLIC_KEY_CONTROLLER}
+    WIREGUARD_SERVER_ENDPOINT: ${WIREGUARD_SERVER_ENDPOINT}
+    WIREGUARD_HUB_PUBLIC_KEY: ${WIREGUARD_HUB_PUBLIC_KEY}
+    CONTROLLER_VPN_IP: ${CONTROLLER_VPN_IP}
   inventory:
     links:
       host_vars: ../../inventory/host_vars/

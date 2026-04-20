@@ -1,12 +1,3 @@
 ---
-- name: Validate rsyslog config
-  ansible.builtin.command:
-    cmd: /usr/sbin/rsyslogd -N1
-  listen: _restart_rsyslog
-  changed_when: false
-
-- name: Restart rsyslog service
-  ansible.builtin.systemd:
-    name: rsyslog
-    state: restarted
-  listen: _restart_rsyslog
+# Service restarts are handled via NM API (ansible.builtin.uri).
+# No handlers needed for API-driven configure roles.

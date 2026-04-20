@@ -1,44 +1,39 @@
 ---
-# guisettings.xml (default port), .kodi skeleton, and headless VNC services
-# (sway+wayvnc+websockify) are baked into the image by build-images.sh.
+# guisettings.xml (default port), .kodi skeleton, and KasmVNC display service
+# are baked into the image by build-images.sh.
 # This role handles ONLY host-specific config: optional web port override.
+# All in-container operations go through the Node Manager API over VPN.
 
-# ── Ensure container is running ──────────────────────────────────
+# ── Ensure container is running ────────────────────────────────────
 
 - name: Check Kodi container status
-  ansible.builtin.command:
-    cmd: pct status {{ kodi_ct_id }}
-  register: _kodi_ct_status
-  changed_when: false
-  failed_when: false
-
-- name: Start Kodi container if stopped
-  ansible.builtin.command:
-    cmd: pct start {{ kodi_ct_id }}
-  when: "'stopped' in (_kodi_ct_status.stdout | default(''))"
-  changed_when: true
-
-- name: Wait for Kodi container to be ready
-  ansible.builtin.command:
-    cmd: pct exec {{ kodi_ct_id }} -- ls /
-  register: _kodi_ready
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ kodi_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: "echo alive"
+      timeout: 10
+    status_code: 200
+  delegate_to: localhost
+  register: _kodi_alive
   retries: 10
   delay: 3
-  until: _kodi_ready.rc == 0
-  changed_when: false
-  when: "'stopped' in (_kodi_ct_status.stdout | default(''))"
+  until: (_kodi_alive.json.success | default(false)) | bool
 
 # ── Override web port if non-default ────────────────────────────
 
 - name: Override Kodi web port if non-default
-  ansible.builtin.shell:
-    cmd: |
-      pct exec {{ kodi_ct_id }} -- bash -c '
-        sed -i "s/services.webserverport\">8080/services.webserverport\">{{ kodi_web_port }}/" \
-          /home/kodi/.kodi/userdata/guisettings.xml
-      '
-    executable: /bin/bash
-  changed_when: true
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ kodi_ct_id }}/sed"
+    method: POST
+    body_format: json
+    body:
+      path: /home/kodi/.kodi/userdata/guisettings.xml
+      pattern: 'services.webserverport">8080'
+      replacement: 'services.webserverport">{{ kodi_web_port }}'
+    status_code: 200
+  delegate_to: localhost
   when: kodi_web_port | string != '8080'
 
 # ── Report completion ────────────────────────────────────────────
@@ -48,6 +43,6 @@
     msg: >-
       Kodi configured successfully!
       Web interface: http://{{ kodi_static_ip | default('unknown') }}:{{ kodi_web_port }}
-      Display: headless Wayland (sway + wayvnc) via VNC
-      VNC port: {{ kodi_vnc_ws_port | default('6082') }}
-      Service: kodi-display + kodi-vnc + kodi-vnc-ws (baked + enabled)
+      Display: KasmVNC (X11)
+      Display port: {{ kodi_ws_port | default('6082') }}
+      Service: kodi-display (baked + enabled)

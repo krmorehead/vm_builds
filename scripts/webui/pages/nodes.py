@@ -6,12 +6,14 @@ telemetry. Each card is clickable to open a Proxmox-inspired detail view.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from nicegui import ui
 
 from scripts.webui import data, theme
 from scripts.webui.data import Fleet, Host, HostBucket, Labels, PageTitles, Routes
 from scripts.webui import manager
-from scripts.webui.pages.vnc_shared import render_app_console_links
+from scripts.webui.pages.display_shared import render_app_console_links
 
 
 def register() -> None:
@@ -67,11 +69,11 @@ def register() -> None:
 def _render_live_content(
     container: ui.column,
     env: dict[str, str],
-    state_dir: data.Path,
+    state_dir: Path,
 ) -> None:
+    fleet = data.build_fleet(env, state_dir)
     container.clear()
     with container:
-        fleet = data.build_fleet(env, state_dir)
         nodes = data.load_node_registry(state_dir)
         alerts = data.compute_alerts(nodes)
 
@@ -89,6 +91,7 @@ def _render_live_content(
 
         theme.section_label("Node Details")
         _detail_table(fleet)
+    _maybe_kickstart(fleet)
 
 
 def _health_banner(fleet: Fleet) -> None:
@@ -198,7 +201,7 @@ _BUCKET_LABELS: dict[str, str] = {
 _BUCKET_ORDER = [HostBucket.PRODUCTION, HostBucket.LAB, HostBucket.TEST]
 
 
-def _node_cards_by_bucket(fleet: Fleet, state_dir: data.Path) -> None:
+def _node_cards_by_bucket(fleet: Fleet, state_dir: Path) -> None:
     if not fleet.hosts:
         ui.label("No hosts configured").classes("text-sm").style(
             f"color: {theme.TEXT_SECONDARY}"
@@ -225,7 +228,7 @@ def _node_cards_by_bucket(fleet: Fleet, state_dir: data.Path) -> None:
                 _single_node_card(host, state_dir)
 
 
-def _add_host_form(state_dir: data.Path) -> None:
+def _add_host_form(state_dir: Path) -> None:
     """Collapsible inline form for manual host registration."""
     with ui.expansion(Labels.ADD_HOST, icon="add_circle_outline").classes(
         "w-full mb-2"
@@ -277,7 +280,7 @@ def _add_host_form(state_dir: data.Path) -> None:
         ).props("dense")
 
 
-def _single_node_card(host: Host, state_dir: data.Path) -> None:
+def _single_node_card(host: Host, state_dir: Path) -> None:
     with ui.card().classes(
         "flex-1 min-w-[260px] max-w-[380px] cursor-pointer hover:brightness-110"
     ).on("click", lambda _, n=host.name: ui.navigate.to(Routes.NODE_DETAIL.replace("{hostname}", n))):
@@ -388,6 +391,16 @@ def _service_matrix(nodes: list[data.RegisteredNode]) -> None:
     ui.table(columns=columns, rows=rows, row_key="service").classes("w-full")
 
 
+def _maybe_kickstart(fleet: data.Fleet) -> None:
+    """Trigger auto-kickstart for stale hosts in the background."""
+    import asyncio
+
+    if not any(not h.online and h.reachable_ip for h in fleet.hosts):
+        return
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, data.auto_kickstart_stale_fleet, fleet)
+
+
 # ── Detail table ─────────────────────────────────────────────────────
 
 
@@ -432,7 +445,7 @@ def _render_detail(
     container: ui.column,
     hostname: str,
     env: dict[str, str],
-    state_dir: data.Path,
+    state_dir: Path,
 ) -> None:
     container.clear()
     with container:
@@ -490,8 +503,8 @@ def _detail_header(host: Host) -> None:
         if mgr:
             with ui.row().classes("items-center gap-2 mt-2"):
                 node_detail_back = Routes.NODE_DETAIL.replace("{hostname}", host.name)
-                vnc_url = mgr.get_child_vnc_url(host.name)
-                if vnc_url:
+                display_url = mgr.get_child_display_url(host.name)
+                if display_url:
                     kiosk_target = Routes.REMOTE_KIOSK.replace("{node_id}", host.name) + f"?back={node_detail_back}"
                     ui.button(
                         Labels.OPEN_KIOSK, icon="cast_connected",

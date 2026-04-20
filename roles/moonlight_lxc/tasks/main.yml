@@ -1,10 +1,21 @@
 ---
-# ── Verify Moonlight template exists ────────────────────────────
+# Moonlight LXC provisioning via Node Manager API.
+# Version check skips provisioning when the deployed version matches.
+
+# ── Version-aware skip check ──────────────────────────────────────
+- name: Check Moonlight version via NM API
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/check_service_version.yml"
+  vars:
+    _check_service_name: moonlight
+    _check_image_version: "{{ moonlight_image_version }}"
+
+# ── Verify Moonlight template exists (skipped when version matches)
 - name: Verify Moonlight template exists
   ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/verify_lxc_template.yml"
   vars:
     lxc_template_path: "{{ moonlight_ct_template_path }}"
     lxc_service_name: Moonlight
+  when: not (_service_up_to_date | default(false) | bool)
 
 # ── Determine container network ──────────────────────────────────
 - name: Compute Moonlight LAN network
@@ -13,81 +24,77 @@
     lxc_net_service_name: moonlight
     lxc_net_ip_offset: "{{ moonlight_ct_ip_offset }}"
 
-# ── Check container existence ──────────────────────────────────
+# ── Provision container via NM API (skipped when version matches) ─
+- name: Provision Moonlight LXC via NM API
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/moonlight"
+    method: POST
+    body_format: json
+    body:
+      vmid: "{{ moonlight_ct_id }}"
+      template_path: "{{ moonlight_ct_template_path | basename }}"
+      hostname: "{{ moonlight_ct_hostname }}"
+      memory: "{{ moonlight_ct_memory }}"
+      cores: "{{ moonlight_ct_cores }}"
+      disk: "{{ moonlight_ct_disk }}"
+      onboot: "{{ moonlight_ct_onboot }}"
+      startup_order: 0
+      unprivileged: "{{ moonlight_ct_unprivileged }}"
+      features: "{{ moonlight_ct_features | join(',') }}"
+      ip: "{{ _lxc_ct_ip }}/{{ _lan_cidr }}"
+      gateway: "{{ _lan_gateway }}"
+      nameserver: "{{ _lan_gateway }}"
+      bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
+      image_version: "{{ moonlight_image_version }}"
+    status_code: 200
+    timeout: 180
+  delegate_to: localhost
+  register: _provision_result
+  failed_when: not (_provision_result.json.success | default(false))
+  when: not (_service_up_to_date | default(false) | bool)
 
-- name: Check if Moonlight container exists
-  ansible.builtin.command:
-    cmd: pct status {{ moonlight_ct_id }}
-  register: _ct_status
-  failed_when: false
-  changed_when: false
+- name: Report provision result
+  ansible.builtin.debug:
+    msg: "Moonlight on {{ inventory_hostname }}: {{ _provision_result.json.status }} — {{ _provision_result.json.log | default([]) | join(', ') }}"
+  when: not (_service_up_to_date | default(false) | bool)
 
-- name: Set container existence flag
-  ansible.builtin.set_fact:
-    _lxc_exists: "{{ _ct_status.rc == 0 }}"
-
-# ── Resolve deployed version ──────────────────────────────────
-
-- name: Resolve deployed Moonlight version
-  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_deployed_version.yml"
+# ── Configure callhome via NM API (skipped when version matches) ─
+- name: Configure callhome on Moonlight
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/configure_callhome_api.yml"
   vars:
-    _resolve_service_name: moonlight
+    _callhome_vmid: "{{ moonlight_ct_id }}"
 
-# ── Provision via shared proxmox_lxc role ────────────────────────
+# ── Register in dynamic inventory (for configure plays) ──────────
+- name: Add Moonlight containers to dynamic inventory group
+  ansible.builtin.add_host:
+    name: "{{ moonlight_ct_hostname }}-{{ item }}"
+    groups: moonlight
+    ansible_connection: community.proxmox.proxmox_pct_remote
+    ansible_host: "{{ hostvars[item].ansible_host }}"
+    ansible_user: root
+    proxmox_vmid: "{{ moonlight_ct_id }}"
+    ansible_paramiko_host_key_checking: false
+    ansible_paramiko_proxy_command: >-
+      {{ 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@'
+         + lookup('env', 'PRIMARY_HOST')
+         if 'lan_hosts' in (hostvars[item].group_names | default([]))
+         else omit }}
+  loop: "{{ ansible_play_hosts }}"
 
-- name: Provision Moonlight LXC container
-  ansible.builtin.include_role:
-    name: proxmox_lxc
-  vars:
-    lxc_ct_id: "{{ moonlight_ct_id }}"
-    lxc_ct_hostname: "{{ moonlight_ct_hostname }}"
-    lxc_ct_dynamic_group: moonlight
-    lxc_ct_memory: "{{ moonlight_ct_memory }}"
-    lxc_ct_cores: "{{ moonlight_ct_cores }}"
-    lxc_ct_disk: "{{ moonlight_ct_disk }}"
-    lxc_ct_onboot: "{{ moonlight_ct_onboot }}"
-    lxc_ct_startup_order: 0
-    lxc_ct_template_path: "{{ moonlight_ct_template_path }}"
-    lxc_ct_ip: "{{ _lxc_ct_ip }}/{{ _lan_cidr }}"
-    lxc_ct_gateway: "{{ _lan_gateway }}"
-    lxc_ct_nameserver: "{{ _lan_gateway }}"
-    lxc_ct_bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
-    lxc_ct_unprivileged: "{{ moonlight_ct_unprivileged }}"
-    lxc_ct_features: "{{ moonlight_ct_features }}"
-    lxc_ct_image_version: "{{ moonlight_image_version }}"
-
-# Moonlight runs headless via sway+wayvnc (WLR_BACKENDS=headless, pixman).
-# No DRI/input passthrough needed — VNC provides remote display.
-
+# ── Export static IP for downstream roles ─────────────────────────
 - name: Export Moonlight static IP for downstream roles
   ansible.builtin.set_fact:
     moonlight_static_ip: "{{ _lxc_ct_ip }}"
     cacheable: true
 
-# ── Port forwarding for Moonlight VNC WebSocket ──────────────────
+# ── Port forwarding for Moonlight display ──────────────────
+# TODO: Convert lxc_display_proxy to NM API in a future pass.
+# Kept as SSH for now — deploys systemd units and socat proxies on the host.
 
-- name: Deploy Moonlight VNC socat proxy unit
-  ansible.builtin.copy:
-    content: |
-      [Unit]
-      Description=Moonlight VNC WebSocket proxy (host:{{ moonlight_vnc_ws_port }} -> moonlight:{{ moonlight_vnc_ws_port }})
-      After=network.target pve-guests.service
-      Wants=pve-guests.service
-
-      [Service]
-      Type=simple
-      ExecStart=/usr/bin/socat TCP-LISTEN:{{ moonlight_vnc_ws_port }},reuseaddr,fork TCP:{{ _lxc_ct_ip }}:{{ moonlight_vnc_ws_port }}
-      Restart=always
-      RestartSec=3
-
-      [Install]
-      WantedBy=multi-user.target
-    dest: /etc/systemd/system/moonlight-vnc-proxy.service
-    mode: "0644"
-
-- name: Enable and start Moonlight VNC proxy
-  ansible.builtin.systemd:
-    name: moonlight-vnc-proxy
-    daemon_reload: true
-    enabled: true
-    state: restarted
+- name: Set up Moonlight display proxy
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_display_proxy.yml"
+  vars:
+    _display_proxy_name: moonlight-display-proxy
+    _display_proxy_port: "{{ moonlight_ws_port }}"
+    _display_proxy_target: "{{ _lxc_ct_ip }}"
+    _display_proxy_legacy: moonlight-vnc-proxy

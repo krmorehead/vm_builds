@@ -1,4 +1,16 @@
 ---
+# WireGuard LXC provisioning via Node Manager API.
+# Host-level kernel ops (modprobe, modules-load.d) stay as SSH.
+# Version check skips provisioning when the deployed version matches.
+
+# ── Version-aware skip check ──────────────────────────────────────
+- name: Check WireGuard version via NM API
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/check_service_version.yml"
+  vars:
+    _check_service_name: wireguard
+    _check_image_version: "{{ wireguard_image_version }}"
+
+# ── Host-level kernel module setup (SSH) ─────────────────────────
 - name: Load wireguard kernel module on Proxmox host
   ansible.builtin.command:
     cmd: modprobe wireguard
@@ -11,7 +23,6 @@
     mode: "0644"
 
 # ── Determine container network based on host topology ───────────
-
 - name: Compute WireGuard container network
   ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_wan_or_lan_network.yml"
   vars:
@@ -19,72 +30,87 @@
     lxc_net_ip_offset: "{{ wireguard_ct_ip_offset }}"
     lxc_net_flavor_group: vpn_nodes
 
-# ── Check container existence ──────────────────────────────────
+# ── Provision container via NM API (skipped when version matches) ─
+- name: Provision WireGuard LXC via NM API
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/wireguard"
+    method: POST
+    body_format: json
+    body:
+      vmid: "{{ wireguard_ct_id }}"
+      template_path: "{{ wireguard_ct_template_path | basename }}"
+      hostname: "{{ wireguard_ct_hostname }}"
+      memory: "{{ wireguard_ct_memory }}"
+      cores: "{{ wireguard_ct_cores }}"
+      disk: "{{ wireguard_ct_disk }}"
+      onboot: "{{ wireguard_ct_onboot }}"
+      startup_order: "{{ wireguard_ct_startup_order }}"
+      features: "{{ wireguard_ct_features | join(',') }}"
+      ip: "{{ _lxc_net_ip }}/{{ _lxc_net_cidr }}"
+      gateway: "{{ _lxc_net_gateway }}"
+      nameserver: "{{ _lxc_net_nameserver }}"
+      bridge: "{{ _lxc_net_bridge }}"
+      image_version: "{{ wireguard_image_version }}"
+    status_code: 200
+    timeout: 180
+  delegate_to: localhost
+  register: _provision_result
+  failed_when: not (_provision_result.json.success | default(false))
+  when: not (_service_up_to_date | default(false) | bool)
 
-- name: Check if WireGuard container exists
-  ansible.builtin.command:
-    cmd: pct status {{ wireguard_ct_id }}
-  register: _ct_status
-  failed_when: false
-  changed_when: false
+- name: Report provision result
+  ansible.builtin.debug:
+    msg: "WireGuard on {{ inventory_hostname }}: {{ _provision_result.json.status }} — {{ _provision_result.json.log | default([]) | join(', ') }}"
+  when: not (_service_up_to_date | default(false) | bool)
 
-- name: Set container existence flag
-  ansible.builtin.set_fact:
-    _lxc_exists: "{{ _ct_status.rc == 0 }}"
-
-# ── Resolve deployed version ────────────────────────────────────
-
-- name: Resolve deployed WireGuard version
-  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_deployed_version.yml"
+# ── Configure callhome via NM API (skipped when version matches) ─
+- name: Configure callhome on WireGuard
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/configure_callhome_api.yml"
   vars:
-    _resolve_service_name: wireguard
+    _callhome_vmid: "{{ wireguard_ct_id }}"
 
-- name: Provision WireGuard LXC container
-  ansible.builtin.include_role:
-    name: proxmox_lxc
-  vars:
-    lxc_ct_id: "{{ wireguard_ct_id }}"
-    lxc_ct_hostname: "{{ wireguard_ct_hostname }}"
-    lxc_ct_dynamic_group: wireguard
-    lxc_ct_memory: "{{ wireguard_ct_memory }}"
-    lxc_ct_cores: "{{ wireguard_ct_cores }}"
-    lxc_ct_disk: "{{ wireguard_ct_disk }}"
-    lxc_ct_onboot: "{{ wireguard_ct_onboot }}"
-    lxc_ct_startup_order: "{{ wireguard_ct_startup_order }}"
-    lxc_ct_features: "{{ wireguard_ct_features }}"
-    lxc_ct_ip: "{{ _lxc_net_ip }}/{{ _lxc_net_cidr }}"
-    lxc_ct_gateway: "{{ _lxc_net_gateway }}"
-    lxc_ct_nameserver: "{{ _lxc_net_nameserver }}"
-    lxc_ct_template_path: "{{ wireguard_ct_template_path }}"
-    lxc_ct_bridge: "{{ _lxc_net_bridge }}"
-    lxc_ct_image_version: "{{ wireguard_image_version }}"
+# ── Register in dynamic inventory + propagate vpn_ip ─────────────
+- name: Add WireGuard containers to dynamic inventory group
+  ansible.builtin.add_host:
+    name: "{{ wireguard_ct_hostname }}-{{ item }}"
+    groups: wireguard
+    ansible_connection: community.proxmox.proxmox_pct_remote
+    ansible_host: "{{ hostvars[item].ansible_host }}"
+    ansible_user: root
+    proxmox_vmid: "{{ wireguard_ct_id }}"
+    ansible_paramiko_host_key_checking: false
+    ansible_paramiko_proxy_command: >-
+      {{ 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@'
+         + lookup('env', 'PRIMARY_HOST')
+         if 'lan_hosts' in (hostvars[item].group_names | default([]))
+         else omit }}
+    vpn_ip: "{{ hostvars[item].vpn_ip }}"
+    _wg_parent_host: "{{ item }}"
+    _wg_parent_ansible_host: "{{ hostvars[item].ansible_host }}"
+  loop: "{{ ansible_play_hosts }}"
 
 # ── Port forwarding for WireGuard on NAT bridge (WAN hosts only) ──
-# WireGuard needs inbound UDP 51820 from the internet. With NAT,
-# the container is on a private subnet — DNAT forwards traffic.
-
-- name: Add DNAT rule for WireGuard VPN (WAN hosts)
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      WAN_IF="{{ proxmox_wan_bridge }}"
-      CT_IP="{{ _lxc_net_ip }}"
-      if ! iptables -t nat -C PREROUTING -i "$WAN_IF" -p udp --dport 51820 -j DNAT --to-destination "$CT_IP:51820" 2>/dev/null; then
-        iptables -t nat -A PREROUTING -i "$WAN_IF" -p udp --dport 51820 -j DNAT --to-destination "$CT_IP:51820"
-      fi
-    executable: /bin/bash
-  when: not (_lxc_net_on_lan | bool)
-  changed_when: true
-
-- name: Add FORWARD rule for WireGuard DNAT traffic (WAN hosts)
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      WAN_IF="{{ proxmox_wan_bridge }}"
-      CT_BR="{{ proxmox_container_bridge }}"
-      if ! iptables -C FORWARD -i "$WAN_IF" -o "$CT_BR" -p udp --dport 51820 -j ACCEPT 2>/dev/null; then
-        iptables -A FORWARD -i "$WAN_IF" -o "$CT_BR" -p udp --dport 51820 -j ACCEPT
-      fi
-    executable: /bin/bash
-  when: not (_lxc_net_on_lan | bool)
+- name: Add WireGuard DNAT + FORWARD rules via NM API (WAN hosts)
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/host/iptables"
+    method: POST
+    body_format: json
+    body:
+      rules:
+        - chain: PREROUTING
+          table: nat
+          protocol: udp
+          dport: "51820"
+          destination: "{{ _lxc_net_ip }}:51820"
+          interface: "{{ proxmox_wan_bridge }}"
+      forward_rules:
+        - in_interface: "{{ proxmox_wan_bridge }}"
+          out_interface: "{{ proxmox_container_bridge }}"
+          protocol: udp
+          dport: "51820"
+    status_code: 200
+  delegate_to: localhost
+  when:
+    - not (_service_up_to_date | default(false) | bool)
+    - not (_lxc_net_on_lan | bool)
   changed_when: true

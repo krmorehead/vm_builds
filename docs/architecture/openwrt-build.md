@@ -101,7 +101,8 @@ Fresh OpenWrt has no password on root and runs Dropbear SSH. The playbook establ
 
 Post-baseline features are added as separate task files in `openwrt_configure/tasks/`.
 Each feature gets a pair of plays in `site.yml` (configure + deploy_stamp), both
-tagged with `never` so they only run when explicitly requested via `--tags`.
+sharing a feature tag. They run in the default (no-tags) E2E flow AND can be
+invoked individually via `--tags`.
 
 ```
 roles/openwrt_configure/tasks/

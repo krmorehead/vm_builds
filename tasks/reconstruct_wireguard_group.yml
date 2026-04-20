@@ -15,3 +15,14 @@
     reconstruct_service_name: WireGuard
     reconstruct_service_prefix: wireguard
     reconstruct_ct_id: "{{ wireguard_ct_id }}"
+
+# vpn_ip from host_vars doesn't flow through reconstruct_lxc_group.
+# Pass it to the dynamic hosts so wireguard_configure can use it.
+# add_host runs once per play, so use a loop over the static group.
+- name: Propagate vpn_ip to reconstructed WireGuard hosts
+  ansible.builtin.add_host:
+    name: "wireguard-{{ item }}"
+    vpn_ip: "{{ hostvars[item].vpn_ip }}"
+    _wg_parent_host: "{{ item }}"
+    _wg_parent_ansible_host: "{{ hostvars[item].ansible_host }}"
+  loop: "{{ groups['vpn_nodes'] }}"

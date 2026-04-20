@@ -187,7 +187,7 @@
       register: _sunshine_api
       changed_when: false
       failed_when: _sunshine_api.rc != 0
-      retries: 6
+      retries: 4
       delay: 5
       until: _sunshine_api.rc == 0
       when: not (_api_ready | bool)

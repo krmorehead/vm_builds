@@ -2,86 +2,85 @@
 # Docker, config dir, docker-compose.yml, configuration.yaml, and the
 # compose systemd unit are baked into the image by build-images.sh.
 # This role handles ONLY host-specific config: password and onboarding.
-
-# ── Verify Docker is available in container ──────────────────────
-
-- name: Verify Docker is available in container
-  ansible.builtin.command:
-    cmd: pct exec {{ homeassistant_ct_id }} -- docker --version
-  register: _docker_check
-  changed_when: false
-  failed_when: _docker_check.rc != 0
+# All in-container operations go through the Node Manager API over VPN.
 
 # ── Start Home Assistant via baked systemd unit ──────────────────
 
 - name: Start Home Assistant compose service
-  ansible.builtin.command:
-    cmd: pct exec {{ homeassistant_ct_id }} -- systemctl start homeassistant-compose
-  changed_when: true
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ homeassistant_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: "systemctl start homeassistant-compose"
+      timeout: 30
+    status_code: 200
+  delegate_to: localhost
 
 - name: Wait for Home Assistant Docker container to be running
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      pct exec {{ homeassistant_ct_id }} -- docker compose \
-        -f {{ homeassistant_config_path }}/docker-compose.yml \
-        ps --services --filter "status=running" | grep -c home-assistant
-    executable: /bin/bash
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ homeassistant_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: "docker compose -f {{ homeassistant_config_path }}/docker-compose.yml ps --services --filter status=running"
+      timeout: 30
+    status_code: 200
+  delegate_to: localhost
   register: _ha_services
   retries: 30
   delay: 10
-  until: (_ha_services.stdout | trim | int) > 0
-  changed_when: false
+  until: >-
+    (_ha_services.json.success | default(false)) | bool
+    and 'home-assistant' in (_ha_services.json.output | default(''))
 
 # ── Generate admin password if not provided ──────────────────────
 
-- name: Set provided admin password
+- name: Set admin password
   ansible.builtin.set_fact:
-    _ha_admin_password: "{{ ha_admin_password }}"
-  when: ha_admin_password | length > 0
-
-- name: Generate random admin password
-  ansible.builtin.command:
-    cmd: pct exec {{ homeassistant_ct_id }} -- openssl rand -base64 32
-  register: _generated_password
-  changed_when: false
-  no_log: true
-  when: ha_admin_password | length == 0
-
-- name: Set generated admin password
-  ansible.builtin.set_fact:
-    _ha_admin_password: "{{ _generated_password.stdout | trim }}"
-  when: ha_admin_password | length == 0
+    _ha_admin_password: >-
+      {{ ha_admin_password
+         if ha_admin_password | length > 0
+         else lookup('password', '/dev/null chars=ascii_letters,digits length=32') }}
 
 # ── Wait for web UI and create admin user ────────────────────────
 
 - name: Wait for Home Assistant web interface
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      pct exec {{ homeassistant_ct_id }} -- \
-        curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8123 | grep -cE '(200|301|302)'
-    executable: /bin/bash
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ homeassistant_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8123"
+      timeout: 15
+    status_code: 200
+  delegate_to: localhost
   register: _ha_http_check
   retries: 15
   delay: 10
-  until: (_ha_http_check.stdout | trim | int) > 0
-  changed_when: false
+  until: >-
+    (_ha_http_check.json.success | default(false)) | bool
+    and (_ha_http_check.json.output | default('') | trim) in ['200', '301', '302']
 
 - name: Create admin user via Home Assistant onboarding API
-  ansible.builtin.command:
-    cmd: >-
-      pct exec {{ homeassistant_ct_id }} -- /bin/sh -c '
-      curl -s -X POST -H "Content-Type: application/json"
-      -d "{\"client_id\": \"http://homeassistant.local/\",
-           \"name\": \"Administrator\",
-           \"username\": \"admin\",
-           \"password\": \"{{ _ha_admin_password }}\",
-           \"language\": \"en\"}"
-      http://127.0.0.1:8123/api/onboarding/users 2>/dev/null || true'
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ homeassistant_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: >-
+        /bin/sh -c 'curl -s -X POST -H "Content-Type: application/json"
+        -d "{\"client_id\": \"http://homeassistant.local/\",
+             \"name\": \"Administrator\",
+             \"username\": \"admin\",
+             \"password\": \"{{ _ha_admin_password }}\",
+             \"language\": \"en\"}"
+        http://127.0.0.1:8123/api/onboarding/users 2>/dev/null || true'
+      timeout: 30
+    status_code: 200
+  delegate_to: localhost
   no_log: true
   failed_when: false
-  changed_when: false
 
 # ── Report completion ────────────────────────────────────────────
 

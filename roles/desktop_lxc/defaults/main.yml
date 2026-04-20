@@ -1,0 +1,11 @@
+---
+desktop_ct_hostname: desktop
+desktop_ct_memory: 4096
+desktop_ct_swap: 512
+desktop_ct_cores: 4
+desktop_ct_disk: "16"
+desktop_ct_onboot: true
+desktop_ct_startup_order: 5
+desktop_ct_unprivileged: false
+desktop_ct_features:
+  - "nesting=1"

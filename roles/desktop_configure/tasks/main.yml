@@ -1,86 +1,82 @@
 ---
-# GPU drivers, SDDM, user groups, KDE/GNOME polish, flameshot, graphical
-# target, and all static config are baked into the image by build-images.sh.
-# This role handles ONLY host-specific runtime config.
+# Desktop LXC configure role — host-specific runtime config only.
+# KDE Plasma, GNOME, KasmVNC, GPU drivers, and desktop-display.service
+# are all baked into the image by build-images.sh. This role configures
+# callhome to point to the local NodeManager and starts services.
+# All in-container operations go through the Node Manager API over VPN.
 
-# ── Wait for cloud-init to finish ──────────────────────────────────
-
-- name: Wait for cloud-init to complete
-  ansible.builtin.command:
-    cmd: cloud-init status --wait
-  changed_when: false
-  retries: 6
-  delay: 10
-  register: _ci_status
-  until: _ci_status.rc == 0
-
-# ── Configure callhome agent ──────────────────────────────────────
+# ── Detect local kiosk Manager IP ──────────────────────────────────
 
 - name: Detect local kiosk Manager IP for callhome target
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      pct config {{ kiosk_ct_id }} 2>/dev/null | grep -oP 'ip=\K[^/]+' | head -1
-    executable: /bin/bash
-  register: _desktop_kiosk_ip
-  changed_when: false
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ kiosk_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: "hostname -I"
+      timeout: 10
+    status_code: 200
+  delegate_to: localhost
+  register: _desktop_kiosk_ip_result
   failed_when: false
-  delegate_to: "{{ desktop_proxmox_host }}"
+
+- name: Extract kiosk IP
+  ansible.builtin.set_fact:
+    _desktop_kiosk_ip: "{{ (_desktop_kiosk_ip_result.json.output | default('') | trim).split()[0] | default('') }}"
 
 - name: Compute callhome target (local NodeManager or fallback to SuperManager)
   ansible.builtin.set_fact:
     _desktop_callhome_target: >-
-      {{ 'http://' + _desktop_kiosk_ip.stdout | trim + ':'
+      {{ 'http://' + _desktop_kiosk_ip + ':'
          + (kiosk_manager_port | default('9001'))
-         if (_desktop_kiosk_ip.stdout | default('') | trim | length > 0)
+         if _desktop_kiosk_ip | length > 0
          else callhome_server }}
 
-- name: Write callhome config
-  ansible.builtin.copy:
-    dest: /etc/default/callhome
-    mode: "0644"
-    content: |
-      CALLHOME_SERVER={{ _desktop_callhome_target }}
-      CALLHOME_PUBLIC_KEY={{ callhome_public_key }}
-      CALLHOME_HOSTNAME=desktop-{{ inventory_hostname }}
-  become: true
+# ── Set desktop user password from env var ────────────────────────
+
+- name: Set desktop user password
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ desktop_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: >-
+        bash -c 'echo "desktop:{{ desktop_password }}" | chpasswd'
+      timeout: 10
+    status_code: 200
+  delegate_to: localhost
+  no_log: true
+  when: desktop_password | length > 0
+
+- name: Remove desktop user password if none provided
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ desktop_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: "passwd -d desktop"
+      timeout: 10
+    status_code: 200
+  delegate_to: localhost
+  when: desktop_password | length == 0
+
+# ── Write callhome config + start services ─────────────────────────
+
+- name: Configure callhome and start Desktop services
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ desktop_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: >-
+        bash -c '
+        sed -i "s|^CALLHOME_SERVER=.*|CALLHOME_SERVER={{ _desktop_callhome_target }}|" /etc/default/callhome;
+        sed -i "s|^CALLHOME_PUBLIC_KEY=.*|CALLHOME_PUBLIC_KEY={{ callhome_public_key }}|" /etc/default/callhome;
+        grep -q "^CALLHOME_HOSTNAME=" /etc/default/callhome 2>/dev/null
+          || echo "CALLHOME_HOSTNAME=desktop-{{ inventory_hostname }}" >> /etc/default/callhome;
+        systemctl restart callhome || true;
+        systemctl restart desktop-display || true'
+      timeout: 30
+    status_code: 200
+  delegate_to: localhost
   when: callhome_server | default('') | length > 0
-
-- name: Check if callhome service exists
-  ansible.builtin.command:
-    cmd: systemctl list-unit-files callhome.service
-  register: _callhome_unit
-  changed_when: false
-  failed_when: false
-  become: true
-
-- name: Start callhome service
-  ansible.builtin.systemd:
-    name: callhome
-    state: restarted
-  become: true
-  when:
-    - callhome_server | default('') | length > 0
-    - "'callhome.service' in _callhome_unit.stdout"
-
-# ── SDDM autologin (operator choice per deploy) ─────────────────
-
-- name: Configure SDDM autologin
-  ansible.builtin.copy:
-    content: |
-      [Autologin]
-      User={{ desktop_user }}
-      Session={{ desktop_default_session }}.desktop
-    dest: /etc/sddm.conf.d/autologin.conf
-    owner: root
-    group: root
-    mode: "0644"
-  become: true
-  when: desktop_autologin | bool
-
-- name: Remove SDDM autologin when disabled
-  ansible.builtin.file:
-    path: /etc/sddm.conf.d/autologin.conf
-    state: absent
-  become: true
-  when: not (desktop_autologin | bool)

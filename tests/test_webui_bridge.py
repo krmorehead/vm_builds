@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from nicegui import app as nicegui_app, ui
 from nicegui.testing import user_simulation
 
-from scripts.webui import data, manager
+from scripts.webui import data, manager, theme
 from scripts.webui.data import Labels, PageTitles, Routes
 from scripts.webui.pages import bridge, containers, launch, mesh, router, viewer
 
@@ -221,19 +221,43 @@ class TestViewerPage:
 # ── Containers page tests ─────────────────────────────────────────────
 
 
+@asynccontextmanager
+async def containers_ctx(tmp_path: Path):
+    """Lightweight context for testing the containers page.
+
+    Registers a kiosk-style containers page with an empty fleet to avoid
+    the heavy build_fleet() + probe_all_hosts() path that the SuperManager
+    containers.register() uses. The tests only verify UI rendering, not
+    fleet data.
+    """
+    from scripts.webui.pages.containers import _render_containers
+
+    manager.init(lambda _: None)
+    try:
+        async with user_simulation() as user:
+            @ui.page("/containers")
+            async def _test_containers() -> None:
+                with theme.page_shell("containers"):
+                    ui.add_head_html(theme.HOVER_CARD_STYLES)
+                    await _render_containers(data.Fleet([]))
+            yield user
+    finally:
+        manager.reset()
+
+
 class TestContainersPage:
     async def test_containers_page_loads(self, tmp_path):
-        async with viewer_ctx(tmp_path) as user:
+        async with containers_ctx(tmp_path) as user:
             await user.open(Routes.CONTAINERS)
             await user.should_see(PageTitles.CONTAINERS)
 
     async def test_containers_shows_refresh_button(self, tmp_path):
-        async with viewer_ctx(tmp_path) as user:
+        async with containers_ctx(tmp_path) as user:
             await user.open(Routes.CONTAINERS)
             await user.should_see("Refresh")
 
     async def test_containers_shows_help_tooltip(self, tmp_path):
-        async with viewer_ctx(tmp_path) as user:
+        async with containers_ctx(tmp_path) as user:
             await user.open(Routes.CONTAINERS)
             await user.should_see("Manage all guests")
 
@@ -296,11 +320,6 @@ class TestLaunchPage:
             await user.open(f"{Routes.LAUNCH}?vmid=400&title=Desktop&url_key=DESKTOP_URL")
             await user.should_see("Desktop")
             await user.should_see("Launch Desktop")
-
-    async def test_launch_page_shows_explanation(self, tmp_path):
-        async with launch_ctx(tmp_path) as user:
-            await user.open(f"{Routes.LAUNCH}?vmid=302&title=Moonlight&url_key=MOONLIGHT_URL")
-            await user.should_see("How does this work?")
 
     async def test_launch_page_has_home_button(self, tmp_path):
         """The kiosk nav bar home button should be present."""

@@ -16,7 +16,7 @@ description: Per-feature rollback implementation patterns and tag conventions. U
    └── Rollback: openwrt-security-rollback, openwrt-vlans-rollback, openwrt-dns-rollback, openwrt-mesh-rollback
    ```
 
-3. Apply tags go in `site.yml` plays. Rollback tags go in `cleanup.yml` plays. Both use the `never` meta-tag so they don't run unless explicitly requested.
+3. Apply tags go in `site.yml` plays. Rollback tags go in `cleanup.yml` plays. Rollback plays are gated by their rollback-specific tags (e.g., `openwrt-security-rollback`) — you must pass `--tags` explicitly to invoke them. NEVER use Ansible's `never` special tag.
 
 ## OpenWrt UCI Rollback Pattern
 
@@ -28,7 +28,7 @@ description: Per-feature rollback implementation patterns and tag conventions. U
    # In playbooks/cleanup.yml
    - name: Rollback security hardening
      hosts: openwrt
-     tags: [openwrt-security-rollback, never]
+     tags: [openwrt-security-rollback]
      gather_facts: false
      tasks:
        - name: Remove banIP and revert SSH config
@@ -40,7 +40,7 @@ description: Per-feature rollback implementation patterns and tag conventions. U
            /etc/init.d/dropbear restart
    ```
 
-6. The `never` tag prevents rollback from running during full cleanup. It only runs when explicitly requested: `--tags openwrt-security-rollback`.
+6. Rollback plays are gated by `when: rollback | default(false) | bool`. Invoke via: `ansible-playbook cleanup.yml --tags openwrt-security-rollback -e rollback=true`.
 
 ## Package Installation Rollback
 

@@ -1,6 +1,3 @@
 ---
-- name: Restart netdata service
-  ansible.builtin.systemd:
-    name: netdata
-    state: restarted
-  listen: _restart_netdata
+# Service restarts are handled via NM API (ansible.builtin.uri).
+# No handlers needed for API-driven configure roles.

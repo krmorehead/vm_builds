@@ -1,0 +1,129 @@
+---
+# Desktop LXC provisioning via Node Manager API.
+# Version check skips provisioning when the deployed version matches.
+
+# ── Version-aware skip check ──────────────────────────────────────
+- name: Check Desktop version via NM API
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/check_service_version.yml"
+  vars:
+    _check_service_name: desktop
+    _check_image_version: "{{ desktop_image_version }}"
+
+# ── Verify Desktop LXC template exists (skipped when version matches)
+- name: Verify Desktop LXC template exists
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/verify_lxc_template.yml"
+  vars:
+    lxc_template_path: "{{ desktop_ct_template_path }}"
+    lxc_service_name: Desktop LXC
+  when: not (_service_up_to_date | default(false) | bool)
+
+# ── Determine container network based on host topology ───────────
+- name: Compute Desktop container network
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_wan_or_lan_network.yml"
+  vars:
+    lxc_net_service_name: Desktop LXC
+    lxc_net_ip_offset: "{{ desktop_ct_ip_offset }}"
+    lxc_net_flavor_group: desktop_nodes
+
+# ── Provision container via NM API (skipped when version matches) ─
+- name: Provision Desktop LXC via NM API
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/desktop"
+    method: POST
+    body_format: json
+    body:
+      vmid: "{{ desktop_ct_id }}"
+      template_path: "{{ desktop_ct_template_path | basename }}"
+      hostname: "{{ desktop_ct_hostname }}"
+      memory: "{{ desktop_ct_memory }}"
+      swap: "{{ desktop_ct_swap }}"
+      cores: "{{ desktop_ct_cores }}"
+      disk: "{{ desktop_ct_disk }}"
+      onboot: "{{ desktop_ct_onboot }}"
+      startup_order: "{{ desktop_ct_startup_order }}"
+      unprivileged: "{{ desktop_ct_unprivileged }}"
+      features: "{{ desktop_ct_features | join(',') }}"
+      ip: "{{ _lxc_net_ip }}/{{ _lxc_net_cidr }}"
+      gateway: "{{ _lxc_net_gateway }}"
+      nameserver: "{{ _lxc_net_nameserver }}"
+      bridge: "{{ _lxc_net_bridge }}"
+      image_version: "{{ desktop_image_version }}"
+    status_code: 200
+    timeout: 180
+  delegate_to: localhost
+  register: _provision_result
+  failed_when: not (_provision_result.json.success | default(false))
+  when: not (_service_up_to_date | default(false) | bool)
+
+- name: Report provision result
+  ansible.builtin.debug:
+    msg: "Desktop LXC on {{ inventory_hostname }}: {{ _provision_result.json.status }} — {{ _provision_result.json.log | default([]) | join(', ') }}"
+  when: not (_service_up_to_date | default(false) | bool)
+
+# ── Device passthrough (DRI render node) ─────────────────────────
+# TODO: Convert lxc_device_passthrough to NM API in a future pass.
+# Kept as SSH for now — modifies pmxcfs config and restarts container.
+
+- name: Apply DRI device passthrough for Desktop
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_device_passthrough.yml"
+  vars:
+    lxc_dev_ct_id: "{{ desktop_ct_id }}"
+    lxc_dev_conf_entries:
+      - "lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir"
+      - "lxc.cgroup2.devices.allow: c 226:* rwm"
+
+# ── Configure callhome via NM API (skipped when version matches) ─
+- name: Configure callhome on Desktop
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/configure_callhome_api.yml"
+  vars:
+    _callhome_vmid: "{{ desktop_ct_id }}"
+
+# ── Register in dynamic inventory (for configure plays) ──────────
+- name: Add Desktop containers to dynamic inventory group
+  ansible.builtin.add_host:
+    name: "{{ desktop_ct_hostname }}-{{ item }}"
+    groups: desktop
+    ansible_connection: community.proxmox.proxmox_pct_remote
+    ansible_host: "{{ hostvars[item].ansible_host }}"
+    ansible_user: root
+    proxmox_vmid: "{{ desktop_ct_id }}"
+    ansible_paramiko_host_key_checking: false
+    ansible_paramiko_proxy_command: >-
+      {{ 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@'
+         + lookup('env', 'PRIMARY_HOST')
+         if 'lan_hosts' in (hostvars[item].group_names | default([]))
+         else omit }}
+  loop: "{{ ansible_play_hosts }}"
+
+# ── Export static IP for downstream roles ─────────────────────────
+- name: Export Desktop container static IP
+  ansible.builtin.set_fact:
+    _lxc_ct_ip: "{{ _lxc_net_ip }}"
+    cacheable: true
+
+# ── Port forwarding for Desktop display ──────────────────────────
+# TODO: Convert lxc_display_proxy to NM API in a future pass.
+# Kept as SSH for now — deploys systemd units and socat proxies on the host.
+
+- name: Set up Desktop display proxy
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_display_proxy.yml"
+  vars:
+    _display_proxy_name: desktop-display-proxy
+    _display_proxy_port: "{{ desktop_ws_port }}"
+    _display_proxy_target: "{{ _lxc_net_ip }}"
+    _display_proxy_legacy: desktop-vnc-ws
+
+# ── Register with Manager ────────────────────────────────────────
+
+- name: Register Desktop LXC with Manager
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/manager_register.yml"
+  vars:
+    register_path: "api/host/{{ inventory_hostname }}/containers/{{ desktop_ct_id }}"
+    register_body:
+      service_type: desktop_lxc
+      hostname: "desktop-{{ inventory_hostname }}"
+      state: running
+      ip: "{{ _lxc_net_ip }}"
+      bridge: "{{ _lxc_net_bridge }}"
+      hardware: []
+      last_deployed: "{{ now(utc=true).isoformat() }}"

@@ -15,7 +15,7 @@ from nicegui import ui
 from scripts.webui import theme
 from scripts.webui.data import (
     DISPLAY_APPS, INTERNAL_PAGES, HubService, PageTitles, Routes,
-    get_hub_services, load_kiosk_config,
+    generate_sm_hub_urls, get_hub_services, load_kiosk_config,
 )
 
 
@@ -23,6 +23,10 @@ def render_hub(urls: dict[str, str] | None = None) -> None:
     """Render the Home Hub dashboard. Reusable by both the full app and kiosk server."""
     if urls is None:
         urls = load_kiosk_config()
+        if not any(k.endswith("_URL") for k in urls):
+            from scripts.webui.app import load_active_env
+            sm_urls = generate_sm_hub_urls(load_active_env())
+            urls.update(sm_urls)
 
     services = get_hub_services()
     current_section = ""

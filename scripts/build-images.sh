@@ -16,7 +16,7 @@ set -euo pipefail
 #  11. Kiosk LXC template       — Debian 12 with Cage + Chromium + Mesa for kiosk dashboard (remote build on Proxmox)
 #  12. Gaming LXC template     — Fedora with Sunshine + dsda-doom + Mesa VA-API + PipeWire (remote build on Proxmox)
 #  13. Sunshine VM image        — Windows 11 with Sunshine + dsda-doom + virtio drivers    (remote build on Proxmox)
-#  14. Desktop VM image         — Debian 12 with KDE + GNOME + SDDM + apps baked in    (remote build on Proxmox)
+#  14. Desktop LXC image        — Debian 12 with KDE Plasma + GNOME + KasmVNC baked in (remote build on Proxmox)
 #
 # Usage: ./build-images.sh [--clean] [--host <proxmox-ip>] [--only <target>]
 #                          [--parallel] [--hosts <ip1>,<ip2>,...]
@@ -45,6 +45,7 @@ IB_URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARG
 
 MESH_FILES_DIR="${SCRIPT_DIR}/image-builder/files-mesh-lxc"
 ROUTER_FILES_DIR="${SCRIPT_DIR}/image-builder/files-router-vm"
+WG_FILES_DIR="${SCRIPT_DIR}/image-builder/files-wireguard-lxc"
 
 # Canonical sources for scripts shared between mesh and router images.
 # Copied into both files directories before building to avoid duplication.
@@ -81,8 +82,10 @@ GAMING_LXC_IMAGE_URL="https://images.linuxcontainers.org/images/fedora/${GAMING_
 GAMING_BUILD_VMID=990
 
 # Desktop VM image (built remotely on Proxmox: cloud-init boot → apt install desktops → export disk)
-DESKTOP_BASE_IMAGE="debian-12-generic-amd64.qcow2"
-DESKTOP_BUILD_VMID=991
+# KasmVNC — shared across all display-capable images (kiosk, kodi, moonlight, desktop)
+KASMVNC_VERSION="1.4.0"
+KASMVNC_DEB="kasmvncserver_bookworm_${KASMVNC_VERSION}_amd64.deb"
+KASMVNC_URL="https://github.com/kasmtech/KasmVNC/releases/download/v${KASMVNC_VERSION}/${KASMVNC_DEB}"
 
 # Remote Proxmox host (set via --host flag)
 PROXMOX_HOST=""
@@ -151,6 +154,10 @@ ROUTER_PACKAGES=(
     batctl-tiny
     # openssl CLI for HMAC verification in batman_trigger.sh
     openssl-util
+    # Web interface
+    luci
+    luci-ssl
+    uhttpd
     # Remove conflicting default wpad
     -wpad-basic-openssl
     -wpad-basic-wolfssl
@@ -173,9 +180,10 @@ remote_cmd() {
 # Called by each build_*_lxc() function after package installation.
 inject_callhome_agent() {
     local vmid="$1"
+    local http_probes="${2:-}"
+    local config_files="${3:-}"
     log "Injecting callhome agent into container ${vmid}..."
 
-    # Copy callhome.py to the Proxmox host, then push into the container
     local callhome_src="${SCRIPT_DIR}/callhome.py"
     if [[ ! -f "$callhome_src" ]]; then
         log "WARNING: callhome.py not found at ${callhome_src}, skipping agent injection"
@@ -189,14 +197,24 @@ inject_callhome_agent() {
     remote_cmd "rm -f /tmp/callhome.py"
     remote_cmd "pct exec ${vmid} -- chmod +x /opt/callhome/callhome.py"
 
-    # Create /etc/default/callhome with placeholder (populated by configure role)
+    # Bake /etc/default/callhome with placeholder SERVER/KEY and service-specific
+    # HTTP probes + config files. SERVER and KEY are updated by Ansible at deploy
+    # time via sed; probes and config_files persist across updates.
+    local probes_line=""
+    if [[ -n "$http_probes" ]]; then
+        probes_line="CALLHOME_HTTP_PROBES=${http_probes}"
+    fi
+    local config_files_line=""
+    if [[ -n "$config_files" ]]; then
+        config_files_line="CALLHOME_CONFIG_FILES=${config_files}"
+    fi
     remote_cmd "pct exec ${vmid} -- bash -c 'cat > /etc/default/callhome << \"CONF_EOF\"
-# Populated by Ansible configure role at deploy time
 CALLHOME_SERVER=
 CALLHOME_PUBLIC_KEY=
+${probes_line}
+${config_files_line}
 CONF_EOF'"
 
-    # Create systemd service unit
     remote_cmd "pct exec ${vmid} -- bash -c 'cat > /etc/systemd/system/callhome.service << \"UNIT_EOF\"
 [Unit]
 Description=Call-home heartbeat agent
@@ -215,6 +233,130 @@ UNIT_EOF'"
 
     remote_cmd "pct exec ${vmid} -- systemctl enable callhome.service 2>/dev/null || true"
     log "Callhome agent injected."
+}
+
+install_kasmvnc() {
+    local vmid="$1"
+    local app_user="$2"
+    local ws_port="$3"
+    local display_num="$4"
+    local service_name="$5"
+    local xstartup_content="$6"
+    log "Installing KasmVNC v${KASMVNC_VERSION} into container ${vmid}..."
+
+    # Download KasmVNC deb on the Proxmox host (reliable internet), then
+    # push into the container. Avoids depending on container DNS which may
+    # be broken by NetworkManager taking over eth0 during desktop builds.
+    if ! remote_cmd "test -f /tmp/${KASMVNC_DEB}"; then
+        remote_cmd "wget -q '${KASMVNC_URL}' -O /tmp/${KASMVNC_DEB}"
+    fi
+    remote_cmd "pct push ${vmid} /tmp/${KASMVNC_DEB} /tmp/${KASMVNC_DEB}"
+
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        # Restore DNS if NetworkManager cleared resolv.conf
+        if ! getent hosts deb.debian.org >/dev/null 2>&1; then
+            echo nameserver 8.8.8.8 > /etc/resolv.conf
+        fi
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y /tmp/${KASMVNC_DEB}
+        rm -f /tmp/${KASMVNC_DEB}
+        usermod -aG ssl-cert ${app_user} 2>/dev/null || true
+    '"
+
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    local user_home
+    if [[ "$app_user" == "root" ]]; then
+        user_home="/root"
+    else
+        user_home="/home/${app_user}"
+    fi
+
+    mkdir -p "${tmpdir}/vnc"
+
+    cat > "${tmpdir}/vnc/kasmvnc.yaml" << YAML_EOF
+desktop:
+  resolution:
+    width: 1920
+    height: 1080
+  allow_resize: true
+  gpu:
+    hw3d: false
+    drinode: /dev/dri/renderD128
+
+network:
+  protocol: http
+  interface: 0.0.0.0
+  websocket_port: ${ws_port}
+  udp:
+    public_ip: 0.0.0.0
+  ssl:
+    require_ssl: false
+
+encoding:
+  max_frame_rate: 30
+
+server:
+  http:
+    headers: []
+
+command_line:
+  prompt: false
+YAML_EOF
+
+    cat > "${tmpdir}/vnc/xstartup" << XSTARTUP_EOF
+#!/bin/bash
+${xstartup_content}
+XSTARTUP_EOF
+    chmod +x "${tmpdir}/vnc/xstartup"
+
+    local uid
+    uid=$(remote_cmd "pct exec ${vmid} -- id -u ${app_user}" 2>/dev/null || echo "0")
+
+    cat > "${tmpdir}/${service_name}.service" << SERVICE_EOF
+[Unit]
+Description=${service_name} (KasmVNC)
+After=network.target
+
+[Service]
+Type=simple
+User=${app_user}
+Environment=HOME=${user_home}
+Environment=XDG_RUNTIME_DIR=/run/user/${uid}
+ExecStartPre=+/bin/sh -c 'mkdir -p /run/user/${uid} && chmod 700 /run/user/${uid} && chown ${app_user}:${app_user} /run/user/${uid}'
+ExecStartPre=/bin/sh -c 'rm -f /tmp/.X${display_num}-lock /tmp/.X11-unix/X${display_num}'
+ExecStart=/usr/bin/vncserver :${display_num} -websocketPort ${ws_port} -geometry 1920x1080 -depth 24 -select-de manual -DisableBasicAuth -fg
+ExecStop=/usr/bin/vncserver -kill :${display_num}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+    # Push files to the container
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS -r "${tmpdir}/vnc" "root@${PROXMOX_HOST}:/tmp/kasmvnc_config"
+    remote_cmd "pct exec ${vmid} -- mkdir -p ${user_home}/.vnc"
+    remote_cmd "pct push ${vmid} /tmp/kasmvnc_config/kasmvnc.yaml ${user_home}/.vnc/kasmvnc.yaml"
+    remote_cmd "pct push ${vmid} /tmp/kasmvnc_config/xstartup ${user_home}/.vnc/xstartup"
+    remote_cmd "pct exec ${vmid} -- chmod +x ${user_home}/.vnc/xstartup"
+    remote_cmd "pct exec ${vmid} -- chown -R ${app_user}:${app_user} ${user_home}/.vnc"
+    remote_cmd "rm -rf /tmp/kasmvnc_config"
+
+    # KasmVNC 1.4 requires at least one user in the passwd file
+    remote_cmd "pct exec ${vmid} -- bash -c 'echo -e \"kasmvnc\nkasmvnc\n\" | su - ${app_user} -c \"/usr/bin/vncpasswd -u ${app_user} -ow\"'"
+
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS "${tmpdir}/${service_name}.service" "root@${PROXMOX_HOST}:/tmp/${service_name}.service"
+    remote_cmd "pct push ${vmid} /tmp/${service_name}.service /etc/systemd/system/${service_name}.service && rm -f /tmp/${service_name}.service"
+    remote_cmd "pct exec ${vmid} -- systemctl daemon-reload"
+    remote_cmd "pct exec ${vmid} -- systemctl enable ${service_name} 2>/dev/null || true"
+
+    rm -rf "${tmpdir}"
+    log "KasmVNC installed and ${service_name} service enabled."
 }
 
 # Shared cleanup for any LXC build container
@@ -254,7 +396,7 @@ compute_filename() {
         kiosk)         echo "kiosk-${version}-debian-12-amd64.tar.zst" ;;
         gaming)        echo "gaming-${version}-fedora-amd64.tar.zst" ;;
         sunshine)      echo "sunshine-${version}-win11-amd64.qcow2" ;;
-        desktop)       echo "desktop-${version}-debian-12-amd64.qcow2" ;;
+        desktop)       echo "desktop-${version}-debian-12-amd64.tar.zst" ;;
         *)             die "Unknown target for filename: $target" ;;
     esac
 }
@@ -484,7 +626,7 @@ TOML_EOF
         sed -i \"s/frame-ancestors .none./frame-ancestors */g\" /etc/pihole/pihole.toml
     '"
 
-    inject_callhome_agent "${vmid}"
+    inject_callhome_agent "${vmid}" "http://127.0.0.1/admin/" "/etc/pihole/pihole.toml"
 
     remote_cmd "pct exec ${vmid} -- bash -c 'echo ${_NEW_VERSION} > /etc/image_version'"
 
@@ -848,7 +990,7 @@ LIBRARY_EOF
     '"
     log "Jellyfin smoke test passed."
 
-    inject_callhome_agent "${vmid}"
+    inject_callhome_agent "${vmid}" "http://127.0.0.1:8096"
 
     remote_cmd "pct exec ${vmid} -- bash -c 'echo ${_NEW_VERSION} > /etc/image_version'"
 
@@ -1031,7 +1173,7 @@ OVERRIDE_EOF
     '"
     log "Netdata smoke test completed."
 
-    inject_callhome_agent "${vmid}"
+    inject_callhome_agent "${vmid}" "http://127.0.0.1:19999"
 
     remote_cmd "pct exec ${vmid} -- bash -c 'echo ${_NEW_VERSION} > /etc/image_version'"
 
@@ -1153,7 +1295,7 @@ build_kodi_lxc() {
     done
     log "Network ready."
 
-    log "Installing Kodi + headless Wayland VNC stack (sway + wayvnc)..."
+    log "Installing Kodi and dependencies..."
     remote_cmd "pct exec ${vmid} -- bash -c '
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
@@ -1164,10 +1306,7 @@ build_kodi_lxc() {
             libcec6 \
             cec-utils \
             alsa-utils \
-            sway \
-            wayvnc \
-            python3-websockify \
-            xwayland
+            wget
 
         # VA-API drivers for both Intel and AMD iGPU
         apt-get install -y --no-install-recommends \
@@ -1176,85 +1315,8 @@ build_kodi_lxc() {
             vainfo
 
         # Create kodi system user for headless operation
-        useradd -r -m -G audio,video,input,render -s /bin/bash kodi 2>/dev/null || true
-
-        # Headless Wayland display via sway compositor (virtual input support)
-        mkdir -p /home/kodi/.config/sway
-        cat > /home/kodi/.config/sway/config << \"SWAY_CFG\"
-output HEADLESS-1 resolution 1920x1080 position 0,0
-for_window [app_id=\".*\"] fullscreen enable
-for_window [class=\".*\"] fullscreen enable
-exec /usr/bin/kodi --windowing=wayland
-SWAY_CFG
-        chown -R kodi:kodi /home/kodi/.config
-
-        cat > /etc/systemd/system/kodi-display.service << \"SERVICE_EOF\"
-[Unit]
-Description=Kodi Headless Wayland Display (sway)
-After=systemd-user-sessions.service network-online.target sound.target
-Wants=network-online.target
-
-[Service]
-User=kodi
-Group=kodi
-PAMName=login
-Type=simple
-Environment=WLR_BACKENDS=headless
-Environment=WLR_LIBINPUT_NO_DEVICES=1
-Environment=WLR_RENDERER=pixman
-Environment=XDG_RUNTIME_DIR=/run/user/999
-ExecStartPre=+/bin/sh -c \"mkdir -p /run/user/999 && chown kodi:kodi /run/user/999 && chmod 700 /run/user/999\"
-ExecStart=/usr/bin/sway
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-SERVICE_EOF
-
-        # VNC capture of the Wayland display
-        cat > /etc/systemd/system/kodi-vnc.service << \"SERVICE_EOF\"
-[Unit]
-Description=Kodi VNC Server (wayvnc)
-After=kodi-display.service
-Requires=kodi-display.service
-
-[Service]
-User=kodi
-Group=kodi
-Type=simple
-Environment=WAYLAND_DISPLAY=wayland-1
-Environment=XDG_RUNTIME_DIR=/run/user/999
-ExecStartPre=/bin/sleep 3
-ExecStart=/usr/bin/wayvnc --render-cursor 0.0.0.0 5900
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-SERVICE_EOF
-
-        # WebSocket bridge for noVNC
-        cat > /etc/systemd/system/kodi-vnc-ws.service << \"SERVICE_EOF\"
-[Unit]
-Description=Kodi VNC WebSocket bridge
-After=kodi-vnc.service
-Requires=kodi-vnc.service
-
-[Service]
-Type=simple
-ExecStartPre=/bin/sleep 2
-ExecStart=/usr/bin/websockify 0.0.0.0:6082 localhost:5900
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-SERVICE_EOF
-
+        useradd -r -m -G audio,video,input,render,ssl-cert -s /bin/bash kodi 2>/dev/null || true
         loginctl enable-linger kodi 2>/dev/null || true
-        systemctl daemon-reload
-        systemctl enable kodi-display kodi-vnc kodi-vnc-ws 2>/dev/null || true
 
         # Pre-configure advancedsettings.xml template for buffer/cache tuning
         mkdir -p /home/kodi/.kodi/userdata
@@ -1287,6 +1349,9 @@ GUI_EOF
         apt-get clean 2>/dev/null || true
         rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
     '"
+
+    install_kasmvnc "${vmid}" "kodi" "6082" "1" "kodi-display" \
+        "exec /usr/bin/kodi"
 
     log "Verifying Kodi installation..."
     remote_cmd "pct exec ${vmid} -- bash -c '
@@ -1406,20 +1471,19 @@ build_kiosk_lxc() {
     done
     log "Network ready."
 
-    log "Installing sway compositor, Chromium, and Mesa drivers..."
+    log "Installing Chromium, Mesa drivers, and dependencies..."
     remote_cmd "pct exec ${vmid} -- bash -c '
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
 
         apt-get install -y --no-install-recommends \
-            sway \
             chromium \
+            dbus-x11 \
             fonts-noto \
             fonts-noto-color-emoji \
+            libxtst6 \
             openssh-client \
-            xwayland \
-            wayvnc \
-            python3-websockify
+            wget
 
         # VA-API drivers for both Intel and AMD iGPU
         apt-get install -y --no-install-recommends \
@@ -1476,92 +1540,55 @@ echo "Hub server not ready"
 exit 1
 WAIT_EOF
 
-    cat > "${tmpdir}/kiosk-display.service" << 'DISPLAY_EOF'
-[Unit]
-Description=Kiosk Dashboard (sway + Chromium)
-After=systemd-user-sessions.service kiosk-web.service
-Wants=network-online.target kiosk-web.service
-
-[Service]
-User=kiosk
-Group=kiosk
-Type=simple
-Environment=WLR_LIBINPUT_NO_DEVICES=1
-Environment=WLR_BACKENDS=headless
-Environment=WLR_RENDERER=pixman
-Environment=XDG_RUNTIME_DIR=/run/user/999
-ExecStartPre=+/bin/sh -c 'mkdir -p /run/user/999 && chown kiosk:kiosk /run/user/999 && chmod 700 /run/user/999'
-ExecStartPre=/opt/kiosk/wait-for-hub.sh
-ExecStart=/usr/bin/sway
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-DISPLAY_EOF
-
-    cat > "${tmpdir}/kiosk-vnc.service" << 'VNC_EOF'
-[Unit]
-Description=Kiosk VNC Server (wayvnc)
-After=kiosk-display.service
-Requires=kiosk-display.service
-
-[Service]
-User=kiosk
-Group=kiosk
-Environment=XDG_RUNTIME_DIR=/run/user/999
-Environment=WAYLAND_DISPLAY=wayland-1
-ExecStartPre=/bin/sleep 2
-ExecStart=/usr/bin/wayvnc --render-cursor 0.0.0.0 5900
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-VNC_EOF
-
-    cat > "${tmpdir}/kiosk-vnc-ws.service" << 'VNCWS_EOF'
-[Unit]
-Description=Kiosk VNC WebSocket Bridge (websockify)
-After=kiosk-vnc.service
-Requires=kiosk-vnc.service
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/websockify 0.0.0.0:6080 localhost:5900
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-VNCWS_EOF
-
-    # Push files into the container
-    for f in kiosk-web.service kiosk-display.service kiosk-vnc.service kiosk-vnc-ws.service; do
-        # shellcheck disable=SC2086
-        scp $SSH_OPTS "${tmpdir}/${f}" "root@${PROXMOX_HOST}:/tmp/${f}"
-        remote_cmd "pct push ${vmid} /tmp/${f} /etc/systemd/system/${f} && rm -f /tmp/${f}"
-    done
+    # Push kiosk-web.service and wait-for-hub.sh
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS "${tmpdir}/kiosk-web.service" "root@${PROXMOX_HOST}:/tmp/kiosk-web.service"
+    remote_cmd "pct push ${vmid} /tmp/kiosk-web.service /etc/systemd/system/kiosk-web.service && rm -f /tmp/kiosk-web.service"
     # shellcheck disable=SC2086
     scp $SSH_OPTS "${tmpdir}/wait-for-hub.sh" "root@${PROXMOX_HOST}:/tmp/wait-for-hub.sh"
     remote_cmd "pct push ${vmid} /tmp/wait-for-hub.sh /opt/kiosk/wait-for-hub.sh && rm -f /tmp/wait-for-hub.sh"
     remote_cmd "pct exec ${vmid} -- chmod +x /opt/kiosk/wait-for-hub.sh"
-
-    # Create sway config for kiosk fullscreen mode
-    remote_cmd "pct exec ${vmid} -- bash -c '
-        mkdir -p /home/kiosk/.config/sway
-        cat > /home/kiosk/.config/sway/config << \"SWAY_CFG\"
-output HEADLESS-1 resolution 1920x1080 position 0,0
-for_window [app_id=\".*\"] fullscreen enable
-for_window [class=\".*\"] fullscreen enable
-exec /usr/bin/chromium --kiosk --no-sandbox --ozone-platform=wayland --disable-gpu-compositing --noerrdialogs --disable-infobars --no-first-run --disable-translate --disable-features=TranslateUI --start-fullscreen http://127.0.0.1:9001/hub
-SWAY_CFG
-        chown -R kiosk:kiosk /home/kiosk/.config
-        loginctl enable-linger kiosk 2>/dev/null || true
-    '"
     remote_cmd "pct exec ${vmid} -- systemctl daemon-reload"
+    remote_cmd "pct exec ${vmid} -- systemctl enable kiosk-web 2>/dev/null || true"
+    remote_cmd "pct exec ${vmid} -- loginctl enable-linger kiosk 2>/dev/null || true"
 
     rm -rf "${tmpdir}"
+
+    # Install KasmVNC for the kiosk display (Chromium in kiosk mode via xstartup)
+    install_kasmvnc "${vmid}" "kiosk" "6080" "1" "kiosk-display" \
+        '# Set up XDG_RUNTIME_DIR for D-Bus and Chromium
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+export DBUS_SESSION_BUS_ADDRESS=$(dbus-daemon --session --fork --print-address)
+
+# Wait for kiosk-web (NiceGUI) to be ready before launching Chromium
+for _i in $(seq 1 30); do
+    wget -q -O /dev/null http://127.0.0.1:9001/ 2>/dev/null && break
+    sleep 1
+done
+
+/usr/bin/chromium --kiosk --no-sandbox --disable-gpu-compositing --enable-features=NetworkServiceInProcess --noerrdialogs --disable-infobars --no-first-run --disable-translate --disable-features=TranslateUI --start-fullscreen http://127.0.0.1:9001/hub &
+CHROME_PID=$!
+# Background watchdog: send F5 until NiceGUI WebSocket connections establish (max 2 min)
+(
+  for i in $(seq 1 24); do
+    sleep 5
+    if ss -tnp dst :9001 2>/dev/null | grep -q ESTAB; then exit 0; fi
+    python3 -c "
+import ctypes, ctypes.util
+x11 = ctypes.cdll.LoadLibrary(ctypes.util.find_library(\"X11\"))
+xtst = ctypes.cdll.LoadLibrary(ctypes.util.find_library(\"Xtst\"))
+dpy = x11.XOpenDisplay(None)
+if dpy:
+    xtst.XTestFakeKeyEvent(dpy, 71, True, 0)
+    xtst.XTestFakeKeyEvent(dpy, 71, False, 0)
+    x11.XFlush(dpy)
+    x11.XCloseDisplay(dpy)
+" 2>/dev/null
+  done
+) &
+wait $CHROME_PID'
 
     # Bake webui application code into the image
     log "Baking webui Python files and build.py into image..."
@@ -1577,15 +1604,8 @@ SWAY_CFG
         pages/__init__.py pages/hub.py pages/bridge.py pages/mesh.py
         pages/router.py pages/viewer.py pages/launch.py
         pages/containers.py pages/cluster_dashboard.py
-        pages/remote_kiosk.py pages/console.py pages/vnc_shared.py
+        pages/remote_kiosk.py pages/console.py pages/display_shared.py
     )
-    # Include noVNC static assets if present
-    if [[ -d "${SCRIPT_DIR}/webui/static/noVNC" ]]; then
-        while IFS= read -r -d '' f; do
-            tar_files+=("$f")
-        done < <(cd "${SCRIPT_DIR}/webui" && find static/noVNC -type f -print0)
-    fi
-
     tar czf "${webui_tar}" \
         -C "${SCRIPT_DIR}/webui" \
         "${tar_files[@]}" \
@@ -1604,22 +1624,13 @@ SWAY_CFG
     '"
     rm -f "${webui_tar}"
 
-    # Enable services so they start on boot
-    remote_cmd "pct exec ${vmid} -- bash -c '
-        systemctl enable kiosk-web kiosk-display kiosk-vnc kiosk-vnc-ws 2>/dev/null || true
-    '"
-
     log "Verifying Kiosk installation..."
     remote_cmd "pct exec ${vmid} -- bash -c '
-        dpkg -l sway | grep -c ^ii || { echo FAIL: sway not installed; exit 1; }
         dpkg -l chromium | grep -c ^ii || { echo FAIL: chromium not installed; exit 1; }
         python3 -c \"import nicegui\" || { echo FAIL: nicegui not installed; exit 1; }
         test -f /etc/systemd/system/kiosk-display.service || { echo FAIL: display service missing; exit 1; }
         test -f /etc/systemd/system/kiosk-web.service || { echo FAIL: web service missing; exit 1; }
-        test -f /etc/systemd/system/kiosk-vnc.service || { echo FAIL: vnc service missing; exit 1; }
-        test -f /etc/systemd/system/kiosk-vnc-ws.service || { echo FAIL: vnc-ws service missing; exit 1; }
-        dpkg -l wayvnc | grep -c ^ii || { echo FAIL: wayvnc not installed; exit 1; }
-        dpkg -l python3-websockify | grep -c ^ii || { echo FAIL: websockify not installed; exit 1; }
+        dpkg -l kasmvncserver | grep -c ^ii || { echo FAIL: kasmvnc not installed; exit 1; }
         test -x /opt/kiosk/wait-for-hub.sh || { echo FAIL: wait-for-hub script missing; exit 1; }
         id kiosk || { echo FAIL: kiosk user missing; exit 1; }
         test -d /opt/kiosk/scripts/webui || { echo FAIL: kiosk webui dir missing; exit 1; }
@@ -1629,7 +1640,7 @@ SWAY_CFG
     '"
     log "Kiosk smoke test passed."
 
-    inject_callhome_agent "${vmid}"
+    inject_callhome_agent "${vmid}" "" "/opt/kiosk/config.json"
 
     remote_cmd "pct exec ${vmid} -- bash -c 'echo ${_NEW_VERSION} > /etc/image_version'"
 
@@ -1736,23 +1747,18 @@ build_moonlight_lxc() {
     done
     log "Network ready."
 
-    log "Installing runtime and build dependencies + headless VNC stack..."
+    log "Installing runtime and build dependencies..."
     remote_cmd "pct exec ${vmid} -- bash -c '
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
 
-        # Runtime deps (marked manual — survives autoremove after build)
-        # SDL2 for video output via Wayland under sway compositor
-        # FFmpeg for video decode
-        # VA-API drivers for Intel + AMD hardware decode
-        # sway + wayvnc + websockify for headless VNC streaming
+        # Runtime deps: SDL2 for video, FFmpeg for decode, VA-API for hardware accel
         apt-get install -y --no-install-recommends \
             libopus0 libexpat1 libasound2 libudev1 libavahi-client3 \
             libcurl4 libevdev2 libpulse0 libsdl2-2.0-0 \
             libavcodec59 libavutil57 \
             intel-media-va-driver mesa-va-drivers vainfo \
-            ca-certificates \
-            sway wayvnc python3-websockify xwayland
+            ca-certificates wget
 
         # Build deps (purged after compilation)
         apt-get install -y --no-install-recommends \
@@ -1790,87 +1796,15 @@ build_moonlight_lxc() {
         rm -rf /tmp/moonlight-embedded /var/lib/apt/lists/* /tmp/* /var/tmp/*
     '"
 
-    log "Creating moonlight user and deploying VNC systemd units..."
+    log "Creating moonlight user..."
     remote_cmd "pct exec ${vmid} -- bash -c '
-        useradd -r -m -G audio,video,input,render -s /bin/bash moonlight 2>/dev/null || true
-
-        mkdir -p /home/moonlight/.config/sway
-        cat > /home/moonlight/.config/sway/config << \"SWAY_CFG\"
-output HEADLESS-1 resolution 1920x1080 position 0,0
-for_window [app_id=\".*\"] fullscreen enable
-for_window [class=\".*\"] fullscreen enable
-exec /usr/local/bin/moonlight stream
-SWAY_CFG
-        chown -R moonlight:moonlight /home/moonlight/.config
+        useradd -r -m -G audio,video,input,render,ssl-cert -s /bin/bash moonlight 2>/dev/null || true
         loginctl enable-linger moonlight 2>/dev/null || true
-
-        cat > /etc/systemd/system/moonlight-display.service << \"SERVICE_EOF\"
-[Unit]
-Description=Moonlight Headless Wayland Display (sway)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-User=moonlight
-Group=moonlight
-PAMName=login
-Type=simple
-Environment=WLR_BACKENDS=headless
-Environment=WLR_LIBINPUT_NO_DEVICES=1
-Environment=WLR_RENDERER=pixman
-Environment=SDL_VIDEODRIVER=wayland
-Environment=XDG_RUNTIME_DIR=/run/user/999
-ExecStartPre=+/bin/sh -c \"mkdir -p /run/user/999 && chown moonlight:moonlight /run/user/999 && chmod 700 /run/user/999\"
-ExecStart=/usr/bin/sway
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-SERVICE_EOF
-
-        cat > /etc/systemd/system/moonlight-vnc.service << \"SERVICE_EOF\"
-[Unit]
-Description=Moonlight VNC Server (wayvnc)
-After=moonlight-display.service
-Requires=moonlight-display.service
-
-[Service]
-User=moonlight
-Group=moonlight
-Type=simple
-Environment=WAYLAND_DISPLAY=wayland-1
-Environment=XDG_RUNTIME_DIR=/run/user/999
-ExecStartPre=/bin/sleep 3
-ExecStart=/usr/bin/wayvnc --render-cursor 0.0.0.0 5900
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-SERVICE_EOF
-
-        # WebSocket bridge for noVNC
-        cat > /etc/systemd/system/moonlight-vnc-ws.service << \"SERVICE_EOF\"
-[Unit]
-Description=Moonlight VNC WebSocket bridge
-After=moonlight-vnc.service
-Requires=moonlight-vnc.service
-
-[Service]
-Type=simple
-ExecStartPre=/bin/sleep 2
-ExecStart=/usr/bin/websockify 0.0.0.0:6083 localhost:5900
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-SERVICE_EOF
-
-        systemctl daemon-reload
-        systemctl enable moonlight-display moonlight-vnc moonlight-vnc-ws 2>/dev/null || true
     '"
+
+    install_kasmvnc "${vmid}" "moonlight" "6083" "1" "moonlight-display" \
+        "if ! grep -q '^address' /etc/moonlight.conf 2>/dev/null; then exec sleep infinity; fi
+exec /usr/local/bin/moonlight stream -config /etc/moonlight.conf -app Desktop"
 
     log "Verifying Moonlight installation..."
     remote_cmd "pct exec ${vmid} -- bash -c '
@@ -2010,12 +1944,29 @@ SYSCTL_EOF
         rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
     '"
 
+    log "Installing firewall setup script and systemd unit..."
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS \
+        "${WG_FILES_DIR}/usr/sbin/wireguard-firewall-setup" \
+        "root@${PROXMOX_HOST}:/tmp/wireguard-firewall-setup"
+    remote_cmd "pct push ${vmid} /tmp/wireguard-firewall-setup /usr/sbin/wireguard-firewall-setup && rm -f /tmp/wireguard-firewall-setup"
+    remote_cmd "pct exec ${vmid} -- chmod +x /usr/sbin/wireguard-firewall-setup"
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS \
+        "${WG_FILES_DIR}/etc/systemd/system/wireguard-firewall.service" \
+        "root@${PROXMOX_HOST}:/tmp/wireguard-firewall.service"
+    remote_cmd "pct push ${vmid} /tmp/wireguard-firewall.service /etc/systemd/system/wireguard-firewall.service && rm -f /tmp/wireguard-firewall.service"
+    remote_cmd "pct exec ${vmid} -- systemctl daemon-reload"
+    remote_cmd "pct exec ${vmid} -- systemctl enable wireguard-firewall.service 2>/dev/null || true"
+
     log "Verifying WireGuard tools work inside build container..."
     remote_cmd "pct exec ${vmid} -- bash -c '
         wg genkey | wg pubkey >/dev/null
         test -d /etc/wireguard && echo wireguard-dir-ok
         test -f /etc/sysctl.d/99-wireguard.conf && echo sysctl-ok
         dpkg -l iptables-persistent | grep -q ^ii && echo iptables-persistent-ok
+        test -x /usr/sbin/wireguard-firewall-setup && echo firewall-script-ok
+        grep -q "awk.*print" /usr/sbin/wireguard-firewall-setup && echo firewall-awk-ok
     '"
     log "WireGuard smoke test passed."
 
@@ -2265,7 +2216,7 @@ HA_SVC_EOF
     '"
     log "Docker installation verified."
 
-    inject_callhome_agent "${vmid}"
+    inject_callhome_agent "${vmid}" "http://127.0.0.1:8123"
 
     remote_cmd "pct exec ${vmid} -- bash -c 'echo ${_NEW_VERSION} > /etc/image_version'"
 
@@ -2527,7 +2478,7 @@ PEOF
         systemctl enable sunshine.service 2>/dev/null || true
     '"
 
-    inject_callhome_agent "${vmid}"
+    inject_callhome_agent "${vmid}" "https://127.0.0.1:47990"
 
     log "Cleaning up package caches..."
     remote_cmd "pct exec ${vmid} -- bash -c '
@@ -2566,26 +2517,20 @@ PEOF
     log "  Size: $(du -h "$output" | cut -f1)"
 }
 
-# ── Desktop VM image ─────────────────────────────────────────────────
-# Debian 12 cloud image with KDE Plasma, GNOME, SDDM, and shared apps
-# pre-installed. Both Intel and AMD GPU driver stacks are baked in so
-# the image works on any host — only the matching driver loads at runtime.
-# The generic cloud image must already be downloaded to
-# images/debian-12-generic-amd64.qcow2.
+# ── Desktop LXC image ────────────────────────────────────────────────
+# Debian 12 LXC template with KDE Plasma (Windows UX) + GNOME (Mac UX),
+# KasmVNC, and GPU drivers. Session switching via xstartup symlink swap.
+# Uses shared DRI render node (/dev/dri/renderD*) — no iGPU passthrough,
+# no IOMMU required. Works on both Intel and AMD hosts.
 
-cleanup_desktop_build() {
-    local vmid="${DESKTOP_BUILD_VMID}"
-    if [[ -n "$PROXMOX_HOST" ]]; then
-        log "Cleaning up Desktop build VM ${vmid}..."
-        remote_cmd "qm stop ${vmid} 2>/dev/null; sleep 3; qm destroy ${vmid} --purge 2>/dev/null; true"
-        remote_cmd "rm -f /var/tmp/desktop-*-debian-12-amd64.qcow2; true"
-    fi
-}
+DESKTOP_BUILD_VMID=991
 
-build_desktop_vm() {
+cleanup_desktop_build() { cleanup_lxc_build "${DESKTOP_BUILD_VMID}"; }
+
+build_desktop_lxc() {
     init_build_version "desktop"
-    log "Building Desktop VM image (remote on Proxmox)..."
-    local base_image="${IMAGES_DIR}/${DESKTOP_BASE_IMAGE}"
+    log "Building Desktop LXC template (remote on Proxmox)..."
+    local base_template="${IMAGES_DIR}/${DEBIAN_BASE_TEMPLATE}"
     local output="${IMAGES_DIR}/$(compute_filename desktop "$_NEW_VERSION")"
     local vmid="${DESKTOP_BUILD_VMID}"
 
@@ -2594,441 +2539,331 @@ build_desktop_vm() {
   ./build-images.sh --host 192.168.86.201 --only desktop"
     fi
 
-    if [[ ! -f "$base_image" ]]; then
-        die "Debian cloud image not found: ${base_image}.
-  Download from: https://cloud.debian.org/images/cloud/bookworm/latest/
-  Save to: images/debian-12-generic-amd64.qcow2"
+    if [[ ! -f "$base_template" ]]; then
+        die "Base template not found: ${base_template}. Download it first:
+  wget -O ${base_template} \\
+    http://download.proxmox.com/images/system/${DEBIAN_BASE_TEMPLATE}"
     fi
 
     trap cleanup_desktop_build EXIT
 
-    remote_cmd "qm stop ${vmid} 2>/dev/null; sleep 2; qm destroy ${vmid} --purge 2>/dev/null; true"
+    remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
 
-    # Upload cloud image to Proxmox
-    log "Uploading Debian cloud image to Proxmox..."
-    if ! remote_cmd "test -f /var/tmp/${DESKTOP_BASE_IMAGE}"; then
+    local remote_template="/var/lib/vz/template/cache/${DEBIAN_BASE_TEMPLATE}"
+    if ! remote_cmd "test -f ${remote_template}"; then
+        log "Uploading base template to Proxmox host..."
         # shellcheck disable=SC2086
-        scp $SSH_OPTS "$base_image" "root@${PROXMOX_HOST}:/var/tmp/${DESKTOP_BASE_IMAGE}"
-    else
-        log "  Cloud image already on host, skipping upload."
+        scp $SSH_OPTS "$base_template" "root@${PROXMOX_HOST}:${remote_template}"
     fi
 
-    # Detect management bridge
     local mgmt_bridge
     mgmt_bridge=$(remote_cmd "ip -o route show default | awk '{print \$5}' | head -1")
     log "Management bridge: ${mgmt_bridge}"
 
-    # Create temporary build VM with cloud-init
-    log "Creating build VM (VMID ${vmid})..."
-    remote_cmd "qm create ${vmid} \
-        --name desktop-build \
-        --machine q35 \
-        --bios ovmf \
-        --efidisk0 local-lvm:1,format=raw,efitype=4m,pre-enrolled-keys=0 \
-        --cores 4 \
+    log "Creating temporary build container (VMID ${vmid})..."
+    remote_cmd "pct create ${vmid} local:vztmpl/${DEBIAN_BASE_TEMPLATE} \
+        --hostname desktop-build \
         --memory 4096 \
-        --cpu host \
-        --scsihw virtio-scsi-pci \
-        --serial0 socket \
-        --vga std \
-        --agent enabled=1 \
-        --net0 virtio,bridge=${mgmt_bridge} \
-        --ide2 local-lvm:cloudinit \
-        --ostype l26"
+        --cores 4 \
+        --rootfs local-lvm:16 \
+        --net0 name=eth0,bridge=${mgmt_bridge},ip=dhcp \
+        --nameserver 8.8.8.8 \
+        --unprivileged 0 \
+        --features nesting=1 \
+        --start false"
 
-    # Import and attach cloud image disk
-    log "Importing cloud image disk..."
-    remote_cmd "qm importdisk ${vmid} /var/tmp/${DESKTOP_BASE_IMAGE} local-lvm"
-    remote_cmd "qm set ${vmid} \
-        --scsi0 local-lvm:vm-${vmid}-disk-1,discard=on,ssd=1 \
-        --boot order=scsi0"
+    log "Starting build container..."
+    remote_cmd "pct start ${vmid}"
 
-    # Configure cloud-init for SSH access
-    remote_cmd "qm set ${vmid} \
-        --ciuser root \
-        --sshkeys /root/.ssh/authorized_keys \
-        --ipconfig0 ip=dhcp"
-
-    # Resize disk for desktop packages
-    remote_cmd "qm resize ${vmid} scsi0 32G"
-
-    # Start VM
-    log "Starting build VM..."
-    remote_cmd "qm start ${vmid}"
-
-    # Get VM MAC address for IP discovery
-    local vm_mac
-    vm_mac=$(remote_cmd "qm config ${vmid} | grep '^net0' | sed -n 's/.*\\(..:..:..:..:..:..\).*/\\1/p'" | tr '[:upper:]' '[:lower:]')
-    log "VM MAC: ${vm_mac}"
-
-    # Wait for DHCP lease and discover IP via ARP neighbor table
-    log "Waiting for VM to acquire DHCP lease (up to 5 minutes)..."
-    local vm_ip=""
-    local ip_retries=0
-    while [[ -z "$vm_ip" ]]; do
-        ip_retries=$((ip_retries + 1))
-        if (( ip_retries > 30 )); then
-            die "Could not discover VM IP after 5 minutes. Check VM console."
+    log "Waiting for container to start..."
+    local retries=0
+    while ! remote_cmd "pct exec ${vmid} -- ls / >/dev/null 2>&1"; do
+        retries=$((retries + 1))
+        if (( retries > 20 )); then
+            remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
+            die "Build container never became ready after 40s"
         fi
-        sleep 10
-        vm_ip=$(remote_cmd "ip -4 neigh show dev ${mgmt_bridge} \
-            | awk '/${vm_mac}/{print \$1}' | head -1" 2>/dev/null || true)
-        if [[ -z "$vm_ip" ]]; then
-            remote_cmd "subnet=\$(ip -4 addr show ${mgmt_bridge} | awk '/inet /{print \$2}' | head -1 | sed 's/\\.[0-9]*\\/.*//')
-                for i in \$(seq 1 254); do ping -c1 -W1 \${subnet}.\$i >/dev/null 2>&1 & done; wait" 2>/dev/null || true
-        fi
+        sleep 2
     done
-    log "VM IP: ${vm_ip}"
+    log "Container is ready."
 
-    # Wait for SSH (cloud-init installs SSH keys, no guest agent needed)
-    log "Waiting for SSH..."
-    local ssh_retries=0
-    while ! remote_cmd "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@${vm_ip} true 2>/dev/null"; do
-        ssh_retries=$((ssh_retries + 1))
-        if (( ssh_retries > 30 )); then
-            die "SSH not available after 5 minutes."
+    log "Waiting for network inside build container..."
+    local net_retries=0
+    while ! remote_cmd "pct exec ${vmid} -- bash -c 'getent hosts deb.debian.org >/dev/null 2>&1'"; do
+        net_retries=$((net_retries + 1))
+        if (( net_retries > 30 )); then
+            remote_cmd "pct stop ${vmid} 2>/dev/null; pct destroy ${vmid} --purge 2>/dev/null; true"
+            die "Build container never got network after 60s"
         fi
-        sleep 10
+        sleep 2
     done
-    log "SSH connected."
+    log "Network ready."
 
-    # Install desktop packages inside the VM (via SSH from the Proxmox host)
-    log "Installing desktop environments and applications (this takes 10-15 minutes)..."
-    remote_cmd "ssh -o StrictHostKeyChecking=no root@${vm_ip} bash -s" << 'INSTALL_EOF'
-set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
+    log "Installing KDE Plasma + GNOME desktops, applications, and GPU drivers..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
 
-echo "==> Waiting for cloud-init..."
-cloud-init status --wait >/dev/null 2>&1 || true
+        # KDE Plasma (Windows-style UX)
+        apt-get install -y --no-install-recommends \
+            kde-plasma-desktop \
+            plasma-nm \
+            konsole \
+            dolphin \
+            kate \
+            ark \
+            breeze-icon-theme
 
-echo "==> Updating package lists..."
-apt-get update -qq
+        # GNOME (Mac-style UX)
+        apt-get install -y --no-install-recommends \
+            gnome-core \
+            gnome-tweaks \
+            gnome-shell-extension-dashtodock \
+            nautilus \
+            gnome-terminal \
+            dbus-x11
 
-echo "==> Upgrading base system..."
-apt-get dist-upgrade -y -qq
+        # Shared applications and infrastructure
+        apt-get install -y --no-install-recommends \
+            firefox-esr \
+            vlc \
+            flameshot \
+            xdg-user-dirs \
+            fonts-noto \
+            fonts-noto-color-emoji \
+            pipewire \
+            pipewire-audio \
+            wireplumber \
+            openssh-client \
+            wget
 
-echo "==> Installing KDE Plasma, GNOME, SDDM, and shared applications..."
-apt-get install -y --no-install-recommends \
-    task-kde-desktop \
-    kde-plasma-desktop \
-    plasma-nm \
-    konsole \
-    dolphin \
-    kate \
-    kde-spectacle \
-    ark \
-    kde-config-screenlocker \
-    task-gnome-desktop \
-    gnome-session \
-    gnome-terminal \
-    nautilus \
-    gnome-text-editor \
-    gnome-screenshot \
-    gnome-tweaks \
-    gnome-shell-extension-manager \
-    gnome-shell-extension-dashtodock \
-    file-roller \
-    sddm \
-    firefox-esr \
-    vlc \
-    libreoffice \
-    flameshot \
-    xdg-user-dirs \
-    fonts-noto \
-    fonts-noto-color-emoji \
-    pipewire \
-    pipewire-audio \
-    wireplumber \
-    qemu-guest-agent
+        # VA-API drivers for both Intel and AMD iGPU
+        apt-get install -y --no-install-recommends \
+            intel-media-va-driver \
+            mesa-va-drivers \
+            mesa-vulkan-drivers \
+            vainfo \
+            libgl1-mesa-dri
 
-echo "==> Installing GPU drivers (both Intel and AMD -- no conflict)..."
-apt-get install -y --no-install-recommends \
-    xserver-xorg-video-intel \
-    intel-media-va-driver \
-    xserver-xorg-video-amdgpu \
-    mesa-va-drivers \
-    mesa-vulkan-drivers \
-    vainfo
+        # NM connectivity check: tells plasma-nm whether internet is reachable.
+        # Without this package, NM reports "limited" and shows a disabled icon.
+        apt-get install -y --no-install-recommends \
+            network-manager-config-connectivity-debian
 
-echo "==> Configuring SDDM as default display manager..."
-echo "/usr/bin/sddm" > /etc/X11/default-display-manager
-dpkg-reconfigure -f noninteractive sddm
+        # Let NetworkManager manage interfaces configured by Proxmox so
+        # KDE plasma-nm shows the network as connected (not disabled icon).
+        # dns=none prevents NM from overwriting /etc/resolv.conf (Proxmox sets
+        # nameserver via pct config and writes resolv.conf directly).
+        # CRITICAL: set dns=none BEFORE managed=true. NM uses inotify and
+        # reloads config immediately — if managed=true is set first, NM takes
+        # over eth0 DNS before dns=none is in effect, wiping resolv.conf.
+        sed -i "/^\[main\]/a dns=none" /etc/NetworkManager/NetworkManager.conf
+        sed -i "s/managed=false/managed=true/" /etc/NetworkManager/NetworkManager.conf
 
-echo "==> Enabling services..."
-systemctl enable qemu-guest-agent 2>/dev/null || true
-systemctl set-default graphical.target
-systemctl enable sddm 2>/dev/null || true
+        # Create desktop user — passwordless by default. The configure role
+        # sets the password from DESKTOP_PASSWORD env var at deploy time.
+        useradd -m -G video,render,audio,sudo -s /bin/bash desktop 2>/dev/null || \
+            usermod -a -G video,render,audio,sudo desktop
+        passwd -d desktop
 
-echo "==> Creating desktop user with correct groups..."
-useradd -m -G video,render,audio,sudo -s /bin/bash desktop 2>/dev/null || \
-    usermod -a -G video,render,audio,sudo desktop
+        # KasmVNC manages the X session directly via xstartup — disable
+        # display managers that kde-plasma-desktop and gnome-core pull in.
+        systemctl disable sddm 2>/dev/null || true
+        systemctl disable gdm 2>/dev/null || true
+        systemctl disable gdm3 2>/dev/null || true
 
-echo "==> Running xdg-user-dirs-update..."
-su - desktop -c "xdg-user-dirs-update" 2>/dev/null || true
+        su - desktop -c \"xdg-user-dirs-update\" 2>/dev/null || true
 
-echo "==> Baking KDE Plasma configuration..."
-DHOME=/home/desktop
-mkdir -p "$DHOME/.config/kglobalshortcutsrc.d" "$DHOME/.config/autostart" "$DHOME/.config/gtk-3.0" "$DHOME/.local/share/plasma/layout-templates"
+        apt-get clean 2>/dev/null || true
+        rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    '"
 
-cat > "$DHOME/.config/kdeglobals" << "KDE_EOF"
+    log "Baking KDE Plasma (Windows-style) configuration..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        DHOME=/home/desktop
+
+        # KDE: Breeze Dark theme with bottom taskbar
+        mkdir -p \"\$DHOME/.config\"
+
+        cat > \"\$DHOME/.config/kdeglobals\" << \"KDE_EOF\"
 [General]
 ColorScheme=BreezeDark
 
 [KDE]
-SingleClick=false
 LookAndFeelPackage=org.kde.breezedark.desktop
+widgetStyle=Breeze
 KDE_EOF
 
-cat > "$DHOME/.config/kglobalshortcutsrc" << "KDE_SC_EOF"
-[kwin]
-Overview=Meta+Tab
-Window Close=Alt+F4
-Window Maximize=Meta+Up
-Window Minimize=Meta+Down
-Window Quick Tile Left=Meta+Left
-Window Quick Tile Right=Meta+Right
-Switch Window Down=Alt+Tab
+        cat > \"\$DHOME/.config/plasmarc\" << \"PLASMA_EOF\"
+[Theme]
+name=breeze-dark
+PLASMA_EOF
 
-[plasmashell]
-activate task manager entry 1=Meta+1
-activate task manager entry 2=Meta+2
-activate task manager entry 3=Meta+3
-show-on-mouse-pos=Meta+V
+        cat > \"\$DHOME/.config/kwinrc\" << \"KWIN_EOF\"
+[org.kde.kdecoration2]
+theme=Breeze
+ButtonsOnLeft=M
+ButtonsOnRight=IAX
 
-[org.kde.spectacle.desktop]
-ActiveWindowScreenShot=Alt+Print
-CurrentMonitorScreenShot=Ctrl+Print
-FullScreenScreenShot=Print
-RectangularRegionScreenShot=Ctrl+Shift+4
-_launch=Meta+Shift+S
+[Desktops]
+Number=2
+Rows=1
+KWIN_EOF
 
-[flameshot.desktop]
-Capture=Ctrl+Shift+4
-KDE_SC_EOF
+        # Disable KDE screen locker — headless VNC session, no lock screen
+        cat > \"\$DHOME/.config/kscreenlockerrc\" << \"LOCK_EOF\"
+[Daemon]
+Autolock=false
+LockOnResume=false
+LOCK_EOF
 
-cat > "$DHOME/.config/plasma-org.kde.plasma.desktop-appletsrc" << "KDE_PANEL_EOF"
-[PlasmaViews][Panel 2]
-alignment=0
-floating=1
-panelVisibility=1
+        chown -R desktop:desktop \"\$DHOME\"
+    '"
 
-[PlasmaViews][Panel 2][Defaults]
-thickness=44
+    log "Baking GNOME (Mac-style) configuration..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        DHOME=/home/desktop
 
-[Containments][2]
-activityId=
-formfactor=2
-immutability=1
-lastScreen=0
-location=4
-plugin=org.kde.panel
-wallpaperplugin=org.kde.image
-KDE_PANEL_EOF
+        # GNOME: Adwaita Dark with Dash-to-Dock
+        mkdir -p \"\$DHOME/.config/dconf\"
 
-echo "==> Baking GNOME configuration..."
-mkdir -p /etc/dconf/db/local.d/locks /etc/dconf/profile
-
-cat > /etc/dconf/profile/user << "DCONF_PROFILE_EOF"
-user-db:user
-system-db:local
-DCONF_PROFILE_EOF
-
-cat > /etc/dconf/db/local.d/00-desktop-defaults << "DCONF_DEFAULTS_EOF"
+        cat > /tmp/gnome-defaults.ini << \"GNOME_EOF\"
 [org/gnome/desktop/interface]
-color-scheme='prefer-dark'
-gtk-theme='Adwaita-dark'
-clock-format='12h'
-enable-hot-corners=true
+color-scheme='"'"'prefer-dark'"'"'
+gtk-theme='"'"'Adwaita-dark'"'"'
+icon-theme='"'"'Adwaita'"'"'
 
 [org/gnome/shell]
-enabled-extensions=['dash-to-dock@micxgx.gmail.com']
-favorite-apps=['firefox-esr.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop', 'org.gnome.TextEditor.desktop']
+favorite-apps=['"'"'org.gnome.Nautilus.desktop'"'"', '"'"'firefox-esr.desktop'"'"', '"'"'org.gnome.Terminal.desktop'"'"']
+enabled-extensions=['"'"'dash-to-dock@micxgx.gmail.com'"'"']
 
 [org/gnome/shell/extensions/dash-to-dock]
-dock-position='BOTTOM'
+dock-position='"'"'BOTTOM'"'"'
 dash-max-icon-size=48
-extend-height=false
-dock-fixed=true
-click-action='minimize'
+autohide=true
 intellihide=true
-transparency-mode='DYNAMIC'
+dock-fixed=false
 
-[org/gnome/desktop/wm/keybindings]
-close=['<Alt>F4', '<Super>q']
-minimize=['<Super>h']
-toggle-maximized=['<Super>Up']
-begin-move=['<Super>m']
-switch-applications=['<Alt>Tab']
-switch-windows=['<Super>Tab']
+[org/gnome/desktop/wm/preferences]
+num-workspaces=2
+button-layout='"'"'close,minimize,maximize:appmenu'"'"'
+GNOME_EOF
 
-[org/gnome/shell/keybindings]
-toggle-overview=['<Super>space']
+        # Compile dconf database for desktop user
+        mkdir -p \"\$DHOME/.config/dconf\"
+        dbus-run-session -- bash -c \"
+            export HOME=\$DHOME
+            export XDG_RUNTIME_DIR=/tmp/gnome-dconf-setup
+            mkdir -p /tmp/gnome-dconf-setup
+            dconf load / < /tmp/gnome-defaults.ini
+        \" 2>/dev/null || true
+        rm -f /tmp/gnome-defaults.ini
 
-[org/gnome/settings-daemon/plugins/media-keys]
-screenshot=['Print', '<Shift><Super>3']
-screenshot-clip=['<Shift><Control>4']
-area-screenshot-clip=['<Shift><Control>4']
-window-screenshot=['<Shift><Super>5']
+        chown -R desktop:desktop \"\$DHOME\"
+    '"
 
-[org/gnome/desktop/peripherals/touchpad]
-natural-scroll=true
-tap-to-click=true
+    log "Creating session switching files..."
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        DHOME=/home/desktop
+        mkdir -p \"\$DHOME/.vnc\"
 
-[org/gnome/desktop/input-sources]
-xkb-options=['caps:super']
+        # KDE xstartup — disable screen locking for headless VNC
+        cat > \"\$DHOME/.vnc/xstartup-kde\" << \"XKDE_EOF\"
+#!/bin/bash
+kwriteconfig5 --file kscreenlockerrc --group Daemon --key Autolock false
+kwriteconfig5 --file kscreenlockerrc --group Daemon --key LockOnResume false
+kwriteconfig5 --file kscreenlockerrc --group Daemon --key LockGrace 0
+kwriteconfig5 --file powermanagementprofilesrc --group AC --group DPMSControl --key idleTime 0
+kwriteconfig5 --file powermanagementprofilesrc --group AC --group DPMSControl --key lockBeforeTurnOff 0
+exec startplasma-x11
+XKDE_EOF
 
-[org/gnome/mutter]
-edge-tiling=true
-dynamic-workspaces=true
-DCONF_DEFAULTS_EOF
+        # GNOME xstartup
+        cat > \"\$DHOME/.vnc/xstartup-gnome\" << \"XGNOME_EOF\"
+#!/bin/bash
+export XDG_CURRENT_DESKTOP=GNOME
+exec dbus-launch --exit-with-session gnome-session
+XGNOME_EOF
 
-cat > /etc/dconf/db/local.d/locks/desktop-defaults << "DCONF_LOCKS_EOF"
-[org/gnome/shell]
-enabled-extensions='dash-to-dock@micxgx.gmail.com'
+        chmod +x \"\$DHOME/.vnc/xstartup-kde\" \"\$DHOME/.vnc/xstartup-gnome\"
+        chown desktop:desktop \"\$DHOME/.vnc/xstartup-kde\" \"\$DHOME/.vnc/xstartup-gnome\"
+    '"
 
-[org/gnome/desktop/interface]
-color-scheme='prefer-dark'
-DCONF_LOCKS_EOF
+    log "Creating session switch script..."
+    remote_cmd "pct exec ${vmid} -- bash -c 'cat > /usr/sbin/switch-desktop-session << \"SWITCH_EOF\"
+#!/bin/bash
+set -e
+SESSION=\"\$1\"
+DHOME=/home/desktop
+XSTARTUP=\"\$DHOME/.vnc/xstartup\"
 
-dconf update 2>/dev/null || true
+case \"\$SESSION\" in
+    kde|gnome)
+        rm -f \"\$XSTARTUP\"
+        ln -s \"xstartup-\$SESSION\" \"\$XSTARTUP\"
+        systemctl restart desktop-display.service
+        echo \"SESSION=\$SESSION\"
+        echo \"STATUS=ok\"
+        ;;
+    status)
+        TARGET=\$(readlink -f \"\$XSTARTUP\" 2>/dev/null || echo \"unknown\")
+        case \"\$TARGET\" in
+            *kde*)   echo \"SESSION=kde\" ;;
+            *gnome*) echo \"SESSION=gnome\" ;;
+            *)       echo \"SESSION=unknown\" ;;
+        esac
+        echo \"STATUS=ok\"
+        ;;
+    *)
+        echo \"ERROR=invalid session: \$SESSION (use kde or gnome)\" >&2
+        exit 1
+        ;;
+esac
+SWITCH_EOF
+    chmod +x /usr/sbin/switch-desktop-session'"
 
-echo "==> Baking shared desktop polish..."
-cat > "$DHOME/.config/autostart/flameshot.desktop" << "FLAME_EOF"
-[Desktop Entry]
-Type=Application
-Name=Flameshot
-Exec=flameshot
-Icon=flameshot
-Terminal=false
-X-GNOME-Autostart-enabled=true
-X-KDE-autostart-after=panel
-FLAME_EOF
+    install_kasmvnc "${vmid}" "desktop" "6081" "1" "desktop-display" \
+        'exec startplasma-x11'
 
-cat > "$DHOME/.config/gtk-3.0/bookmarks" << "BOOKMARKS_EOF"
-file:///home/desktop/Downloads Downloads
-file:///home/desktop/Documents Documents
-file:///home/desktop/Pictures Pictures
-file:///home/desktop/Videos Videos
-file:///home/desktop/Music Music
-BOOKMARKS_EOF
+    # Replace the flat xstartup with a symlink to the KDE session (default).
+    # xstartup-kde and xstartup-gnome were created above.
+    remote_cmd "pct exec ${vmid} -- bash -c '
+        rm -f /home/desktop/.vnc/xstartup
+        ln -s xstartup-kde /home/desktop/.vnc/xstartup
+        chown -h desktop:desktop /home/desktop/.vnc/xstartup
+    '"
 
-mkdir -p /etc/sddm.conf.d
-cat > /etc/sddm.conf.d/default.conf << "SDDM_EOF"
-[Theme]
-Current=breeze
+    inject_callhome_agent "${vmid}"
 
-[General]
-DefaultSession=plasma.desktop
-SDDM_EOF
+    remote_cmd "pct exec ${vmid} -- bash -c 'echo ${_NEW_VERSION} > /etc/image_version'"
 
-chown -R desktop:desktop "$DHOME"
+    log "Stopping build container..."
+    remote_cmd "pct stop ${vmid}"
+    sleep 2
 
-echo "==> Cleaning up..."
-apt-get clean
-rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    log "Exporting container as template via vzdump..."
+    remote_cmd "vzdump ${vmid} --dumpdir /tmp --compress zstd --mode stop"
 
-echo "==> Resetting cloud-init for next boot..."
-cloud-init clean --logs
-
-echo "==> Desktop image build complete."
-INSTALL_EOF
-
-    # Inject callhome Python agent into the VM (same agent as Debian LXC containers)
-    local callhome_src="${SCRIPT_DIR}/callhome.py"
-    if [[ -f "$callhome_src" ]]; then
-        log "Injecting callhome agent into Desktop VM..."
-        # shellcheck disable=SC2086
-        scp $SSH_OPTS "$callhome_src" "root@${PROXMOX_HOST}:/tmp/callhome.py"
-        remote_cmd "scp -o StrictHostKeyChecking=no /tmp/callhome.py root@${vm_ip}:/tmp/callhome.py"
-        remote_cmd "rm -f /tmp/callhome.py"
-        remote_cmd "ssh -o StrictHostKeyChecking=no root@${vm_ip} bash -s" << 'CALLHOME_EOF'
-set -euo pipefail
-mkdir -p /opt/callhome
-mv /tmp/callhome.py /opt/callhome/callhome.py
-chmod +x /opt/callhome/callhome.py
-
-cat > /etc/default/callhome << "CONF_EOF"
-# Populated by Ansible configure role at deploy time
-CALLHOME_SERVER=
-CALLHOME_PUBLIC_KEY=
-CONF_EOF
-
-cat > /etc/systemd/system/callhome.service << "UNIT_EOF"
-[Unit]
-Description=Call-home heartbeat agent
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/python3 /opt/callhome/callhome.py --container --interval 60 --interval-startup 5
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-UNIT_EOF
-
-systemctl enable callhome.service 2>/dev/null || true
-echo "Callhome agent installed."
-CALLHOME_EOF
-        log "Callhome agent injected into Desktop VM."
-    else
-        log "WARNING: callhome.py not found at ${callhome_src}, skipping agent injection"
+    local vzdump_file
+    vzdump_file=$(remote_cmd "ls -t /tmp/vzdump-lxc-${vmid}-*.tar.zst 2>/dev/null | head -1")
+    if [[ -z "$vzdump_file" ]]; then
+        remote_cmd "pct destroy ${vmid} --purge 2>/dev/null; true"
+        die "vzdump archive not found on Proxmox host"
     fi
+    log "vzdump archive: ${vzdump_file}"
 
-    remote_cmd "ssh -o StrictHostKeyChecking=no root@${vm_ip} 'echo ${_NEW_VERSION} > /etc/image_version'"
-
-    # Shutdown VM (use SSH shutdown since guest agent may not be started yet)
-    log "Shutting down build VM..."
-    remote_cmd "ssh -o StrictHostKeyChecking=no root@${vm_ip} 'shutdown -h now' 2>/dev/null || qm stop ${vmid}"
-    sleep 15
-
-    local stop_retries=0
-    while remote_cmd "qm status ${vmid} 2>/dev/null | grep -q running"; do
-        stop_retries=$((stop_retries + 1))
-        if (( stop_retries > 24 )); then
-            log "Force-stopping VM..."
-            remote_cmd "qm stop ${vmid}"
-            sleep 10
-            break
-        fi
-        sleep 5
-    done
-
-    # Export the disk image
-    log "Exporting VM disk image..."
-    local disk_vol disk_path
-    disk_vol=$(remote_cmd "qm config ${vmid} | grep '^scsi0:' | sed 's/^scsi0: //;s/,.*//' 2>/dev/null || echo ''")
-    if [[ -n "$disk_vol" ]]; then
-        disk_path=$(remote_cmd "pvesm path '${disk_vol}' 2>/dev/null || echo ''")
-    fi
-
-    if [[ -z "${disk_path:-}" ]]; then
-        die "Could not determine disk path for VM ${vmid}. Check 'qm config ${vmid}' on the host."
-    fi
-
-    log "Disk path: ${disk_path}"
-    log "Converting to qcow2 and downloading..."
-
-    local output_name
-    output_name="$(basename "$output")"
-    remote_cmd "rm -f /var/tmp/${output_name}"
-    remote_cmd "qemu-img convert -f raw -O qcow2 '${disk_path}' /var/tmp/${output_name}"
-
+    log "Downloading template to ${output}..."
     mkdir -p "$IMAGES_DIR"
     # shellcheck disable=SC2086
-    scp $SSH_OPTS "root@${PROXMOX_HOST}:/var/tmp/${output_name}" "$output"
+    scp $SSH_OPTS "root@${PROXMOX_HOST}:${vzdump_file}" "$output"
 
-    # Cleanup
-    log "Cleaning up build VM and temporary files..."
-    remote_cmd "qm destroy ${vmid} --purge 2>/dev/null; true"
-    remote_cmd "rm -f /var/tmp/${output_name} /var/tmp/${DESKTOP_BASE_IMAGE}; true"
+    log "Cleaning up build container and vzdump archive..."
+    remote_cmd "pct destroy ${vmid} --purge 2>/dev/null; rm -f '${vzdump_file}'; true"
 
     trap - EXIT
 
     finalize_build "desktop" "$output" "$_NEW_VERSION"
-    log "Desktop VM image: ${output}"
+    log "Desktop LXC template: ${output}"
     log "  Size: $(du -h "$output" | cut -f1)"
 }
 
@@ -3476,7 +3311,7 @@ should_build kiosk        && build_kiosk_lxc
 should_build moonlight    && build_moonlight_lxc
 should_build gaming       && build_gaming_lxc
 should_build sunshine     && build_sunshine_vm
-should_build desktop      && build_desktop_vm
+should_build desktop      && build_desktop_lxc
 
 log ""
 log "Done. Custom images in ${IMAGES_DIR}/:"

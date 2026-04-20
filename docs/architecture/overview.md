@@ -6,7 +6,7 @@
 configuration of virtual machines and LXC containers on Proxmox VE. It
 deploys 15 services across 6 Proxmox nodes — OpenWrt router, WireGuard VPN,
 Pi-hole DNS, monitoring (rsyslog + Netdata), Home Assistant, media
-(Jellyfin + Kodi + Moonlight), Desktop VM, Gaming LXC, Mesh WiFi, WiFi
+(Jellyfin + Kodi + Moonlight), Desktop LXC, Gaming LXC, Mesh WiFi, WiFi
 Bridge, and Kiosk — with a NiceGUI Web UI for deployment, fleet monitoring,
 and kiosk management.
 
@@ -174,6 +174,34 @@ and relays heartbeats over the tunnel.
 | Cluster Manager → Node Manager | HTTP POST `/api/manager/events` | Event broadcast (batman, bridge-wifi) |
 | Cluster Manager → Node Manager | HTTP GET `/api/batman/local/status` | Status query |
 | SuperManager → Cluster Manager | HTTP (future) | Fleet-wide commands |
+
+### API-driven fleet operations (verified 2026-04-18)
+
+After VPN and heartbeat are established (the first two mandatory plays in
+`site.yml`), ALL subsequent Ansible configure roles use `ansible.builtin.uri`
+to push configuration through NodeManager HTTP APIs. No SSH to containers.
+No fallback paths.
+
+| Role | API Transport | SSH | Notes |
+|------|--------------|-----|-------|
+| pihole_configure | 100% `uri` → NM | None | |
+| rsyslog_configure | 100% `uri` → NM | None | |
+| netdata_configure | 100% `uri` → NM | None | |
+| homeassistant_configure | 100% `uri` → NM | None | |
+| jellyfin_configure | 100% `uri` → NM | None | |
+| kodi_configure | 100% `uri` → NM | None | |
+| moonlight_configure | 100% `uri` → NM | None | |
+| desktop_configure | 100% `uri` → NM | None | |
+| gaming_lxc_configure | 100% `uri` → NM | None | |
+| wireguard_configure | `uri` → NM | localhost `wg genkey` | Controller-local crypto only |
+| kiosk_configure | — | `pct exec` | **Bootstrap exception**: deploys the NM itself |
+| openwrt_configure | — | `raw` (SSH) | **No HTTP API** on OpenWrt VM |
+
+**Verification is also API-first.** The E2E verify playbook (`verify.yml`)
+uses `/api/fleet/ready`, `/api/fleet/stale`, `/api/container/{id}/ready`,
+and `/api/config/self` over VPN to validate the entire fleet. SSH checks
+remain only for hypervisor-level validation (`pct config`) and L3
+integration proofs (cross-service connectivity).
 
 ### Event propagation: batman mode
 
@@ -363,7 +391,7 @@ Boot Sequence (Home Entertainment Box)
 │   └── Jellyfin (VMID 300)                   Media server (iGPU transcode, no display)
 │
 ├── Priority 6 ── Default Display
-│   └── Custom UX Kiosk (VMID 401)            Dashboard + VNC streaming when idle
+│   └── Custom UX Kiosk (VMID 401)            Dashboard + KasmVNC remote display when idle
 │
 └── On-Demand ── Manual Start Only
     ├── Kodi (VMID 301)                       Stops Kiosk on start, restarts Kiosk on stop
@@ -373,44 +401,47 @@ Boot Sequence (Home Entertainment Box)
 
 ---
 
-## VNC Remote Kiosk Streaming
+## Remote display (KasmVNC)
 
-Every kiosk container runs a VNC streaming stack that enables remote control
-from any parent tier in the 4-tier hierarchy:
+Display workloads use **KasmVNC**: one process per app provides the X11 session
+and a built-in WebSocket server on a dedicated port. The previous multi-service
+display pipeline is fully replaced by this single-process model per app.
 
 ```
-Browser (operator / parent kiosk)
-│   noVNC RFB client (JavaScript ES module)
-│   Direct WebSocket to target kiosk
-│   Port: 6080 (websockify)
+NiceGUI Web UI (SuperManager / operator browser)
+│   Each remote display is embedded as an iframe (direct URL to KasmVNC)
 │
-├── websockify (python3-websockify)
-│   Bridges WebSocket ↔ TCP VNC
-│   Listens: 0.0.0.0:6080 → localhost:5900
+├── LXC (kiosk, kodi, moonlight): single systemd unit per app
+│   Examples: kiosk-display.service, kodi-display.service, moonlight-display.service
+│   KasmVNC: X11 + WebSocket on a fixed port per service (e.g. 6080, 6082, 6083)
 │
-├── wayvnc
-│   Wayland-native VNC server for wlroots (Cage)
-│   Captures framebuffer, serves VNC on 0.0.0.0:5900
-│   Creates virtual input devices for mouse/keyboard
-│
-└── Cage compositor + Chromium
-    Physical display output + VNC capture simultaneously
+└── Debian Desktop LXC
+    ├── Inside CT: desktop-display.service — KasmVNC on port 6081
+    └── On Proxmox host: desktop-display-proxy.service (socat) forwards host:6081 → VM:6081
 ```
 
-**Port forwarding** bridges the host IP to the container's websockify:
-- WAN hosts: iptables DNAT on the NAT bridge
-- Router node: socat TCP proxy (`kiosk-vnc-proxy.service`, cross-bridge)
-- LAN hosts: socat TCP proxy (`kiosk-vnc-proxy.service`, host:6080 → container:6080)
+**Port forwarding** bridges the host management IP to the container or VM
+display port (so the operator reaches KasmVNC from the WAN or LAN):
 
-**Two-level drill-down**: the operator's browser always connects directly to
-the target kiosk — never nested VNC. Navigation in the parent page's HTML
-chrome (back button, child picker dropdown) creates the hierarchy illusion.
-When drilling from a CM into a child NM, the browser disconnects from the CM
-and opens a new direct WebSocket to the NM's websockify.
+- WAN hosts: iptables DNAT on the NAT bridge to the container’s KasmVNC port
+- Router node: socat TCP proxy (`kiosk-display-proxy.service`, cross-bridge hairpin avoidance)
+- LAN hosts: socat TCP proxy (`kiosk-display-proxy.service`, host display port → container port)
 
-**Packages baked into image**: `wayvnc`, `python3-websockify`
-**Systemd units**: `kiosk-vnc.service`, `kiosk-vnc-ws.service`
-**Port constants**: `kiosk_vnc_port: 5900`, `kiosk_vnc_ws_port: 6080`
+Analogous `*-display-proxy.service` units exist for other display services where
+the role deploys a host-side proxy.  All display connections are direct
+peer-to-peer — the 4-tier architecture brokers URL discovery, but the
+browser's WebSocket connects directly to the host's KasmVNC endpoint.
+
+**Two-level drill-down**: the operator’s UI loads the **target** display URL in
+an iframe — never nested full-desktop-in-desktop. Navigation in the parent page
+chrome (back button, child picker) provides the hierarchy; drilling from a
+Cluster Manager into a child Node Manager loads that child’s display endpoint
+directly.
+
+**Baked into images**: KasmVNC and runtime dependencies for each display image
+**Systemd (examples)**: `kiosk-display.service`; VM side `desktop-display.service`;
+host side `desktop-display-proxy.service` (not `desktop-vnc-ws.service`)
+**Port constants (examples)**: `kiosk_ws_port: 6080` (per-role display port for each app)
 
 ---
 
@@ -428,13 +459,13 @@ iGPU Usage
 │
 └── Display Output (physical screen)
     ├── Custom UX Kiosk (default)
-    │   └── Cage + Chromium, shared iGPU via bind mount
+    │   └── KasmVNC (kiosk-display.service): X11 + dashboard; remote UI in NiceGUI iframe; shared iGPU via bind mount
     ├── Kodi (on-demand)
-    │   └── kodi-standalone GBM/DRM, shared iGPU via bind mount
+    │   └── kodi-standalone GBM/DRM (local); KasmVNC on dedicated ws_port for NiceGUI iframe; shared iGPU via bind mount
     ├── Moonlight Client (on-demand)
-    │   └── moonlight-embedded DRM/KMS, shared iGPU via bind mount
+    │   └── moonlight-embedded DRM/KMS (local); KasmVNC on dedicated ws_port for NiceGUI iframe; shared iGPU via bind mount
     └── Debian Desktop (on-demand, most disruptive)
-        └── Full iGPU passthrough via hostpci (exclusive access)
+        └── Full iGPU passthrough via hostpci (exclusive access); remote UI via KasmVNC in VM (`desktop-display.service`) plus host `desktop-display-proxy.service`
 ```
 
 ### Sharing Rules
@@ -447,8 +478,8 @@ iGPU Access Model
 │   ├── Multiple containers share renderD128 simultaneously (transcode)
 │   └── Only one container drives the physical display at a time
 │
-└── Desktop VM
-    ├── Access via hostpci (vfio-pci exclusive passthrough)
+└── Desktop LXC
+    ├── Access via DRI render node (shared GPU, no exclusive passthrough)
     ├── Host LOSES /dev/dri/* while VM is running
     ├── All LXC iGPU bind mounts break
     └── Jellyfin falls back to software transcoding
@@ -466,10 +497,10 @@ Display-Exclusive State Machine
 │   ├── 2. Start requested service
 │   └── 3. On stop → restart Kiosk
 │
-└── Start Desktop VM
-    ├── 1. Stop Kiosk, Kodi, Moonlight
-    ├── 2. iGPU unbound from i915/amdgpu, bound to vfio-pci
-    ├── 3. Desktop VM gets exclusive GPU
+└── Start Desktop LXC
+    ├── 1. Stop conflicting display apps (Kodi, Moonlight)
+    ├── 2. DRI render node shared via LXC bind mount
+    ├── 3. Desktop LXC gets GPU access (shared, not exclusive)
     ├── 4. Jellyfin switches to software transcoding
     └── 5. On stop → iGPU returns to i915/amdgpu, Kiosk restarts
 ```
@@ -495,9 +526,7 @@ PCI Device Handling (separate roles)
     ├── Method: Keep host driver loaded (i915/amdgpu), install VA-API tools, export device paths
     ├── Exports: igpu_available, igpu_vendor, igpu_pci_address, igpu_render_device,
     │           igpu_card_device, igpu_render_gid, igpu_video_gid
-    ├── LXC consumers (shared bind mount): jellyfin_lxc, kodi_lxc, moonlight_lxc, kiosk_lxc
-    ├── VM consumers (exclusive hostpci/vfio-pci):
-    │   └── desktop_vm (takes GPU from host when running)
+    ├── LXC consumers (shared bind mount): jellyfin_lxc, kodi_lxc, moonlight_lxc, kiosk_lxc, desktop_lxc
     │
     └── LXC consumers (shared bind mount): gaming_lxc (Sunshine streaming via /dev/dri)
 ```
@@ -712,7 +741,7 @@ site.yml (current — phased for multi-node)
 │   ├── Play 14: vpn_nodes           [wireguard]     wireguard_lxc, deploy_stamp
 │   ├── Play 15: wifi_nodes:!router_nodes [mesh-wifi] openwrt_mesh_lxc, deploy_stamp
 │   ├── Play 16: bridge_nodes        [bridge]        openwrt_bridge_lxc, deploy_stamp
-│   ├── Play 17: desktop_nodes       [desktop]       desktop_vm, deploy_stamp
+│   ├── Play 17: desktop_nodes       [desktop]       desktop_lxc, deploy_stamp
 │   ├── Play 18: desktop_nodes       [kiosk]         kiosk_lxc, deploy_stamp
 │   └── Play 19: proxmox             [callhome-config] Configure callhome on all running containers
 │       Containers → local Node Manager (kiosk LXC, port 9001).
@@ -749,7 +778,7 @@ site.yml (current — phased for multi-node)
 │       has since stopped heartbeating. Catches host crashes, container
 │       deaths, and network partitions before proceeding.
 │
-├── Per-feature plays (opt-in via --tags <name>, tagged with [never]):
+├── Per-feature plays (run in default flow; also invocable via --tags <name>):
 │   ├── gaming_nodes        [gaming]        gaming_lxc, deploy_stamp
 │   ├── gaming_nodes        [gaming]        gaming_lxc_configure
 │   ├── openwrt             [openwrt-security]   include_role: openwrt_configure/security.yml
@@ -824,8 +853,8 @@ site.yml (target)
 │   └── Play 20: media_nodes      [media]       moonlight_configure
 │
 ├── Phase: Desktop & Kiosk
-│   ├── Play 21: desktop_nodes    [desktop]     desktop_vm, deploy_stamp
-│   ├── Play 22: desktop          [desktop]     desktop_configure
+│   ├── Play 21: desktop_nodes    [desktop]     desktop_lxc, deploy_stamp
+│   ├── Play 22: desktop_nodes    [desktop]     desktop_configure
 │   ├── Play 23: desktop_nodes    [kiosk]       kiosk_lxc, deploy_stamp
 │   └── Play 24: desktop_nodes    [kiosk]       kiosk_configure
 │
@@ -922,8 +951,8 @@ Service Roles
 │   └── moonlight_lxc / moonlight_configure       LXC  VMID 302   media_nodes    → moonlight
 │
 ├── Desktop Tier
-│   ├── desktop_vm / desktop_configure            VM   VMID 400   desktop_nodes  → desktop
-│   └── kiosk_lxc / kiosk_configure               LXC  VMID 401   desktop_nodes  → kiosk  (VNC: 5900/6080)
+│   ├── desktop_lxc / desktop_configure           LXC  VMID 400   desktop_nodes  → desktop_nodes (pct exec)
+│   └── kiosk_lxc / kiosk_configure               LXC  VMID 401   desktop_nodes  → kiosk  (KasmVNC ws_port 6080; Kodi/Moonlight use 6082/6083 where deployed)
 │
 └── Gaming
     └── gaming_lxc / gaming_lxc_configure         LXC  VMID 601   gaming_nodes   → gaming
@@ -1071,7 +1100,7 @@ vm_builds/
 │   │   └── moonlight_configure/
 │   │
 │   ├── Desktop Tier
-│   │   ├── desktop_vm/
+│   │   ├── desktop_lxc/
 │   │   ├── desktop_configure/
 │   │   ├── kiosk_lxc/
 │   │   └── kiosk_configure/
@@ -1083,7 +1112,6 @@ vm_builds/
 │       └── gaming_configure/    (legacy)
 │
 ├── tasks/
-│   ├── reconstruct_desktop_group.yml     Reusable dynamic group reconstruction (Desktop)
 │   ├── reconstruct_gaming_group.yml      Reusable dynamic group reconstruction (Gaming)
 │   ├── reconstruct_bridge_group.yml     Reusable dynamic group reconstruction (WiFi Bridge)
 │   ├── reconstruct_homeassistant_group.yml  Reusable dynamic group reconstruction (Home Assistant)
@@ -1105,7 +1133,7 @@ vm_builds/
 ├── molecule/
 │   ├── UNIT_TEST_PATTERN.md       Per-feature unit test reference doc
 │   ├── default/                   E2E integration tests (4-node, pre-built images required)
-│   ├── desktop-vm/                Per-feature: Debian Desktop VM with iGPU passthrough
+│   ├── desktop-vm/                Per-feature: Debian Desktop LXC with shared GPU
 │   ├── bridge-lxc/                Per-feature: Dedicated WiFi Bridge LXC containers
 │   ├── gaming-lxc/                Per-feature: Gaming LXC with GPU render device sharing
 │   ├── homeassistant-lxc/         Per-feature: Home Assistant LXC container

@@ -1,13 +1,23 @@
 ---
-# ── Verify Gaming LXC template exists ────────────────────────────
+# Gaming LXC provisioning via Node Manager API.
+# Version check skips provisioning when the deployed version matches.
+
+# ── Version-aware skip check ──────────────────────────────────────
+- name: Check Gaming version via NM API
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/check_service_version.yml"
+  vars:
+    _check_service_name: gaming
+    _check_image_version: "{{ gaming_image_version }}"
+
+# ── Verify Gaming LXC template exists (skipped when version matches)
 - name: Verify Gaming LXC template exists
   ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/verify_lxc_template.yml"
   vars:
     lxc_template_path: "{{ gaming_ct_template_path }}"
     lxc_service_name: Gaming LXC
+  when: not (_service_up_to_date | default(false) | bool)
 
 # ── Determine container network based on host topology ───────────
-
 - name: Compute Gaming container network
   ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_wan_or_lan_network.yml"
   vars:
@@ -15,52 +25,45 @@
     lxc_net_ip_offset: "{{ gaming_ct_ip_offset }}"
     lxc_net_flavor_group: gaming_nodes
 
-# ── Check container existence ──────────────────────────────────
+# ── Provision container via NM API (skipped when version matches) ─
+- name: Provision Gaming LXC via NM API
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/gaming"
+    method: POST
+    body_format: json
+    body:
+      vmid: "{{ gaming_ct_id }}"
+      template_path: "{{ gaming_ct_template_path | basename }}"
+      hostname: "{{ gaming_ct_hostname }}"
+      memory: "{{ gaming_ct_memory }}"
+      swap: "{{ gaming_ct_swap }}"
+      cores: "{{ gaming_ct_cores }}"
+      disk: "{{ gaming_ct_disk }}"
+      onboot: "{{ gaming_ct_onboot }}"
+      startup_order: "{{ gaming_ct_startup_order }}"
+      unprivileged: "{{ gaming_ct_unprivileged }}"
+      features: "{{ gaming_ct_features | join(',') }}"
+      ip: "{{ _lxc_net_ip }}/{{ _lxc_net_cidr }}"
+      gateway: "{{ _lxc_net_gateway }}"
+      nameserver: "{{ _lxc_net_nameserver }}"
+      bridge: "{{ _lxc_net_bridge }}"
+      skip_debian_cleanup: true
+      image_version: "{{ gaming_image_version }}"
+    status_code: 200
+    timeout: 180
+  delegate_to: localhost
+  register: _provision_result
+  failed_when: not (_provision_result.json.success | default(false))
+  when: not (_service_up_to_date | default(false) | bool)
 
-- name: Check if Gaming container exists
-  ansible.builtin.command:
-    cmd: pct status {{ gaming_ct_id }}
-  register: _ct_status
-  failed_when: false
-  changed_when: false
-
-- name: Set container existence flag
-  ansible.builtin.set_fact:
-    _lxc_exists: "{{ _ct_status.rc == 0 }}"
-
-# ── Resolve deployed version ────────────────────────────────────
-
-- name: Resolve deployed Gaming version
-  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_deployed_version.yml"
-  vars:
-    _resolve_service_name: gaming
-
-# ── Provision via shared proxmox_lxc role ────────────────────────
-
-- name: Provision Gaming LXC container
-  ansible.builtin.include_role:
-    name: proxmox_lxc
-  vars:
-    lxc_ct_id: "{{ gaming_ct_id }}"
-    lxc_ct_hostname: "{{ gaming_ct_hostname }}"
-    lxc_ct_dynamic_group: gaming
-    lxc_ct_memory: "{{ gaming_ct_memory }}"
-    lxc_ct_swap: "{{ gaming_ct_swap }}"
-    lxc_ct_cores: "{{ gaming_ct_cores }}"
-    lxc_ct_disk: "{{ gaming_ct_disk }}"
-    lxc_ct_onboot: "{{ gaming_ct_onboot }}"
-    lxc_ct_startup_order: "{{ gaming_ct_startup_order }}"
-    lxc_ct_template_path: "{{ gaming_ct_template_path }}"
-    lxc_ct_ip: "{{ _lxc_net_ip }}/{{ _lxc_net_cidr }}"
-    lxc_ct_gateway: "{{ _lxc_net_gateway }}"
-    lxc_ct_nameserver: "{{ _lxc_net_nameserver }}"
-    lxc_ct_bridge: "{{ _lxc_net_bridge }}"
-    lxc_ct_unprivileged: "{{ gaming_ct_unprivileged }}"
-    lxc_ct_features: "{{ gaming_ct_features }}"
-    lxc_ct_skip_debian_cleanup: true
-    lxc_ct_image_version: "{{ gaming_image_version }}"
+- name: Report provision result
+  ansible.builtin.debug:
+    msg: "Gaming LXC on {{ inventory_hostname }}: {{ _provision_result.json.status }} — {{ _provision_result.json.log | default([]) | join(', ') }}"
+  when: not (_service_up_to_date | default(false) | bool)
 
 # ── Device passthrough via lxc.mount.entry + cgroup allowlists ───
+# TODO: Convert lxc_device_passthrough to NM API in a future pass.
+# Kept as SSH for now — modifies pmxcfs config and restarts container.
 
 - name: Apply device passthrough (DRI + input + uinput)
   ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_device_passthrough.yml"
@@ -73,7 +76,87 @@
       - "lxc.cgroup2.devices.allow: c 13:* rwm"
       - "lxc.cgroup2.devices.allow: c 10:223 rwm"
 
+# ── Configure callhome via NM API (skipped when version matches) ─
+- name: Configure callhome on Gaming LXC
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/configure_callhome_api.yml"
+  vars:
+    _callhome_vmid: "{{ gaming_ct_id }}"
+
+# ── Register in dynamic inventory (for configure plays) ──────────
+- name: Add Gaming containers to dynamic inventory group
+  ansible.builtin.add_host:
+    name: "{{ gaming_ct_hostname }}-{{ item }}"
+    groups: gaming
+    ansible_connection: community.proxmox.proxmox_pct_remote
+    ansible_host: "{{ hostvars[item].ansible_host }}"
+    ansible_user: root
+    proxmox_vmid: "{{ gaming_ct_id }}"
+    ansible_paramiko_host_key_checking: false
+    ansible_paramiko_proxy_command: >-
+      {{ 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@'
+         + lookup('env', 'PRIMARY_HOST')
+         if 'lan_hosts' in (hostvars[item].group_names | default([]))
+         else omit }}
+  loop: "{{ ansible_play_hosts }}"
+
+# ── Export static IP for downstream roles ─────────────────────────
 - name: Export Gaming container static IP for downstream roles
   ansible.builtin.set_fact:
     gaming_static_ip: "{{ _lxc_net_ip }}"
     cacheable: true
+
+# ── Sunshine port forwarding via NM API (WAN hosts only) ─────────
+- name: Add Sunshine DNAT + FORWARD rules via NM API (WAN hosts)
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/host/iptables"
+    method: POST
+    body_format: json
+    body:
+      rules:
+        - chain: PREROUTING
+          table: nat
+          protocol: tcp
+          dport: "47984"
+          destination: "{{ _lxc_net_ip }}:47984"
+          interface: "{{ proxmox_wan_bridge }}"
+        - chain: PREROUTING
+          table: nat
+          protocol: tcp
+          dport: "47989"
+          destination: "{{ _lxc_net_ip }}:47989"
+          interface: "{{ proxmox_wan_bridge }}"
+        - chain: PREROUTING
+          table: nat
+          protocol: tcp
+          dport: "47990"
+          destination: "{{ _lxc_net_ip }}:47990"
+          interface: "{{ proxmox_wan_bridge }}"
+        - chain: PREROUTING
+          table: nat
+          protocol: udp
+          dport: "48010"
+          destination: "{{ _lxc_net_ip }}:48010"
+          interface: "{{ proxmox_wan_bridge }}"
+      forward_rules:
+        - in_interface: "{{ proxmox_wan_bridge }}"
+          out_interface: "{{ proxmox_container_bridge }}"
+          protocol: tcp
+          dport: "47984"
+        - in_interface: "{{ proxmox_wan_bridge }}"
+          out_interface: "{{ proxmox_container_bridge }}"
+          protocol: tcp
+          dport: "47989"
+        - in_interface: "{{ proxmox_wan_bridge }}"
+          out_interface: "{{ proxmox_container_bridge }}"
+          protocol: tcp
+          dport: "47990"
+        - in_interface: "{{ proxmox_wan_bridge }}"
+          out_interface: "{{ proxmox_container_bridge }}"
+          protocol: udp
+          dport: "48010"
+    status_code: 200
+  delegate_to: localhost
+  when:
+    - not (_service_up_to_date | default(false) | bool)
+    - not (_lxc_net_on_lan | bool)
+  changed_when: true

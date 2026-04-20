@@ -109,8 +109,8 @@
           '
       register: _ftl_listen
       changed_when: false
-      retries: 6
-      delay: 5
+      retries: 3
+      delay: 3
       until: "'BOTH' in _ftl_listen.stdout"
 
     - name: Restart FTL if listeners are incomplete
@@ -131,7 +131,7 @@
           register: _pihole_dns
           changed_when: false
           retries: 3
-          delay: 10
+          delay: 5
           until: >-
             _pihole_dns.rc == 0 and
             (_pihole_dns.stdout | trim | length > 0) and

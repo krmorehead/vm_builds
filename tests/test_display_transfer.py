@@ -18,11 +18,9 @@ from scripts.webui.data import DISPLAY_APP_CONFIGS, Ports
 from scripts.webui.data import DisplayAppConfig
 from scripts.webui.display_transfer import (
     DisplayHandler,
+    DisplayHandlerProtocol,
     DisplayTransferService,
-    DisplayType,
-    QemuVncHandler,
     TransferResult,
-    WaylandVncHandler,
     WebViewHandler,
     build_handler,
 )
@@ -33,7 +31,7 @@ _MOONLIGHT_CFG = DISPLAY_APP_CONFIGS["moonlight"]
 
 
 # ── Stub SSH function ─────────────────────────────────────────────────
-# WHY: _ssh_exec runs real SSH commands on remote Proxmox hosts (qm start,
+# WHY: _ssh_exec runs real SSH commands on remote Proxmox hosts (pct start,
 # pct stop, etc.) — irreversible infrastructure side effects.
 # HOW: The stub records calls and returns configurable (ok, output) tuples,
 # letting us verify handler logic without touching hardware.
@@ -66,19 +64,16 @@ class TestTransferResult:
         r = TransferResult(success=True)
         assert r.success is True
         assert r.viewstream_url is None
-        assert r.display_type == DisplayType.VNC
         assert r.error is None
 
     def test_with_all_fields(self):
         r = TransferResult(
             success=False,
-            viewstream_url="ws://10.0.0.1:6081",
-            display_type=DisplayType.WEB,
+            viewstream_url="http://10.0.0.1:6081",
             error="connection refused",
         )
         assert r.success is False
-        assert r.viewstream_url == "ws://10.0.0.1:6081"
-        assert r.display_type == DisplayType.WEB
+        assert r.viewstream_url == "http://10.0.0.1:6081"
         assert r.error == "connection refused"
 
 
@@ -87,134 +82,133 @@ class TestTransferResult:
 
 class TestDisplayAppConfig:
     def test_required_fields(self):
-        cfg = DisplayAppConfig(app_id="test", handler_type="qemu_vnc")
+        cfg = DisplayAppConfig(app_id="test", handler_type="container_display")
         assert cfg.app_id == "test"
-        assert cfg.handler_type == "qemu_vnc"
+        assert cfg.handler_type == "container_display"
         assert cfg.conflicts == []
 
     def test_mutable_defaults_isolation(self):
-        a = DisplayAppConfig(app_id="a", handler_type="qemu_vnc")
-        b = DisplayAppConfig(app_id="b", handler_type="qemu_vnc")
+        a = DisplayAppConfig(app_id="a", handler_type="container_display")
+        b = DisplayAppConfig(app_id="b", handler_type="container_display")
         a.conflicts.append("x")
         assert b.conflicts == []
 
 
-# ── QemuVncHandler ────────────────────────────────────────────────────
+# ── DisplayHandler (unified container handler) ───────────────────────
 
 
-class TestQemuVncHandler:
+class TestDisplayHandler:
     def test_protocol_compliance(self):
         ssh = SshStub()
-        h = QemuVncHandler("desktop", _DESKTOP_CFG.vmid, Ports.DESKTOP_VNC_WS, ["kodi"], ssh)
-        assert isinstance(h, DisplayHandler)
+        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, ["kodi"], ssh)
+        assert isinstance(h, DisplayHandlerProtocol)
 
     def test_properties(self):
         ssh = SshStub()
-        h = QemuVncHandler(
-            "desktop", _DESKTOP_CFG.vmid, Ports.DESKTOP_VNC_WS,
+        h = DisplayHandler(
+            "desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY,
             _DESKTOP_CFG.conflicts, ssh,
         )
         assert h.app_id == "desktop"
-        assert h.display_type == DisplayType.VNC
+        assert h.handler_type == "container_display"
         assert h.conflicts_with == _DESKTOP_CFG.conflicts
 
     def test_viewstream_url(self):
         ssh = SshStub()
-        h = QemuVncHandler("desktop", _DESKTOP_CFG.vmid, Ports.DESKTOP_VNC_WS, [], ssh)
-        assert h.get_viewstream_url("10.0.0.1") == f"ws://10.0.0.1:{Ports.DESKTOP_VNC_WS}"
+        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, [], ssh)
+        assert h.get_viewstream_url("10.0.0.1") == f"http://10.0.0.1:{Ports.DESKTOP_DISPLAY}"
 
     def test_enter_success(self):
         ssh = SshStub(default_ok=True, default_output="")
-        h = QemuVncHandler("desktop", _DESKTOP_CFG.vmid, Ports.DESKTOP_VNC_WS, [], ssh)
+        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, [], ssh)
         result = h.enter("10.0.0.1")
         assert result.success is True
-        assert result.viewstream_url == f"ws://10.0.0.1:{Ports.DESKTOP_VNC_WS}"
-        assert ("10.0.0.1", f"qm start {_DESKTOP_CFG.vmid}", 30) in ssh.calls
+        assert result.viewstream_url == f"http://10.0.0.1:{Ports.DESKTOP_DISPLAY}"
+        assert ("10.0.0.1", f"pct start {_DESKTOP_CFG.ct_id}", 30) in ssh.calls
 
     def test_enter_already_running(self):
-        ssh = SshStub(default_ok=False, default_output="VM 400 already running")
-        h = QemuVncHandler("desktop", _DESKTOP_CFG.vmid, Ports.DESKTOP_VNC_WS, [], ssh)
+        ssh = SshStub(default_ok=False, default_output="CT 400 already running")
+        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, [], ssh)
         result = h.enter("10.0.0.1")
         assert result.success is True
-        assert result.viewstream_url == f"ws://10.0.0.1:{Ports.DESKTOP_VNC_WS}"
+        assert result.viewstream_url == f"http://10.0.0.1:{Ports.DESKTOP_DISPLAY}"
 
     def test_enter_failure(self):
-        ssh = SshStub(default_ok=False, default_output="VM locked")
-        h = QemuVncHandler("desktop", _DESKTOP_CFG.vmid, Ports.DESKTOP_VNC_WS, [], ssh)
+        ssh = SshStub(default_ok=False, default_output="container locked")
+        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, [], ssh)
         result = h.enter("10.0.0.1")
         assert result.success is False
         assert result.viewstream_url is None
-        assert result.error == "VM locked"
+        assert result.error == "container locked"
 
     def test_exit(self):
         ssh = SshStub(default_ok=True)
-        h = QemuVncHandler("desktop", _DESKTOP_CFG.vmid, Ports.DESKTOP_VNC_WS, [], ssh)
+        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, [], ssh)
         result = h.exit("10.0.0.1")
         assert result.success is True
-        assert ("10.0.0.1", f"qm stop {_DESKTOP_CFG.vmid}", 30) in ssh.calls
+        assert ("10.0.0.1", f"pct stop {_DESKTOP_CFG.ct_id}", 30) in ssh.calls
 
     def test_is_active_true(self):
         ssh = SshStub()
-        ssh.set_response("qm status", True, "status: running")
-        h = QemuVncHandler("desktop", _DESKTOP_CFG.vmid, Ports.DESKTOP_VNC_WS, [], ssh)
+        ssh.set_response("pct status", True, "status: running")
+        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, [], ssh)
         assert h.is_active("10.0.0.1") is True
 
     def test_is_active_false(self):
         ssh = SshStub()
-        ssh.set_response("qm status", True, "status: stopped")
-        h = QemuVncHandler("desktop", _DESKTOP_CFG.vmid, Ports.DESKTOP_VNC_WS, [], ssh)
+        ssh.set_response("pct status", True, "status: stopped")
+        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, [], ssh)
         assert h.is_active("10.0.0.1") is False
 
     def test_is_active_ssh_failure(self):
         ssh = SshStub(default_ok=False)
-        h = QemuVncHandler("desktop", _DESKTOP_CFG.vmid, Ports.DESKTOP_VNC_WS, [], ssh)
+        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, [], ssh)
         assert h.is_active("10.0.0.1") is False
 
 
-# ── WaylandVncHandler ─────────────────────────────────────────────────
+class TestDisplayHandlerKodi:
+    """Test DisplayHandler with Kodi-specific config."""
 
-
-class TestWaylandVncHandler:
     def test_protocol_compliance(self):
         ssh = SshStub()
-        h = WaylandVncHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_VNC_WS, [], ssh)
-        assert isinstance(h, DisplayHandler)
+        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], ssh)
+        assert isinstance(h, DisplayHandlerProtocol)
 
     def test_properties(self):
         ssh = SshStub()
-        h = WaylandVncHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_VNC_WS, _KODI_CFG.conflicts, ssh)
+        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, _KODI_CFG.conflicts, ssh)
         assert h.app_id == "kodi"
-        assert h.display_type == DisplayType.VNC
+        assert h.handler_type == "container_display"
         assert h.conflicts_with == _KODI_CFG.conflicts
 
     def test_viewstream_url(self):
         ssh = SshStub()
-        h = WaylandVncHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_VNC_WS, [], ssh)
-        assert h.get_viewstream_url("10.0.0.1") == f"ws://10.0.0.1:{Ports.KODI_VNC_WS}"
+        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], ssh)
+        assert h.get_viewstream_url("10.0.0.1") == f"http://10.0.0.1:{Ports.KODI_DISPLAY}"
 
     def test_enter_success(self):
         ssh = SshStub(default_ok=True)
-        h = WaylandVncHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_VNC_WS, [], ssh)
+        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], ssh)
         result = h.enter("10.0.0.1")
         assert result.success is True
-        assert result.viewstream_url == f"ws://10.0.0.1:{Ports.KODI_VNC_WS}"
+        assert result.viewstream_url == f"http://10.0.0.1:{Ports.KODI_DISPLAY}"
 
     def test_enter_already_running(self):
         ssh = SshStub(default_ok=False, default_output="already running")
-        h = WaylandVncHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_VNC_WS, [], ssh)
+        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], ssh)
         result = h.enter("10.0.0.1")
         assert result.success is True
 
     def test_enter_failure(self):
         ssh = SshStub(default_ok=False, default_output="container locked")
-        h = WaylandVncHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_VNC_WS, [], ssh)
+        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], ssh)
         result = h.enter("10.0.0.1")
         assert result.success is False
         assert result.error == "container locked"
 
     def test_exit(self):
         ssh = SshStub(default_ok=True)
-        h = WaylandVncHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_VNC_WS, [], ssh)
+        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], ssh)
         result = h.exit("10.0.0.1")
         assert result.success is True
         assert ("10.0.0.1", f"pct stop {_KODI_CFG.ct_id}", 30) in ssh.calls
@@ -222,18 +216,18 @@ class TestWaylandVncHandler:
     def test_is_active_true(self):
         ssh = SshStub()
         ssh.set_response("pct status", True, "status: running")
-        h = WaylandVncHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_VNC_WS, [], ssh)
+        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], ssh)
         assert h.is_active("10.0.0.1") is True
 
     def test_is_active_false(self):
         ssh = SshStub()
         ssh.set_response("pct status", True, "status: stopped")
-        h = WaylandVncHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_VNC_WS, [], ssh)
+        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], ssh)
         assert h.is_active("10.0.0.1") is False
 
     def test_is_active_ssh_failure(self):
         ssh = SshStub(default_ok=False)
-        h = WaylandVncHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_VNC_WS, [], ssh)
+        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], ssh)
         assert h.is_active("10.0.0.1") is False
 
 
@@ -243,12 +237,11 @@ class TestWaylandVncHandler:
 class TestWebViewHandler:
     def test_protocol_compliance(self):
         h = WebViewHandler("homeassistant", 8123)
-        assert isinstance(h, DisplayHandler)
+        assert isinstance(h, DisplayHandlerProtocol)
 
     def test_properties(self):
         h = WebViewHandler("homeassistant", 8123, "/dashboard")
         assert h.app_id == "homeassistant"
-        assert h.display_type == DisplayType.WEB
         assert h.conflicts_with == []
 
     def test_viewstream_url(self):
@@ -259,7 +252,6 @@ class TestWebViewHandler:
         h = WebViewHandler("homeassistant", 8123)
         result = h.enter("10.0.0.1")
         assert result.success is True
-        assert result.display_type == DisplayType.WEB
         assert "http://10.0.0.1:8123/" in result.viewstream_url
 
     def test_exit_is_noop(self):
@@ -276,16 +268,16 @@ class TestWebViewHandler:
 
 
 class TestBuildHandler:
-    def test_qemu_vnc(self):
+    def test_container_display_desktop(self):
         ssh = SshStub()
         h = build_handler(_DESKTOP_CFG, ssh)
-        assert isinstance(h, QemuVncHandler)
+        assert isinstance(h, DisplayHandler)
         assert h.app_id == "desktop"
 
-    def test_wayland_vnc(self):
+    def test_container_display_kodi(self):
         ssh = SshStub()
         h = build_handler(_KODI_CFG, ssh)
-        assert isinstance(h, WaylandVncHandler)
+        assert isinstance(h, DisplayHandler)
         assert h.app_id == "kodi"
 
     def test_web_view(self):
@@ -309,16 +301,16 @@ class TestDisplayTransferService:
     def _make_service(self, ssh: SshStub | None = None) -> DisplayTransferService:
         ssh = ssh or SshStub()
         svc = DisplayTransferService()
-        svc.register(QemuVncHandler(
-            "desktop", _DESKTOP_CFG.vmid, Ports.DESKTOP_VNC_WS,
+        svc.register(DisplayHandler(
+            "desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY,
             _DESKTOP_CFG.conflicts, ssh,
         ))
-        svc.register(WaylandVncHandler(
-            "kodi", _KODI_CFG.ct_id, Ports.KODI_VNC_WS,
+        svc.register(DisplayHandler(
+            "kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY,
             _KODI_CFG.conflicts, ssh,
         ))
-        svc.register(WaylandVncHandler(
-            "moonlight", _MOONLIGHT_CFG.ct_id, Ports.MOONLIGHT_VNC_WS,
+        svc.register(DisplayHandler(
+            "moonlight", _MOONLIGHT_CFG.ct_id, Ports.MOONLIGHT_DISPLAY,
             _MOONLIGHT_CFG.conflicts, ssh,
         ))
         return svc
@@ -332,9 +324,9 @@ class TestDisplayTransferService:
     def test_list_handlers_metadata(self):
         svc = self._make_service()
         meta = svc.list_handlers()
-        assert meta["desktop"]["display_type"] == "vnc"
+        assert meta["desktop"]["handler_type"] == "container_display"
         assert "kodi" in meta["desktop"]["conflicts_with"]
-        assert meta["kodi"]["display_type"] == "vnc"
+        assert meta["kodi"]["handler_type"] == "container_display"
 
     def test_enter_unknown_app(self):
         svc = self._make_service()
@@ -351,7 +343,7 @@ class TestDisplayTransferService:
         ssh = SshStub()
         ssh.set_response(f"pct status {_KODI_CFG.ct_id}", True, "status: running")
         ssh.set_response(f"pct stop {_KODI_CFG.ct_id}", True, "")
-        ssh.set_response(f"qm start {_DESKTOP_CFG.vmid}", True, "")
+        ssh.set_response(f"pct start {_DESKTOP_CFG.ct_id}", True, "")
         svc = self._make_service(ssh)
 
         result = svc.enter("desktop", "10.0.0.1")
@@ -368,13 +360,13 @@ class TestDisplayTransferService:
         result = svc.enter("desktop", "10.0.0.1")
         assert result.success is False
         assert "Cannot stop conflicting app" in result.error
-        start_calls = [c for c in ssh.calls if "qm start" in c[1]]
+        start_calls = [c for c in ssh.calls if "pct start" in c[1]]
         assert len(start_calls) == 0, "Should not start desktop when conflict exit fails"
 
     def test_enter_no_conflict_when_not_active(self):
         ssh = SshStub()
         ssh.set_response("pct status", True, "status: stopped")
-        ssh.set_response(f"qm start {_DESKTOP_CFG.vmid}", True, "")
+        ssh.set_response(f"pct start {_DESKTOP_CFG.ct_id}", True, "")
         svc = self._make_service(ssh)
 
         result = svc.enter("desktop", "10.0.0.1")
@@ -384,18 +376,18 @@ class TestDisplayTransferService:
 
     def test_get_viewstream_url(self):
         svc = self._make_service()
-        assert svc.get_viewstream_url("desktop", "10.0.0.1") == f"ws://10.0.0.1:{Ports.DESKTOP_VNC_WS}"
+        assert svc.get_viewstream_url("desktop", "10.0.0.1") == f"http://10.0.0.1:{Ports.DESKTOP_DISPLAY}"
         assert svc.get_viewstream_url("nonexistent", "10.0.0.1") is None
 
     def test_is_active(self):
         ssh = SshStub()
-        ssh.set_response(f"qm status {_DESKTOP_CFG.vmid}", True, "status: running")
+        ssh.set_response(f"pct status {_DESKTOP_CFG.ct_id}", True, "status: running")
         svc = self._make_service(ssh)
         assert svc.is_active("desktop", "10.0.0.1") is True
 
     def test_list_active(self):
         ssh = SshStub()
-        ssh.set_response(f"qm status {_DESKTOP_CFG.vmid}", True, "status: running")
+        ssh.set_response(f"pct status {_DESKTOP_CFG.ct_id}", True, "status: running")
         ssh.set_response(f"pct status {_KODI_CFG.ct_id}", True, "status: stopped")
         ssh.set_response(f"pct status {_MOONLIGHT_CFG.ct_id}", True, "status: running")
         svc = self._make_service(ssh)
@@ -431,10 +423,10 @@ class TestDisplayAppConfigsIntegration:
                     f"{app_id} references unknown conflict {c!r}"
                 )
 
-    def test_vnc_ports_unique(self):
-        ports = [cfg.vnc_ws_port for cfg in DISPLAY_APP_CONFIGS.values()
-                 if cfg.vnc_ws_port > 0]
-        assert len(ports) == len(set(ports)), "VNC WebSocket ports must be unique"
+    def test_display_ports_unique(self):
+        ports = [cfg.display_port for cfg in DISPLAY_APP_CONFIGS.values()
+                 if cfg.display_port > 0]
+        assert len(ports) == len(set(ports)), "Display ports must be unique"
 
     def test_handler_types_are_known(self):
         from scripts.webui.display_transfer import HANDLER_TYPES
@@ -442,3 +434,44 @@ class TestDisplayAppConfigsIntegration:
             assert cfg.handler_type in HANDLER_TYPES, (
                 f"{app_id} has unknown handler_type {cfg.handler_type!r}"
             )
+
+    def test_handler_type_is_string(self):
+        """handler_type must be a plain string, not an enum — API JSON serialization depends on this."""
+        ssh = SshStub()
+        for app_id, cfg in DISPLAY_APP_CONFIGS.items():
+            h = build_handler(cfg, ssh)
+            assert isinstance(h.handler_type, str), (
+                f"{app_id} handler_type is {type(h.handler_type).__name__}, expected str"
+            )
+
+    def test_target_hosts_field_present(self):
+        """Every DisplayAppConfig must have a target_hosts list (empty = all hosts)."""
+        for app_id, cfg in DISPLAY_APP_CONFIGS.items():
+            assert isinstance(cfg.target_hosts, list), (
+                f"{app_id} target_hosts must be a list"
+            )
+
+    def test_target_hosts_constrained_apps(self):
+        """Apps with hardware constraints must specify target_hosts."""
+        desktop = DISPLAY_APP_CONFIGS["desktop"]
+        assert desktop.target_hosts == [], "Desktop LXC is on all hosts"
+        kodi = DISPLAY_APP_CONFIGS["kodi"]
+        assert kodi.target_hosts == ["home"], "Kodi is only on home"
+        moonlight = DISPLAY_APP_CONFIGS["moonlight"]
+        assert moonlight.target_hosts == ["mesh1"], "Moonlight is only on mesh1"
+
+    def test_kiosk_available_everywhere(self):
+        """Kiosk has no target_hosts constraint — available on all nodes."""
+        kiosk = DISPLAY_APP_CONFIGS["kiosk"]
+        assert kiosk.target_hosts == [], "Kiosk should be available everywhere"
+
+    def test_transfer_result_has_no_display_type(self):
+        """TransferResult must not carry display_type — it was removed in the KasmVNC migration."""
+        r = TransferResult(success=True)
+        assert not hasattr(r, "display_type"), "TransferResult should not have display_type"
+
+    def test_all_managed_apps_use_ct_id(self):
+        """All container_display apps must have a ct_id set."""
+        for app_id, cfg in DISPLAY_APP_CONFIGS.items():
+            if cfg.handler_type == "container_display":
+                assert cfg.ct_id, f"{app_id} is container_display but missing ct_id"

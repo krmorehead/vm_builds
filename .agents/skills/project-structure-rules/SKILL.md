@@ -78,7 +78,7 @@ homeassistant_ct_id: 200    # Services
 jellyfin_ct_id: 300         # Media
 kodi_ct_id: 301
 moonlight_ct_id: 302
-desktop_vm_id: 400          # Desktop
+desktop_ct_id: 400          # Desktop
 kiosk_ct_id: 401
 netdata_ct_id: 500          # Observability
 rsyslog_ct_id: 501
@@ -129,6 +129,31 @@ BaseManager → NodeManager → ClusterManager
 - ClusterManager → SuperManager: `POST /api/checkin` (cluster relay via MANAGEMENT_SERVER)
 - ClusterManager → NodeManager: `POST /api/manager/events` (event broadcast via CHILD_MANAGER_IPS)
 
+### API-driven fleet operations (MANDATORY — verified 2026-04-18)
+
+After VPN + heartbeat are established (first two plays post-infrastructure),
+ALL operations use `ansible.builtin.uri` → NM/SM API over VPN. NEVER SSH.
+
+| Configure role | Method | Notes |
+|---|---|---|
+| pihole_configure | `uri` → NM API | Password push via `/api/container/{id}/exec` |
+| wireguard_configure | Local crypto | Key generation on controller, push via NM API |
+| netdata_configure | `uri` → NM API | Stream config via API |
+| homeassistant_configure | `uri` → NM API | Docker Compose start via API |
+| jellyfin_configure | `uri` → NM API | iGPU device config via API |
+| kodi_configure | `uri` → NM API | Display config via API |
+| moonlight_configure | `uri` → NM API | Streaming endpoint via API |
+| gaming_lxc_configure | `uri` → NM API | Sunshine/display config via API |
+| desktop_configure | `uri` → NM API | Desktop LXC setup via API |
+| kiosk_configure | SSH (bootstrap) | Deploys the NM itself — justified exception |
+| openwrt_configure | SSH (no HTTP API) | OpenWrt VM has no HTTP server — justified |
+
+Verification (`verify.yml`): Uses `/api/fleet/ready`, `/api/container/{id}/ready`,
+`/api/config/self` over VPN. NEVER SSH fallbacks. If API fails, the 4-tier
+system is broken — hard-fail with INVESTIGATE prompts.
+
+NEVER add SSH fallback paths. NEVER use `pct exec` when an API endpoint exists.
+
 ### WAN host reachability (DNAT + socat)
 
 WAN host kiosk containers live on private NAT subnets (10.99.x.x) that
@@ -158,6 +183,36 @@ closed, breaking the heartbeat relay chain. WAN NodeManagers could not
 reach the Cluster Manager, causing 0 of 6 hosts on the SuperManager.
 Fix: deploy as `manager-api-proxy.service` with `Restart=always`.
 
+## Controller as a bakeable target
+
+The controller (build/test machine) is managed by the pipeline just like
+Proxmox hosts. Controller-specific infrastructure:
+
+- **wireguard-tools**: installed by `setup.sh` during first-time bootstrap.
+  Already present on the build machine.
+- **NOPASSWD sudoers**: `/etc/sudoers.d/vm-builds-wireguard` grants
+  passwordless `wg-quick`, `wg`, and `install` to the current user.
+  Already installed by `setup.sh`. Allows `site.yml` to use explicit
+  `sudo` in shell/command tasks without `become: true`.
+- **wg0 VPN tunnel**: configured automatically by the "Configure controller
+  VPN tunnel" play in `site.yml` on every converge. Uses keys from
+  `env.generated` (controller keypair from `prepare.yml`, hub pubkey
+  from `wireguard_configure`). Torn down by `cleanup.yml`.
+- **Display streaming**: the SuperManager resolves display URLs via VPN IPs.
+  Without wg0 on the build machine, KasmVNC iframes are unreachable.
+
+### Why explicit `sudo` instead of `become: true`
+
+`become: true` on a localhost play prompts for the sudo password, blocking
+non-interactive molecule runs. The NOPASSWD sudoers entry (already installed
+by `setup.sh`) allows `wg-quick`, `wg`, and `install` without a password.
+This is a solved problem — `setup.sh` handles it during first-time setup.
+
+Previous bug (2026-04-17): Controller VPN play used `become: true` on
+localhost. `molecule converge` failed with "sudo: a password is required"
+after 60 minutes of successful converge on all 6 hosts. Fix: explicit
+`sudo` calls with NOPASSWD sudoers (installed by `setup.sh`).
+
 ## Anti-patterns
 
 NEVER explain what Ansible is in project structure rules
@@ -169,3 +224,5 @@ NEVER patch running containers — update build scripts, rebuild images, redeplo
 NEVER use raw `ansible-playbook --tags openwrt` without `infra` — bridges undefined
 NEVER treat Proxmox hosts as special snowflakes — they are machines you control, same as containers. Host-level systemd units, iptables rules, and packages are deployable infrastructure
 NEVER use `nohup ... &` for persistent host-level services — deploy systemd units with Restart=always. Background processes die when SSH sessions close
+NEVER treat the build machine as a special snowflake — it is a bakeable target. WireGuard and NOPASSWD sudoers are already installed by setup.sh; wg0 is configured automatically by site.yml on every converge
+NEVER use `become: true` on localhost plays — use explicit `sudo` in shell/command tasks. The NOPASSWD sudoers entry is already installed

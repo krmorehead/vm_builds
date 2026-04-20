@@ -10,7 +10,7 @@
 
 - name: Query Node Manager for deployed versions
   ansible.builtin.uri:
-    url: "http://{{ ansible_host }}:9001/api/images/versions"
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/images/versions"
     return_content: true
     timeout: 5
   register: _nm_versions

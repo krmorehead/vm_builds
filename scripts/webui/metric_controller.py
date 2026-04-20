@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Callable
 from nicegui import ui
 
 if TYPE_CHECKING:
-    from scripts.webui.manager import CachedMetric
+    from scripts.webui.heartbeat import HeartbeatCache
 
 
 class MetricPageController:
@@ -26,7 +26,7 @@ class MetricPageController:
     node_ids:
         Static list of node identifiers to subscribe to.
     on_refresh:
-        Called with ``dict[node_id, CachedMetric]`` each tick.
+        Called with ``dict[node_id, HeartbeatCache]`` each tick.
     refresh_interval:
         Seconds between automatic refreshes (default 5).
     ttl_seconds:
@@ -38,7 +38,7 @@ class MetricPageController:
         metric_name: str,
         node_ids: list[str],
         *,
-        on_refresh: Callable[[dict[str, CachedMetric]], None],
+        on_refresh: Callable[[dict[str, HeartbeatCache]], None],
         refresh_interval: float = 5.0,
         ttl_seconds: int = 30,
     ) -> None:
@@ -58,7 +58,7 @@ class MetricPageController:
             if ip:
                 mgr.subscribe(node_id, self.metric_name, ttl_seconds=self.ttl_seconds)
 
-    def collect(self) -> dict[str, CachedMetric]:
+    def collect(self) -> dict[str, HeartbeatCache]:
         """Return cached metrics for all nodes, subscribing first."""
         from scripts.webui.manager import get_metric_cache
 

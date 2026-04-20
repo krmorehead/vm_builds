@@ -27,13 +27,17 @@
 - name: "CIRCUIT BREAKER: fail on stale heartbeats"
   ansible.builtin.fail:
     msg: >-
-      HEARTBEAT CIRCUIT BREAKER TRIPPED — previously-healthy services
-      have stopped heartbeating. This means a container or its host
-      went down mid-run. Stale services:
-      {{ _stale_result.json.stale | map(attribute='service') | list | join(', ') }}
-      (last seen: {{ _stale_result.json.stale
-        | map(attribute='last_seen') | list | join(', ') }}).
-      Investigate immediately — do NOT continue with a degraded fleet.
+      HARD FAILURE — HEARTBEAT CIRCUIT BREAKER TRIPPED. Previously-healthy
+      services have stopped heartbeating. A container or host went down mid-run.
+      Stale services: {{ _stale_result.json.stale | map(attribute='service') | list | join(', ') }}
+      (last seen: {{ _stale_result.json.stale | map(attribute='last_seen') | list | join(', ') }}).
+      INVESTIGATE:
+      1. Check which host owns each stale service (fleet dashboard or /api/nodes)
+      2. SSH to that host — is it reachable? Is the container running?
+      3. Check container logs: pct exec <CT_ID> -- journalctl -u callhome --no-pager -n 20
+      4. Check the NM relay chain: Container → NM (port 9001) → CM → SM
+      5. If a HOST is unreachable — FULL STOP per unreachable host protocol
+      Do NOT continue with a degraded fleet. Do NOT add workarounds.
   when:
     - callhome_server | default('') | length > 0
     - _stale_result.json.has_stale | default(false) | bool

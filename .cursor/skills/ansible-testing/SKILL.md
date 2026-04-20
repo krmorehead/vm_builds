@@ -570,8 +570,7 @@ The cleanup playbook MUST restore the host to a clean state using
 by explicit VMID from `group_vars/all.yml`.
 
 1. Destroy project VMs by explicit VMID (check existence first with
-   `qm status`, then stop + destroy). Current VMIDs: OpenWrt (100),
-   Desktop VM (400).
+   `qm status`, then stop + destroy). Current VMIDs: OpenWrt (100).
 2. Destroy project containers by explicit VMID (check with `pct status`,
    then stop + destroy). Current VMIDs: WireGuard (101), Pi-hole (102),
    Mesh WiFi (103), WiFi Bridge (104), Home Assistant (200),

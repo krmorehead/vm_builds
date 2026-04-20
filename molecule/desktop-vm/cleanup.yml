@@ -1,97 +1,41 @@
 ---
-- name: Destroy Desktop VM
+- name: Destroy Desktop LXC
   hosts: desktop_nodes
   gather_facts: false
   tasks:
-    - name: Check Desktop VM exists
+    - name: Check Desktop container exists
       ansible.builtin.command:
-        cmd: qm status {{ desktop_vm_id }}
+        cmd: pct status {{ desktop_ct_id }}
       register: _desktop_cleanup_status
       failed_when: false
       changed_when: false
 
-    - name: Stop Desktop VM
+    - name: Stop Desktop container
       ansible.builtin.command:
-        cmd: qm stop {{ desktop_vm_id }}
+        cmd: pct stop {{ desktop_ct_id }}
       when: _desktop_cleanup_status.rc == 0 and 'running' in _desktop_cleanup_status.stdout
       failed_when: false
       changed_when: true
 
-    - name: Wait for VM to stop
+    - name: Wait for container to stop
       ansible.builtin.pause:
-        seconds: 5
+        seconds: 3
       when: _desktop_cleanup_status.rc == 0 and 'running' in _desktop_cleanup_status.stdout
 
-    - name: Destroy Desktop VM
+    - name: Destroy Desktop container
       ansible.builtin.command:
-        cmd: qm destroy {{ desktop_vm_id }} --purge
+        cmd: pct destroy {{ desktop_ct_id }} --purge
       when: _desktop_cleanup_status.rc == 0
       failed_when: false
       changed_when: true
 
-    # ── Clean up temporary SSH keypair on Proxmox host ───────────────
-    - name: Remove temporary SSH private key from Proxmox host
-      ansible.builtin.file:
-        path: /tmp/desktop_tmp_key
-        state: absent
-
-    # ── Clean up temporary SSH keypair on controller ────────────────
-    - name: Remove temporary SSH keypair from controller
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: absent
-      delegate_to: localhost
-      loop:
-        - /tmp/desktop_tmp_key
-        - /tmp/desktop_tmp_key.pub
-
-    # ── PCI cleanup: restore iGPU to host ──────────────────────────
-    - name: Unbind vfio-pci devices and restore native drivers
+    - name: Remove desktop-display-proxy service
       ansible.builtin.shell:
         cmd: |
-          set -o pipefail
-          for dev in /sys/bus/pci/drivers/vfio-pci/0000:*/; do
-            [ -d "$dev" ] || continue
-            addr=$(basename "$dev")
-            echo "$addr" > /sys/bus/pci/drivers/vfio-pci/unbind 2>/dev/null || true
-            echo "" > "/sys/bus/pci/devices/${addr}/driver_override" 2>/dev/null || true
-          done
-          echo 1 > /sys/bus/pci/rescan 2>/dev/null || true
-          sleep 3
-          # Bind unbound VGA devices to native driver
-          for dev in /sys/bus/pci/devices/0000:*/; do
-            [ -d "$dev" ] || continue
-            addr=$(basename "$dev")
-            class=$(cat "${dev}/class" 2>/dev/null)
-            [ "${class:0:4}" = "0x03" ] || continue
-            [ -e "${dev}/driver" ] && continue
-            vendor=$(cat "${dev}/vendor" 2>/dev/null)
-            case "$vendor" in
-              0x8086) echo "$addr" > /sys/bus/pci/drivers/i915/bind 2>/dev/null || true ;;
-              0x1002) echo "$addr" > /sys/bus/pci/drivers/amdgpu/bind 2>/dev/null || true ;;
-            esac
-          done
-          # Wait for DRI device nodes — retry bind if needed
-          for i in $(seq 1 20); do
-            ls /dev/dri/renderD* >/dev/null 2>&1 && break
-            if [ "$i" -eq 10 ]; then
-              echo 1 > /sys/bus/pci/rescan 2>/dev/null || true
-              sleep 2
-              for dev in /sys/bus/pci/devices/0000:*/; do
-                [ -d "$dev" ] || continue
-                class=$(cat "${dev}/class" 2>/dev/null)
-                [ "${class:0:4}" = "0x03" ] || continue
-                [ -e "${dev}/driver" ] && continue
-                addr=$(basename "$dev")
-                vendor=$(cat "${dev}/vendor" 2>/dev/null)
-                case "$vendor" in
-                  0x8086) echo "$addr" > /sys/bus/pci/drivers/i915/bind 2>/dev/null || true ;;
-                  0x1002) echo "$addr" > /sys/bus/pci/drivers/amdgpu/bind 2>/dev/null || true ;;
-                esac
-              done
-            fi
-            sleep 1
-          done
+          systemctl stop desktop-display-proxy 2>/dev/null || true
+          systemctl disable desktop-display-proxy 2>/dev/null || true
+          rm -f /etc/systemd/system/desktop-display-proxy.service
+          systemctl daemon-reload
         executable: /bin/bash
       changed_when: true
       failed_when: false

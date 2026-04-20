@@ -84,7 +84,6 @@
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ kiosk_ct_id }} -- /bin/sh -c '
-          echo "SWAY_PKG=$(dpkg -l sway 2>/dev/null | grep -c ^ii)";
           echo "CHROMIUM_PKG=$(dpkg -l chromium 2>/dev/null | grep -c ^ii)";
           echo "CONFIG=$(test -f /opt/kiosk/config.json && echo yes || echo no)";
           echo "SERVER=$(test -f /opt/kiosk/webui/kiosk_server.py && echo yes || echo no)";
@@ -104,11 +103,6 @@
       register: _kiosk_services
       changed_when: false
       when: not (_api_ready | bool)
-
-    - name: Assert sway compositor is installed
-      ansible.builtin.assert:
-        that: "'SWAY_PKG=1' in _kiosk_health.stdout"
-        fail_msg: "sway package not installed"
 
     - name: Assert Chromium is installed
       ansible.builtin.assert:
@@ -254,7 +248,7 @@
         that:
           - "'{{ kodi_ct_id | string }}' in _hookscript_text"
           - "'{{ moonlight_ct_id | string }}' in _hookscript_text"
-          - "'{{ desktop_vm_id | string }}' in _hookscript_text"
+          - "'{{ desktop_ct_id | string }}' in _hookscript_text"
         fail_msg: "Hookscript must contain kodi, moonlight, and desktop VMIDs"
 
     - name: Assert kiosk is NOT in hookscript stop list
@@ -266,61 +260,59 @@
           - "kiosk_ct_id | string not in _ct_ids_line"
         fail_msg: "Kiosk CT ID {{ kiosk_ct_id }} must NOT be in hookscript CT_IDS array"
 
-    # ── VNC stack verification ───────────────────────────────────
+    # ── KasmVNC display stack ───────────────────────────────────
 
-    - name: Check VNC stack inside container
+    - name: Check KasmVNC display stack inside container
       ansible.builtin.shell:
         cmd: >-
           pct exec {{ kiosk_ct_id }} -- /bin/sh -c '
-          echo "VNC_SVC=$(systemctl is-enabled kiosk-vnc 2>/dev/null || echo disabled)";
-          echo "VNC_WS_SVC=$(systemctl is-enabled kiosk-vnc-ws 2>/dev/null || echo disabled)";
-          echo "WAYVNC=$(command -v wayvnc >/dev/null 2>&1 && echo yes || echo no)";
-          echo "WEBSOCKIFY=$(command -v websockify >/dev/null 2>&1 && echo yes || echo no)"
+          echo "VNCSERVER=$(command -v vncserver >/dev/null 2>&1 && echo yes || echo no)";
+          echo "KASM_PKG=$(dpkg -l kasmvncserver 2>/dev/null | grep -c ^ii)";
+          echo "DISPLAY_SVC=$(systemctl is-enabled kiosk-display 2>/dev/null || echo disabled)"
           '
-      register: _vnc_health
+      register: _display_health
       changed_when: false
 
-    - name: Assert VNC services enabled and packages present
+    - name: Assert KasmVNC display stack is present and enabled
       ansible.builtin.assert:
         that:
-          - "'VNC_SVC=enabled' in _vnc_health.stdout"
-          - "'VNC_WS_SVC=enabled' in _vnc_health.stdout"
-          - "'WAYVNC=yes' in _vnc_health.stdout"
-          - "'WEBSOCKIFY=yes' in _vnc_health.stdout"
-        fail_msg: "VNC stack not properly baked: {{ _vnc_health.stdout }}"
+          - "'VNCSERVER=yes' in _display_health.stdout"
+          - "'KASM_PKG=1' in _display_health.stdout"
+          - "'DISPLAY_SVC=enabled' in _display_health.stdout"
+        fail_msg: "KasmVNC display stack not properly baked: {{ _display_health.stdout }}"
 
-    - name: Verify VNC WebSocket port forwarding exists (WAN hosts)
+    - name: Verify display WebSocket port forwarding exists (WAN hosts)
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          iptables -t nat -S PREROUTING 2>/dev/null | grep -c '{{ kiosk_vnc_ws_port | default(6080) }}' || echo 0
+          iptables -t nat -S PREROUTING 2>/dev/null | grep -c '{{ kiosk_ws_port }}' || echo 0
         executable: /bin/bash
-      register: _vnc_dnat_check
+      register: _display_dnat_check
       changed_when: false
       when:
         - inventory_hostname not in groups.get('router_nodes', [])
         - inventory_hostname not in groups.get('lan_hosts', [])
 
-    - name: Assert VNC DNAT rule exists on WAN hosts
+    - name: Assert display DNAT rule exists on WAN hosts
       ansible.builtin.assert:
-        that: (_vnc_dnat_check.stdout | trim | int) > 0
-        fail_msg: "Missing VNC DNAT rule for WebSocket port on {{ inventory_hostname }}"
+        that: (_display_dnat_check.stdout | trim | int) > 0
+        fail_msg: "Missing display DNAT rule for port {{ kiosk_ws_port }} on {{ inventory_hostname }}"
       when:
         - inventory_hostname not in groups.get('router_nodes', [])
         - inventory_hostname not in groups.get('lan_hosts', [])
 
-    - name: Verify VNC socat proxy on LAN hosts
+    - name: Verify display socat proxy on LAN hosts
       ansible.builtin.command:
-        cmd: systemctl is-active kiosk-vnc-proxy
-      register: _vnc_proxy_check
+        cmd: systemctl is-active kiosk-display-proxy
+      register: _display_proxy_check
       changed_when: false
       failed_when: false
       when: inventory_hostname in groups.get('router_nodes', []) or inventory_hostname in groups.get('lan_hosts', [])
 
-    - name: Assert VNC socat proxy active on LAN hosts
+    - name: Assert display socat proxy active on LAN hosts
       ansible.builtin.assert:
-        that: "'active' in _vnc_proxy_check.stdout"
-        fail_msg: "VNC socat proxy not active on LAN host {{ inventory_hostname }}"
+        that: "'active' in _display_proxy_check.stdout"
+        fail_msg: "display socat proxy (kiosk-display-proxy) not active on LAN host {{ inventory_hostname }}"
       when: inventory_hostname in groups.get('router_nodes', []) or inventory_hostname in groups.get('lan_hosts', [])
 
     # ── Report ──────────────────────────────────────────────────
@@ -330,11 +322,14 @@
         msg: >-
           Kiosk per-feature verify passed:
           ct={{ kiosk_ct_id }}, running=yes,
-          sway={{ 'installed' if 'SWAY_PKG=1' in _kiosk_health.stdout else 'missing' }},
           chromium={{ 'installed' if 'CHROMIUM_PKG=1' in _kiosk_health.stdout else 'missing' }},
           display_svc={{ 'api' if (_api_ready | bool) else ('enabled' if 'DISPLAY_SVC=enabled' in (_kiosk_services.stdout | default('')) else 'disabled') }},
           web_svc={{ 'api' if (_api_ready | bool) else ('enabled' if 'WEB_SVC=enabled' in (_kiosk_services.stdout | default('')) else 'disabled') }},
           dri={{ 'mounted' if _dri_devices.rc == 0 else 'missing' }},
           hookscript={{ 'deployed' if _hookscript.stat.exists else 'missing' }},
-          vnc={{ 'baked' if 'VNC_SVC=enabled' in _vnc_health.stdout else 'missing' }},
+          kasm_display={{ 'baked'
+            if ('VNCSERVER=yes' in _display_health.stdout
+                and 'KASM_PKG=1' in _display_health.stdout
+                and 'DISPLAY_SVC=enabled' in _display_health.stdout)
+            else 'missing' }},
           config=present, nicegui=deployed

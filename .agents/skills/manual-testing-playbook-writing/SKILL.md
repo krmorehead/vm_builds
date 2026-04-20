@@ -24,7 +24,7 @@ deliverable. This skill governs HOW to write that playbook.
    only one gets tested. Enumerate and test EVERY feature individually.
 
 4. NEVER write vague expected outcomes. "Verify it works" is not an outcome.
-   "noVNC canvas shows the Jellyfin library, NOT the kiosk hub" is.
+   "KasmVNC iframe shows the Jellyfin library, NOT the kiosk hub" is.
 
 5. ALWAYS update `.agents/skills/webui-manual-testing/SKILL.md` to list the
    new playbook immediately — not deferred to a later milestone.

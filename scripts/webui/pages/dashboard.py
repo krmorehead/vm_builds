@@ -73,6 +73,17 @@ def _refresh_fleet(
     with container:
         fleet = data.build_fleet(env, state_dir)
         _fleet_card(fleet, state_dir)
+    _maybe_kickstart(fleet)
+
+
+def _maybe_kickstart(fleet: data.Fleet) -> None:
+    """Trigger auto-kickstart for stale hosts in the background."""
+    import asyncio
+
+    if not any(not h.online and h.reachable_ip for h in fleet.hosts):
+        return
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, data.auto_kickstart_stale_fleet, fleet)
 
 
 def _env_banner(env_path: Path) -> None:

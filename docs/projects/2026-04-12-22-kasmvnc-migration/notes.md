@@ -568,3 +568,81 @@ encoding:
 ### Documentation
 - `docs/manual-testing-playbooks.md` — update VNC service check steps
 - `docs/architecture/overview.md` — update VNC pipeline description
+
+---
+
+## Implementation Outcomes
+
+### Completed (2026-04-14)
+
+**Scope change from plan:** The Desktop VM was included in the migration
+(Option B — KasmVNC inside the VM) rather than kept on QEMU VNC as the
+notes originally suggested. All 4 display apps now use KasmVNC.
+
+**Key implementation details:**
+
+1. **`install_kasmvnc()` helper function** added to `build-images.sh` —
+   shared by kiosk, kodi, and moonlight LXC builds. Takes user, port,
+   display number, service name, and xstartup content. Desktop VM installs
+   KasmVNC inline (inside the VM via SSH heredoc).
+
+2. **Handler hierarchy simplified:**
+   - `_VncHandlerBase` → `_ManagedDisplayBase` (shared managed display logic)
+   - `QemuVncHandler` → `VmDisplayHandler` (for VMs)
+   - `WaylandVncHandler` → `ContainerDisplayHandler` (for LXC)
+   - All generate `http://` URLs (KasmVNC serves its own web client)
+
+3. **vnc_shared.py deleted**, replaced by `display_shared.py` with generic
+   iframe utilities (no noVNC dependencies).
+
+4. **Port assignments unchanged** — 6080 (kiosk), 6081 (desktop), 6082
+   (kodi), 6083 (moonlight). Same host-side socat/DNAT forwarding.
+
+5. **Image size changes:**
+   - Kiosk: 508→509 MB (marginal increase)
+   - Kodi: 369→353 MB (16 MB decrease — sway+wayvnc+websockify larger than KasmVNC)
+   - Moonlight: 297→266 MB (31 MB decrease)
+
+**Bug found during build:** The `install_kasmvnc()` helper function
+initially failed on the kiosk build because `apt-get update` was not run
+before `apt-get install /tmp/kasmvnc.deb`. The kiosk build cleans apt
+lists (`rm -rf /var/lib/apt/lists/*`) before calling the helper. Fix:
+added `apt-get update -qq` to the helper function.
+
+### Manual testing outcomes (2026-04-14)
+
+**Playbook 13 executed — ALL sections passed:**
+
+| Section | Result |
+|---------|--------|
+| 13.1 KasmVNC display service health | ALL PASS — 6/6 kiosk, kodi, moonlight, desktop |
+| 13.2 SM→CM drill-down via iframe | PASS — WebSocket 101 on all nodes |
+| 13.3 App console switching | PASS — Kodi, Desktop, Moonlight consoles work |
+| 13.4 Fleet dashboard display integration | PASS — Open Kiosk + app links on node details |
+| 13.5 Direct SM access to all 6 kiosk displays | ALL PASS — 6/6 via DNAT/socat/relay |
+| 13.6 CM display from own web UI | PASS — resolves via _child_managers path |
+| 13.7 Error/edge cases | PASS — error page, stopped service, no noVNC artifacts |
+| 13.8 Host × app verification matrix | ALL PASS — every cell verified |
+
+**Bugs found during manual testing:**
+
+1. **`-disableBasicAuth` flag is invalid.** KasmVNC 1.4.0's Xvnc accepts
+   `-DisableBasicAuth` (capital D, Xvnc option), not `-disableBasicAuth`
+   (lowercase, vncserver option). The lowercase flag was silently ignored,
+   leaving basic auth enabled (401 on iframe requests).
+
+2. **KasmVNC 1.4.0 requires a user even with DisableBasicAuth.** Without at
+   least one user in the passwd file, vncserver exits with "No users
+   configured and prompting is prohibited." The `vncpasswd -u <user> -ow`
+   call in `install_kasmvnc()` creates the required user.
+
+3. **`hw3d: true` crashes without `/dev/dri` access.** LXC containers
+   without DRI device passthrough fail with "Failed to create gbm." The
+   `kasmvnc.yaml` config must set `hw3d: false` as the safe default.
+
+4. **Desktop VM had stale service file.** The deployed VM was from a
+   pre-fix image, so it still had the `-disableBasicAuth` flag. Hot-patched
+   via `qm guest exec` + `sed`; permanent fix in `build-images.sh`.
+
+All fixes are baked into `build-images.sh` and will take effect on the
+next image rebuild + molecule test cycle.

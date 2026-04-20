@@ -55,7 +55,7 @@ Service Baseline (plays 5–32)
 ├── WireGuard VPN (VMID 101)
 ├── Mesh WiFi LXC (VMID 103)
 ├── WiFi Bridge LXC (VMID 104)
-├── Desktop VM (VMID 400)
+├── Desktop LXC (VMID 400)
 ├── Kiosk (VMID 401)
 └── Gaming LXC (VMID 601, opt-in)
 │

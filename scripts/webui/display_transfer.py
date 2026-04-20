@@ -4,18 +4,16 @@ Each display app registers a DisplayHandler that knows how to enter/exit its
 viewstream. The DisplayTransferService manages the registry, resolves conflicts
 between mutually exclusive display apps, and provides viewstream URL discovery.
 
-Three concrete handler types cover all current and future apps:
+Two concrete handler types cover all current and future apps:
 
-    QemuVncHandler     — QEMU VMs via Proxmox VNC Unix socket + host-side websockify
-    WaylandVncHandler  — LXC containers running sway + wayvnc headless Wayland
-    WebViewHandler     — Services with HTTP web UIs (no lifecycle management)
+    DisplayHandler  — LXC containers running KasmVNC Xvnc
+    WebViewHandler  — Services with HTTP web UIs (no lifecycle management)
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass
-from enum import Enum
 from typing import Callable, Protocol, runtime_checkable
 
 from scripts.webui.data import DisplayAppConfig
@@ -31,25 +29,18 @@ PROXMOX_STATUS_RUNNING = "status: running"
 # ── Models ────────────────────────────────────────────────────────────
 
 
-class DisplayType(Enum):
-    """How the viewstream is rendered in the browser."""
-    VNC = "vnc"
-    WEB = "web"
-
-
 @dataclass
 class TransferResult:
     """Outcome of an enter/exit operation."""
     success: bool
     viewstream_url: str | None = None
-    display_type: DisplayType = DisplayType.VNC
     error: str | None = None
 
 
 @dataclass
 class HandlerMetadata:
     """Serializable metadata returned by list_handlers."""
-    display_type: str
+    handler_type: str
     conflicts_with: list[str]
 
 
@@ -60,14 +51,14 @@ SshExecFn = Callable[[str, str, int], tuple[bool, str]]
 
 
 @runtime_checkable
-class DisplayHandler(Protocol):
+class DisplayHandlerProtocol(Protocol):
     """Contract for display stream entry/exit strategies."""
 
     @property
     def app_id(self) -> str: ...
 
     @property
-    def display_type(self) -> DisplayType: ...
+    def handler_type(self) -> str: ...
 
     @property
     def conflicts_with(self) -> list[str]: ...
@@ -84,23 +75,25 @@ class DisplayHandler(Protocol):
 # ── Concrete Handlers ─────────────────────────────────────────────────
 
 
-class _VncHandlerBase:
-    """Shared base for VNC-streaming handlers (QEMU and Wayland).
+class DisplayHandler:
+    """Unified handler for LXC containers with KasmVNC displays.
 
-    Provides common property wiring and viewstream URL construction.
-    Subclasses implement enter/exit/is_active with their specific
-    management commands (qm vs pct).
+    All managed display apps are LXC containers. The handler uses
+    pct start/stop for lifecycle and http://{host}:{port} for URL
+    discovery. Conflict resolution is handled by DisplayTransferService.
     """
 
     def __init__(
         self,
         app_id: str,
-        vnc_ws_port: int,
+        ct_id: str,
+        port: int,
         conflicts: list[str],
         ssh_exec: SshExecFn,
     ) -> None:
         self._app_id = app_id
-        self._vnc_ws_port = vnc_ws_port
+        self._ct_id = ct_id
+        self._port = port
         self._conflicts = list(conflicts)
         self._ssh = ssh_exec
 
@@ -109,86 +102,33 @@ class _VncHandlerBase:
         return self._app_id
 
     @property
-    def display_type(self) -> DisplayType:
-        return DisplayType.VNC
+    def handler_type(self) -> str:
+        return "container_display"
 
     @property
     def conflicts_with(self) -> list[str]:
         return list(self._conflicts)
 
     def get_viewstream_url(self, host_ip: str) -> str | None:
-        return f"ws://{host_ip}:{self._vnc_ws_port}"
-
-    def _make_enter_result(self, ok: bool, out: str, host_ip: str) -> TransferResult:
-        url = self.get_viewstream_url(host_ip) if ok else None
-        return TransferResult(
-            success=ok, viewstream_url=url,
-            display_type=DisplayType.VNC,
-            error=out if not ok else None,
-        )
-
-    def _make_exit_result(self, ok: bool, out: str) -> TransferResult:
-        return TransferResult(success=ok, error=out if not ok else None)
-
-    def _check_status(self, host_ip: str, cmd: str) -> bool:
-        ok, out = self._ssh(host_ip, cmd, SSH_STATUS_TIMEOUT)
-        return ok and PROXMOX_STATUS_RUNNING in out
-
-
-class QemuVncHandler(_VncHandlerBase):
-    """QEMU VM display via Proxmox VNC Unix socket + host-side websockify."""
-
-    def __init__(
-        self,
-        app_id: str,
-        vmid: str,
-        vnc_ws_port: int,
-        conflicts: list[str],
-        ssh_exec: SshExecFn,
-    ) -> None:
-        super().__init__(app_id, vnc_ws_port, conflicts, ssh_exec)
-        self._vmid = vmid
-
-    def enter(self, host_ip: str) -> TransferResult:
-        ok, out = self._ssh(host_ip, f"qm start {self._vmid}", SSH_GUEST_OP_TIMEOUT)
-        if not ok and ALREADY_RUNNING in out:
-            ok = True
-        return self._make_enter_result(ok, out, host_ip)
-
-    def exit(self, host_ip: str) -> TransferResult:
-        ok, out = self._ssh(host_ip, f"qm stop {self._vmid}", SSH_GUEST_OP_TIMEOUT)
-        return self._make_exit_result(ok, out)
-
-    def is_active(self, host_ip: str) -> bool:
-        return self._check_status(host_ip, f"qm status {self._vmid}")
-
-
-class WaylandVncHandler(_VncHandlerBase):
-    """LXC container with sway + wayvnc headless Wayland display."""
-
-    def __init__(
-        self,
-        app_id: str,
-        ct_id: str,
-        vnc_ws_port: int,
-        conflicts: list[str],
-        ssh_exec: SshExecFn,
-    ) -> None:
-        super().__init__(app_id, vnc_ws_port, conflicts, ssh_exec)
-        self._ct_id = ct_id
+        return f"http://{host_ip}:{self._port}"
 
     def enter(self, host_ip: str) -> TransferResult:
         ok, out = self._ssh(host_ip, f"pct start {self._ct_id}", SSH_GUEST_OP_TIMEOUT)
         if not ok and ALREADY_RUNNING in out:
             ok = True
-        return self._make_enter_result(ok, out, host_ip)
+        url = self.get_viewstream_url(host_ip) if ok else None
+        return TransferResult(
+            success=ok, viewstream_url=url,
+            error=out if not ok else None,
+        )
 
     def exit(self, host_ip: str) -> TransferResult:
         ok, out = self._ssh(host_ip, f"pct stop {self._ct_id}", SSH_GUEST_OP_TIMEOUT)
-        return self._make_exit_result(ok, out)
+        return TransferResult(success=ok, error=out if not ok else None)
 
     def is_active(self, host_ip: str) -> bool:
-        return self._check_status(host_ip, f"pct status {self._ct_id}")
+        ok, out = self._ssh(host_ip, f"pct status {self._ct_id}", SSH_STATUS_TIMEOUT)
+        return ok and PROXMOX_STATUS_RUNNING in out
 
 
 class WebViewHandler:
@@ -209,8 +149,8 @@ class WebViewHandler:
         return self._app_id
 
     @property
-    def display_type(self) -> DisplayType:
-        return DisplayType.WEB
+    def handler_type(self) -> str:
+        return "web_view"
 
     @property
     def conflicts_with(self) -> list[str]:
@@ -223,26 +163,21 @@ class WebViewHandler:
         return TransferResult(
             success=True,
             viewstream_url=self.get_viewstream_url(host_ip),
-            display_type=DisplayType.WEB,
         )
 
-    def exit(self, host_ip: str) -> TransferResult:
+    def exit(self, _host_ip: str) -> TransferResult:
         return TransferResult(success=True)
 
-    def is_active(self, host_ip: str) -> bool:
+    def is_active(self, _host_ip: str) -> bool:
         return True
 
 
 # ── Handler Factory ───────────────────────────────────────────────────
 
 
-_HANDLER_BUILDERS: dict[str, Callable[[DisplayAppConfig, SshExecFn], DisplayHandler]] = {
-    "qemu_vnc": lambda cfg, ssh: QemuVncHandler(
-        app_id=cfg.app_id, vmid=cfg.vmid, vnc_ws_port=cfg.vnc_ws_port,
-        conflicts=cfg.conflicts, ssh_exec=ssh,
-    ),
-    "wayland_vnc": lambda cfg, ssh: WaylandVncHandler(
-        app_id=cfg.app_id, ct_id=cfg.ct_id, vnc_ws_port=cfg.vnc_ws_port,
+_HANDLER_BUILDERS: dict[str, Callable[[DisplayAppConfig, SshExecFn], DisplayHandlerProtocol]] = {
+    "container_display": lambda cfg, ssh: DisplayHandler(
+        app_id=cfg.app_id, ct_id=cfg.ct_id, port=cfg.display_port,
         conflicts=cfg.conflicts, ssh_exec=ssh,
     ),
     "web_view": lambda cfg, _ssh: WebViewHandler(
@@ -254,7 +189,7 @@ _HANDLER_BUILDERS: dict[str, Callable[[DisplayAppConfig, SshExecFn], DisplayHand
 HANDLER_TYPES: frozenset[str] = frozenset(_HANDLER_BUILDERS.keys())
 
 
-def build_handler(config: DisplayAppConfig, ssh_exec: SshExecFn) -> DisplayHandler:
+def build_handler(config: DisplayAppConfig, ssh_exec: SshExecFn) -> DisplayHandlerProtocol:
     """Build a concrete DisplayHandler from a DisplayAppConfig."""
     builder = _HANDLER_BUILDERS.get(config.handler_type)
     if builder is None:
@@ -274,14 +209,14 @@ class DisplayTransferService:
     """
 
     def __init__(self) -> None:
-        self._handlers: dict[str, DisplayHandler] = {}
+        self._handlers: dict[str, DisplayHandlerProtocol] = {}
 
-    def register(self, handler: DisplayHandler) -> None:
+    def register(self, handler: DisplayHandlerProtocol) -> None:
         """Add a handler to the registry."""
         self._handlers[handler.app_id] = handler
-        log.info("Registered display handler: %s (%s)", handler.app_id, handler.display_type.value)
+        log.info("Registered display handler: %s (%s)", handler.app_id, handler.handler_type)
 
-    def get_handler(self, app_id: str) -> DisplayHandler | None:
+    def get_handler(self, app_id: str) -> DisplayHandlerProtocol | None:
         """Look up a handler by app_id."""
         return self._handlers.get(app_id)
 
@@ -341,7 +276,7 @@ class DisplayTransferService:
         """Return JSON-serializable metadata for all registered handlers."""
         return {
             h.app_id: asdict(HandlerMetadata(
-                display_type=h.display_type.value,
+                handler_type=h.handler_type,
                 conflicts_with=h.conflicts_with,
             ))
             for h in self._handlers.values()

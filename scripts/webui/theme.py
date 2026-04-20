@@ -565,7 +565,10 @@ def kiosk_nav_bar() -> None:
         f"padding: 0 16px; gap: 12px; "
         f"background: {BG_CARD}; border-bottom: 1px solid {BORDER};"
     )
+    from scripts.webui import manager as _mgr
     from scripts.webui.data import KIOSK_NAV_ITEMS, Labels, Routes
+
+    is_cm = isinstance(_mgr.try_get_instance(), _mgr.ClusterManager)
 
     with ui.element("div").style(bar_style):
         ui.button(
@@ -574,6 +577,8 @@ def kiosk_nav_bar() -> None:
         ui.label(Labels.HOME_HUB).classes("text-sm").style(f"color: {TEXT_SECONDARY}")
         ui.space()
         for nav_label, nav_path, nav_icon in KIOSK_NAV_ITEMS:
+            if nav_path == Routes.FLEET and not is_cm:
+                continue
             ui.button(
                 nav_label, icon=nav_icon,
                 on_click=lambda p=nav_path: ui.navigate.to(p),

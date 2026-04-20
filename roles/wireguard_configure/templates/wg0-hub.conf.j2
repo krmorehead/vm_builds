@@ -1,0 +1,17 @@
+[Interface]
+PrivateKey = {{ _wg_private_key }}
+Address = {{ wireguard_client_address }}
+ListenPort = 51820
+{% if wireguard_dns | length > 0 %}
+DNS = {{ wireguard_dns }}
+{% endif %}
+
+{% for peer in _wg_peers %}
+[Peer]
+PublicKey = {{ peer.public_key }}
+AllowedIPs = {{ peer.vpn_ip }}/32
+{% if peer.preshared_key | default('') | length > 0 %}
+PresharedKey = {{ peer.preshared_key }}
+{% endif %}
+
+{% endfor %}

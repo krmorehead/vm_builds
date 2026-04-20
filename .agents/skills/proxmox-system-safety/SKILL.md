@@ -112,15 +112,15 @@ description: Proxmox system safety operations and hardware detection patterns. U
 
 ## Hookscript Attachment Ordering
 
-28. Display-exclusive hookscripts that stop DRI-sharing containers MUST NOT be attached during provisioning. Attaching during `kiosk_lxc` (Phase 2.5) causes the hookscript to fire when `desktop_vm` starts in Phase 3, stopping all DRI containers (Kodi, Moonlight, Kiosk) before their configure plays run.
+28. Display-exclusive hookscripts that stop DRI-sharing containers MUST NOT be attached during provisioning. Attaching during `kiosk_lxc` (Phase 2.5) causes the hookscript to fire when `desktop_lxc` starts in Phase 3, stopping all DRI containers (Kodi, Moonlight, Kiosk) before their configure plays run.
 
 29. Pattern: deploy the hookscript FILE in the provisioning role, attach it to containers/VMs in a dedicated play AFTER all configure plays finish. This ensures all containers are configured before the hookscript can stop them.
 
 30. Configure roles for DRI-sharing containers should include a defensive "ensure container is running" guard at the top (check `pct status`, start if stopped, wait for readiness). This handles re-runs where hookscripts may already be attached from a previous cycle.
 
-31. Previous bug: `kiosk_lxc` deployed AND attached the display-exclusive hookscript during Phase 2.5. When `desktop_vm` started in Phase 3, the hookscript's `pre-start(400)` stopped Kodi (301), Moonlight (302), and Kiosk (401). `Configure Kodi` then failed with "container '301' not running!" Fix: split hookscript deployment (provisioning) from attachment (post-configure play).
+31. Previous bug: `kiosk_lxc` deployed AND attached the display-exclusive hookscript during Phase 2.5. When `desktop_lxc` started in Phase 3, the hookscript's `pre-start(400)` stopped Kodi (301), Moonlight (302), and Kiosk (401). `Configure Kodi` then failed with "container '301' not running!" Fix: split hookscript deployment (provisioning) from attachment (post-configure play).
 
-32. Verify assertions for DRI-sharing containers (Kodi, Kiosk, Moonlight) MUST skip `systemctl is-active` checks when the Desktop VM is running. The Desktop VM holds the iGPU via PCI passthrough, making DRI devices unavailable to containers. Graphical services (Kodi) legitimately report `inactive` without GPU access. Check `qm status desktop_vm_id` and gate the service-active assertion.
+32. Verify assertions for DRI-sharing containers (Kodi, Kiosk, Moonlight) MUST skip `systemctl is-active` checks when the Desktop LXC is running and has grabbed the DRI render node. The display-exclusive hookscript manages this conflict. Check `pct status {{ desktop_ct_id }}` and gate the service-active assertion.
 
 33. Previous bug: Kodi container was `running` but `systemctl is-active kodi` returned `inactive` during verify. Root cause: Desktop VM held the iGPU, DRI devices absent from container. Fix: added `"'running' not in (_desktop_status.stdout | default(''))"` condition to the Kodi service-active assertion.
 

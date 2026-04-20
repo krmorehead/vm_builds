@@ -61,7 +61,7 @@ When working with LXC containers, load these skills IMMEDIATELY:
 
 3. For readiness: use `ls /` not `hostname` (BusyBox containers may lack it). For OpenWrt LXC: use `--ostype unmanaged`.
 
-4. Configure plays target the dynamic group populated by `add_host`. The connection uses `community.proxmox.proxmox_pct_remote` which SSHes to the Proxmox host and runs `pct exec` inside the container.
+4. Configure plays use `ansible.builtin.uri` to push config via the NodeManager API (`/api/container/{id}/exec`, `/api/config/push`) over VPN. This is the standard path for 9/10 configure roles. NEVER use `pct exec` or `pct_remote` in configure roles when an API endpoint exists. The only exceptions are `kiosk_configure` (bootstrap — deploys the NM itself) and `openwrt_configure` (no HTTP API on OpenWrt VM). Legacy `pct_remote` references remain in provisioning roles for hypervisor-side operations (`pct config`, `pct status`).
 
 5. For OpenWrt containers (no Python), use `ansible.builtin.raw` with commands wrapped in `/bin/sh -c '...'`.
 
@@ -358,12 +358,61 @@ forwarding port 9001 from the host IP to the container IP fixed it.
 
 ## Display-Exclusive Hookscript and DRI-Sharing Containers
 
-38. When the Desktop VM holds the iGPU via PCI passthrough (`--hostpci0`), DRI devices (`/dev/dri/renderD*`) are not available on the Proxmox host. Containers that bind-mount DRI devices (Kodi, Kiosk, Moonlight, Jellyfin) lose GPU access. Graphical services (Kodi) cannot start and report `inactive`.
+38. Desktop LXC shares the iGPU DRI render node via bind mount (not exclusive PCI passthrough). The display-exclusive hookscript manages conflicts — when Desktop LXC starts, it stops other DRI-sharing containers (Kodi, Kiosk, Moonlight) and vice versa.
 
 39. Configure roles for DRI-sharing containers MUST include a defensive "ensure container is running" guard: check `pct status`, start if stopped, wait for readiness via `pct exec -- ls /`. This handles re-runs where hookscripts have already stopped the container.
 
-40. Verify assertions for DRI-sharing services MUST skip `systemctl is-active` checks when the Desktop VM is running. The service legitimately can't start without GPU access.
+40. Verify assertions for DRI-sharing services MUST skip `systemctl is-active` checks when a competing container (Desktop LXC) has the DRI render node exclusively. The service legitimately can't start without GPU access.
 
-41. When detecting render group GID from `/dev/dri/renderD*`, use `failed_when: false` and fall back to a cached `igpu_render_gid` fact from `proxmox_igpu`. The Desktop VM holding the iGPU makes the DRI device unavailable on the host.
+41. When detecting render group GID from `/dev/dri/renderD*`, use `failed_when: false` and fall back to a cached `igpu_render_gid` fact from `proxmox_igpu`. The DRI device may be temporarily unavailable when a competing container has exclusive use.
 
-42. Previous bug: `kiosk_configure` ran `stat -c '%g' /dev/dri/renderD*` but the Desktop VM held the iGPU via passthrough. No DRI devices existed on the host. Fix: made detection non-fatal with fallback to cached fact.
+42. Previous bug: `kiosk_configure` ran `stat -c '%g' /dev/dri/renderD*` but a competing container held exclusive DRI access. No DRI devices existed on the host. Fix: made detection non-fatal with fallback to cached fact.
+
+## Callhome Config Rewrite Pattern (CRITICAL)
+
+47. When rewriting `/etc/default/callhome` on sibling containers (to point
+them at the local NodeManager after kiosk deployment), NEVER overwrite the
+entire file. Use targeted `sed -i` to update ONLY `CALLHOME_SERVER` and
+`CALLHOME_PUBLIC_KEY`. This preserves baked-in variables like
+`CALLHOME_HOSTNAME` which determine fleet identity.
+
+48. The `kiosk_configure` role's "Rewrite callhome config on sibling
+containers" task iterates all running containers on the host and updates
+their callhome config. Two paths:
+- Debian containers (have `/opt/callhome/`): `bash -c "sed -i ..."` + restart `callhome.service`
+- OpenWrt containers (have `/usr/sbin/callhome.sh`, no `/opt/callhome`): `sh -c "sed -i ..."` + restart cron
+
+49. OpenWrt containers use BusyBox `sed`, which supports `-i` without a
+backup extension. ALWAYS use `sh -c` (not `bash -c`) for OpenWrt containers.
+
+50. Previous bug (2026-04-17): `kiosk_configure` used `printf` to overwrite
+the entire `/etc/default/callhome` on OpenWrt mesh/bridge containers.
+This destroyed `CALLHOME_HOSTNAME=openwrt-mesh` and
+`CALLHOME_HOSTNAME=openwrt-bridge`. The containers then heartbeated with
+their CT hostname instead of the expected fleet service name. The fleet
+readiness API couldn't find them, causing verify failures. Fix: `sed -i`
+to update only the changed values.
+
+## Host-Level Socat Proxy Port Conflicts (CRITICAL)
+
+43. When an LXC provisioning role deploys a host-level socat proxy (e.g.,
+`kiosk-display-proxy` on port 6080), a PREVIOUSLY DEPLOYED service with
+a different name on the SAME port will prevent the new service from
+starting. The new service crash-loops with `Result=exit-code` and
+`NRestarts=<hundreds>` while appearing as "activating" to `systemctl is-active`.
+
+44. ALWAYS stop and remove the legacy service BEFORE deploying the
+replacement in the provisioning role. Include `pkill -f 'socat.*TCP-LISTEN:<port>'`
+as a belt-and-suspenders cleanup.
+
+45. `cleanup_lan_host.yml` MUST clean up ALL host-level systemd units
+deployed by provisioning roles. LAN hosts are excluded from the main
+cleanup play (`proxmox:!lan_hosts`), so without explicit LAN cleanup,
+stale units survive indefinitely.
+
+46. Previous catastrophe (2026-04-14): KasmVNC migration renamed
+`kiosk-vnc-proxy` → `kiosk-display-proxy`. mesh1 (LAN host) was excluded
+from main cleanup. Old `kiosk-vnc-proxy` held port 6080. New service
+crash-looped 957 times. Masked by adding 100s of verify retries instead
+of diagnosing the port conflict. The root cause took multiple test cycles
+to surface because the retries delayed the failure without ever succeeding.

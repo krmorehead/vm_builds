@@ -1,13 +1,23 @@
 ---
-# ── Verify rsyslog template exists ──────────────────────────────
+# rsyslog LXC provisioning via Node Manager API.
+# Version check skips provisioning when the deployed version matches.
+
+# ── Version-aware skip check ──────────────────────────────────────
+- name: Check rsyslog version via NM API
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/check_service_version.yml"
+  vars:
+    _check_service_name: rsyslog
+    _check_image_version: "{{ rsyslog_image_version }}"
+
+# ── Verify rsyslog template exists (skipped when version matches) ─
 - name: Verify rsyslog template exists
   ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/verify_lxc_template.yml"
   vars:
     lxc_template_path: "{{ rsyslog_ct_template_path }}"
     lxc_service_name: rsyslog
+  when: not (_service_up_to_date | default(false) | bool)
 
-# ── Determine container network based on host topology ───────────
-
+# ── Determine container network ──────────────────────────────────
 - name: Compute rsyslog container network
   ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_wan_or_lan_network.yml"
   vars:
@@ -15,48 +25,58 @@
     lxc_net_ip_offset: "{{ rsyslog_ct_ip_offset }}"
     lxc_net_flavor_group: monitoring_nodes
 
-# ── Check container existence ──────────────────────────────────
+# ── Provision container via NM API (skipped when version matches) ─
+- name: Provision rsyslog LXC via NM API
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/rsyslog"
+    method: POST
+    body_format: json
+    body:
+      vmid: "{{ rsyslog_ct_id }}"
+      template_path: "{{ rsyslog_ct_template_path | basename }}"
+      hostname: "{{ rsyslog_ct_hostname }}"
+      memory: "{{ rsyslog_ct_memory }}"
+      cores: "{{ rsyslog_ct_cores }}"
+      disk: "{{ rsyslog_ct_disk }}"
+      onboot: "{{ rsyslog_ct_onboot }}"
+      startup_order: "{{ rsyslog_ct_startup_order }}"
+      features: "{{ rsyslog_ct_features | join(',') }}"
+      ip: "{{ _lxc_net_ip }}/{{ _lxc_net_cidr }}"
+      gateway: "{{ _lxc_net_gateway }}"
+      nameserver: "{{ _lxc_net_nameserver }}"
+      bridge: "{{ _lxc_net_bridge }}"
+      image_version: "{{ rsyslog_image_version }}"
+    status_code: 200
+    timeout: 180
+  delegate_to: localhost
+  register: _provision_result
+  failed_when: not (_provision_result.json.success | default(false))
+  when: not (_service_up_to_date | default(false) | bool)
 
-- name: Check if rsyslog container exists
-  ansible.builtin.command:
-    cmd: pct status {{ rsyslog_ct_id }}
-  register: _ct_status
-  failed_when: false
-  changed_when: false
-
-- name: Set container existence flag
-  ansible.builtin.set_fact:
-    _lxc_exists: "{{ _ct_status.rc == 0 }}"
-
-# ── Resolve deployed version ────────────────────────────────────
-
-- name: Resolve deployed rsyslog version
-  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_deployed_version.yml"
+# ── Configure callhome via NM API (skipped when version matches) ─
+- name: Configure callhome on rsyslog
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/configure_callhome_api.yml"
   vars:
-    _resolve_service_name: rsyslog
+    _callhome_vmid: "{{ rsyslog_ct_id }}"
 
-# ── Provision via shared proxmox_lxc role ────────────────────────
+# ── Register in dynamic inventory (for configure plays) ──────────
+- name: Add rsyslog containers to dynamic inventory group
+  ansible.builtin.add_host:
+    name: "{{ rsyslog_ct_hostname }}-{{ item }}"
+    groups: rsyslog
+    ansible_connection: community.proxmox.proxmox_pct_remote
+    ansible_host: "{{ hostvars[item].ansible_host }}"
+    ansible_user: root
+    proxmox_vmid: "{{ rsyslog_ct_id }}"
+    ansible_paramiko_host_key_checking: false
+    ansible_paramiko_proxy_command: >-
+      {{ 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@'
+         + lookup('env', 'PRIMARY_HOST')
+         if 'lan_hosts' in (hostvars[item].group_names | default([]))
+         else omit }}
+  loop: "{{ ansible_play_hosts }}"
 
-- name: Provision rsyslog LXC container
-  ansible.builtin.include_role:
-    name: proxmox_lxc
-  vars:
-    lxc_ct_id: "{{ rsyslog_ct_id }}"
-    lxc_ct_hostname: "{{ rsyslog_ct_hostname }}"
-    lxc_ct_dynamic_group: rsyslog
-    lxc_ct_memory: "{{ rsyslog_ct_memory }}"
-    lxc_ct_cores: "{{ rsyslog_ct_cores }}"
-    lxc_ct_disk: "{{ rsyslog_ct_disk }}"
-    lxc_ct_onboot: "{{ rsyslog_ct_onboot }}"
-    lxc_ct_startup_order: "{{ rsyslog_ct_startup_order }}"
-    lxc_ct_template_path: "{{ rsyslog_ct_template_path }}"
-    lxc_ct_ip: "{{ _lxc_net_ip }}/{{ _lxc_net_cidr }}"
-    lxc_ct_gateway: "{{ _lxc_net_gateway }}"
-    lxc_ct_nameserver: "{{ _lxc_net_nameserver }}"
-    lxc_ct_features: "{{ rsyslog_ct_features }}"
-    lxc_ct_bridge: "{{ _lxc_net_bridge }}"
-    lxc_ct_image_version: "{{ rsyslog_image_version }}"
-
+# ── Export static IP for downstream roles ─────────────────────────
 - name: Export rsyslog static IP for downstream roles
   ansible.builtin.set_fact:
     rsyslog_static_ip: "{{ _lxc_net_ip }}"

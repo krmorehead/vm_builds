@@ -88,9 +88,10 @@ done
 # 3b. Display apps can be started (should return success even if already running)
 echo ""
 echo "=== Display App Launch Tests ==="
+# home: Kodi (301) and Desktop (400)
 for pair in "301:Kodi" "400:Desktop"; do
   vmid="${pair%%:*}"; name="${pair##*:}"
-  echo -n "$name (VMID $vmid): "
+  echo -n "home $name (VMID $vmid): "
   ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST \
     "pct exec 401 -- python3 -c \"
 import urllib.request, json
@@ -100,6 +101,17 @@ d = json.loads(r.read())
 print('OK' if d.get('success') else f'FAIL: {d.get(\\\"output\\\", d.get(\\\"error\\\"))}')
 \"" 2>/dev/null || echo "FAILED"
 done
+# mesh1: Moonlight (302)
+echo -n "mesh1 Moonlight (VMID 302): "
+ssh -o StrictHostKeyChecking=no -o ProxyCommand="ssh -o StrictHostKeyChecking=no -W %h:%p root@$PRIMARY_HOST" \
+  root@10.10.10.210 \
+  "pct exec 401 -- python3 -c \"
+import urllib.request, json
+req = urllib.request.Request('http://localhost:9001/api/guests/302/start', method='POST')
+r = urllib.request.urlopen(req, timeout=10)
+d = json.loads(r.read())
+print('OK' if d.get('success') else f'FAIL: {d.get(\\\"output\\\", d.get(\\\"error\\\"))}')
+\"" 2>/dev/null || echo "FAILED"
 
 # 3c. External service URLs are reachable from kiosk
 echo ""
@@ -150,19 +162,32 @@ ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST \
   "pct exec 401 -- ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 root@10.10.10.1 \
    'echo REACHABLE; uci get system.@system[0].hostname 2>/dev/null'" 2>/dev/null || echo "FAILED"
 
-# 3f. VNC service status on ALL hosts
+# 3f. Display service status on ALL hosts (kiosk-display on CT 401)
 echo ""
-echo "=== VNC Services (all hosts) ==="
+echo "=== Kiosk Display Services (all hosts) ==="
 for pair in "$PRIMARY_HOST:home" "$AI_HOST:ai" "$MESH_2_HOST:mesh2" \
             "$BRIDGE_1_HOST:bridge-1" "$BRIDGE_2_HOST:bridge-2"; do
   host="${pair%%:*}"; label="${pair##*:}"
-  echo -n "  $label: "
+  echo -n "  $label kiosk-display: "
   ssh -o StrictHostKeyChecking=no root@$host \
-    "pct exec 401 -- systemctl is-active kiosk-vnc kiosk-vnc-ws 2>/dev/null" 2>/dev/null
+    "pct exec 401 -- systemctl is-active kiosk-display 2>/dev/null" 2>/dev/null
 done
-echo -n "  mesh1: "
+echo -n "  mesh1 kiosk-display: "
 ssh -o StrictHostKeyChecking=no -o ProxyCommand="ssh -o StrictHostKeyChecking=no -W %h:%p root@$PRIMARY_HOST" \
-  root@10.10.10.210 "pct exec 401 -- systemctl is-active kiosk-vnc kiosk-vnc-ws 2>/dev/null" 2>/dev/null
+  root@10.10.10.210 "pct exec 401 -- systemctl is-active kiosk-display 2>/dev/null" 2>/dev/null
+
+# 3g. App-specific display services (Desktop, Kodi, Moonlight)
+echo ""
+echo "=== App Display Services ==="
+echo -n "  home desktop-display (CT 400): "
+ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST \
+  "pct exec 400 -- systemctl is-active desktop-display 2>/dev/null" 2>/dev/null || echo "inactive/missing"
+echo -n "  home kodi display (CT 301): "
+ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST \
+  "pct status 301 2>/dev/null" 2>/dev/null || echo "not found"
+echo -n "  mesh1 moonlight display (CT 302): "
+ssh -o StrictHostKeyChecking=no -o ProxyCommand="ssh -o StrictHostKeyChecking=no -W %h:%p root@$PRIMARY_HOST" \
+  root@10.10.10.210 "pct status 302 2>/dev/null" 2>/dev/null || echo "not found"
 ```
 
 **Expected**: ALL checks pass. Any FAIL or BLOCKED result MUST be fixed before
@@ -174,7 +199,7 @@ proceeding to browser-based testing. Common failures:
 | Service URL FAIL: Connection refused | Service not listening or wrong IP in config | Check container networking, restart service |
 | X-Frame-Options BLOCKED | Service sends SAMEORIGIN header | Add `use_x_frame_options: false` to service config |
 | Router SSH FAILED | Kiosk can't reach router at 10.10.10.1 | Check LAN routing, SSH keys |
-| VNC not active | sway/wayvnc crashed | `journalctl -u kiosk-display` inside container |
+| Display service not active | KasmVNC crashed | `journalctl -u kiosk-display` inside container |
 
 ## Playbook 1: Verify Kiosk Containers Running
 
@@ -659,7 +684,23 @@ navigation, and interactive elements that CLI-only API tests cannot cover.
 
 ### Prerequisites — tunnels
 
+**Tunnel port assignments** (used across all playbooks):
+
+| Local Port | Target | Used by |
+|-----------|--------|---------|
+| 9099 | CM (10.10.10.23:9001) via direct tunnel | PB2–7 (CLI API) |
+| 9098 | CM via socat relay | PB11–14, 19 (browser UI) |
+| 9097 | ai NM (10.99.3.20:9001) | PB12, 15 |
+| 6080–6083 | KasmVNC display streams | PB13 |
+| ${WEBUI_PORT} | SuperManager (local) | PB9, 12, 16–18, 20 |
+
+If PB11's direct tunnel on 9098 is still active, kill it before
+setting up the socat relay below.
+
 ```bash
+# Kill any stale PB11 tunnel on 9098
+kill $(lsof -ti :9098) 2>/dev/null
+
 # SuperManager runs on the controller (no tunnel needed):
 # http://localhost:${WEBUI_PORT:-52525}/
 
@@ -676,7 +717,7 @@ ssh -o StrictHostKeyChecking=no -L 9098:127.0.0.1:9098 root@$PRIMARY_HOST -N -f
 # Access at: http://localhost:9098/
 
 # NodeManager kiosk (ai — NAT bridge, no collision):
-ssh -o StrictHostKeyChecking=no -L 9097:10.99.3.19:9001 root@$AI_HOST -N -f
+ssh -o StrictHostKeyChecking=no -L 9097:10.99.3.20:9001 root@$AI_HOST -N -f
 # Access at: http://localhost:9097/
 ```
 
@@ -828,27 +869,44 @@ ssh -o StrictHostKeyChecking=no \
 
 **Expected**: All 6 hosts show `active` and `kasmvnc=ok`. If any service
 is failed, check `journalctl -u kiosk-display` inside the container.
-Verify NO old services exist:
+Verify only `kiosk-display.service` is used (legacy `kiosk-vnc` /
+`kiosk-vnc-ws` units must not exist):
 
 ```bash
 ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST \
-  "pct exec 401 -- systemctl is-active kiosk-vnc kiosk-vnc-ws 2>&1 || true"
+  "pct exec 401 -- systemctl is-active kiosk-display"
 ```
 
-**Expected**: `inactive` or `Unit kiosk-vnc.service not found` for both.
-
-**Desktop VM check** (on home only):
+**Expected**: Command output is `active`. Legacy `kiosk-vnc` and
+`kiosk-vnc-ws` must not be installed as systemd units (`LoadState=not-found`).
 
 ```bash
 ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST \
-  "qm guest exec 400 -- systemctl is-active desktop-display" 2>&1
-# Verify NO host-side websockify
-ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST \
-  "systemctl is-active desktop-vnc-ws 2>&1 || echo 'correctly absent'"
+  "pct exec 401 -- bash -c 'for u in kiosk-vnc kiosk-vnc-ws; do [ \"\$(systemctl show -p LoadState --value \"\${u}.service\")\" = not-found ] || exit 1; done; echo legacy_vnc_units=absent'"
 ```
 
-**Expected**: `desktop-display` active inside VM, `desktop-vnc-ws` absent
-on host.
+**Expected**: `legacy_vnc_units=absent`.
+
+**Desktop LXC check** (on home only — CT 400):
+
+```bash
+ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST \
+  "pct exec 400 -- systemctl is-active desktop-display" 2>&1
+# Verify session switch script is baked in
+ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST \
+  "pct exec 400 -- test -x /usr/sbin/switch-desktop-session && echo 'switch-script=ok' || echo 'switch-script=MISSING'"
+# Verify both xstartup session files exist
+ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST \
+  "pct exec 400 -- bash -c 'test -f /home/desktop/.vnc/xstartup-kde && test -f /home/desktop/.vnc/xstartup-gnome && echo sessions=ok || echo sessions=MISSING'"
+# Verify current session
+ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST \
+  "pct exec 400 -- /usr/sbin/switch-desktop-session status"
+```
+
+**Expected**: `desktop-display` active inside the container (KasmVNC);
+`switch-script=ok`; `sessions=ok`; `SESSION=kde` (default). The
+container has both KDE Plasma and GNOME installed with switchable
+xstartup symlink.
 
 ### 13.2 SuperManager → ClusterManager drill-down via iframe
 
@@ -857,14 +915,19 @@ on host.
 3. Verify "Open Kiosk" button visible with `cast` icon
 4. Click "Open Kiosk" → `/remote/home?back=/nodes/home`
 5. Verify KasmVNC iframe loads showing the CM kiosk hub page — NOT a
-   noVNC `<canvas>`, NOT an RFB connection status dot. The KasmVNC
+   noVNC `<canvas>`. The KasmVNC
    web client auto-hides its control bar when embedded in an iframe
-6. Verify the viewer bar at the top shows "home" label with back button
-7. Click bridge/mesh/router links inside the iframe — verify Chromium
+6. Verify the **thin viewer bar** at the top shows: **back arrow**,
+   "home" label, **"Drill into" dropdown** (child node picker), and
+   **visibility_off toggle** button. The SM acts as a thin client —
+   NO session switching, NO app switcher icons in the bar
+7. Click the **visibility_off** toggle → verify the viewer bar hides,
+   giving full-screen immersive view of the KasmVNC iframe
+8. Click bridge/mesh/router links inside the iframe — verify Chromium
    navigates within the kiosk (page changes visible through iframe)
-8. Move mouse, type on keyboard — verify input reaches the KasmVNC
+9. Move mouse, type on keyboard — verify input reaches the KasmVNC
    display through the iframe
-9. Click back button in top bar → verify return to `/nodes/home`
+10. Click back button in top bar → verify return to `/nodes/home`
 
 ### 13.3 Two-level drill-down (SM → CM kiosk → NM kiosk)
 
@@ -901,19 +964,37 @@ These apps run their own KasmVNC instance on dedicated ports. The console
 page renders the app's KasmVNC web client in an iframe. Each one must be
 tested individually.
 
-**Desktop (VMID 400):**
+**Desktop (VMID 400) — KDE session (default, Windows-style):**
 
-1. In the app switcher buttons on the viewer bar, click the Desktop
-   icon (or navigate via SM: `/console/home/desktop`)
-2. Verify the console page loads with Desktop label in the viewer bar
-3. Verify the KasmVNC iframe shows the Desktop VM's virtual X11 desktop
-   (desktop environment wallpaper, taskbar), NOT the kiosk hub, NOT
-   a VGA BIOS stub. This is a SEPARATE session from the iGPU passthrough
-   physical display
-4. Interact: open a terminal, move windows, click the application menu,
-   type text. Verify mouse and keyboard input work through the iframe
-5. Click back button in viewer bar → verify return to previous page
-6. Verify no noVNC status dot, no `<canvas>` element — pure iframe
+1. Navigate to `/console/home/desktop` from the SM
+2. Verify the console page loads with a **minimal thin viewer bar**:
+   **back arrow**, "Desktop on home" label, and **visibility_off toggle**
+3. Verify the viewer bar does NOT contain session switching buttons or
+   app switcher icons — the SM is a thin client, session management
+   happens within the desktop environment itself via the KasmVNC iframe
+4. Verify the KasmVNC iframe shows a **KDE Plasma desktop** — Breeze Dark
+   theme, bottom taskbar with system tray, Application Launcher (start
+   menu style), dark window decorations. This should look like Windows 11
+   Dark Mode, NOT generic XFCE
+5. Interact: open Konsole (terminal), open Dolphin (file manager), move
+   windows, click the Application Launcher menu, type text. Verify mouse
+   and keyboard input work through the iframe
+6. Click the **visibility_off** toggle → verify the viewer bar hides,
+   giving full-screen immersive desktop view
+7. Click back button in viewer bar → verify return to previous page
+8. Verify no noVNC status dot, no `<canvas>` element — pure iframe
+
+**Desktop (VMID 400) — session switching:**
+
+Session switching between KDE (Windows-style) and GNOME (Mac-style) is
+done WITHIN the desktop environment, through the KasmVNC iframe. The
+switch-desktop-session script runs inside the Desktop LXC container.
+The SM does not control sessions — it only provides the viewport.
+
+9. To test session switching, use the desktop environment's own
+   mechanisms (e.g., log out and select a different session, or use
+   the baked-in `/usr/sbin/switch-desktop-session` command via a
+   terminal inside the KasmVNC iframe)
 
 **Kodi (VMID 301):**
 
@@ -955,22 +1036,32 @@ For each app below, perform these steps:
 4. Click the home icon (top-left of viewer bar) → verify return to hub
 5. Verify iframe connection remains active
 
-Test these services in order:
+Test these services on **home's kiosk** (services deployed on home):
 
 | # | Tile | Section | What to verify in the iframe |
 |---|------|---------|------------------------------|
 | 1 | **Jellyfin** | Desktop & Media | Media library loads, browse a show/movie, start playback |
 | 2 | **Home Assistant** | Desktop & Media | Dashboard loads with entity cards, click a card to see entity detail |
-| 3 | **Gaming (Sunshine)** | Desktop & Media | Sunshine web UI loads, apps list or login page visible |
-| 4 | **Router (OpenWrt)** | Settings & Network | LuCI status overview loads, navigate to Network → Interfaces |
-| 5 | **Pi-hole** | Settings & Network | Dashboard loads with query stats, navigate to Query Log |
-| 6 | **WireGuard** | Settings & Network | VPN status page loads, peer list visible |
-| 7 | **Netdata** | Monitoring | Real-time metrics dashboard loads, CPU/memory charts updating |
-| 8 | **Logs (rsyslog)** | Monitoring | Log viewer page loads, recent log entries visible |
+| 3 | **Router (OpenWrt)** | Settings & Network | LuCI status overview loads, navigate to Network → Interfaces |
+| 4 | **Pi-hole** | Settings & Network | Dashboard loads with query stats, navigate to Query Log |
+| 5 | **WireGuard** | Settings & Network | VPN status page loads if URL configured, OR tile shows "Not available" (WireGuard lacks a native web UI — this is valid) |
+| 6 | **Netdata** | Monitoring | Real-time metrics dashboard loads, CPU/memory charts updating |
+| 7 | **Logs (rsyslog)** | Monitoring | Log viewer loads if URL configured, OR tile shows "Not available" (rsyslog lacks a native web UI — this is valid) |
 
 If any service URL is not configured on home's kiosk (tile shows "Not
 available" badge), note it as a gap but do NOT skip — verify the disabled
 tile renders correctly (greyed out, non-clickable).
+
+**Gaming (Sunshine) — test on ai's kiosk, NOT home's:**
+
+Gaming (Sunshine) is deployed only on `ai` (`gaming_nodes`). On home's hub
+the Gaming tile shows "Not available." To test Gaming:
+
+1. Navigate to SM `/nodes/ai` → "Open Kiosk" → `/remote/ai`
+2. Inside ai's kiosk hub, verify the Gaming tile shows the Sunshine URL
+3. Click Gaming tile → verify viewer page loads with Sunshine web UI
+4. Interact: view apps list or login page, navigate menus
+5. Click back → return to ai's hub
 
 ---
 
@@ -994,14 +1085,17 @@ For each page below:
 |---|------|-------|----------------|
 | 1 | **WiFi Bridge** | `/bridge` | Bridge host cards with AP/STA roles, WiFi status, signal metrics |
 | 2 | **Mesh WiFi** | `/mesh` | Mesh topology, peer status cards, signal quality indicators |
-| 3 | **Router Detail** | `/router` | OpenWrt status, WAN/LAN interfaces, DHCP lease table |
+| 3 | **Router Detail** | `/router` | OpenWrt metrics (WAN/LAN/WiFi/Firewall/System) populated via heartbeat subscription to 10.10.10.1. Page must NOT be blank — verify data cards show real values |
 | 4 | **Containers & VMs** | `/containers` | Guest list with VMIDs, names, status badges, start/stop controls |
 
 ---
 
-**13.4d Two-level drill-down app launch**
+**13.4d Two-level drill-down app launch (test multiple child hosts)**
 
-Test that apps work after navigating SM → CM → NM via child picker:
+Test that apps work after navigating SM → CM → NM via child picker.
+Test at least 3 different child hosts to cover all forwarding topologies.
+
+**mesh1 (LAN host — relay path):**
 
 1. Open `/remote/home?back=/nodes/home` — iframe to home's CM kiosk
 2. Select "mesh1" from the child picker dropdown → iframe to mesh1
@@ -1009,18 +1103,53 @@ Test that apps work after navigating SM → CM → NM via child picker:
    available." Click each enabled tile — internal pages (Bridge, Mesh,
    Router, Containers) and any configured external services. Verify
    each loads and is interactive through the iframe
-4. If Moonlight is configured, navigate to its console. Otherwise verify
-   it shows "Not available" or "Launch" badge
+4. If Moonlight is configured, navigate to its console via the app
+   switcher or hub "Launch" tile. Verify the KasmVNC iframe shows
+   Moonlight's UI on port 6083
 5. Click back in the **parent page top bar** → return to `/remote/home`
-6. Verify home's kiosk hub is visible again, iframe reconnected
-7. Click back again → return to `/nodes/home` (SM page, no iframe)
 
-### 13.5 Direct SuperManager → NodeManager display
+**ai (WAN host — DNAT path):**
 
-1. From `/nodes/mesh1`, click "Open Kiosk" → KasmVNC iframe to mesh1
-2. Verify single-layer iframe (lower latency than two-level)
-3. Navigate mesh1's kiosk pages, launch an app, verify full control
-4. Click back → return to `/nodes/mesh1`
+6. Select "ai" from the child picker → iframe to ai
+7. Verify ai's hub loads. Click the Gaming (Sunshine) tile — verify
+   Sunshine web UI loads inside the viewer iframe
+8. Click back → return to `/remote/home`
+
+**bridge-1 (WAN host — minimal services):**
+
+9. Select "bridge-1" from the child picker → iframe to bridge-1
+10. Verify bridge-1's hub shows mostly "Not available" tiles (bridge
+    nodes have fewer services). Verify the Containers & VMs internal
+    page works
+11. Click back → return to `/remote/home`
+12. Click back again → return to `/nodes/home` (SM page, no iframe)
+
+### 13.5 Direct SuperManager → every host's kiosk display
+
+Test that ALL 6 hosts' kiosk displays are accessible directly from the SM.
+This verifies the display URL resolution, port forwarding (DNAT, socat,
+relay), and KasmVNC service health on every unit.
+
+For each host below:
+
+1. Navigate to `/nodes/{hostname}` on the SuperManager
+2. Click "Open Kiosk" → `/remote/{hostname}`
+3. Verify KasmVNC iframe loads and shows the kiosk hub page
+4. Verify mouse/keyboard interaction works through the iframe
+5. Click one tile inside the iframe (any tile) to verify navigation
+6. Click back → return to `/nodes/{hostname}`
+
+| # | Host | IP resolution path | Port forwarding type |
+|---|------|--------------------|---------------------|
+| 1 | **home** | `_fleet_nodes` → WAN IP | socat proxy (router node cross-bridge) |
+| 2 | **mesh1** | `_fleet_nodes` → LAN IP (direct) | socat proxy on mesh1:6080 → container |
+| 3 | **ai** | `_fleet_nodes` → WAN IP | iptables DNAT |
+| 4 | **mesh2** | `_fleet_nodes` → WAN IP | iptables DNAT |
+| 5 | **bridge-1** | `_fleet_nodes` → WAN IP | iptables DNAT |
+| 6 | **bridge-2** | `_fleet_nodes` → WAN IP | iptables DNAT |
+
+**All 6 must load.** If any fails, note the specific error (iframe blank,
+ERR_CONNECTION_REFUSED, timeout) and which forwarding path is broken.
 
 ### 13.6 ClusterManager display from CM's own web UI (different code path)
 
@@ -1064,6 +1193,33 @@ separately from the SM path (`_fleet_nodes`). Access the CM's
 4. Verify ZERO noVNC artifacts: no `<canvas id="vnc-container">`, no
    `#vnc-status-dot`, no `/static/noVNC/` requests in browser DevTools
    Network tab. ALL display streaming uses `<iframe>` elements
+5. Verify display app conflict resolution: navigate to
+   `/console/home/desktop` (start Desktop LXC), then switch to
+   `/console/home/kodi` via the app switcher. Verify the Desktop LXC is
+   stopped before Kodi starts (DRI3 device conflict). Then switch back
+   to Desktop — verify Kodi stops and Desktop starts
+
+### 13.8 Complete host × app verification matrix
+
+Final sign-off checklist. Every cell must be verified during this playbook.
+Mark each as PASS/FAIL.
+
+| Host | Kiosk (6080) | Desktop (6081) | Kodi (6082) | Moonlight (6083) | Gaming (web) |
+|------|:---:|:---:|:---:|:---:|:---:|
+| **home** | SM direct | SM console | SM console | N/A | N/A |
+| **mesh1** | SM direct + relay | SM console | N/A | SM console | N/A |
+| **ai** | SM direct | SM console | N/A | N/A | hub tile |
+| **mesh2** | SM direct | SM console | N/A | N/A | N/A |
+| **bridge-1** | SM direct | SM console | N/A | N/A | N/A |
+| **bridge-2** | SM direct | SM console | N/A | N/A | N/A |
+
+- "SM direct" = `/remote/{hostname}` from the SuperManager
+- "SM console" = `/console/{hostname}/{app_id}` from the SuperManager
+- "hub tile" = service web UI accessed via the hub tile on that host's kiosk
+- "N/A" = service not deployed on this host (verify tile shows "Not available")
+- Session switching (KDE ↔ GNOME) is done within the desktop environment
+  through the KasmVNC iframe, not via SM-side buttons. The SM is a thin
+  client — it provides the viewport, not the control logic
 
 ## Playbook 14: Cluster Manager Sidebar & Submenu Navigation
 
@@ -1134,7 +1290,7 @@ Open `http://localhost:9098/fleet` in the operator's browser.
 19. Verify node detail shows: hostname, IP, disk %, memory %, container
     health info, and display app buttons (Desktop Console, Kodi Console,
     Moonlight Console)
-20. Click **Open Kiosk** → verify VNC viewer opens at `/remote/mesh1`
+20. Click **Open Kiosk** → verify display viewer opens at `/remote/mesh1`
 21. Click back → return to `/fleet/mesh1`
 22. Click back again or use sidebar → return to `/fleet`
 
@@ -1204,7 +1360,7 @@ but NO sidebar and NO fleet dashboard.
 
 - SSH tunnel to a NodeManager kiosk active (e.g., ai's kiosk):
   ```bash
-  ssh -o StrictHostKeyChecking=no -L 9097:10.99.3.19:9001 root@$AI_HOST -N -f
+  ssh -o StrictHostKeyChecking=no -L 9097:10.99.3.20:9001 root@$AI_HOST -N -f
   ```
 
 ### 15.1 Hub page on NodeManager
@@ -1268,9 +1424,581 @@ ClusterManager (home):
 | Mesh page | Shows all mesh nodes | Local only or empty |
 | Router page | Shows router details | May show limited info |
 | Containers page | Shows home's guests | Shows ai's guests |
-| VNC remote control | Available for child nodes | Not available |
+| Display remote control | Available for child nodes | Not available |
 | Batman enable/disable | Broadcasts to all nodes | Local only |
 | `/api/batman/status` | Returns cluster-wide status | Returns local only |
+
+## Playbook 16: SuperManager Full Page Navigation
+
+Test every page in the SuperManager UI by visiting each sidebar item and
+verifying content renders correctly. This covers SM-specific pages NOT
+tested by PB12 (which only spot-checks dashboard, nodes, deploy, hub).
+
+### Prerequisites
+
+- SuperManager running in UI mode (see Known Issues — headless vs UI mode):
+  ```bash
+  kill $(cat .state/test_api.pid) 2>/dev/null
+  python scripts/webui/app.py --port ${WEBUI_PORT:-52525} --env test.env &
+  echo $! > .state/test_api.pid
+  sleep 5
+  ```
+- Browser open at `http://localhost:${WEBUI_PORT:-52525}/`
+
+### 16.1 Dashboard (`/`)
+
+1. Open `http://localhost:${WEBUI_PORT:-52525}/`
+2. Verify **Environment badge** at top — shows active env file
+3. Verify **Hosts section** — 6 host cards with names, IPs, and status
+   dot (green = reachable, red = unreachable)
+4. Verify **Images section** — "All Images Built" or per-target build
+   status with version numbers
+5. Verify **Fleet summary** at bottom — online/total counts, health
+   score percentage
+6. Verify **Quick Actions row** — 4 buttons: Full Deploy, Build Images,
+   Check Hosts, Deploy Timeline
+7. Click **Full Deploy** → verify navigation to `/deploy`
+8. Click browser Back → return to dashboard
+9. Click **Deploy Timeline** → verify navigation to `/timeline`
+10. Click browser Back → return to dashboard
+11. Click a **host card** (e.g., "home") → verify navigation to `/nodes/home`
+12. Click browser Back → return to dashboard
+
+### 16.2 Environment page (`/environment`)
+
+1. Click **Environment** in the sidebar → navigates to `/environment`
+2. Verify the page title renders
+3. Verify the env variable table loads with key/value rows from the
+   active env file (test.env or .env)
+4. Verify **Validate** button is present — click it, verify it reports
+   validation results (missing required vars, etc.)
+5. Verify **Save** button is present
+6. Verify **Create .env** button is present (for creating from template)
+7. Do NOT actually save or create — just verify the controls exist and
+   the table is populated
+
+### 16.3 Hosts page (`/hosts`)
+
+1. Click **Hosts** in the sidebar → navigates to `/hosts`
+2. Verify table shows all hosts with hostname, IP, and connectivity status
+3. Click **Probe All** → verify probing starts, status indicators update
+   (green checkmark for reachable, red X for unreachable)
+4. Click **Test SSH** → verify SSH test runs against all hosts, results
+   display inline (success/failure per host)
+5. Verify any unreachable host shows clearly with error details
+
+### 16.4 Services page (`/services`)
+
+1. Click **Services** in the sidebar → navigates to `/services`
+2. Verify **Deploy Profile** select dropdown is present with options:
+   Full Deploy, Home Unit, Mesh Unit, Gamer Unit, Bridge Units,
+   Network Only, Core Services, Media Stack, Custom
+3. Select **"Home Unit"** profile → verify tag checkboxes auto-update
+   to match the profile
+4. Select **"Custom"** → verify all checkboxes become manually toggleable
+5. Verify tag checkboxes present: backup, infra, openwrt, lan-satellite,
+   cleanup, pihole, wireguard, monitoring, homeassistant, media,
+   moonlight, desktop, kiosk, mesh-wifi, bridge, gaming
+6. Click **Select All** → verify all checkboxes checked
+7. Click **Deselect All** → verify all checkboxes unchecked
+8. Manually check "pihole" and "wireguard" → verify checkboxes toggle
+9. Click **Deploy Selected** → verify navigation to `/deploy` with the
+   selected tags pre-populated
+10. Do NOT actually start the deploy — verify the tags are shown on the
+    deploy page, then navigate away
+
+### 16.5 Images page (`/images`)
+
+1. Click **Images** in the sidebar → navigates to `/images`
+2. Verify **Quick build** row shows "Mesh" and "Router" buttons
+3. Verify the image table lists all buildable targets: mesh, router,
+   pihole, rsyslog, jellyfin, netdata, wireguard, homeassistant, kodi,
+   moonlight, kiosk, gaming, sunshine, desktop
+4. Verify each row shows: target name, version (from sidecar), build
+   status, last build timestamp
+5. Click **Refresh** → verify table refreshes
+6. Do NOT click "Build Selected" or "Build All" — just verify controls
+   are present and the table is populated correctly
+
+### 16.6 Deploy page (`/deploy`)
+
+1. Click **Deploy** in the sidebar → navigates to `/deploy`
+2. Verify controls: **Host limit** input, **Dry Run** toggle, **Verbose**
+   level selector
+3. Verify **Start Deploy** button is present (enabled)
+4. Verify **Cancel** button is present (disabled until deploy starts)
+5. Verify the log area is empty (no previous run output)
+6. Verify selected tags are shown (from Services page selection or empty)
+7. Do NOT start a deploy — just verify the page renders with all controls
+
+### 16.7 Timeline page (`/timeline`)
+
+1. Click the **Deploy Timeline** quick action on the dashboard, or
+   navigate to `/timeline` directly
+2. Verify the page renders a deploy timeline (Gantt chart style) or
+   a "No deploys recorded" empty state
+3. If deploys exist: verify bars show deploy duration, tags, and status
+4. Navigate back to the dashboard
+
+### 16.8 Nodes page — Add Host and Kickstart (`/nodes`)
+
+1. Navigate to `/nodes`
+2. Verify **Auto-refresh** toggle switch at top — click it on, verify
+   node cards update periodically (5s interval)
+3. Click auto-refresh off
+4. Verify the **Add Host** expansion panel at the bottom
+5. Click to expand it — verify form fields: hostname, IP, MAC, VPN IP,
+   bucket (select), and **Register** button
+6. Do NOT register a host — just verify the form renders
+7. Click a host card that is "reachable" but not heartbeating (if any)
+   → navigate to `/nodes/{hostname}`
+8. Verify the **Kickstart Heartbeat** button is present on reachable-but-
+   not-online hosts — do NOT click it in this test
+9. Navigate back to `/nodes`
+
+### 16.9 Node detail — app console links (`/nodes/{hostname}`)
+
+1. Navigate to `/nodes/home`
+2. Verify **Back** button returns to `/nodes`
+3. Verify **Open Kiosk** button with `cast` icon (if display URL resolves)
+4. Verify **app console icon links** (tv/web icons) for display apps:
+   Desktop, Kodi, Moonlight. Disabled icons for apps not on this host
+5. Verify resource cards: disk %, memory %, CPU (if available)
+6. Verify **Guests** table — list of VMs/CTs on this host with VMIDs
+7. Verify **Network** section — interfaces, IPs, MACs
+8. Verify **Deploy History** expansion — recent deploy stamps
+9. Verify **Extensions** expansion — heartbeat extension data
+10. Navigate to `/nodes/mesh1` — verify mesh1's detail loads
+11. Navigate to `/nodes/ai` — verify ai's detail loads (may show offline
+    status if ai is unreachable — verify the "unreachable" state renders)
+
+## Playbook 17: Display App Launch Flow — End-to-End
+
+Test the complete launch flow for display apps: hub tile → launch page →
+guest start → console page → KasmVNC iframe. This is the critical user
+path for local kiosk users (through KasmVNC) and remote operators
+(through SM).
+
+### Prerequisites
+
+- All display app containers exist and are configured (CT 400 Desktop,
+  CT 301 Kodi on home; CT 302 Moonlight on mesh1)
+- SSH tunnel to CM active (localhost:9098)
+- SuperManager running in UI mode
+
+### 17.1 Desktop launch from SuperManager `/hub`
+
+1. Open `http://localhost:${WEBUI_PORT:-52525}/hub`
+2. Locate the **Desktop** tile in the "Desktop & Media" section
+3. Verify the tile shows a **"Launch"** badge (not "Not available")
+4. Click the Desktop tile → verify navigation to `/launch?vmid=400&title=Desktop&url_key=DESKTOP_URL`
+5. Verify the **launch page** renders:
+   - Desktop icon or similar
+   - "Desktop" title
+   - Description text
+   - **"Launch Desktop"** button with play_arrow icon
+   - **"View Desktop Console"** button with cast icon
+   - **"Back to Hub"** button
+6. Click **"Launch Desktop"** → verify:
+   - Status text updates: "Starting VMID 400..."
+   - On success: "Desktop is running." in accent color
+   - Auto-navigates to `/console/home/desktop?back=/hub`
+7. Verify the **console page** renders with a **minimal thin viewer bar**:
+   - **Back arrow** button
+   - "Desktop on home" label
+   - **visibility_off** toggle button
+   - KasmVNC iframe below the bar showing the desktop
+   - NO session switching buttons (SM is a thin client)
+   - NO app switcher icons (navigation happens via SM pages)
+
+### 17.2 Console page interaction
+
+1. On `/console/home/desktop`:
+2. Verify KasmVNC iframe shows the desktop environment
+3. Interact inside the iframe: move mouse, click, type on keyboard
+4. Click the **visibility_off** toggle → verify viewer bar hides
+5. Click back button → verify return to previous page
+
+Note: Session switching and app switching are done via the SM's own
+navigation (e.g., navigate to `/console/home/kodi` directly) or within
+the node's desktop environment through the KasmVNC iframe. The SM does
+not embed control logic in the viewer bar.
+
+### 17.3 App navigation — Desktop ↔ Kodi via SM routes
+
+1. Navigate to `/console/home/desktop` — verify Desktop iframe loads
+2. Navigate to `/console/home/kodi` — verify Kodi iframe loads
+3. Verify each console page shows the correct app label in the
+   viewer bar ("Desktop on home" vs "Kodi on home")
+4. Verify each KasmVNC iframe connects to the correct display port
+
+### 17.4 Remote kiosk from SM Nodes page
+
+1. Navigate to `/nodes/home`
+2. Click **Open Kiosk** → verify `/remote/home?back=/nodes/home`
+3. Verify the kiosk display iframe loads (showing the hub page on home)
+4. Click **Back** in the viewer bar → verify return to `/nodes/home`
+
+### 17.5 Launch flow error cases
+
+**Missing VMID:**
+
+1. Navigate to `/launch?title=Test` (no vmid parameter)
+2. Verify error message "No VMID configured" in red
+3. Verify **Back to Hub** button present and works
+
+**App not on this host:**
+
+1. Navigate to `/console/home/moonlight`
+2. Verify error page: "Moonlight is not available on home"
+3. Verify **Go Back** button present and works
+
+**Nonexistent node:**
+
+1. Navigate to `/console/nonexistent/desktop`
+2. Verify error page with "Host unreachable" message
+3. Verify **Go Back** button present and works
+
+### 17.6 Kodi launch from SuperManager `/hub`
+
+1. Navigate to `/hub`
+2. Click the **Kodi** tile → verify `/launch?vmid=301&title=Kodi&url_key=KODI_URL`
+3. Click **"Launch Kodi"** → verify guest starts
+4. Auto-navigates to `/console/home/kodi`
+5. Verify Kodi home screen visible in the KasmVNC iframe
+6. Interact: browse menus with mouse, use keyboard for search
+7. Click **Back** → verify return to hub
+
+### 17.7 Moonlight launch from mesh1's hub
+
+Moonlight is on `streaming_nodes` (mesh1), NOT home.
+
+1. Navigate to `/remote/mesh1?back=/nodes` (mesh1's kiosk via SM)
+2. Inside mesh1's kiosk hub, click the **Moonlight** tile
+3. Verify the launch page renders inside the kiosk iframe (Chromium)
+4. Verify launch button shows "Launch Moonlight"
+5. Click launch → verify guest starts and console opens
+6. Verify Moonlight SDL2 UI visible in the nested iframe
+7. Click Back → return to mesh1's hub
+
+### 17.8 Display app conflict resolution
+
+This tests the DRI3 device exclusive access — only one display app runs
+at a time per host.
+
+1. Navigate to `/console/home/desktop` — verify Desktop is running
+2. Navigate to `/console/home/kodi` (via SM URL bar or sidebar)
+3. Verify the Desktop LXC (CT 400) is stopped (the display transfer service stops
+   conflicting apps before starting the new one)
+4. Verify Kodi starts and its home screen appears in the iframe
+5. Navigate back to `/console/home/desktop`
+6. Verify Kodi stops, Desktop starts
+7. Verify via CLI:
+   ```bash
+   ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST \
+     "pct status 400; pct status 301"
+   ```
+   **Expected**: The most recently switched-to app is running, the other
+   is stopped
+
+## Playbook 18: External Web UI Testing via Hub Tiles
+
+Test every external web service accessible through the hub's iframe
+viewer (`/view?url=...`). Each service has a dedicated URL configured in
+the kiosk's `config.json`. This tests iframe embedding, X-Frame-Options
+compatibility, and service functionality through the viewer.
+
+### Prerequisites
+
+- SuperManager in UI mode
+- All service containers running and healthy
+
+### 18.1 Jellyfin via SM hub tile
+
+1. Navigate to `http://localhost:${WEBUI_PORT:-52525}/hub`
+2. Click the **Jellyfin** tile in "Desktop & Media" section
+3. Verify navigation to `/view?url=http://10.10.10.15:8096&title=Jellyfin`
+4. Verify the viewer page renders:
+   - Top bar with **home** icon (left), "Jellyfin" title, **open_in_new**
+     icon (right)
+   - Service web UI iframe below the bar
+5. Verify the Jellyfin web UI loads inside the iframe:
+   - Login page or media library (depending on auth state)
+   - Browse a show or movie listing
+   - Verify mouse clicks work inside the iframe (click a media item)
+6. Click the **home** icon → verify return to `/hub`
+
+### 18.2 Home Assistant via SM hub tile
+
+1. Click the **Home Assistant** tile
+2. Verify navigation to `/view?url=http://10.10.10.14:8123&title=Home+Assistant`
+3. Verify the HA dashboard loads in the iframe:
+   - Entity cards visible
+   - Click a card to see entity detail
+4. Click home → return to hub
+
+### 18.3 Router (OpenWrt LuCI) via SM hub tile
+
+1. Click the **Router** tile in "Settings & Network"
+2. Verify navigation to `/view?url=http://10.10.10.1/...&title=Router`
+3. Verify LuCI status overview loads:
+   - System info, memory, network statistics
+   - Navigate to Network → Interfaces inside the iframe
+4. Click home → return to hub
+
+### 18.4 Pi-hole via SM hub tile
+
+1. Click the **Pi-hole** tile
+2. Verify `/view?url=http://10.10.10.10/admin/&title=Pi-hole`
+3. Verify Pi-hole dashboard loads:
+   - Query stats (total queries, blocked percentage)
+   - Navigate to Query Log inside the iframe
+4. Click home → return to hub
+
+### 18.5 WireGuard via SM hub tile
+
+1. Click the **WireGuard** tile
+2. If configured: verify viewer loads WireGuard status page
+   - Peer list visible, tunnel status
+3. If NOT configured (no web UI URL): verify tile shows "Not available"
+   badge — this is a valid outcome as WireGuard doesn't have a native
+   web UI. Note this as expected behavior.
+
+### 18.6 Netdata via SM hub tile
+
+1. Click the **Netdata** tile in "Monitoring"
+2. Verify navigation to `/view?url=http://10.10.10.41:19999&title=Netdata`
+3. Verify real-time metrics dashboard loads:
+   - CPU chart updating
+   - Memory chart updating
+   - Disk I/O chart
+4. Click home → return to hub
+
+### 18.7 Logs (rsyslog) via SM hub tile
+
+1. Click the **Logs** tile in "Monitoring"
+2. If configured: verify log viewer loads with recent entries
+3. If NOT configured: verify "Not available" badge — rsyslog doesn't
+   have a native web UI. Note this as expected behavior.
+
+### 18.8 Gaming (Sunshine) via ai's hub
+
+Gaming is only on ai. Test via SM remote kiosk:
+
+1. Navigate to `/remote/ai?back=/nodes`
+2. Inside ai's kiosk hub, click the **Gaming** tile
+3. Verify viewer loads with Sunshine web UI (port 47990):
+   - Login page or apps list
+4. Click home → return to ai's hub
+5. Click Back in viewer bar → return to `/nodes`
+
+### 18.9 X-Frame-Options cross-check
+
+After testing each service above, verify none were blocked by
+X-Frame-Options headers:
+
+```bash
+echo "=== X-Frame-Options Audit ==="
+for pair in "10.10.10.14:8123:HomeAssistant" "10.10.10.15:8096:Jellyfin" \
+            "10.10.10.10:80:Pi-hole" "10.10.10.41:19999:Netdata" \
+            "10.10.10.1:80:OpenWrt"; do
+  ip_port="${pair%:*}"; name="${pair##*:}"
+  echo -n "  $name: "
+  ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST \
+    "curl -sI http://$ip_port 2>/dev/null | grep -i 'x-frame-options'" 2>/dev/null
+  echo "(empty = OK, no blocking)"
+done
+```
+
+## Playbook 19: Internal Kiosk Pages — CM Interactive Elements Deep Test
+
+Deep test every interactive element on the Cluster Manager's internal
+pages (Bridge, Mesh, Router, Containers). PB14 verifies pages RENDER;
+this playbook verifies every INTERACTIVE ELEMENT functions correctly.
+
+### Prerequisites
+
+- SSH tunnel to CM: `ssh -o StrictHostKeyChecking=no -L 9098:10.10.10.23:9001 root@$PRIMARY_HOST -N -f`
+- All containers running and heartbeating
+
+### 19.1 Bridge page — WiFi restart and status refresh
+
+1. Open `http://localhost:9098/bridge`
+2. Verify bridge-1 card shows: WiFi status (AP mode), SSID, band (2.4GHz),
+   channel (11), signal quality
+3. Verify bridge-2 card shows: WiFi status (STA mode), same SSID/band
+4. Click **WiFi Restart** on bridge-1:
+   - Verify API call triggers (`/api/bridge/wifi/restart`)
+   - Verify status updates after a few seconds
+   - Verify bridge-1 returns to AP mode with same SSID
+5. Verify via CLI that WiFi actually restarted:
+   ```bash
+   ssh -o StrictHostKeyChecking=no root@$BRIDGE_1_HOST \
+     "pct exec 104 -- /usr/sbin/wifi_setup.sh status"
+   ```
+6. Verify bridge-2 shows STA associated to bridge-1's SSID
+
+### 19.2 Mesh page — batman enable/disable cycle
+
+1. Open `http://localhost:9098/mesh`
+2. Verify mesh topology diagram shows mesh nodes (mesh1, mesh2)
+3. Verify **Batman Status** section — click status check:
+   - Returns status for all mesh containers
+4. Click **Enable Batman**:
+   - Verify API call to `/api/batman/enable`
+   - Verify response shows per-node results
+5. Verify via CLI on mesh1:
+   ```bash
+   ssh -o StrictHostKeyChecking=no -o ProxyCommand="ssh -o StrictHostKeyChecking=no -W %h:%p root@$PRIMARY_HOST" \
+     root@10.10.10.210 "pct exec 103 -- /usr/sbin/batman_trigger.sh status"
+   ```
+   **Expected**: `BATMAN=enabled`
+6. Click **Disable Batman**:
+   - Verify API call to `/api/batman/disable`
+   - Verify response shows per-node disable results
+7. Verify via CLI: `BATMAN=disabled`
+
+### 19.3 Router page — data population verification
+
+1. Open `http://localhost:9098/router`
+2. Verify page is NOT blank — data cards must show real values
+3. Verify WAN status section: IP, interface, link state
+4. Verify LAN status section: IP (10.10.10.1), interface, DHCP range
+5. Verify system info: hostname (openwrt-router), firmware version
+6. Verify the page updates via heartbeat subscription (data from
+   container heartbeat at 10.10.10.1, not direct SSH)
+
+### 19.4 Containers page — guest lifecycle management
+
+1. Open `http://localhost:9098/containers`
+2. Verify guest list shows ALL VMs and CTs on home:
+   - VM 100 (openwrt-router) — running
+   - CT 101 (wireguard) — running
+   - CT 102 (pihole) — running
+   - CT 200 (homeassistant) — running
+   - CT 300 (jellyfin) — running
+   - CT 301 (kodi) — running/stopped
+   - CT 400 (desktop) — running/stopped
+   - CT 401 (kiosk) — running
+   - CT 500 (netdata) — running
+   - CT 501 (rsyslog) — running
+3. Verify each entry shows: VMID, name, status badge (green running /
+   grey stopped)
+4. Verify **Start/Stop/Restart** buttons present for each guest
+5. Click **Restart** on rsyslog (CT 501) — safe, non-critical:
+   - Verify status briefly changes
+   - Verify container returns to "running" within 10 seconds
+6. Verify via CLI:
+   ```bash
+   ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST "pct status 501"
+   ```
+   **Expected**: `status: running`
+
+## Playbook 20: SuperManager Display Pipeline — Every Host Verification
+
+Exhaustive verification that every host's display pipeline works from
+the SuperManager. This is the capstone test — it proves the full chain:
+SM → URL resolution → port forwarding → KasmVNC iframe → interaction.
+
+### Prerequisites
+
+- All tunnels from PB12 active
+- SuperManager in UI mode
+- All kiosk containers running with kiosk-display active
+
+### 20.1 Systematic node-by-node verification
+
+For EACH of the 6 hosts below, perform ALL 7 steps. Record PASS/FAIL.
+
+**Steps (repeat for each host):**
+
+1. Navigate to `/nodes/{hostname}` on the SM
+2. Verify the node detail page renders with host info
+3. Click **Open Kiosk** → verify `/remote/{hostname}` loads
+4. Verify KasmVNC iframe connects and shows the hub page
+5. Move mouse inside the iframe — verify cursor moves
+6. Type on keyboard — verify input reaches the display
+7. Click a hub tile inside the iframe — verify navigation works
+8. Click **Back** in the viewer bar → verify return to `/nodes/{hostname}`
+
+| # | Host | WAN/LAN IP | Forwarding | Steps 1-8 |
+|---|------|-----------|------------|-----------|
+| 1 | home | 192.168.86.201 | socat (cross-bridge) | ______ |
+| 2 | mesh1 | 10.10.10.210 | socat (LAN host) | ______ |
+| 3 | ai | 192.168.86.220 | iptables DNAT | ______ |
+| 4 | mesh2 | 192.168.86.211 | iptables DNAT | ______ |
+| 5 | bridge-1 | 192.168.86.230 | iptables DNAT | ______ |
+| 6 | bridge-2 | 192.168.86.231 | iptables DNAT | ______ |
+
+### 20.2 Child picker drill-down — all children
+
+From `/remote/home`:
+
+1. Verify child picker dropdown shows: mesh1, ai, mesh2, bridge-1, bridge-2
+2. For EACH child:
+   a. Select child from dropdown
+   b. Verify iframe disconnects from home, reconnects to child's kiosk
+   c. Verify child's hub page visible through single-layer iframe
+   d. Click one tile inside the iframe — verify it works
+   e. Click **Back** → verify return to `/remote/home`
+3. After testing all children, click **Back** → verify return to
+   `/nodes/home`
+
+### 20.3 Console page — every display app on every host
+
+Test every display app console on its target host:
+
+| App | Node | Route | What to verify |
+|-----|------|-------|----------------|
+| Desktop | home | `/console/home/desktop` | KDE desktop, session buttons |
+| Kodi | home | `/console/home/kodi` | Kodi home screen |
+| Moonlight | mesh1 | `/console/mesh1/moonlight` | Moonlight SDL2 UI |
+| Kiosk | home | `/remote/home` | Hub page (via remote_kiosk) |
+| Kiosk | mesh1 | `/remote/mesh1` | Hub page |
+| Kiosk | ai | `/remote/ai` | Hub page |
+| Kiosk | mesh2 | `/remote/mesh2` | Hub page |
+| Kiosk | bridge-1 | `/remote/bridge-1` | Hub page |
+| Kiosk | bridge-2 | `/remote/bridge-2` | Hub page |
+
+For each: verify iframe loads, interaction works, back button works.
+
+### 20.4 Non-available app verification
+
+Verify that apps NOT deployed on a host show correct error state.
+Note: `target_hosts` restrictions in `DISPLAY_APP_CONFIGS` control the
+error message. Kodi (home only) and Moonlight (mesh1 only) have explicit
+restrictions → "not available on {host}". Desktop has NO restriction →
+falls through to URL resolution → "Host unreachable" when the display
+port isn't forwarded.
+
+1. `/console/home/moonlight` → "Moonlight is not available on home"
+2. `/console/mesh1/kodi` → "Kodi is not available on mesh1"
+3. `/console/ai/kodi` → "Kodi is not available on ai"
+4. `/console/ai/moonlight` → "Moonlight is not available on ai"
+5. `/console/bridge-1/kodi` → "Kodi is not available on bridge-1"
+6. `/console/mesh1/desktop` → "Desktop on mesh1" viewer (Desktop is
+   deployed on all `desktop_nodes` hosts — mesh1, ai, mesh2, bridge-1, bridge-2)
+7. `/console/ai/desktop` → "Desktop on ai" viewer (same — Desktop on all hosts)
+
+Each should show the error page with "Go Back" button.
+
+### 20.5 Final sign-off matrix
+
+Complete verification matrix. EVERY cell must be tested. Mark PASS/FAIL.
+
+| Host | Kiosk (remote) | Desktop (console) | Kodi (console) | Moonlight (console) | Hub Tiles |
+|------|:-:|:-:|:-:|:-:|:-:|
+| **home** | __ | __ | __ | N/A __ | __ |
+| **mesh1** | __ | __ | N/A __ | __ | __ |
+| **ai** | __ | __ | N/A __ | N/A __ | __ |
+| **mesh2** | __ | __ | N/A __ | N/A __ | __ |
+| **bridge-1** | __ | __ | N/A __ | N/A __ | __ |
+| **bridge-2** | __ | __ | N/A __ | N/A __ | __ |
+
+- Blank `__` = needs testing. Fill with PASS or FAIL.
+- "N/A __" = verify error page renders ("not available on {host}")
+- Session switching is done within the desktop environment via the
+  KasmVNC iframe, not via SM viewer bar buttons
 
 ## Known Issues and Workarounds
 
@@ -1305,6 +2033,26 @@ proceed until all nodes are on the LAN and the mesh is established.
 **Fix:** Run `molecule test` to converge the full system. If SSH errors
 persist after a successful converge, investigate the specific connectivity
 failure — do NOT dismiss it as "pre-mesh."
+
+### SM Bridge/Mesh/Router pages show "Not reachable"
+
+**Symptom:** The SuperManager's Bridge, Mesh, and Router pages show "Not
+reachable" errors, while the same pages on the Cluster Manager (via
+localhost:9098) show full data.
+
+**Cause:** These SM pages try to directly query container APIs (bridge
+containers at 10.99.5.x, mesh containers at 10.10.10.x, router VM at
+10.10.10.1). The controller machine is NOT on the fleet LAN or VPN, so
+these IPs are unreachable from the browser.
+
+**Expected behavior:** In a production deployment with VPN, the
+controller would reach these IPs via WireGuard. In local test setups
+without VPN, the SM Bridge/Mesh/Router pages show error states. The CM
+versions work because the CM is inside the cluster network.
+
+**Workaround:** Use the CM pages (localhost:9098/bridge, /mesh, /router)
+for infrastructure monitoring during local testing. The SM pages will
+work in production with VPN connectivity.
 
 ### SuperManager headless vs UI mode
 

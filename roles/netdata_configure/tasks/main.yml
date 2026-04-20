@@ -2,30 +2,7 @@
 # Netdata base config (dbengine, retention, proc/sys paths, dashboard,
 # systemd LXC override) is baked into the image. This role only applies
 # host-specific streaming config when NETDATA_PARENT_IP is set.
-
-# ── Locate netdata config directory ──────────────────────────────
-
-- name: Detect netdata config directory
-  ansible.builtin.command:
-    cmd: >-
-      sh -c '
-      if [ -d /etc/netdata ]; then echo /etc/netdata;
-      elif [ -d /opt/netdata/etc/netdata ]; then echo /opt/netdata/etc/netdata;
-      else echo "";
-      fi'
-  register: _netdata_conf_dir
-  changed_when: false
-
-- name: Set netdata config directory fact
-  ansible.builtin.set_fact:
-    _netdata_conf_dir: "{{ _netdata_conf_dir.stdout | trim }}"
-
-- name: Fail if netdata config directory not found
-  ansible.builtin.fail:
-    msg: >-
-      Netdata config directory not found at /etc/netdata or /opt/netdata/etc/netdata.
-      Is Netdata installed in the image?
-  when: _netdata_conf_dir | length == 0
+# All in-container operations go through the Node Manager API over VPN.
 
 # ── Deploy or remove streaming config ────────────────────────────
 
@@ -38,23 +15,59 @@
     - netdata_parent_ip | length > 0
     - netdata_stream_api_key | length == 0
 
-- name: Deploy streaming config to netdata
-  ansible.builtin.template:
-    src: stream.conf.j2
-    dest: "{{ _netdata_conf_dir }}/stream.conf"
-    mode: "0640"
+- name: Build Netdata streaming config content
+  ansible.builtin.set_fact:
+    _netdata_stream_content: |
+      [stream]
+          enabled = yes
+          destination = {{ netdata_parent_ip }}:19999
+          api key = {{ netdata_stream_api_key }}
+          buffer size bytes = 1048576
+          reconnect delay seconds = 5
+          initial clock resync iterations = 60
   when: netdata_parent_ip | length > 0
-  notify: _restart_netdata
+
+- name: Deploy streaming config via NM API
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ netdata_ct_id }}/file"
+    method: POST
+    body_format: json
+    body:
+      path: /etc/netdata/stream.conf
+      content: "{{ _netdata_stream_content }}"
+      mode: "0640"
+    status_code: 200
+  delegate_to: localhost
+  when: netdata_parent_ip | length > 0
 
 - name: Remove streaming config when parent IP is not set
-  ansible.builtin.file:
-    path: "{{ _netdata_conf_dir }}/stream.conf"
-    state: absent
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ netdata_ct_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      cmd: "rm -f /etc/netdata/stream.conf"
+      timeout: 10
+    status_code: 200
+  delegate_to: localhost
   when: netdata_parent_ip | length == 0
-  notify: _restart_netdata
 
-- name: Flush handlers to restart netdata
-  ansible.builtin.meta: flush_handlers
+# ── Restart Netdata ──────────────────────────────────────────────
+
+- name: Restart netdata service via NM API
+  ansible.builtin.uri:
+    url: >-
+      http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ netdata_ct_id }}/service/netdata/restart
+    method: POST
+    body_format: json
+    body: {}
+    status_code: 200
+    timeout: 60
+  delegate_to: localhost
+  retries: 2
+  delay: 5
+  register: _netdata_restart
+  until: (_netdata_restart.status | default(0)) == 200
 
 # ── Post-restart health check ────────────────────────────────────
 
@@ -70,19 +83,9 @@
   failed_when: false
   when: callhome_server | default('') | length > 0
 
-- name: Wait for netdata to be active after config change (SSH fallback)
-  ansible.builtin.command:
-    cmd: systemctl is-active netdata
-  register: _netdata_status
-  changed_when: false
-  retries: 10
-  delay: 3
-  until: _netdata_status.stdout | trim == 'active'
-  when: callhome_server | default('') | length == 0 or not (_netdata_api_check.json.ready | default(false)) | bool
-
 - name: Report netdata status
   ansible.builtin.debug:
     msg: >-
       Netdata service: {{ 'ready (via API)' if (_netdata_api_check.json.ready | default(false)) | bool
-        else (_netdata_status.stdout | default('unknown') | trim) }},
+        else 'unknown' }},
       streaming={{ 'enabled to ' + netdata_parent_ip if netdata_parent_ip | length > 0 else 'disabled (local dashboard only)' }}

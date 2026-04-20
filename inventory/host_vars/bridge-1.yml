@@ -4,3 +4,4 @@ pci_passthrough_allow_reboot: true
 wol_capable: true
 wifi_role: ap
 container_subnet_id: 5
+vpn_ip: 10.0.0.5

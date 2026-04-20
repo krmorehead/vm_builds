@@ -1,7 +1,30 @@
 ---
-wireguard_private_key: "{{ lookup('env', 'WIREGUARD_PRIVATE_KEY') | default('', true) }}"
-wireguard_client_address: "{{ lookup('env', 'WIREGUARD_CLIENT_ADDRESS') | default('10.0.0.2/24', true) }}"
-wireguard_server_public_key: "{{ lookup('env', 'WIREGUARD_SERVER_PUBLIC_KEY') | default('', true) }}"
+# Per-host private key — looked up by host suffix (e.g. WIREGUARD_PRIVATE_KEY_HOME).
+# Falls back to the legacy single-key env var for backwards compat with
+# the per-feature scenario which only has one host.
+_wg_host_suffix: >-
+  {{ _wg_parent_host | default(inventory_hostname | regex_replace('^wireguard-', ''))
+     | upper | replace('-', '_') }}
+wireguard_private_key: >-
+  {{ lookup('env', 'WIREGUARD_PRIVATE_KEY_' + _wg_host_suffix)
+     | default(lookup('env', 'WIREGUARD_PRIVATE_KEY'), true)
+     | default('', true) }}
+
+wireguard_client_address: >-
+  {{ (vpn_ip + '/24')
+     if vpn_ip is defined and vpn_ip | length > 0
+     else lookup('env', 'WIREGUARD_CLIENT_ADDRESS') | default('10.0.0.2/24', true) }}
+
+# Hub detection: the hub node (vpn_ip == 10.0.0.1) runs as the WireGuard
+# server. All other nodes are clients connecting to it.
+wireguard_is_hub: "{{ vpn_ip | default('') == '10.0.0.1' }}"
+wireguard_hub_vpn_ip: "10.0.0.1"
+
+# Server endpoint — clients connect to the hub host's WAN IP on UDP 51820.
+wireguard_server_public_key: >-
+  {{ lookup('env', 'WIREGUARD_HUB_PUBLIC_KEY')
+     | default(lookup('env', 'WIREGUARD_SERVER_PUBLIC_KEY'), true)
+     | default('', true) }}
 wireguard_server_endpoint: "{{ lookup('env', 'WIREGUARD_SERVER_ENDPOINT') | default('198.51.100.1:51820', true) }}"
 wireguard_allowed_ips: "{{ lookup('env', 'WIREGUARD_ALLOWED_IPS') | default('10.0.0.0/24', true) }}"
 wireguard_preshared_key: "{{ lookup('env', 'WIREGUARD_PRESHARED_KEY') | default('', true) }}"

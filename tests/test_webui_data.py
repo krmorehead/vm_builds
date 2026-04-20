@@ -1298,12 +1298,12 @@ class TestVpnIpModel:
         host = data.Host("a", "10.0.0.1", vpn_ip="10.8.0.1")
         assert host.vpn_ip == "10.8.0.1"
 
-    def test_reachable_ip_prefers_primary_when_reachable(self):
+    def test_reachable_ip_always_prefers_vpn(self):
         host = data.Host("a", "192.168.1.1", vpn_ip="10.8.0.1")
         host.reachable = True
-        assert host.reachable_ip == "192.168.1.1"
+        assert host.reachable_ip == "10.8.0.1"
 
-    def test_reachable_ip_falls_back_to_vpn(self):
+    def test_reachable_ip_uses_vpn_when_unreachable(self):
         host = data.Host("a", "192.168.1.1", vpn_ip="10.8.0.1")
         host.reachable = False
         assert host.reachable_ip == "10.8.0.1"
@@ -1578,6 +1578,27 @@ class TestHubServices:
         assert keys == expected
 
 
+class TestSmHubUrls:
+    def test_generates_urls_from_gateway(self):
+        env = {"LAN_GATEWAY": "10.10.10.1"}
+        urls = data.generate_sm_hub_urls(env)
+        assert urls["OPENWRT_URL"] == "http://10.10.10.1"
+        assert urls["PIHOLE_URL"] == "http://10.10.10.10/admin"
+        assert urls["HOMEASSISTANT_URL"] == "http://10.10.10.14:8123"
+        assert urls["JELLYFIN_URL"] == "http://10.10.10.15:8096"
+        assert urls["NETDATA_URL"] == "http://10.10.10.40:19999"
+        assert urls["GAMING_URL"] == "https://10.10.10.18:47990"
+
+    def test_returns_empty_without_gateway(self):
+        assert data.generate_sm_hub_urls({}) == {}
+        assert data.generate_sm_hub_urls({"OTHER": "val"}) == {}
+
+    def test_covers_all_sm_service_url_keys(self):
+        env = {"LAN_GATEWAY": "10.10.10.1"}
+        urls = data.generate_sm_hub_urls(env)
+        assert set(urls.keys()) == set(data.SM_SERVICE_URLS.keys())
+
+
 # ── Display apps ──────────────────────────────────────────────────────
 
 
@@ -1612,12 +1633,12 @@ class TestDisplayApps:
     def test_display_apps_count(self):
         assert len(data.DISPLAY_APPS) == 3
 
-    def test_display_apps_descriptions_mention_vnc(self):
-        """Each description should reference VNC or remote console access."""
+    def test_display_apps_descriptions_mention_display(self):
+        """Each description should reference KasmVNC, display, or console access."""
         for url_key, info in data.DISPLAY_APPS.items():
             desc = info["description"].lower()
-            assert "vnc" in desc or "console" in desc or "remotely" in desc, (
-                f"{url_key} description should reference remote console access"
+            assert "kasmvnc" in desc or "console" in desc or "remotely" in desc, (
+                f"{url_key} description should reference display/console access"
             )
 
     def test_display_apps_have_app_id(self):
@@ -1654,14 +1675,6 @@ class TestConsoleUrl:
         url = data.console_url("mesh1", "moonlight", back="")
         expected = data.Routes.CONSOLE.replace("{node_id}", "mesh1").replace("{app_id}", "moonlight")
         assert url == expected
-
-
-class TestDisplayIcon:
-    def test_vnc(self):
-        assert data.display_icon("vnc") == "tv"
-
-    def test_web(self):
-        assert data.display_icon("web") == "web"
 
 
 # ── SSH connection ────────────────────────────────────────────────────
@@ -2018,7 +2031,7 @@ class TestNodeRegistry:
         assert content[1].startswith("zulu")
 
     def test_fleet_ips_empty_when_no_ips(self, tmp_path):
-        data._save_node_registry(tmp_path, [])
+        data.save_node_registry(tmp_path, [])
         ip_file = tmp_path / "fleet_ips.txt"
         assert ip_file.exists()
         assert ip_file.read_text() == ""
@@ -2172,7 +2185,7 @@ class TestCheckContainerReady:
         nodes = data.load_node_registry(tmp_path)
         old_time = (datetime.now() - timedelta(seconds=300)).isoformat(timespec="seconds")
         nodes[0].last_seen = old_time
-        data._save_node_registry(tmp_path, nodes)
+        data.save_node_registry(tmp_path, nodes)
 
         result = data.check_container_ready(tmp_path, "102")
         assert result["ready"] is False
@@ -2313,7 +2326,7 @@ class TestCheckFleetStaleness:
                 stale_time = datetime.now() - timedelta(seconds=300)
                 n.last_seen = stale_time.isoformat(timespec="seconds")
                 break
-        data._save_node_registry(tmp_path, nodes)
+        data.save_node_registry(tmp_path, nodes)
 
     def test_all_healthy(self, tmp_path):
         self._register_service(tmp_path, "pihole-ct", "pihole")
@@ -4337,30 +4350,26 @@ class TestClusterManagerFleetStorage:
             mgr.register_child_checkin({"hostname": ""})
 
 
-class TestVncConstants:
-    """Verify VNC-related constants exist in data.py."""
+class TestDisplayConstants:
+    """Verify display-related constants exist in data.py."""
 
     def test_ports_class(self):
         assert hasattr(data, "Ports")
-        assert data.Ports.KIOSK_VNC == 5900
-        assert data.Ports.KIOSK_VNC_WS == 6080
+        assert data.Ports.KIOSK_DISPLAY == 6080
 
     def test_routes_remote_kiosk(self):
         assert hasattr(data.Routes, "REMOTE_KIOSK")
         assert "{node_id}" in data.Routes.REMOTE_KIOSK
 
-    def test_page_titles_remote_kiosk(self):
-        assert hasattr(data.PageTitles, "REMOTE_KIOSK")
-
-    def test_labels_vnc(self):
+    def test_labels_display(self):
         assert hasattr(data.Labels, "OPEN_KIOSK")
         assert hasattr(data.Labels, "KIOSK_NOT_REACHABLE")
         assert hasattr(data.Labels, "DRILL_INTO")
         assert hasattr(data.Labels, "GO_BACK")
 
 
-class TestManagerVncResolution:
-    """Verify VNC URL resolution and child topology via real manager instances."""
+class TestManagerDisplayResolution:
+    """Verify display URL resolution and child topology via real manager instances."""
 
     def setup_method(self):
         from scripts.webui import manager
@@ -4375,7 +4384,7 @@ class TestManagerVncResolution:
             config={"HOST_IP": "10.99.3.19", "HOST_NAME": "ai", "MESH_KEY": "test"},
             manager_class=self._mgr_module.NodeManager,
         )
-        assert mgr.get_child_vnc_url("home") is None
+        assert mgr.get_child_display_url("home") is None
         assert mgr.get_fleet_children("ai") == []
 
     def test_cluster_manager_resolves_from_child_managers(self):
@@ -4387,10 +4396,10 @@ class TestManagerVncResolution:
             },
             manager_class=self._mgr_module.ClusterManager,
         )
-        url = mgr.get_child_vnc_url("mesh1")
+        url = mgr.get_child_display_url("mesh1")
         assert url is not None
         assert "10.10.10.210" in url
-        assert str(data.Ports.KIOSK_VNC_WS) in url
+        assert str(data.Ports.KIOSK_DISPLAY) in url
 
     def test_cluster_manager_unknown_returns_none(self):
         mgr = self._mgr_module.init(
@@ -4401,7 +4410,7 @@ class TestManagerVncResolution:
             },
             manager_class=self._mgr_module.ClusterManager,
         )
-        assert mgr.get_child_vnc_url("nonexistent") is None
+        assert mgr.get_child_display_url("nonexistent") is None
 
     def test_cluster_manager_fleet_children(self):
         mgr = self._mgr_module.init(
@@ -4441,7 +4450,7 @@ class TestManagerVncResolution:
         url = mgr.get_guest_viewstream_url("mesh1", "desktop")
         assert url is not None
         assert "10.10.10.210" in url
-        assert str(data.Ports.DESKTOP_VNC_WS) in url
+        assert str(data.Ports.DESKTOP_DISPLAY) in url
 
     def test_get_guest_viewstream_url_unknown_node(self):
         """Returns None when node cannot be resolved."""
@@ -4468,23 +4477,38 @@ class TestManagerVncResolution:
         assert mgr.get_guest_viewstream_url("mesh1", "nonexistent") is None
 
     def test_supermanager_resolves_from_fleet_nodes(self):
-        """SM resolves VNC IP from _fleet_nodes (heartbeat-populated)."""
-        def resolver(n):
-            return {"mesh1": "10.10.10.210", "ai": "192.168.86.220"}.get(n)
+        """SM resolves display IP from display_resolver (not node_resolver)."""
+        def node_resolver(n):
+            return {"mesh1": "10.0.0.2", "ai": "10.0.0.3"}.get(n)
+
+        def display_resolver(n):
+            return {"mesh1": ("10.10.10.210", 0), "ai": ("192.168.86.220", 0)}.get(n)
 
         mgr = self._mgr_module.init(
-            resolver,
+            node_resolver,
             config={"HOST_IP": "192.168.86.201", "HOST_NAME": "super", "MESH_KEY": "test"},
             manager_class=self._mgr_module.ClusterManager,
+            display_resolver=display_resolver,
         )
-        mgr.register_child_checkin({
-            "node_id": "mesh1", "hostname": "mesh1",
-            "local_ips": ["10.10.10.210"],
-        })
-        url = mgr.get_child_vnc_url("mesh1")
+        url = mgr.get_child_display_url("mesh1")
         assert url is not None
         assert "10.10.10.210" in url
-        assert str(data.Ports.KIOSK_VNC_WS) in url
+        assert str(data.Ports.KIOSK_DISPLAY) in url
+
+    def test_vpn_display_url_uses_standard_port(self):
+        """VPN-first: all display URLs use the standard port, no proxy remapping."""
+        mgr = self._mgr_module.init(
+            lambda n: {"mesh1": "10.0.0.2"}.get(n),
+            config={
+                "HOST_IP": "10.0.0.1", "HOST_NAME": "super", "MESH_KEY": "test",
+                "CHILD_MANAGER_IPS": {"mesh1": "10.0.0.2"},
+            },
+            manager_class=self._mgr_module.ClusterManager,
+        )
+        url = mgr.get_child_display_url("mesh1")
+        assert url is not None
+        assert "10.0.0.2" in url
+        assert str(data.Ports.KIOSK_DISPLAY) in url
 
     def test_supermanager_fleet_children_includes_fleet_nodes(self):
         """SM's get_fleet_children returns fleet nodes as children."""
@@ -4504,3 +4528,31 @@ class TestManagerVncResolution:
         children = mgr.get_fleet_children("super")
         assert "mesh1" in children
         assert "ai" in children
+
+    def test_no_display_resolver_returns_none_for_unknown_nodes(self):
+        """Without display_resolver, nodes not in _child_managers return None."""
+        mgr = self._mgr_module.init(
+            lambda n: "10.0.0.2" if n == "mesh1" else None,
+            config={
+                "HOST_IP": "10.10.10.23", "HOST_NAME": "home", "MESH_KEY": "test",
+                "CHILD_MANAGER_IPS": {},
+            },
+            manager_class=self._mgr_module.ClusterManager,
+        )
+        assert mgr.get_child_display_url("mesh1") is None
+
+    def test_display_resolver_with_port_offset(self):
+        """display_resolver returning (ip, offset) applies offset to port."""
+        mgr = self._mgr_module.init(
+            lambda n: "10.0.0.2" if n == "mesh1" else None,
+            config={
+                "HOST_IP": "10.0.0.1", "HOST_NAME": "super", "MESH_KEY": "test",
+            },
+            manager_class=self._mgr_module.ClusterManager,
+            is_supermanager=True,
+            display_resolver=lambda n: ("192.168.86.201", 100) if n == "mesh1" else None,
+        )
+        url = mgr.get_child_display_url("mesh1")
+        assert url is not None
+        assert "192.168.86.201" in url
+        assert str(data.Ports.KIOSK_DISPLAY + 100) in url

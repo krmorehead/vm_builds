@@ -133,6 +133,40 @@ Stale containers from a previous converge are NEVER recreated by `proxmox_lxc` â
 
 Previous bug: LAN host cleanup ran AFTER primary cleanup. OpenWrt (gateway to mesh1) was already destroyed. SSH to mesh1 at 10.10.10.210 failed (no route). The stale rsyslog container on mesh1 survived with an outdated logrotate config. Reconverge reused the stale container. The logrotate verify assertion failed on every test cycle until the cleanup ordering was fixed.
 
+## LAN host systemd unit cleanup (CRITICAL)
+
+The main cleanup play targets `proxmox:!lan_hosts` â€” LAN hosts are
+explicitly excluded because they're only reachable through the router.
+LAN host cleanup runs via `tasks/cleanup_lan_host.yml` from `router_nodes`.
+
+`cleanup_lan_host.yml` MUST clean up host-level systemd units deployed
+by provisioning roles. Without this, legacy services survive cleanup and
+hold ports, causing new services to crash-loop on the next converge.
+
+Previous catastrophe (2026-04-14): KasmVNC migration renamed
+`kiosk-vnc-proxy` to `kiosk-display-proxy`. LAN host cleanup didn't
+remove the old unit. mesh1's old service held port 6080. New service
+crash-looped 957 times. Masked by adding 100s of retries instead of
+diagnosing the root cause.
+
+## Service migration: stop legacy before deploying replacement
+
+When RENAMING a systemd service, the provisioning role MUST stop and
+remove the old service BEFORE deploying the new one:
+
+```yaml
+- name: Stop legacy service before deploying replacement
+  ansible.builtin.shell:
+    cmd: |
+      systemctl stop old-service 2>/dev/null || true
+      systemctl disable old-service 2>/dev/null || true
+      rm -f /etc/systemd/system/old-service.service
+      pkill -f 'socat.*TCP-LISTEN:PORT' 2>/dev/null || true
+    executable: /bin/bash
+  changed_when: true
+  failed_when: false
+```
+
 ## Common failures
 
 | Issue | Cause | Fix |
@@ -142,3 +176,5 @@ Previous bug: LAN host cleanup ran AFTER primary cleanup. OpenWrt (gateway to me
 | WiFi not detected | Didn't unbind vfio-pci or reload modules | Ensure steps 3-6 present |
 | Re-authentication fails after rollback | Cleanup removed authorized_keys | NEVER remove credentials |
 | Stale container on LAN host | LAN cleanup runs after OpenWrt destroyed | Move LAN cleanup before primary |
+| New service crash-loops after rename | Old service holds port, not cleaned | Stop legacy in provisioning role |
+| LAN host keeps stale systemd units | cleanup_lan_host.yml misses them | Add unit cleanup to LAN tasks |

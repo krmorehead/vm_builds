@@ -1,60 +1,87 @@
 ---
-# ── Verify Pi-hole template exists ───────────────────────────────
+# Pi-hole LXC provisioning via Node Manager API.
+# Heavy operations (pct create, start, wait) go through the NM API.
+# Version check skips everything when the deployed version matches.
+
+# ── Version-aware skip check ──────────────────────────────────────
+- name: Check Pi-hole version via NM API
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/check_service_version.yml"
+  vars:
+    _check_service_name: pihole
+    _check_image_version: "{{ pihole_image_version }}"
+
+# ── Verify Pi-hole template exists (controller-side check) ────────
 - name: Verify Pi-hole template exists
   ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/verify_lxc_template.yml"
   vars:
     lxc_template_path: "{{ pihole_ct_template_path }}"
     lxc_service_name: Pi-hole
+  when: not (_service_up_to_date | default(false) | bool)
 
-# ── Determine container network ─────────────────────────────────
+# ── Determine container network ──────────────────────────────────
 - name: Compute Pi-hole LAN network
   ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_lan_network.yml"
   vars:
     lxc_net_service_name: pihole
     lxc_net_ip_offset: "{{ pihole_ct_ip_offset }}"
 
-# ── Check container existence ──────────────────────────────────
+# ── Provision container via NM API (skipped when version matches) ─
+- name: Provision Pi-hole LXC via NM API
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/pihole"
+    method: POST
+    body_format: json
+    body:
+      vmid: "{{ pihole_ct_id }}"
+      template_path: "{{ pihole_ct_template_path | basename }}"
+      hostname: "{{ pihole_ct_hostname }}"
+      memory: "{{ pihole_ct_memory }}"
+      cores: "{{ pihole_ct_cores }}"
+      disk: "{{ pihole_ct_disk }}"
+      onboot: "{{ pihole_ct_onboot }}"
+      startup_order: "{{ pihole_ct_startup_order }}"
+      features: "{{ pihole_ct_features | join(',') }}"
+      ip: "{{ _lxc_ct_ip }}/{{ _lan_cidr }}"
+      gateway: "{{ _lan_gateway }}"
+      nameserver: "{{ _lan_gateway }}"
+      bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
+      image_version: "{{ pihole_image_version }}"
+    status_code: 200
+    timeout: 180
+  delegate_to: localhost
+  register: _provision_result
+  failed_when: not (_provision_result.json.success | default(false))
+  when: not (_service_up_to_date | default(false) | bool)
 
-- name: Check if Pi-hole container exists
-  ansible.builtin.command:
-    cmd: pct status {{ pihole_ct_id }}
-  register: _ct_status
-  failed_when: false
-  changed_when: false
+- name: Report provision result
+  ansible.builtin.debug:
+    msg: "Pi-hole on {{ inventory_hostname }}: {{ _provision_result.json.status }} — {{ _provision_result.json.log | default([]) | join(', ') }}"
+  when: not (_service_up_to_date | default(false) | bool)
 
-- name: Set container existence flag
-  ansible.builtin.set_fact:
-    _lxc_exists: "{{ _ct_status.rc == 0 }}"
-
-# ── Resolve deployed version ────────────────────────────────────
-
-- name: Resolve deployed Pi-hole version
-  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_deployed_version.yml"
+# ── Configure callhome via NM API (skipped when version matches) ─
+- name: Configure callhome on Pi-hole
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/configure_callhome_api.yml"
   vars:
-    _resolve_service_name: pihole
+    _callhome_vmid: "{{ pihole_ct_id }}"
 
-# ── Provision via shared proxmox_lxc role ────────────────────────
+# ── Register in dynamic inventory (for configure plays) ──────────
+- name: Add Pi-hole containers to dynamic inventory group
+  ansible.builtin.add_host:
+    name: "{{ pihole_ct_hostname }}-{{ item }}"
+    groups: pihole
+    ansible_connection: community.proxmox.proxmox_pct_remote
+    ansible_host: "{{ hostvars[item].ansible_host }}"
+    ansible_user: root
+    proxmox_vmid: "{{ pihole_ct_id }}"
+    ansible_paramiko_host_key_checking: false
+    ansible_paramiko_proxy_command: >-
+      {{ 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@'
+         + lookup('env', 'PRIMARY_HOST')
+         if 'lan_hosts' in (hostvars[item].group_names | default([]))
+         else omit }}
+  loop: "{{ ansible_play_hosts }}"
 
-- name: Provision Pi-hole LXC container
-  ansible.builtin.include_role:
-    name: proxmox_lxc
-  vars:
-    lxc_ct_id: "{{ pihole_ct_id }}"
-    lxc_ct_hostname: "{{ pihole_ct_hostname }}"
-    lxc_ct_dynamic_group: pihole
-    lxc_ct_memory: "{{ pihole_ct_memory }}"
-    lxc_ct_cores: "{{ pihole_ct_cores }}"
-    lxc_ct_disk: "{{ pihole_ct_disk }}"
-    lxc_ct_onboot: "{{ pihole_ct_onboot }}"
-    lxc_ct_startup_order: "{{ pihole_ct_startup_order }}"
-    lxc_ct_features: "{{ pihole_ct_features }}"
-    lxc_ct_template_path: "{{ pihole_ct_template_path }}"
-    lxc_ct_ip: "{{ _lxc_ct_ip }}/{{ _lan_cidr }}"
-    lxc_ct_gateway: "{{ _lan_gateway }}"
-    lxc_ct_nameserver: "{{ _lan_gateway }}"
-    lxc_ct_bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
-    lxc_ct_image_version: "{{ pihole_image_version }}"
-
+# ── Export static IP for downstream roles ─────────────────────────
 - name: Export Pi-hole static IP for downstream roles
   ansible.builtin.set_fact:
     pihole_static_ip: "{{ _lxc_ct_ip }}"
