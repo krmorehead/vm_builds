@@ -2000,6 +2000,146 @@ Complete verification matrix. EVERY cell must be tested. Mark PASS/FAIL.
 - Session switching is done within the desktop environment via the
   KasmVNC iframe, not via SM viewer bar buttons
 
+## Playbook 21: WiFi Bridge Negotiation & Link Config Verification
+
+Verify the cross-endpoint WiFi negotiation produces the correct link
+configuration and that it is visible in both CLI and the kiosk UI.
+
+### Prerequisites
+
+- System fully converged (`molecule test` passed)
+- Bridge containers (CT 104) running on bridge-1 and bridge-2
+- WiFi link established (Playbook 4 shows `WIFI=up` on both)
+
+### 21.1 Verify negotiated link parameters via CLI
+
+```bash
+# Check bridge-1 (AP) link config
+ssh -o StrictHostKeyChecking=no root@$BRIDGE_1_HOST \
+  "pct exec 104 -- /usr/sbin/wifi_setup.sh status"
+```
+
+**Expected output includes:**
+- `BAND=6g` (or `5g` if 6 GHz is unavailable)
+- `HTMODE=HE160` (or the best negotiated mode)
+- `CHANNEL=<non-auto value>` (specific channel, not "auto")
+- `WIDTH_MHZ=160` (or negotiated width)
+- `NOSCAN=1` (coexistence scanning disabled for dedicated link)
+- `POWER_SAVE=Power save: off` (performance mode)
+- `DRIVER=iwlwifi` (or actual driver)
+- `WIFI=up`
+
+```bash
+# Check bridge-2 (STA) — should show identical band/htmode/channel
+ssh -o StrictHostKeyChecking=no root@$BRIDGE_2_HOST \
+  "pct exec 104 -- /usr/sbin/wifi_setup.sh status"
+```
+
+**Expected:** Both sides show the SAME band, htmode, and channel.
+
+### 21.2 Verify capabilities reporting
+
+```bash
+# Dump full capabilities from AP side
+ssh -o StrictHostKeyChecking=no root@$BRIDGE_1_HOST \
+  "pct exec 104 -- /usr/sbin/wifi_setup.sh capabilities"
+```
+
+**Expected output includes:**
+- `PHY=phy0` (or detected PHY)
+- `BANDS=2g,5g,6g` (all bands the hardware supports)
+- `BAND_6G_AP_CHANNELS=...` (non-empty if 6 GHz AP mode is available)
+- `BAND_5G_HE=yes` and `BAND_5G_VHT=yes` for AX210
+- `SUPPORTS_WDS=yes`
+
+### 21.3 Verify negotiation logic offline
+
+```bash
+# Run negotiation with live capabilities from both endpoints
+AP_CAPS=$(ssh -o StrictHostKeyChecking=no root@$BRIDGE_1_HOST \
+  "pct exec 104 -- /usr/sbin/wifi_setup.sh capabilities")
+STA_CAPS=$(ssh -o StrictHostKeyChecking=no root@$BRIDGE_2_HOST \
+  "pct exec 104 -- /usr/sbin/wifi_setup.sh capabilities")
+
+python3 scripts/wifi_negotiate.py \
+  --ap "$AP_CAPS" --sta "$STA_CAPS"
+```
+
+**Expected:** JSON output with `band`, `channel`, `htmode`, `width_mhz`,
+and `reason` explaining the selection. The band should match what's
+configured on the containers.
+
+### 21.4 Verify heartbeat extensions include link config
+
+```bash
+# Check callhome extensions for bridge containers
+curl -s http://localhost:${WEBUI_PORT:-52525}/api/container/openwrt-bridge/ready \
+  | python3 -m json.tool
+```
+
+**Expected:** `extensions.bridge_status.link_config` contains `band`,
+`htmode`, `channel`, `noscan` matching the configured values.
+
+```bash
+# Also check the UCI wireless extension
+curl -s http://localhost:${WEBUI_PORT:-52525}/api/container/openwrt-bridge/ready \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d.get('extensions',{}).get('uci_wireless',{}), indent=2))"
+```
+
+**Expected:** `radios[0]` shows the negotiated band, htmode, channel.
+
+### 21.5 Verify Bridge page in Cluster Manager kiosk UI
+
+Access the CM kiosk at `http://localhost:9098/bridge` (or via
+SM remote kiosk at `/remote/home`).
+
+**Expected on the Bridge page:**
+1. **Link banner** at the top shows:
+   - AP and STA icons connected with signal strength
+   - One-line link summary (e.g., "6 GHz · HE160 · ch1")
+   - Link uptime
+2. **Node cards** for Bridge 1 and Bridge 2 each show:
+   - "Negotiated Link" section with Band, HT Mode, Width, Channel,
+     Driver, Co-ex Scan (disabled), Power Save (off)
+   - Interface details (wlan0, mode, SSID, channel)
+   - Link Quality section with signal, TX/RX bitrate
+3. **Detail table** at the bottom includes Band and HT Mode columns
+   for both nodes, showing matching values
+
+### 21.6 Verify asymmetric hardware handling (if available)
+
+If mesh containers use different WiFi hardware than bridge containers:
+
+```bash
+# Compare mesh1 capabilities
+ssh -o StrictHostKeyChecking=no -o ProxyCommand="ssh -o StrictHostKeyChecking=no -W %h:%p root@$PRIMARY_HOST" \
+  root@10.10.10.210 "pct exec 103 -- /usr/sbin/wifi_setup.sh capabilities"
+
+# Compare mesh2 capabilities
+ssh -o StrictHostKeyChecking=no root@$MESH_2_HOST \
+  "pct exec 103 -- /usr/sbin/wifi_setup.sh capabilities"
+```
+
+**Expected:** Different hardware reports different capabilities
+(different bands, widths, HE/VHT support). The negotiation module
+correctly handles asymmetric inputs (unit tested in
+`tests/test_wifi_negotiate.py::TestAsymmetricHardware`).
+
+### 21.7 Sign-off checklist
+
+| Check | bridge-1 (AP) | bridge-2 (STA) |
+|-------|:---:|:---:|
+| `wifi_setup.sh status` shows band/htmode/channel | __ | __ |
+| `wifi_setup.sh capabilities` reports all bands | __ | __ |
+| Both sides show matching band/htmode/channel | __ | __ |
+| `NOSCAN=1` (co-ex scan disabled) | __ | __ |
+| `POWER_SAVE=off` | __ | __ |
+| Heartbeat `bridge_status.link_config` populated | __ | __ |
+| Bridge page shows "Negotiated Link" section | __ | __ |
+| Bridge page detail table has Band/HT Mode columns | __ | __ |
+| Link banner shows one-line config summary | __ | __ |
+| `wifi_negotiate.py` CLI produces correct JSON | __ | __ |
+
 ## Known Issues and Workarounds
 
 ### LAN IP collisions (FIXED)

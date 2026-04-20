@@ -13,6 +13,14 @@
   roles:
     - openwrt_bridge_lxc
 
+- name: Negotiate WiFi bridge link parameters
+  hosts: bridge_nodes
+  gather_facts: false
+  tasks:
+    - name: Run WiFi negotiation
+      ansible.builtin.include_tasks:
+        file: "{{ project_root }}/tasks/negotiate_wifi_bridge.yml"
+
 - name: Reconstruct bridge group for configure play
   hosts: bridge_nodes
   gather_facts: true

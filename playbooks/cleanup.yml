@@ -157,7 +157,7 @@
     # during cleanup. This is the one exception to fail-fast.
 
     - name: Deregister destroyed containers from Manager
-      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/manager_register.yml"
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/manager_register.yml"
       vars:
         register_path: "api/host/{{ inventory_hostname }}/containers/{{ _deregister_vmid }}"
         register_body: {}
@@ -168,7 +168,7 @@
         loop_var: _deregister_vmid
 
     - name: Deregister destroyed VMs from Manager
-      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/manager_register.yml"
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/manager_register.yml"
       vars:
         register_path: "api/host/{{ inventory_hostname }}/containers/{{ _deregister_vmid }}"
         register_body: {}
@@ -233,6 +233,7 @@
         - /etc/network/interfaces.d/ansible-temp-lan.conf
         - /etc/modprobe.d/blacklist-wifi.conf
         - /etc/modprobe.d/vfio-pci.conf
+        - /etc/modprobe.d/iwlwifi-options.conf
         - /etc/ansible/facts.d/vm_builds.fact
         - /etc/apt/sources.list.d/pve-no-subscription.sources
         - /etc/modules-load.d/wireguard.conf
@@ -1376,6 +1377,7 @@
         - /etc/network/interfaces.d/ansible-temp-lan.conf
         - /etc/modprobe.d/blacklist-wifi.conf
         - /etc/modprobe.d/vfio-pci.conf
+        - /etc/modprobe.d/iwlwifi-options.conf
         - /etc/ansible/facts.d/vm_builds.fact
         - /etc/apt/sources.list.d/pve-no-subscription.sources
         - /etc/modules-load.d/wireguard.conf

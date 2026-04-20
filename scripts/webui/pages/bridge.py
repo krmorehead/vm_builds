@@ -125,6 +125,8 @@ def _render_link_banner(node_data: dict) -> None:
     ap_label = bridge_nodes[0]["label"] if len(bridge_nodes) > 0 else "Bridge 1"
     sta_label = bridge_nodes[1]["label"] if len(bridge_nodes) > 1 else "Bridge 2"
 
+    link_summary = _extract_link_summary(ap_data, sta_data)
+
     with ui.card().classes("w-full"):
         if linked:
             sig_text = ""
@@ -144,6 +146,10 @@ def _render_link_banner(node_data: dict) -> None:
                     ui.label(f"◄{'━' * 6} {sig_text} {'━' * 6}►").classes(
                         "text-xs font-mono tracking-tight"
                     ).style(f"color: {sig_color}")
+                    if link_summary:
+                        ui.label(link_summary).classes("text-xs font-bold").style(
+                            f"color: {theme.ACCENT}"
+                        )
                     time_str = ""
                     if uptime_seconds > 0:
                         mins = uptime_seconds // 60
@@ -215,6 +221,8 @@ def _render_node_card(node: dict, cached) -> None:
             )
             return
 
+        _render_link_config(cached.data)
+
         ifaces = cached.data.get("interfaces", [])
         for iface in ifaces:
             iface_name = iface.get("name", "?")
@@ -273,6 +281,79 @@ def _render_node_card(node: dict, cached) -> None:
         ).style(f"color: {theme.TEXT_DISABLED}")
 
 
+_BAND_LABELS = {"2g": "2.4 GHz", "5g": "5 GHz", "6g": "6 GHz"}
+_WIDTH_LABELS = {"160": "160 MHz", "80": "80 MHz", "40": "40 MHz", "20": "20 MHz"}
+
+
+def _extract_link_summary(ap_data, sta_data) -> str:
+    """Build a one-line summary of the negotiated link config (e.g., '6 GHz HE160 ch1')."""
+    for src in (ap_data, sta_data):
+        if not src or not src.success:
+            continue
+        status = src.data.get("script_status", {})
+        band = status.get("BAND", "")
+        htmode = status.get("HTMODE", "")
+        channel = status.get("CHANNEL", "")
+        if band and band != "unknown" and htmode and htmode != "unknown":
+            band_label = _BAND_LABELS.get(band, band)
+            parts = [band_label, htmode]
+            if channel and channel not in ("unknown", "auto"):
+                parts.append(f"ch{channel}")
+            return " · ".join(parts)
+    return ""
+
+
+def _render_link_config(data: dict) -> None:
+    """Render the negotiated link configuration section (band, htmode, channel, width)."""
+    status = data.get("script_status", {})
+    band = status.get("BAND", "")
+    htmode = status.get("HTMODE", "")
+    channel = status.get("CHANNEL", "")
+    width = status.get("WIDTH_MHZ", "")
+    driver = status.get("DRIVER", "")
+    noscan = status.get("NOSCAN", "")
+    power_save = status.get("POWER_SAVE", "")
+
+    if not band or band == "unknown":
+        return
+
+    ui.separator().classes("my-2").style(f"background: {theme.ACCENT_DIM}")
+    with ui.row().classes("items-center gap-1"):
+        theme.section_label("Negotiated Link")
+        theme.help_tooltip(
+            "Link parameters selected by cross-endpoint negotiation. "
+            "Both bridge endpoints report their hardware capabilities, "
+            "and the system picks the best shared band, channel width, "
+            "and channel for maximum throughput."
+        )
+
+    band_label = _BAND_LABELS.get(band, band)
+    theme.metric_row("Band", band_label)
+
+    if htmode and htmode != "unknown":
+        theme.metric_row("HT Mode", htmode)
+
+    if width:
+        width_label = _WIDTH_LABELS.get(width, f"{width} MHz")
+        theme.metric_row("Width", width_label)
+
+    if channel and channel not in ("unknown", "auto"):
+        theme.metric_row("Channel", str(channel))
+
+    if driver and driver != "unknown":
+        theme.metric_row("Driver", driver)
+
+    if noscan == "1":
+        theme.metric_row("Co-ex Scan", "Disabled (dedicated link)")
+    elif noscan:
+        theme.metric_row("Co-ex Scan", "Enabled")
+
+    if power_save and "off" in power_save.lower():
+        theme.metric_row("Power Save", "Off (performance)")
+    elif power_save and power_save != "unknown":
+        theme.metric_row("Power Save", power_save)
+
+
 def _render_traffic_card(tx_history: list[float], rx_history: list[float]) -> None:
     """Render the traffic throughput sparkline card."""
     with ui.card().classes("w-full"):
@@ -292,6 +373,8 @@ def _render_detail_table(node_data: dict) -> None:
                 "node": node["label"],
                 "role": "--",
                 "paired": "--",
+                "band": "--",
+                "htmode": "--",
                 "signal": "--",
                 "tx_rate": "--",
                 "rx_rate": "--",
@@ -300,6 +383,7 @@ def _render_detail_table(node_data: dict) -> None:
             continue
 
         bridge_info = cached.data.get("bridge", {})
+        status = cached.data.get("script_status", {})
         stations = cached.data.get("stations", [])
         sig = "--"
         tx_rate = "--"
@@ -311,10 +395,16 @@ def _render_detail_table(node_data: dict) -> None:
             tx_rate = s.get("tx_bitrate", "--")
             rx_rate = s.get("rx_bitrate", "--")
 
+        band_raw = status.get("BAND", "--")
+        band_display = _BAND_LABELS.get(band_raw, band_raw) if band_raw != "--" else "--"
+        htmode_val = status.get("HTMODE", "--")
+
         rows.append({
             "node": node["label"],
             "role": bridge_info.get("role", "--").upper(),
             "paired": "Yes" if bridge_info.get("paired") else "No",
+            "band": band_display,
+            "htmode": htmode_val if htmode_val and htmode_val != "unknown" else "--",
             "signal": sig,
             "tx_rate": tx_rate,
             "rx_rate": rx_rate,
@@ -326,6 +416,8 @@ def _render_detail_table(node_data: dict) -> None:
             {"name": "node", "label": "Node", "field": "node", "align": "left"},
             {"name": "role", "label": "Role", "field": "role", "align": "center"},
             {"name": "paired", "label": "Paired", "field": "paired", "align": "center"},
+            {"name": "band", "label": "Band", "field": "band", "align": "center"},
+            {"name": "htmode", "label": "HT Mode", "field": "htmode", "align": "center"},
             {"name": "signal", "label": "Signal", "field": "signal", "align": "center"},
             {"name": "tx_rate", "label": "TX Rate", "field": "tx_rate", "align": "center"},
             {"name": "rx_rate", "label": "RX Rate", "field": "rx_rate", "align": "center"},

@@ -163,7 +163,7 @@
 # ── Resolve deployed version ────────────────────────────────────
 
 - name: Resolve deployed OpenWrt mesh version
-  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_deployed_version.yml"
+  ansible.builtin.include_tasks: "{{ project_root }}/tasks/resolve_deployed_version.yml"
   vars:
     _resolve_service_name: openwrt_mesh
 
@@ -224,7 +224,7 @@
 
 - name: Configure callhome on mesh container
   ansible.builtin.include_tasks:
-    file: "{{ playbook_dir }}/../tasks/lxc_openwrt_callhome.yml"
+    file: "{{ project_root }}/tasks/lxc_openwrt_callhome.yml"
   vars:
     _callhome_ct_id: "{{ meshwifi_ct_id }}"
     _callhome_hostname: "{{ openwrt_mesh_ct_hostname }}"
@@ -249,7 +249,7 @@
 # ── Register PHY namespace move with Manager ─────────────────────
 
 - name: Update PHY namespaces in Manager after move
-  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/manager_register.yml"
+  ansible.builtin.include_tasks: "{{ project_root }}/tasks/manager_register.yml"
   vars:
     register_path: "api/host/{{ inventory_hostname }}/hardware/phy/{{ item }}"
     register_body:

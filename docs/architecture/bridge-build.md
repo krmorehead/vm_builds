@@ -11,7 +11,7 @@ as `bridge-1`.
 ## Hardware
 
 Each bridge unit is a small-form-factor PC with:
-- Intel AX210 WiFi adapter (WiFi 6E, supports 5 GHz HE80)
+- Intel AX210 WiFi adapter (WiFi 6E, supports 5 GHz HE160 / 6 GHz HE160)
 - Built-in NIC with Wake-on-LAN support
 - iGPU (Intel HD Graphics 630 — detected by `proxmox_igpu`)
 
@@ -41,7 +41,7 @@ bridge-1 (AP side)                    bridge-2 (STA side)
 │  ┌────────────────┐  │  WDS link    │  ┌────────────────┐  │
 │  │ OpenWrt Bridge  │  │ ◄──────────►│  │ OpenWrt Bridge  │  │
 │  │ LXC (VMID 104) │  │  WiFi 5GHz  │  │ LXC (VMID 104) │  │
-│  │  role: AP       │  │  HE80       │  │  role: STA      │  │
+│  │  role: AP       │  │ HE80/HE160 │  │  role: STA      │  │
 │  │                 │  │  WPA3-SAE   │  │                 │  │
 │  │ br-lan:         │  │             │  │ br-lan:         │  │
 │  │  eth0 + wds0    │  │             │  │  eth0 + wds0    │  │
@@ -61,9 +61,13 @@ bridge-1 (AP side)                    bridge-2 (STA side)
   the WiFi interface. No routing or NAT — pure L2 forwarding with STP.
 - **Dedicated SSID**: Uses `bridge-dedicated` (hidden AP). Prevents interference
   with other WiFi networks.
-- **5 GHz band**: The AX210 self-managed regulatory domain doesn't expose 6 GHz
-  frequencies without proper LAR (Location-Aware Regulatory) initialization.
-  5 GHz with HE80 provides reliable ~800 Mbps throughput.
+- **Dynamic band/width selection via cross-endpoint negotiation**: Both bridge
+  endpoints report WiFi capabilities (`wifi_setup.sh capabilities`), and
+  `scripts/wifi_negotiate.py` determines the optimal shared band, channel, and
+  htmode. With AX210 hardware, the self-managed iwlwifi firmware allows 6 GHz
+  AP mode without `no-IR` restrictions, enabling WiFi 6E HE160. 5 GHz remains
+  restricted by LAR (PASSIVE-SCAN on all channels). Expected throughput:
+  800-1500 Mbps (HE160) on 6 GHz, 200-300 Mbps (HE40) on 2.4 GHz fallback.
 - **WPA3-SAE encryption**: Strong authentication via `MESH_KEY` env var.
 - **PHY namespace move**: WiFi PHY is moved into the LXC container's network
   namespace (same pattern as `openwrt_mesh_lxc`). Hookscript persists across
@@ -90,13 +94,25 @@ bridge-1 (AP side)                    bridge-2 (STA side)
 - Deploys hookscript for WiFi PHY namespace persistence
 - Forwards `wifi_role` to dynamic host
 
+### WiFi negotiation play (between provision and configure)
+
+- Targets: `bridge_nodes` (Proxmox hosts)
+- Collects WiFi capabilities from each bridge container via `pct exec`
+- Runs `scripts/wifi_negotiate.py` on the Ansible controller to compute optimal
+  shared band, channel, and htmode
+- Stores results as `wifi_negotiated_band`, `wifi_negotiated_channel`,
+  `wifi_negotiated_htmode` facts on the bridge hosts
+
 ### `openwrt_bridge_configure` (configure)
 
 - Targets: `openwrt_bridge` (dynamic group populated by provisioning)
 - Connection: `community.proxmox.proxmox_pct_remote`
+- Resolves negotiated WiFi parameters from parent host hostvars (falls back to
+  `auto` for standalone/per-feature scenarios without negotiation)
 - Delegates to shared `tasks/configure_wifi_wds.yml` with bridge-specific vars
 - WDS AP interface (bridge-1) or WDS STA interface (bridge-2) based on `wifi_role`
-- Band selection, country code, STP, and WiFi verification handled by shared task
+- Band, channel, htmode, country code, STP, performance tuning, and WiFi
+  verification handled by `wifi_setup.sh`
 
 ## Container IP
 
@@ -138,8 +154,28 @@ configuration work with WiFi 6E hardware.
 ./cleanup.sh rollback bridge
 ```
 
+## UI Integration
+
+The negotiated link configuration is visible through multiple layers:
+
+1. **Heartbeat extensions**: `callhome.sh` includes `bridge_status.link_config`
+   with band, htmode, channel, noscan in every heartbeat from bridge containers.
+2. **wifi_setup.sh status**: Reports BAND, HTMODE, CHANNEL, WIDTH_MHZ, NOSCAN,
+   DRIVER, POWER_SAVE — all negotiated values.
+3. **Bridge page** (`scripts/webui/pages/bridge.py`):
+   - Link banner shows one-line summary (e.g., "6 GHz · HE160 · ch1")
+   - Each node card has a "Negotiated Link" section with band, htmode, width,
+     channel, driver, co-ex scan, and power save status
+   - Detail table includes Band and HT Mode columns
+4. **Fleet API**: `GET /api/container/openwrt-bridge/ready` returns negotiated
+   config in `extensions.bridge_status.link_config` and `extensions.uci_wireless`.
+
 ## Related
 
+- `scripts/wifi_negotiate.py` — cross-endpoint WiFi negotiation (band, channel,
+  htmode selection). Pure Python, unit-testable with `tests/test_wifi_negotiate.py`
+- `scripts/webui/pages/bridge.py` — kiosk bridge dashboard with negotiated link display
+- `scripts/callhome.sh` — BusyBox heartbeat agent with `bridge_status.link_config`
 - `openwrt_mesh_lxc` / `openwrt_mesh_configure` — mesh satellite roles
   (different SSID: `vm-builds-backhaul`, different target group)
 - `tasks/configure_wifi_wds.yml` — shared WDS configuration (used by both

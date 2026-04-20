@@ -1,0 +1,77 @@
+---
+# Shared WiFi bridge negotiation tasks.
+# Collects capabilities from both bridge endpoints, runs the
+# wifi_negotiate.py module on the controller, and stores the
+# negotiated band/channel/htmode as facts on all bridge hosts.
+#
+# Expected context: runs on bridge_nodes hosts with bridge_ct_id
+# defined and containers already provisioned and running.
+
+- name: Collect WiFi capabilities from bridge containers
+  ansible.builtin.command:
+    cmd: >-
+      pct exec {{ bridge_ct_id }} --
+      /usr/sbin/wifi_setup.sh capabilities
+  register: _bridge_caps
+  changed_when: false
+  failed_when: _bridge_caps.rc != 0
+
+- name: Save capabilities to temp files
+  ansible.builtin.copy:
+    content: "{{ _bridge_caps.stdout }}"
+    dest: "/tmp/wifi_caps_{{ inventory_hostname }}.txt"
+    mode: "0644"
+  delegate_to: localhost
+  changed_when: false
+
+- name: Identify AP host
+  ansible.builtin.set_fact:
+    _ap_host: "{{ item }}"
+  loop: "{{ ansible_play_hosts }}"
+  when: hostvars[item].wifi_role | default('ap') == 'ap'
+
+- name: Identify STA host
+  ansible.builtin.set_fact:
+    _sta_host: "{{ item }}"
+  loop: "{{ ansible_play_hosts }}"
+  when: hostvars[item].wifi_role | default('sta') == 'sta'
+
+- name: Run WiFi negotiation
+  ansible.builtin.command:
+    cmd: >-
+      {{ ansible_playbook_python }} {{ project_root }}/scripts/wifi_negotiate.py
+      --ap-file /tmp/wifi_caps_{{ _ap_host }}.txt
+      --sta-file /tmp/wifi_caps_{{ _sta_host }}.txt
+  delegate_to: localhost
+  run_once: true
+  register: _negotiate_result
+  changed_when: false
+
+- name: Parse negotiation result
+  ansible.builtin.set_fact:
+    _negotiated: "{{ _negotiate_result.stdout | from_json }}"
+  run_once: true
+
+- name: Report negotiated parameters
+  ansible.builtin.debug:
+    msg: >-
+      WiFi negotiation: band={{ _negotiated.band }},
+      channel={{ _negotiated.channel }},
+      htmode={{ _negotiated.htmode }},
+      width={{ _negotiated.width_mhz }}MHz.
+      Reason: {{ _negotiated.reason }}
+  run_once: true
+
+- name: Store negotiated facts on all bridge hosts
+  ansible.builtin.set_fact:
+    wifi_negotiated_band: "{{ _negotiated.band }}"
+    wifi_negotiated_channel: "{{ _negotiated.channel }}"
+    wifi_negotiated_htmode: "{{ _negotiated.htmode }}"
+    wifi_negotiated_width_mhz: "{{ _negotiated.width_mhz }}"
+    cacheable: true
+
+- name: Clean up temp capability files
+  ansible.builtin.file:
+    path: "/tmp/wifi_caps_{{ inventory_hostname }}.txt"
+    state: absent
+  delegate_to: localhost

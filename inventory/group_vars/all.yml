@@ -96,6 +96,8 @@ rsyslog_ct_ip_offset: 30
 netdata_image_version: "{{ lookup('file', project_root + '/images/netdata.version') }}"
 netdata_lxc_template_path: "images/netdata-{{ netdata_image_version }}-debian-12-amd64.tar.zst"
 netdata_ct_ip_offset: 40
+
+# ── WiFi Bridge LXC (OpenWrt WDS backhaul) ──────────────────────
 bridge_ct_ip_offset: 27
 
 # ── Home Assistant LXC ──────────────────────────────────────────

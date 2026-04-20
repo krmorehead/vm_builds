@@ -2,8 +2,11 @@
 openwrt_bridge_ssid: "bridge-dedicated"
 openwrt_bridge_key: "{{ lookup('env', 'MESH_KEY') | default('changeme', true) }}"
 openwrt_bridge_encryption: sae
-# 2.4GHz: AX210 self-managed regulatory blocks 5GHz AP mode (PASSIVE-SCAN).
-# Channel 11: non-overlapping with mesh (channel 1).
-openwrt_bridge_band: "2g"
-openwrt_bridge_channel: "11"
+# Dynamic band/channel/htmode selection via cross-endpoint negotiation.
+# When set to "auto", wifi_setup.sh probes the PHY for optimal parameters.
+# The negotiation play in site.yml overrides these with negotiated values
+# stored as hostvars on bridge_nodes hosts.
+openwrt_bridge_band: "auto"
+openwrt_bridge_channel: "auto"
+openwrt_bridge_htmode: "auto"
 openwrt_bridge_country: "US"

@@ -1093,7 +1093,7 @@
         seconds: 45
 
     - name: Run heartbeat staleness check
-      ansible.builtin.include_tasks: "{{ playbook_dir }}/../../tasks/fleet_heartbeat_gate.yml"
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/fleet_heartbeat_gate.yml"
       vars:
         gate_services: "{{ fleet_monitored_services }}"
         gate_max_age_seconds: 300
@@ -1819,12 +1819,49 @@
           {{ bridge_ct_id }} — kiosk_configure may have overwritten it.
       when: _fleet_api_ready is defined
 
+    # ── Negotiated WiFi parameters (E2E) ─────────────────────────
+
+    - name: Check bridge WiFi band and htmode
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ bridge_ct_id }} -- /bin/sh -c '
+          echo "BAND=$(uci get wireless.radio0.band 2>/dev/null || echo unknown)";
+          echo "HTMODE=$(uci get wireless.radio0.htmode 2>/dev/null || echo unknown)";
+          echo "NOSCAN=$(uci get wireless.radio0.noscan 2>/dev/null || echo 0)"'
+      register: _bridge_wifi_params
+      changed_when: false
+      when: _bridge_health.rc == 0
+
+    - name: Assert WiFi band is negotiated
+      ansible.builtin.assert:
+        that:
+          - _bridge_wifi_params.stdout is search('BAND=(2g|5g|6g)')
+        fail_msg: >-
+          Bridge WiFi band not valid. Got:
+          {{ _bridge_wifi_params.stdout | default('N/A') }}.
+          Expected BAND=2g, 5g, or 6g.
+      when:
+        - _bridge_health.rc == 0
+        - _bridge_wifi_params is defined
+
+    - name: Assert performance tuning (noscan)
+      ansible.builtin.assert:
+        that:
+          - "'NOSCAN=1' in _bridge_wifi_params.stdout"
+        fail_msg: >-
+          noscan not enabled on bridge container {{ inventory_hostname }}.
+          Dedicated links should have noscan=1.
+      when:
+        - _bridge_health.rc == 0
+        - _bridge_wifi_params is defined
+
     - name: Report bridge LXC verification
       ansible.builtin.debug:
         msg: >-
           Bridge LXC verification passed on {{ inventory_hostname }}:
           container={{ bridge_ct_id }}, running=yes,
-          hookscript=deployed, batman_tooling=yes
+          hookscript=deployed, batman_tooling=yes,
+          wifi_params={{ _bridge_wifi_params.stdout | default('N/A') | trim }}
 
 # ── Play 8: Home Assistant health (service_nodes) ────────────────
 # Deep HA checks (Docker install, Compose, cgroupfs, HA image, IP offset)

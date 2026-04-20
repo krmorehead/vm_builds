@@ -10,7 +10,7 @@
 # consistency with all other LXC service reconstruct wrappers.
 
 - name: Reconstruct Home Assistant group
-  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/reconstruct_lxc_group.yml"
+  ansible.builtin.include_tasks: "{{ project_root }}/tasks/reconstruct_lxc_group.yml"
   vars:
     reconstruct_service_name: Home Assistant
     reconstruct_service_prefix: homeassistant

@@ -12,7 +12,7 @@
     _lxc_exists: "{{ vm_status.rc == 0 }}"
 
 - name: Resolve deployed OpenWrt version
-  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_deployed_version.yml"
+  ansible.builtin.include_tasks: "{{ project_root }}/tasks/resolve_deployed_version.yml"
   vars:
     _resolve_service_name: openwrt
 
@@ -405,7 +405,7 @@
 # ── Register VM with Manager ─────────────────────────────────────
 
 - name: Register OpenWrt VM with Manager
-  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/manager_register.yml"
+  ansible.builtin.include_tasks: "{{ project_root }}/tasks/manager_register.yml"
   vars:
     register_path: "api/host/{{ inventory_hostname }}/containers/{{ openwrt_vm_id }}"
     register_body:

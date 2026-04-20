@@ -371,7 +371,7 @@
 # ── Register iGPU state with Manager ─────────────────────────────
 
 - name: Register iGPU with Manager
-  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/manager_register.yml"
+  ansible.builtin.include_tasks: "{{ project_root }}/tasks/manager_register.yml"
   vars:
     register_path: "api/host/{{ inventory_hostname }}/hardware"
     register_body:

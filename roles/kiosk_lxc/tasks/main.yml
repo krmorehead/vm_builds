@@ -43,7 +43,7 @@
 # ── Resolve deployed version (skipped when version matches) ──────
 
 - name: Resolve deployed Kiosk version
-  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/resolve_kiosk_version.yml"
+  ansible.builtin.include_tasks: "{{ project_root }}/tasks/resolve_kiosk_version.yml"
   when: not (_service_up_to_date | default(false) | bool)
 
 # ── Provision via shared proxmox_lxc role (skipped when version matches)

@@ -186,7 +186,19 @@ if [ -n "$CALLHOME_CONTAINER" ]; then
             WDS_JSON="$WDS_JSON$entry"
         done
         if [ -n "$WDS_JSON" ]; then
-            BRIDGE_EXT="\"bridge_status\":{\"links\":[$WDS_JSON]}"
+            # Enrich bridge_status with negotiated link config from UCI
+            LINK_CFG=""
+            if command -v uci >/dev/null 2>&1; then
+                _br_radio=$(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.]*\)=wifi-device$/\1/p' | head -1)
+                if [ -n "$_br_radio" ]; then
+                    _br_band=$(uci -q get "wireless.$_br_radio.band" 2>/dev/null)
+                    _br_htmode=$(uci -q get "wireless.$_br_radio.htmode" 2>/dev/null)
+                    _br_channel=$(uci -q get "wireless.$_br_radio.channel" 2>/dev/null)
+                    _br_noscan=$(uci -q get "wireless.$_br_radio.noscan" 2>/dev/null)
+                    LINK_CFG=",\"link_config\":{\"band\":\"${_br_band:-unknown}\",\"htmode\":\"${_br_htmode:-unknown}\",\"channel\":\"${_br_channel:-auto}\",\"noscan\":\"${_br_noscan:-0}\"}"
+                fi
+            fi
+            BRIDGE_EXT="\"bridge_status\":{\"links\":[$WDS_JSON]${LINK_CFG}}"
             [ -n "$EXT_JSON" ] && EXT_JSON="$EXT_JSON,$BRIDGE_EXT" || EXT_JSON="$BRIDGE_EXT"
         fi
     fi

@@ -255,6 +255,34 @@
       {{ wifi_driver_blacklist if wifi_driver_blacklist | length > 0
          else _auto_driver_blacklist | default([]) }}
 
+# ── Reload iwlwifi for consistent firmware regulatory state ──────
+# iwlwifi's self-managed regulatory starts in country 00 with
+# PASSIVE-SCAN on many bands. A module reload reinitializes the
+# firmware regulatory state, enabling AP-capable channels on 6 GHz.
+# The lar_disable=1 modprobe option (if present in iwlwifi-options.conf
+# from previous runs) is also picked up on reload.
+
+- name: Check if iwlwifi module is loaded
+  ansible.builtin.stat:
+    path: /sys/module/iwlwifi
+  register: _iwlwifi_module
+
+- name: Check if iwlwifi PHY has self-managed regulatory
+  ansible.builtin.shell:
+    cmd: iw reg get 2>/dev/null | grep -c 'self-managed' || echo 0
+    executable: /bin/bash
+  register: _iwlwifi_self_managed
+  changed_when: false
+  when: _iwlwifi_module.stat.exists
+
+- name: Reload iwlwifi module stack for regulatory reinit
+  ansible.builtin.command:
+    cmd: bash -c 'modprobe -r iwlmvm iwlwifi 2>/dev/null || true; sleep 1; modprobe iwlwifi 2>/dev/null || true; sleep 2'
+  changed_when: true
+  when:
+    - _iwlwifi_module.stat.exists
+    - (_iwlwifi_self_managed.stdout | default('0') | trim | int) > 0
+
 - name: Skip remaining tasks when no WiFi devices found
   ansible.builtin.debug:
     msg: "No WiFi PCIe devices detected on this host. Skipping PCI passthrough."
@@ -716,7 +744,7 @@
       {{ result | to_json }}
 
 - name: Register hardware with Manager
-  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/manager_register.yml"
+  ansible.builtin.include_tasks: "{{ project_root }}/tasks/manager_register.yml"
   vars:
     register_path: "api/host/{{ inventory_hostname }}/hardware"
     register_body:

@@ -12,6 +12,26 @@
 # Delegates all WiFi setup to the shared configure_wifi_wds.yml
 # task file via wifi_setup.sh (baked into the image).
 
+- name: Resolve negotiated WiFi parameters
+  ansible.builtin.set_fact:
+    _resolved_band: >-
+      {{ hostvars[inventory_hostname | regex_replace('^openwrt-bridge-', '')].wifi_negotiated_band
+         | default(openwrt_bridge_band) }}
+    _resolved_channel: >-
+      {{ hostvars[inventory_hostname | regex_replace('^openwrt-bridge-', '')].wifi_negotiated_channel
+         | default(openwrt_bridge_channel) }}
+    _resolved_htmode: >-
+      {{ hostvars[inventory_hostname | regex_replace('^openwrt-bridge-', '')].wifi_negotiated_htmode
+         | default(openwrt_bridge_htmode) }}
+
+- name: Report resolved WiFi parameters
+  ansible.builtin.debug:
+    msg: >-
+      Bridge WiFi: band={{ _resolved_band | trim }},
+      channel={{ _resolved_channel | trim }},
+      htmode={{ _resolved_htmode | trim }}
+      (negotiation={{ hostvars[inventory_hostname | regex_replace('^openwrt-bridge-', '')].wifi_negotiated_band | default('not run') }})
+
 - name: Configure WDS WiFi link
   ansible.builtin.include_tasks: "{{ project_root }}/tasks/configure_wifi_wds.yml"
   vars:
@@ -20,6 +40,7 @@
     _wds_encryption: "{{ openwrt_bridge_encryption }}"
     _wds_wifi_role: "{{ hostvars[inventory_hostname | regex_replace('^openwrt-bridge-', '')].wifi_role | default('ap') }}"
     _wds_country: "{{ openwrt_bridge_country }}"
-    _wds_channel: "{{ openwrt_bridge_channel }}"
-    _wds_band: "{{ openwrt_bridge_band }}"
+    _wds_channel: "{{ _resolved_channel | trim }}"
+    _wds_band: "{{ _resolved_band | trim }}"
+    _wds_htmode: "{{ _resolved_htmode | trim }}"
     _wds_mesh_key: "{{ lookup('env', 'MESH_KEY') | default('', true) }}"

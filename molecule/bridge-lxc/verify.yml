@@ -93,6 +93,38 @@
       changed_when: false
       failed_when: (_wifi_iface.stdout | trim | int) == 0
 
+    - name: Check hostapd is actually running (AP mode)
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ bridge_ct_id }} -- /bin/sh -c '
+          if pidof hostapd >/dev/null 2>&1; then echo "running";
+          else echo "stopped"; fi'
+      register: _hostapd_status
+      changed_when: false
+      when: wifi_role | default('ap') == 'ap'
+
+    - name: Assert hostapd is running
+      ansible.builtin.assert:
+        that: (_hostapd_status.stdout | trim) == "running"
+        fail_msg: >-
+          hostapd is NOT running on {{ inventory_hostname }}.
+          Check 'logread | grep hostapd' in the container for details.
+          The selected band/channel may not be available for AP mode.
+      when: wifi_role | default('ap') == 'ap'
+
+    - name: Check STA association status
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ bridge_ct_id }} -- /bin/sh -c '
+          iw dev 2>/dev/null | sed -n "s/.*Interface //p" | head -1 |
+          xargs -I{} iw dev {} link 2>/dev/null | head -1'
+      register: _sta_link
+      changed_when: false
+      when: wifi_role | default('ap') == 'sta'
+      retries: 6
+      delay: 5
+      until: "'Not connected' not in (_sta_link.stdout | default(''))"
+
     - name: Check SSID is bridge-dedicated
       ansible.builtin.shell:
         cmd: |
@@ -159,6 +191,74 @@
         that: "'BAT_STATUS=BATMAN=inactive' in _batman_check.stdout"
         fail_msg: "batman-adv should be inactive by default, got: {{ _batman_check.stdout }}"
 
+    # ── Negotiated WiFi parameters ──────────────────────────────────
+
+    - name: Get WiFi band from container
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ bridge_ct_id }} -- /bin/sh -c '
+          uci get wireless.radio0.band 2>/dev/null || echo unknown'
+      register: _bridge_band
+      changed_when: false
+
+    - name: Get WiFi htmode from container
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ bridge_ct_id }} -- /bin/sh -c '
+          uci get wireless.radio0.htmode 2>/dev/null || echo unknown'
+      register: _bridge_htmode
+      changed_when: false
+
+    - name: Assert WiFi band was negotiated (not unknown)
+      ansible.builtin.assert:
+        that:
+          - _bridge_band.stdout | trim in ['2g', '5g', '6g']
+        fail_msg: >-
+          Bridge WiFi band is '{{ _bridge_band.stdout | trim }}',
+          expected a valid negotiated band (2g, 5g, or 6g).
+
+    - name: Assert htmode is at least HE80 on capable hardware
+      ansible.builtin.assert:
+        that:
+          - _bridge_htmode.stdout | trim is match('HE80|HE160|VHT80|VHT160')
+        fail_msg: >-
+          Bridge htmode is {{ _bridge_htmode.stdout | trim }}, expected
+          HE80 or wider for 5GHz+ operation.
+      when: _bridge_band.stdout | trim != "2g"
+
+    # ── Performance tuning checks ─────────────────────────────────
+
+    - name: Check noscan is enabled on radio
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ bridge_ct_id }} -- /bin/sh -c '
+          uci get wireless.radio0.noscan 2>/dev/null || echo 0'
+      register: _noscan_check
+      changed_when: false
+
+    - name: Assert noscan is enabled
+      ansible.builtin.assert:
+        that: _noscan_check.stdout | trim == "1"
+        fail_msg: "noscan not enabled on bridge radio — should be set for dedicated links"
+
+    # ── Both bridge endpoints match ──────────────────────────────
+
+    - name: Collect band for cross-endpoint comparison
+      ansible.builtin.set_fact:
+        _my_band: "{{ _bridge_band.stdout | trim }}"
+        _my_htmode: "{{ _bridge_htmode.stdout | trim }}"
+
+    - name: Assert all bridge endpoints use the same band
+      ansible.builtin.assert:
+        that:
+          - hostvars[item]._my_band | default('') == _my_band
+        fail_msg: >-
+          Band mismatch: {{ inventory_hostname }}={{ _my_band }},
+          {{ item }}={{ hostvars[item]._my_band | default('unknown') }}
+      loop: "{{ ansible_play_hosts }}"
+      when: ansible_play_hosts | length > 1
+      run_once: true
+
     # ── Report ────────────────────────────────────────────────────
     - name: Report bridge status
       ansible.builtin.debug:
@@ -166,6 +266,9 @@
           Bridge container on {{ inventory_hostname }}:
           WiFi role={{ wifi_role | default('unknown') }},
           mode={{ _wifi_status.stdout | regex_search('MODE=(.+)', '\1') | default(['unknown']) | first }},
+          band={{ _bridge_band.stdout | trim }},
+          htmode={{ _bridge_htmode.stdout | trim }},
           PHYs={{ _ct_phy_count.stdout | trim }},
           WiFi ifaces={{ _wifi_iface.stdout | trim }},
+          noscan={{ _noscan_check.stdout | trim }},
           batman=dormant

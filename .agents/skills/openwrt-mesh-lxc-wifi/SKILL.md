@@ -52,15 +52,47 @@ description: OpenWrt Mesh LXC container WiFi PHY management and namespace handli
 
 14. Previous bug: `uci set wireless.radio0.disabled=0` failed on both mesh1 and mesh2. PHY was detected by `iw phy` (found `phy0`), but UCI wireless config had no matching `radio0` section because PHY was moved into namespace after container booted.
 
-## WiFi Band Selection
+## WiFi Band Selection and Cross-Endpoint Negotiation
 
-15. NEVER auto-detect band for WiFi bridge containers. ALWAYS pass an explicit `--band` parameter to `wifi_setup.sh`. The `detect_band()` function prefers 5GHz when hardware supports it, but Intel AX210 (self-managed regulatory) cannot run AP mode on 5GHz — all 5GHz channels are `PASSIVE-SCAN` only in `country 00: DFS-UNSET`. Hostapd segfaults during ACS or rejects the channel as unsupported.
+15. Bridge WiFi parameters (band, channel, htmode) are selected dynamically via
+    cross-endpoint negotiation. The `scripts/wifi_negotiate.py` module receives
+    capabilities from both AP and STA endpoints and computes the optimal shared
+    config. NEVER hardcode band/channel for bridge containers.
 
-16. Bridge containers use 2.4GHz channel 11 (non-overlapping with mesh channel 1). Mesh containers auto-detect correctly because their hardware (Centrino N 105, etc.) only supports 2.4GHz.
+16. The negotiation play in `site.yml` runs between provision and configure:
+    - Collects capabilities from each bridge container via `wifi_setup.sh capabilities`
+    - Runs `wifi_negotiate.py` on the controller to compute shared band/channel/htmode
+    - Stores results as `wifi_negotiated_*` facts on bridge hosts
+    - The configure role reads these facts; falls back to `auto` for standalone scenarios
 
-17. Previous bug: `wifi_setup.sh configure_radios()` only set the channel when it was not "auto", leaving the `wifi config`-generated default (channel 1 for 2.4GHz) in place after switching the band to 5GHz. Channel 1 is invalid for 5GHz. Fix: always set the channel explicitly in `configure_radios()`.
+17. Intel AX210 `iwlwifi` self-managed regulatory (LAR) blocks 5GHz AP mode
+    (PASSIVE-SCAN on all 5GHz channels). The `lar_disable` module parameter does
+    NOT exist in kernel 6.17+. However, 6GHz channels ARE AP-capable with
+    self-managed regulatory. A module reload (`modprobe -r iwlmvm iwlwifi &&
+    modprobe iwlwifi`) in `proxmox_pci_passthrough` reinitializes the firmware
+    regulatory state, enabling AP-capable 6GHz channels.
 
-18. Previous bug: AX210 5GHz AP mode. Hostapd entered ACS mode on 5GHz, scanned channels, segfaulted in `wpad`. Setting explicit channel 36 produced "Hardware does not support configured channel" because self-managed regulatory marks 5GHz as `PASSIVE-SCAN` (no AP transmit). Fix: use 2.4GHz for bridge WiFi links.
+18. `wifi_setup.sh` now has a `capabilities` subcommand that outputs structured
+    `KEY=value` data: supported bands, AP-capable channels, DFS channels, maximum
+    widths, HE/VHT support, WDS support, and WPA3 support. This output is parsed
+    by `wifi_negotiate.py` via `parse_capabilities()`.
+
+19. Band priority: 6GHz > 5GHz > 2.4GHz. The negotiation selects the highest
+    common band with AP-capable channels on both endpoints. 2.4GHz width is
+    capped at 40MHz. Non-DFS channels are preferred.
+
+20. Performance tuning is applied automatically during `wifi_setup.sh configure`:
+    WiFi power save disabled, coexistence scanning disabled (`noscan=1`), DTIM
+    period set to 3 for WDS. These are critical for dedicated backhaul links.
+
+21. Previous bug: AX210 5GHz AP mode failed with PASSIVE-SCAN channels (LAR).
+    5GHz remains blocked by self-managed regulatory. Negotiation correctly falls
+    through to 6GHz (AP-capable) or 2.4GHz (always AP-capable). Module reload
+    enables 6GHz AP channels on AX210.
+
+22. Mesh containers (non-bridge) auto-detect correctly because their hardware
+    (Centrino N 105, etc.) typically only supports 2.4GHz. The `wifi_setup.sh`
+    dynamic probing handles this without negotiation.
 
 ## L2 Bridge Loop Hazard (CRITICAL)
 

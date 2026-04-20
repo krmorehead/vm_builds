@@ -357,7 +357,7 @@
   tags: [kiosk]
   tasks:
     - name: Deploy LAN NM relay services
-      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/lan_nm_relay.yml"
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/lan_nm_relay.yml"
       when: groups.get('lan_hosts', []) | length > 0
 
 # ── Phase 1 boundary: NM API readiness gate ──────────────────────
@@ -801,6 +801,22 @@
   roles:
     - openwrt_mesh_configure
 
+# ── WiFi Bridge Link Negotiation ────────────────────────────────
+# Collects WiFi capabilities from both bridge endpoints and runs
+# the Python negotiation module to determine optimal shared band,
+# channel, and htmode. Results stored as hostvars on bridge_nodes
+# for consumption by openwrt_bridge_configure.
+
+- name: Negotiate WiFi bridge link parameters
+  hosts: bridge_nodes
+  gather_facts: false
+  tags: [bridge]
+  max_fail_percentage: 100
+  tasks:
+    - name: Run WiFi negotiation
+      ansible.builtin.include_tasks:
+        file: "{{ project_root }}/tasks/negotiate_wifi_bridge.yml"
+
 - name: Configure WiFi Bridge
   hosts: openwrt_bridge
   gather_facts: false
@@ -864,7 +880,7 @@
   tags: [pihole, monitoring, homeassistant, media, moonlight, wireguard, kiosk, gaming, mesh-wifi, bridge]
   tasks:
     - name: Run heartbeat staleness check
-      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/fleet_heartbeat_gate.yml"
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/fleet_heartbeat_gate.yml"
       vars:
         gate_services: "{{ fleet_monitored_services }}"
         gate_max_age_seconds: 180
@@ -922,7 +938,7 @@
   tags: [kiosk]
   tasks:
     - name: Deploy LAN display relay services
-      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/lan_display_relay.yml"
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/lan_display_relay.yml"
       when: groups.get('lan_hosts', []) | length > 0
 
 # ── Per-feature plays ────────────────────────────────────────────

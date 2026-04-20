@@ -69,7 +69,7 @@
   failed_when: false
 
 - name: Deregister LAN host containers from Manager
-  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/manager_register.yml"
+  ansible.builtin.include_tasks: "{{ project_root }}/tasks/manager_register.yml"
   vars:
     register_path: "api/host/{{ _lan_host_name }}/containers/{{ _deregister_vmid }}"
     register_body: {}
@@ -129,6 +129,7 @@
       /etc/network/interfaces.d/ansible-temp-lan.conf
       /etc/modprobe.d/blacklist-wifi.conf
       /etc/modprobe.d/vfio-pci.conf
+      /etc/modprobe.d/iwlwifi-options.conf
       /etc/ansible/facts.d/vm_builds.fact
       /etc/apt/sources.list.d/pve-no-subscription.sources
       /etc/modules-load.d/wireguard.conf"

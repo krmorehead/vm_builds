@@ -356,7 +356,7 @@
 # ── Register container with Manager ──────────────────────────────
 
 - name: Register container with Manager
-  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/manager_register.yml"
+  ansible.builtin.include_tasks: "{{ project_root }}/tasks/manager_register.yml"
   vars:
     register_path: "api/host/{{ inventory_hostname }}/containers/{{ lxc_ct_id }}"
     register_body:

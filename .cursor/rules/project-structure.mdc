@@ -453,7 +453,8 @@ All VMIDs defined in `group_vars/all.yml`.
 | `scripts/webui/pages/cluster_dashboard.py` | Cluster Manager fleet dashboard (scoped to child Managers). Renders /fleet and /fleet/{node_id} from ClusterManager._fleet_nodes |
 | `scripts/callhome.py` | Call-home client for fleet nodes (Python, stdlib-only). Container + host mode heartbeats with systemd/port health |
 | `scripts/callhome.sh` | Call-home client for BusyBox/OpenWrt nodes (shell, curl/wget). Lightweight alternative to callhome.py |
-| `scripts/image-builder/files-mesh-lxc/usr/sbin/wifi_setup.sh` | Container-side WiFi WDS setup script. configure/switch-mode/status subcommands. Baked into mesh LXC image, callable by Ansible and manager API |
+| `scripts/wifi_negotiate.py` | Cross-endpoint WiFi negotiation: parses capabilities from both bridge endpoints, computes optimal shared band/channel/htmode. Pure logic, unit-testable |
+| `scripts/image-builder/files-mesh-lxc/usr/sbin/wifi_setup.sh` | Container-side WiFi WDS setup script. configure/switch-mode/status/capabilities subcommands. Dynamic band/channel/htmode probing, performance tuning. Baked into mesh LXC image, callable by Ansible and manager API |
 | `scripts/image-builder/files-mesh-lxc/usr/sbin/batman_trigger.sh` | Container-side batman-adv enable/disable/status script. HMAC-authenticated mutations. Baked into mesh LXC image |
 
 ## Event-driven fleet monitoring (callhome architecture)
