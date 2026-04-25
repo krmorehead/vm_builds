@@ -1,8 +1,9 @@
 """Tests for scripts/webui/heartbeat.py — subscription lifecycle,
-SSH collectors (real hardware), parsers, and metric cache.
+HTTP collectors (real hardware), parsers, and metric cache.
 
-Collector tests SSH to REAL hosts from test.env. If a host is down,
-the test fails — that's intentional (anti-fake-test doctrine).
+Collector tests query REAL hosts from test.env via HTTP (PVE API,
+NodeManager API). If a host is down, the test fails — that's
+intentional (anti-fake-test doctrine).
 
 Parser tests are pure functions with fixture data — no mocks needed.
 
@@ -27,6 +28,10 @@ from scripts.webui.heartbeat import (
     HeartbeatSubscription,
     MetricCache,
     SubscriptionManager,
+    _CircuitState,
+    _circuit_breakers,
+    _circuit_lock,
+    _get_circuit,
     _parse_brctl,
     _parse_dhcp_leases,
     _parse_iw_dev,
@@ -34,12 +39,8 @@ from scripts.webui.heartbeat import (
     _parse_station_dump,
     _parse_system_info,
     _parse_uci_wireless,
-    _ssh_exec,
-    collect_batman_metrics,
-    collect_bridge_metrics,
-    collect_mesh_metrics,
-    collect_router_metrics,
-    collect_wifi_metrics,
+    get_circuit_status,
+    reset_circuit,
     signal_percentage,
     signal_quality,
 )
@@ -49,6 +50,7 @@ from scripts.webui.heartbeat import (
 # ── SubscriptionManager lifecycle ────────────────────────────────────
 
 
+@pytest.mark.no_infra
 class TestSubscriptionManager:
     def test_subscribe_creates_new(self):
         mgr = SubscriptionManager()
@@ -137,6 +139,7 @@ class TestSubscriptionManager:
 # ── MetricCache ──────────────────────────────────────────────────────
 
 
+@pytest.mark.no_infra
 class TestMetricCache:
     def test_store_and_get(self):
         cache = MetricCache()
@@ -187,107 +190,170 @@ class TestMetricCache:
 # the test fails — that's the point.
 
 
+def _pve_api_probe(ip: str, timeout: int = 5) -> tuple[bool, str]:
+    """Probe a Proxmox host via HTTPS PVE API. Returns (ok, message).
+
+    Any HTTP response (including 401 Unauthorized) means the host is
+    reachable. Only connection failures count as unreachable.
+    """
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    url = f"https://{ip}:8006/api2/json/version"
+    try:
+        resp = urllib.request.urlopen(url, timeout=timeout, context=ctx)
+        resp.read()
+        return True, "PVE API OK"
+    except urllib.error.HTTPError as exc:
+        return True, f"PVE API reachable (HTTP {exc.code})"
+    except urllib.error.URLError as exc:
+        return False, f"PVE API unreachable: {exc.reason}"
+    except (TimeoutError, OSError) as exc:
+        return False, f"PVE API timeout: {exc}"
+
+
 @pytest.mark.integration
-class TestRealSSH:
-    """Verify _ssh_exec works against real Proxmox hosts."""
+class TestRealPveApi:
+    """Verify PVE API connectivity to real Proxmox hosts via HTTPS."""
 
     @pytest.fixture()
     def env(self, test_env):
         return test_env
 
-    def test_ssh_to_primary_host(self, env):
-        """Basic SSH works to the primary Proxmox host."""
+    def test_pve_api_primary_host(self, env):
+        """PVE API reachable on the primary Proxmox host."""
         ip = env["PRIMARY_HOST"]
-        ok, out = _ssh_exec(ip, "hostname", timeout=10)
-        assert ok, f"SSH to primary host ({ip}) failed: {out}"
-        assert out.strip(), "hostname returned empty"
+        ok, msg = _pve_api_probe(ip)
+        assert ok, f"PVE API on primary host ({ip}) failed: {msg}"
 
-    def test_ssh_to_bridge_1(self, env):
+    def test_pve_api_bridge_1(self, env):
         ip = env.get("BRIDGE_1_HOST", "")
         assert ip, "BRIDGE_1_HOST not set in test.env"
-        ok, out = _ssh_exec(ip, "hostname", timeout=10)
-        assert ok, f"SSH to bridge-1 ({ip}) failed: {out}"
+        ok, msg = _pve_api_probe(ip)
+        assert ok, f"PVE API on bridge-1 ({ip}) failed: {msg}"
 
-    def test_ssh_to_bridge_2(self, env):
+    def test_pve_api_bridge_2(self, env):
         ip = env.get("BRIDGE_2_HOST", "")
         assert ip, "BRIDGE_2_HOST not set in test.env"
-        ok, out = _ssh_exec(ip, "hostname", timeout=10)
-        assert ok, f"SSH to bridge-2 ({ip}) failed: {out}"
+        ok, msg = _pve_api_probe(ip)
+        assert ok, f"PVE API on bridge-2 ({ip}) failed: {msg}"
 
-    def test_ssh_to_mesh_2(self, env):
+    def test_pve_api_mesh_2(self, env):
         ip = env.get("MESH_2_HOST", "")
         assert ip, "MESH_2_HOST not set in test.env"
-        ok, out = _ssh_exec(ip, "hostname", timeout=10)
-        assert ok, f"SSH to mesh2 ({ip}) failed: {out}"
+        ok, msg = _pve_api_probe(ip)
+        assert ok, f"PVE API on mesh2 ({ip}) failed: {msg}"
 
-    def test_ssh_failure_with_bad_host(self):
+    def test_pve_api_failure_with_bad_host(self):
         """Non-routable IP returns failure, not an exception."""
-        ok, out = _ssh_exec("192.0.2.1", "hostname", timeout=3)
+        ok, msg = _pve_api_probe("192.0.2.1", timeout=3)
         assert not ok
+
+
+def _nm_api_get(host_ip: str, path: str, timeout: int = 10) -> dict:
+    """Query a NodeManager API endpoint via HTTP."""
+    import json as _json
+    import urllib.request
+    import urllib.error
+
+    url = f"http://{host_ip}:9001{path}"
+    req = urllib.request.Request(url, method="GET")
+    resp = urllib.request.urlopen(req, timeout=timeout)
+    return _json.loads(resp.read().decode())
 
 
 @pytest.mark.integration
 class TestRealWifiCollectors:
-    """Test WiFi/bridge/mesh collectors against real hardware.
+    """Test WiFi/bridge/mesh collectors via the NodeManager API.
 
-    Requires WiFi containers to be deployed (molecule converge).
-    The host-side wrapper scripts forward wifi_setup.sh calls
-    into the container via pct exec.
+    Queries /api/wifi/local/status on each host's NodeManager (port 9001).
+    The NM internally calls the container's HTTP command endpoint to collect
+    metrics. This tests the full 4-tier path: test → NM → container HTTP → script.
+
+    The autouse infra gate already validates VPN + Kiosk. These tests
+    additionally check that the specific service container (bridge/mesh)
+    is deployed before asserting WiFi data.
     """
 
     @pytest.fixture()
     def env(self, test_env):
         return test_env
 
-    def test_bridge_1_wifi_metrics(self, env):
-        """collect_wifi_metrics against bridge-1 returns real data."""
+    def test_bridge_1_wifi_via_nm(self, env):
+        """NodeManager on bridge-1 returns WiFi status with bridge key."""
+        from tests.conftest import host_has_container
         ip = env.get("BRIDGE_1_HOST", "")
         assert ip, "BRIDGE_1_HOST not set"
-        result = collect_wifi_metrics(ip)
-        assert result.success, (
-            f"collect_wifi_metrics failed on bridge-1 ({ip}): {result.error}. "
-            "Is the bridge container deployed? Run molecule converge first."
+        assert host_has_container("BRIDGE_1_HOST", "openwrt-bridge"), (
+            f"Bridge container (openwrt-bridge) NOT running on bridge-1 ({ip}). "
+            f"Run 'molecule converge' to deploy bridge containers."
         )
-        assert "script_status" in result.data or result.data["interfaces"], (
-            "No WiFi data from bridge-1. wifi_setup.sh wrapper or container may be missing."
+        result = _nm_api_get(ip, "/api/wifi/local/status")
+        assert "bridge" in result, (
+            f"NodeManager on bridge-1 ({ip}) missing 'bridge' key: {list(result.keys())}"
         )
+        bridge = result["bridge"]
+        assert "phy" in bridge, f"bridge data missing 'phy': {bridge}"
 
-    def test_bridge_2_wifi_metrics(self, env):
-        """collect_wifi_metrics against bridge-2 returns real data."""
+    def test_bridge_2_wifi_via_nm(self, env):
+        """NodeManager on bridge-2 returns WiFi status with bridge key."""
+        from tests.conftest import host_has_container
         ip = env.get("BRIDGE_2_HOST", "")
         assert ip, "BRIDGE_2_HOST not set"
-        result = collect_wifi_metrics(ip)
-        assert result.success, (
-            f"collect_wifi_metrics failed on bridge-2 ({ip}): {result.error}. "
-            "Is the bridge container deployed? Run molecule converge first."
+        assert host_has_container("BRIDGE_2_HOST", "openwrt-bridge"), (
+            f"Bridge container (openwrt-bridge) NOT running on bridge-2 ({ip}). "
+            f"Run 'molecule converge' to deploy bridge containers."
+        )
+        result = _nm_api_get(ip, "/api/wifi/local/status")
+        assert "bridge" in result, (
+            f"NodeManager on bridge-2 ({ip}) missing 'bridge' key: {list(result.keys())}"
         )
 
-    def test_bridge_1_bridge_metrics(self, env):
-        """collect_bridge_metrics against bridge-1 returns bridge data."""
+    def test_bridge_1_bridge_role(self, env):
+        """NodeManager on bridge-1 reports bridge mode."""
+        from tests.conftest import host_has_container
         ip = env.get("BRIDGE_1_HOST", "")
         assert ip, "BRIDGE_1_HOST not set"
-        result = collect_bridge_metrics(ip)
-        assert result.success, f"collect_bridge_metrics failed: {result.error}"
-        assert "bridge" in result.data
-        assert result.data["bridge"]["role"] in ("ap", "sta", "unknown", "unconfigured")
-
-    def test_mesh_2_wifi_metrics(self, env):
-        """collect_wifi_metrics against mesh2 returns real data."""
-        ip = env.get("MESH_2_HOST", "")
-        assert ip, "MESH_2_HOST not set"
-        result = collect_wifi_metrics(ip)
-        assert result.success, (
-            f"collect_wifi_metrics failed on mesh2 ({ip}): {result.error}. "
-            "Is the mesh container deployed? Run molecule converge first."
+        assert host_has_container("BRIDGE_1_HOST", "openwrt-bridge"), (
+            f"Bridge container NOT running on bridge-1. Run 'molecule converge'."
+        )
+        result = _nm_api_get(ip, "/api/wifi/local/status")
+        mode = result.get("bridge", {}).get("mode", "unknown")
+        assert mode in ("ap", "sta", "unknown", "unconfigured"), (
+            f"Unexpected bridge mode from bridge-1: {mode}"
         )
 
-    def test_mesh_2_mesh_metrics(self, env):
-        """collect_mesh_metrics against mesh2 returns mesh data."""
+    def test_mesh_2_wifi_via_nm(self, env):
+        """NodeManager on mesh2 returns WiFi status with mesh key."""
+        from tests.conftest import host_has_container
         ip = env.get("MESH_2_HOST", "")
         assert ip, "MESH_2_HOST not set"
-        result = collect_mesh_metrics(ip)
-        assert result.success, f"collect_mesh_metrics failed on mesh2: {result.error}"
-        assert result.data["role"] in ("ap", "sta", "unknown")
+        assert host_has_container("MESH_2_HOST", "openwrt-mesh"), (
+            f"Mesh container (openwrt-mesh) NOT running on mesh2 ({ip}). "
+            f"Run 'molecule converge' to deploy mesh containers."
+        )
+        result = _nm_api_get(ip, "/api/wifi/local/status")
+        assert "mesh" in result, (
+            f"NodeManager on mesh2 ({ip}) missing 'mesh' key: {list(result.keys())}"
+        )
+        mesh = result["mesh"]
+        assert "phy" in mesh, f"mesh data missing 'phy': {mesh}"
+
+    def test_mesh_2_role_via_nm(self, env):
+        """NodeManager on mesh2 reports mesh mode."""
+        from tests.conftest import host_has_container
+        ip = env.get("MESH_2_HOST", "")
+        assert ip, "MESH_2_HOST not set"
+        assert host_has_container("MESH_2_HOST", "openwrt-mesh"), (
+            f"Mesh container NOT running on mesh2. Run 'molecule converge'."
+        )
+        result = _nm_api_get(ip, "/api/wifi/local/status")
+        mode = result.get("mesh", {}).get("mode", "unknown")
+        assert mode in ("ap", "sta", "unknown", "unconfigured")
 
 
 # ── Parser fixture data ──────────────────────────────────────────────
@@ -350,6 +416,7 @@ MemAvailable:   384000 kB
 # ── Parser unit tests ────────────────────────────────────────────────
 
 
+@pytest.mark.no_infra
 class TestParseKeyValue:
     def test_basic(self):
         result = _parse_key_value("PHY=phy0\nMODE=ap\nSSID=test\n")
@@ -376,6 +443,7 @@ class TestParseKeyValue:
         assert result["key"] == "value=with=equals"
 
 
+@pytest.mark.no_infra
 class TestParseIwDev:
     def test_single_interface(self):
         ifaces = _parse_iw_dev(IW_DEV_OUTPUT)
@@ -394,6 +462,7 @@ class TestParseIwDev:
         assert ifaces[1]["name"] == "wlan1"
 
 
+@pytest.mark.no_infra
 class TestParseStationDump:
     def test_parse_station(self):
         stations = _parse_station_dump(STATION_DUMP_OUTPUT)
@@ -410,6 +479,7 @@ class TestParseStationDump:
         assert _parse_station_dump("") == []
 
 
+@pytest.mark.no_infra
 class TestParseUciWireless:
     def test_parse(self):
         result = _parse_uci_wireless(UCI_WIRELESS_OUTPUT)
@@ -421,6 +491,7 @@ class TestParseUciWireless:
         assert _parse_uci_wireless("") == {}
 
 
+@pytest.mark.no_infra
 class TestParseBrctl:
     def test_parse(self):
         bridges = _parse_brctl(BRCTL_OUTPUT)
@@ -431,6 +502,7 @@ class TestParseBrctl:
         assert _parse_brctl("") == []
 
 
+@pytest.mark.no_infra
 class TestParseDhcpLeases:
     def test_parse(self):
         leases = _parse_dhcp_leases(DHCP_LEASES_OUTPUT)
@@ -442,6 +514,7 @@ class TestParseDhcpLeases:
         assert _parse_dhcp_leases("") == []
 
 
+@pytest.mark.no_infra
 class TestParseSystemInfo:
     def test_parse(self):
         info = _parse_system_info(SYSTEM_INFO_OUTPUT)
@@ -454,6 +527,7 @@ class TestParseSystemInfo:
 # ── Signal quality helpers ───────────────────────────────────────────
 
 
+@pytest.mark.no_infra
 class TestSignalQuality:
     @pytest.mark.parametrize("dbm,expected", [
         (-30, "excellent"),
@@ -483,6 +557,7 @@ class TestSignalQuality:
 # ── Batman metrics ──────────────────────────────────────────────────
 
 
+@pytest.mark.no_infra
 class TestBatmanOriginatorParsing:
     def test_parse_originator_line(self):
         output = (
@@ -520,6 +595,7 @@ class TestBatmanOriginatorParsing:
         assert _parse_batman_interfaces("") == []
 
 
+@pytest.mark.no_infra
 class TestParseGuestList:
     """Pure unit tests for parse_guest_list — no infrastructure needed."""
 
@@ -586,50 +662,177 @@ class TestParseGuestList:
 
 @pytest.mark.integration
 class TestCollectBatmanMetricsReal:
-    """Batman collector tests against real hardware.
+    """Batman status tests via the NodeManager API.
 
-    These tests require bridge containers to be provisioned (wrapper scripts
-    are deployed by openwrt_bridge_lxc and removed during molecule cleanup).
+    Queries /api/batman/local/status on each host's NodeManager (port 9001).
+    The NM calls batman_trigger.sh inside the container via HTTP command endpoint.
     """
 
     @pytest.fixture()
     def env(self, test_env):
         return test_env
 
-    @staticmethod
-    def _wrapper_exists(ip: str) -> bool:
-        """Check if batman_trigger.sh exists inside the bridge container."""
-        ok, _ = _ssh_exec(
-            ip, "pct exec 104 -- test -x /usr/sbin/batman_trigger.sh", timeout=5,
-        )
-        return ok
-
     def test_batman_status_from_bridge_1(self, env):
-        """Batman status is queryable on bridge-1."""
+        """Batman status queryable via NodeManager on bridge-1."""
+        from tests.conftest import host_has_container
         ip = env.get("BRIDGE_1_HOST", "")
         assert ip, "BRIDGE_1_HOST not set"
-        if not self._wrapper_exists(ip):
-            pytest.skip(
-                "batman_trigger.sh wrapper not deployed on bridge-1 "
-                "(run molecule converge to provision bridge containers)"
-            )
-        result = collect_batman_metrics(ip)
-        assert result.success, (
-            f"collect_batman_metrics failed on bridge-1 ({ip}): {result.error}. "
-            "batman_trigger.sh wrapper may be missing on the Proxmox host."
+        assert host_has_container("BRIDGE_1_HOST", "openwrt-bridge"), (
+            f"Bridge container NOT running on bridge-1 ({ip}). Run 'molecule converge'."
         )
-        assert "active" in result.data
-        assert isinstance(result.data["active"], bool)
+        result = _nm_api_get(ip, "/api/batman/local/status")
+        assert len(result) > 0, f"Empty batman response from bridge-1"
+        node_key = next(iter(result))
+        node_data = result[node_key]
+        assert "active" in node_data, (
+            f"Batman data for {node_key} missing 'active': {node_data}"
+        )
+        assert isinstance(node_data["active"], bool)
 
     def test_batman_status_from_bridge_2(self, env):
-        """Batman status is queryable on bridge-2."""
+        """Batman status queryable via NodeManager on bridge-2."""
+        from tests.conftest import host_has_container
         ip = env.get("BRIDGE_2_HOST", "")
         assert ip, "BRIDGE_2_HOST not set"
-        if not self._wrapper_exists(ip):
-            pytest.skip(
-                "batman_trigger.sh wrapper not deployed on bridge-2 "
-                "(run molecule converge to provision bridge containers)"
-            )
-        result = collect_batman_metrics(ip)
-        assert result.success, f"collect_batman_metrics failed on bridge-2: {result.error}"
-        assert "active" in result.data
+        assert host_has_container("BRIDGE_2_HOST", "openwrt-bridge"), (
+            f"Bridge container NOT running on bridge-2 ({ip}). Run 'molecule converge'."
+        )
+        result = _nm_api_get(ip, "/api/batman/local/status")
+        assert len(result) > 0, f"Empty batman response from bridge-2"
+        node_key = next(iter(result))
+        node_data = result[node_key]
+        assert "active" in node_data, (
+            f"Batman data for {node_key} missing 'active': {node_data}"
+        )
+        assert isinstance(node_data["active"], bool)
+
+
+# ── Circuit breaker tests ────────────────────────────────────────────
+
+
+@pytest.mark.no_infra
+class TestCircuitBreaker:
+    """Unit tests for the per-host HTTP circuit breaker — pure Python."""
+
+    def _fresh_circuit(self) -> _CircuitState:
+        return _CircuitState()
+
+    def test_circuit_starts_closed(self):
+        cb = self._fresh_circuit()
+        assert not cb.is_open()
+
+    def test_single_failure_does_not_open(self):
+        cb = self._fresh_circuit()
+        cb.record_failure()
+        assert not cb.is_open(), "Circuit should stay closed after 1 failure"
+
+    def test_two_failures_opens_circuit(self):
+        cb = self._fresh_circuit()
+        cb.record_failure()
+        cb.record_failure()
+        assert cb.is_open(), "Circuit should open after 2 consecutive failures"
+
+    def test_success_resets_failures(self):
+        cb = self._fresh_circuit()
+        cb.record_failure()
+        cb.record_failure()
+        assert cb.is_open()
+        cb.record_success()
+        assert not cb.is_open(), "Success should close the circuit"
+        assert cb.consecutive_failures == 0
+
+    def test_backoff_increases_exponentially(self):
+        cb = self._fresh_circuit()
+        cb.record_failure()
+        cb.record_failure()
+        backoff_2 = cb.backoff_until - cb.last_failure_time
+        cb.record_failure()
+        backoff_3 = cb.backoff_until - cb.last_failure_time
+        assert backoff_3 > backoff_2, "Backoff should increase with more failures"
+
+    def test_backoff_caps_at_max(self):
+        cb = self._fresh_circuit()
+        for _ in range(20):
+            cb.record_failure()
+        with cb.lock:
+            actual_backoff = cb.backoff_until - cb.last_failure_time
+        assert actual_backoff <= cb._MAX_BACKOFF + 0.1
+
+    def test_total_failures_accumulates(self):
+        cb = self._fresh_circuit()
+        cb.record_failure()
+        cb.record_failure()
+        cb.record_success()
+        cb.record_failure()
+        assert cb.total_failures == 3
+        assert cb.consecutive_failures == 1
+
+    def test_get_circuit_returns_same_instance(self):
+        test_ip = "192.168.99.99"
+        try:
+            c1 = _get_circuit(test_ip)
+            c2 = _get_circuit(test_ip)
+            assert c1 is c2
+        finally:
+            with _circuit_lock:
+                _circuit_breakers.pop(test_ip, None)
+
+    def test_get_circuit_status_dict(self):
+        test_ip = "192.168.99.98"
+        try:
+            cb = _get_circuit(test_ip)
+            status = get_circuit_status(test_ip)
+            assert "consecutive_failures" in status
+            assert "total_failures" in status
+            assert "backoff_remaining_s" in status
+            assert "is_open" in status
+            assert status["is_open"] is False
+        finally:
+            with _circuit_lock:
+                _circuit_breakers.pop(test_ip, None)
+
+    def test_reset_circuit_clears_state(self):
+        test_ip = "192.168.99.97"
+        try:
+            cb = _get_circuit(test_ip)
+            cb.record_failure()
+            cb.record_failure()
+            assert cb.is_open()
+            reset_circuit(test_ip)
+            assert not cb.is_open()
+        finally:
+            with _circuit_lock:
+                _circuit_breakers.pop(test_ip, None)
+
+    def test_circuit_breaker_opens_after_failures(self):
+        """After 2 consecutive failures, circuit opens and blocks calls."""
+        test_ip = "192.168.99.96"
+        try:
+            cb = _get_circuit(test_ip)
+            cb.record_failure()
+            cb.record_failure()
+            assert cb.is_open()
+            remaining = cb.backoff_remaining()
+            assert remaining > 0, "Backoff should be positive when open"
+        finally:
+            with _circuit_lock:
+                _circuit_breakers.pop(test_ip, None)
+
+    def test_backoff_remaining_decreases(self):
+        cb = self._fresh_circuit()
+        cb.record_failure()
+        cb.record_failure()
+        r1 = cb.backoff_remaining()
+        time.sleep(0.1)
+        r2 = cb.backoff_remaining()
+        assert r2 < r1
+
+
+@pytest.mark.no_infra
+class TestPveApiConfig:
+    """Verify PVE API connectivity test uses HTTPS with short timeout."""
+
+    def test_pve_api_probe_returns_tuple(self):
+        ok, msg = _pve_api_probe("192.0.2.1", timeout=2)
+        assert isinstance(ok, bool)
+        assert isinstance(msg, str)

@@ -97,6 +97,7 @@
       {{ _cleanup_ssh }} "
       for svc in kiosk-manager-proxy kiosk-display-proxy
       kiosk-vnc-proxy manager-api-proxy supermanager-relay
+      wireguard-udp-proxy
       desktop-display-proxy desktop-vnc-ws
       kodi-display-proxy kodi-vnc-proxy
       moonlight-display-proxy moonlight-vnc-proxy; do

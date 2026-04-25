@@ -1,0 +1,78 @@
+---
+service: jellyfin
+base_template: build-base-debian-12-amd64.tar.zst
+build_vmid: 995
+hostname: jellyfin-build
+memory: 512
+cores: 1
+disk: "2"
+unprivileged: true
+features: ""
+
+setup_commands:
+  - "echo nameserver 8.8.8.8 > /etc/resolv.conf"
+
+install_commands:
+  - "bash -c 'export DEBIAN_FRONTEND=noninteractive && apt-get update -qq'"
+  - "bash -c 'apt-get install -y --no-install-recommends gnupg2 wget curl'"
+  - "bash -c 'wget -O - https://repo.jellyfin.org/jellyfin_team.gpg.key | gpg --dearmor -o /usr/share/keyrings/jellyfin.gpg'"
+  - >-
+    bash -c 'echo "deb [signed-by=/usr/share/keyrings/jellyfin.gpg]
+    https://repo.jellyfin.org/debian bookworm main" |
+    tee /etc/apt/sources.list.d/jellyfin.list'
+  - "apt-get update -qq"
+  - "bash -c 'apt-get install -y --no-install-recommends jellyfin jellyfin-web jellyfin-ffmpeg7'"
+  - "bash -c 'apt-get install -y --no-install-recommends intel-media-va-driver vainfo'"
+  - "bash -c 'apt-get install -y --no-install-recommends mesa-va-drivers mesa-vdpau-drivers'"
+  - "bash -c 'groupadd -g 993 render 2>/dev/null || true'"
+  - "bash -c 'usermod -a -G render jellyfin 2>/dev/null || true'"
+  - "systemctl enable jellyfin || true"
+  - "bash -c 'apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*'"
+
+config_files:
+  - path: /etc/jellyfin/jellyfin.conf
+    content: |
+      [Networking]
+      _port = 8096
+      _base_url = /
+
+      [MediaEncoder]
+      _vaapi_device = /dev/dri/renderD128
+      _vaapi_driver = auto
+    mode: "0644"
+    mkdir: true
+
+  - path: /etc/jellyfin/network.xml
+    content: |
+      <?xml version="1.0" encoding="UTF-8"?>
+      <Network>
+        <BaseUrl>/</BaseUrl>
+        <Port>8096</Port>
+        <EnableHttps>false</EnableHttps>
+        <EnableUPnP>false</EnableUPnP>
+      </Network>
+    mode: "0644"
+
+  - path: /etc/jellyfin/library.xml
+    content: |
+      <?xml version="1.0" encoding="UTF-8"?>
+      <Library>
+        <SaveMetadataHidden>false</SaveMetadataHidden>
+        <EnableAutomaticSeriesGrouping>false</EnableAutomaticSeriesGrouping>
+        <EnableAutomaticPhotosGrouping>true</EnableAutomaticPhotosGrouping>
+        <CollectionFolders>
+          <CollectionFolder>
+            <Name>Media</Name>
+            <Path>/media</Path>
+          </CollectionFolder>
+        </CollectionFolders>
+      </Library>
+    mode: "0644"
+
+post_commands: []
+
+callhome:
+  http_probes: "http://127.0.0.1:8096"
+  config_files: ""
+
+kasmvnc: null

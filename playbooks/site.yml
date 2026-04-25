@@ -1,8 +1,8 @@
 ---
 # ══════════════════════════════════════════════════════════════════
-# Phase 1: SSH-based bootstrap (management plane)
+# Phase 1: Ansible bootstrap (management plane)
 # ══════════════════════════════════════════════════════════════════
-# Stands up the management plane via SSH: heartbeat API, backups,
+# Stands up the management plane: heartbeat API, backups,
 # infrastructure (bridges, PCI, iGPU), OpenWrt router, LAN hosts,
 # all service LXC provisioning, and Kiosk/Manager containers.
 # After this phase, every NM is running and VPN is configured.
@@ -123,55 +123,8 @@
   gather_facts: true
   tags: [infra]
   pre_tasks:
-    - name: Disable PVE enterprise repo (requires subscription)
-      ansible.builtin.command:
-        cmd: mv /etc/apt/sources.list.d/pve-enterprise.sources /etc/apt/sources.list.d/pve-enterprise.sources.disabled
-      args:
-        removes: /etc/apt/sources.list.d/pve-enterprise.sources
-
-    - name: Disable Ceph enterprise repo (requires subscription)
-      ansible.builtin.command:
-        cmd: mv /etc/apt/sources.list.d/ceph.sources /etc/apt/sources.list.d/ceph.sources.disabled
-      args:
-        removes: /etc/apt/sources.list.d/ceph.sources
-
-    - name: Add Proxmox no-subscription repository
-      ansible.builtin.copy:
-        dest: /etc/apt/sources.list.d/pve-no-subscription.sources
-        mode: "0644"
-        content: |
-          Types: deb
-          URIs: http://download.proxmox.com/debian/pve
-          Suites: {{ ansible_facts['distribution_release'] }}
-          Components: pve-no-subscription
-          Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
-
-    - name: Check clock skew
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          chronyc -n tracking 2>/dev/null | awk '/System time/{print $4}' || echo "999"
-        executable: /bin/bash
-      register: _clock_skew
-      changed_when: false
-      failed_when: false
-
-    - name: Force NTP clock sync before infrastructure setup
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          if command -v chronyc >/dev/null 2>&1; then
-            systemctl restart chronyd 2>/dev/null || true
-            chronyc -a 'burst 4/4' 2>/dev/null || true
-            sleep 6
-            chronyc -a makestep 2>/dev/null || true
-          elif command -v ntpdate >/dev/null 2>&1; then
-            ntpdate -b pool.ntp.org 2>/dev/null || true
-          fi
-        executable: /bin/bash
-      changed_when: false
-      failed_when: false
-      when: (_clock_skew.stdout | default('999') | float) > 30.0
+    - name: Infrastructure pre-flight (repos, health, NTP)
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/infra_pre_tasks.yml"
   roles:
     - proxmox_bridges
     - proxmox_pci_passthrough
@@ -212,6 +165,23 @@
       loop: "{{ groups['lan_hosts'] | default([]) }}"
       when: groups['lan_hosts'] | default([]) | length > 0
 
+# LAN hosts are unreachable during molecule cleanup (router not yet
+# deployed).  Containers from the previous run survive.  This pass
+# destroys them now that the LAN is reachable, so the NM provision
+# handler only does fresh creation — not destroy+create in one request.
+- name: Clean stale containers on LAN hosts
+  hosts: router_nodes
+  gather_facts: false
+  tags: [lan-satellite]
+  tasks:
+    - name: Destroy stale containers on each LAN host
+      ansible.builtin.include_tasks: ../tasks/cleanup_lan_host_containers.yml
+      vars:
+        _lan_host_ip: "{{ hostvars[item].ansible_host }}"
+        _lan_host_name: "{{ item }}"
+      loop: "{{ groups['lan_hosts'] | default([]) }}"
+      when: groups['lan_hosts'] | default([]) | length > 0
+
 - name: Back up LAN satellite hosts
   hosts: lan_hosts
   gather_facts: true
@@ -222,8 +192,8 @@
 
     - name: Wait for SSH via ProxyCommand to stabilize
       ansible.builtin.wait_for_connection:
-        timeout: 120
-        delay: 5
+        timeout: 60
+        delay: 3
   roles:
     - proxmox_backup
     - role: deploy_stamp
@@ -235,55 +205,8 @@
   gather_facts: true
   tags: [lan-satellite, infra]
   pre_tasks:
-    - name: Disable PVE enterprise repo (requires subscription)
-      ansible.builtin.command:
-        cmd: mv /etc/apt/sources.list.d/pve-enterprise.sources /etc/apt/sources.list.d/pve-enterprise.sources.disabled
-      args:
-        removes: /etc/apt/sources.list.d/pve-enterprise.sources
-
-    - name: Disable Ceph enterprise repo (requires subscription)
-      ansible.builtin.command:
-        cmd: mv /etc/apt/sources.list.d/ceph.sources /etc/apt/sources.list.d/ceph.sources.disabled
-      args:
-        removes: /etc/apt/sources.list.d/ceph.sources
-
-    - name: Add Proxmox no-subscription repository
-      ansible.builtin.copy:
-        dest: /etc/apt/sources.list.d/pve-no-subscription.sources
-        mode: "0644"
-        content: |
-          Types: deb
-          URIs: http://download.proxmox.com/debian/pve
-          Suites: {{ ansible_facts['distribution_release'] }}
-          Components: pve-no-subscription
-          Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
-
-    - name: Check clock skew
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          chronyc -n tracking 2>/dev/null | awk '/System time/{print $4}' || echo "999"
-        executable: /bin/bash
-      register: _clock_skew
-      changed_when: false
-      failed_when: false
-
-    - name: Force NTP clock sync before infrastructure setup
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          if command -v chronyc >/dev/null 2>&1; then
-            systemctl restart chronyd 2>/dev/null || true
-            chronyc -a 'burst 4/4' 2>/dev/null || true
-            sleep 6
-            chronyc -a makestep 2>/dev/null || true
-          elif command -v ntpdate >/dev/null 2>&1; then
-            ntpdate -b pool.ntp.org 2>/dev/null || true
-          fi
-        executable: /bin/bash
-      changed_when: false
-      failed_when: false
-      when: (_clock_skew.stdout | default('999') | float) > 30.0
+    - name: Infrastructure pre-flight (repos, health, NTP)
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/infra_pre_tasks.yml"
   roles:
     - proxmox_bridges
     - proxmox_pci_passthrough
@@ -304,52 +227,11 @@
       vars:
         deploy_stamp_play: kiosk_lxc
 
-- name: Configure Kiosk
-  hosts: kiosk_nodes
-  gather_facts: false
-  tags: [kiosk]
-  roles:
-    - kiosk_configure
-
-# ── Distribute Cluster Manager SSH key to all Proxmox hosts ──
-# The Cluster Manager (router node's kiosk) needs SSH access to every
-# Proxmox host for batman/wifi/bridge fleet operations.  Each kiosk
-# generates its own key and authorizes it locally in kiosk_configure.
-# This play reads the Cluster Manager's key and authorizes it on
-# every other host so _ssh_exec() works across the fleet.
-
-- name: Distribute Cluster Manager SSH key
-  hosts: kiosk_nodes
-  gather_facts: false
-  tags: [kiosk]
-  tasks:
-    - name: Read Cluster Manager public key
-      ansible.builtin.command:
-        cmd: pct exec {{ kiosk_ct_id }} -- cat /home/kiosk/.ssh/id_ed25519.pub
-      register: _cm_pubkey
-      changed_when: false
-      when: inventory_hostname in groups.get('router_nodes', [])
-
-    - name: Set Cluster Manager key fact
-      ansible.builtin.set_fact:
-        _cluster_manager_pubkey: "{{ hostvars[groups['router_nodes'][0]]._cm_pubkey.stdout }}"
-      when: groups.get('router_nodes', []) | length > 0
-
-    - name: Authorize Cluster Manager key on this host
-      ansible.posix.authorized_key:
-        user: root
-        key: "{{ _cluster_manager_pubkey }}"
-        comment: "cluster-manager-{{ groups['router_nodes'][0] }}"
-        state: present
-      when:
-        - _cluster_manager_pubkey is defined
-        - _cluster_manager_pubkey | length > 0
-        - inventory_hostname not in groups.get('router_nodes', [])
-
 # ── Deploy NM API relay for LAN hosts ─────────────────────────────
 # LAN hosts are unreachable from the controller via HTTP. The router
 # node (home) relays NM API traffic to each LAN host's Node Manager.
-# This MUST run before the NM readiness gate.
+# MUST run BEFORE kiosk_configure (which checks NM API health) and
+# before the NM readiness gate.
 
 - name: Deploy LAN NM API relays
   hosts: router_nodes
@@ -360,8 +242,15 @@
       ansible.builtin.include_tasks: "{{ project_root }}/tasks/lan_nm_relay.yml"
       when: groups.get('lan_hosts', []) | length > 0
 
+- name: Configure Kiosk
+  hosts: kiosk_nodes
+  gather_facts: false
+  tags: [kiosk]
+  roles:
+    - kiosk_configure
+
 # ── Phase 1 boundary: NM API readiness gate ──────────────────────
-# Everything ABOVE this point is SSH-based bootstrap: infrastructure,
+# Everything ABOVE this point is Ansible bootstrap: infrastructure,
 # OpenWrt, LAN bootstrap, and Kiosk/Manager deployment.
 # Everything BELOW this point uses NM APIs for all operations.
 # The NM gate verifies every Node Manager is responding before
@@ -381,8 +270,8 @@
         return_content: true
         timeout: 5
       register: _nm_ready
-      retries: 12
-      delay: 5
+      retries: 6
+      delay: 3
       until: (_nm_ready.status | default(0)) == 200
       delegate_to: localhost
 
@@ -528,6 +417,18 @@
       vars:
         deploy_stamp_play: gaming_lxc
 
+# ── Post-provision callhome rewrite ─────────────────────────────────
+# kiosk_configure runs its sibling callhome rewrite BEFORE other
+# services are provisioned (they get 404). Re-run the rewrite now
+# that all containers exist and are running.
+- name: Post-provision callhome rewrite
+  hosts: kiosk_nodes
+  gather_facts: false
+  tags: [pihole, monitoring, homeassistant, media, moonlight, wireguard, kiosk, gaming]
+  tasks:
+    - name: Rewrite callhome on all Debian siblings
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/post_provision_callhome.yml"
+
 # ── Fleet readiness gate (hard-fail, no SSH fallback) ─────────────
 # All containers have been provisioned and started. Wait for the
 # heartbeat system to confirm readiness. If any service fails to
@@ -547,15 +448,15 @@
           }}
         return_content: true
       register: _pre_configure_ready
-      retries: 24
-      delay: 5
+      retries: 12
+      delay: 3
       until: (_pre_configure_ready.json.all_ready | default(false)) | bool
 
     - name: Hard-fail if fleet is not ready
       ansible.builtin.assert:
         that: (_pre_configure_ready.json.all_ready | default(false)) | bool
         fail_msg: >-
-          HARD FAILURE: Fleet not ready after 2 minutes. Services not heartbeating: {{
+          HARD FAILURE: Fleet not ready after 36s. Services not heartbeating: {{
             _pre_configure_ready.json.services | dict2items
             | selectattr('value.ready', 'equalto', false)
             | map(attribute='key') | list | join(', ')
@@ -647,19 +548,26 @@
       failed_when: false
 
     - name: Resolve VPN keys (env var → file fallback)
+      vars:
+        _raw_ctrl: "{{ lookup('env', 'WIREGUARD_PRIVATE_KEY_CONTROLLER') | default('', true) }}"
+        _raw_hub: "{{ lookup('env', 'WIREGUARD_HUB_PUBLIC_KEY') | default('', true) }}"
+        _env_ctrl: "{{ _raw_ctrl if (_raw_ctrl | length == 44 and '$' not in _raw_ctrl) else '' }}"
+        _env_hub: "{{ _raw_hub if (_raw_hub | length == 44 and '$' not in _raw_hub) else '' }}"
+        _file_ctrl: "{{ _ctrl_privkey_file.stdout | default('') | trim }}"
+        _file_hub: "{{ _hub_pubkey_file.stdout | default('') | trim }}"
       ansible.builtin.set_fact:
-        _ctrl_privkey: >-
-          {{ lookup('env', 'WIREGUARD_PRIVATE_KEY_CONTROLLER')
-             | default(_ctrl_privkey_file.stdout | default(''), true) | trim }}
-        _hub_pubkey: >-
-          {{ lookup('env', 'WIREGUARD_HUB_PUBLIC_KEY')
-             | default(_hub_pubkey_file.stdout | default(''), true) | trim }}
-        _server_endpoint: "{{ lookup('env', 'WIREGUARD_SERVER_ENDPOINT') }}"
+        _ctrl_privkey: "{{ (_env_ctrl if _env_ctrl | length > 0 else _file_ctrl) | trim }}"
+        _hub_pubkey: "{{ (_env_hub if _env_hub | length > 0 else _file_hub) | trim }}"
+        _server_endpoint: "{{ lookup('env', 'WIREGUARD_SERVER_ENDPOINT') | default('', true) }}"
         _ctrl_ip: "{{ lookup('env', 'CONTROLLER_VPN_IP') | default('10.0.0.7', true) }}"
 
     - name: Skip if controller keys not yet generated
       ansible.builtin.meta: end_play
-      when: _ctrl_privkey | length == 0 or _hub_pubkey | length == 0
+      when: >-
+        _ctrl_privkey | length != 44
+        or '$' in _ctrl_privkey
+        or _hub_pubkey | length != 44
+        or '$' in _hub_pubkey
 
     - name: Ensure wireguard config directory exists
       ansible.builtin.command:
@@ -711,6 +619,10 @@
         cmd: sudo wg show wg0
       changed_when: false
 
+    - name: Wait for WireGuard handshakes to establish
+      ansible.builtin.pause:
+        seconds: 5
+
 # ── VPN NM reachability gate ─────────────────────────────────────
 # Controller VPN is up. Verify all NMs are reachable via VPN IPs.
 # This confirms the VPN tunnel is functional for API-driven config.
@@ -720,28 +632,29 @@
   gather_facts: false
   tags: [wireguard, kiosk]
   tasks:
-    - name: Verify NM reachable via VPN IP
+    - name: Verify NM reachable via host proxy
       ansible.builtin.uri:
-        url: "http://{{ vpn_ip }}:{{ kiosk_manager_port }}/api/images/versions"
+        url: >-
+          http://{{ nm_api_host | default(ansible_host) }}:{{
+          nm_api_port | default(kiosk_manager_port) }}/api/health
         return_content: true
-        timeout: 5
+        timeout: 10
       register: _nm_vpn_ready
       retries: 6
       delay: 5
       until: (_nm_vpn_ready.status | default(0)) == 200
       delegate_to: localhost
 
-    - name: Assert NM reachable via VPN
+    - name: Assert NM reachable
       ansible.builtin.assert:
         that: (_nm_vpn_ready.status | default(0)) == 200
         fail_msg: >-
-          HARD FAILURE: Node Manager on {{ inventory_hostname }} (VPN IP: {{ vpn_ip }})
-          not reachable via VPN after 30s. All configure plays route through VPN.
+          HARD FAILURE: Node Manager on {{ inventory_hostname }}
+          not reachable after 30s. All configure plays route through NM API.
           INVESTIGATE:
-          1. Is controller wg0 up? → sudo wg show wg0
-          2. Can you ping the VPN IP? → ping -c 1 {{ vpn_ip }}
-          3. Is WireGuard CT running? → pct status {{ wireguard_ct_id }} on {{ inventory_hostname }}
-          4. Check WireGuard peer config: wg show wg0 peers
+          1. Is kiosk container running? → pct status {{ kiosk_ct_id }}
+          2. Is socat proxy running? → systemctl status kiosk-manager-proxy
+          3. Is kiosk-web running? → pct exec {{ kiosk_ct_id }} -- systemctl status kiosk-web
           5. Check DNAT rules in WireGuard CT: pct exec {{ wireguard_ct_id }} -- iptables -t nat -S
           6. Is the hub AllowedIPs correct? Hub config should have {{ vpn_ip }}/32
 
@@ -816,6 +729,21 @@
     - name: Run WiFi negotiation
       ansible.builtin.include_tasks:
         file: "{{ project_root }}/tasks/negotiate_wifi_bridge.yml"
+
+- name: Reconstruct WiFi bridge group (in case provision was skipped)
+  hosts: bridge_nodes
+  gather_facts: false
+  tags: [bridge]
+  max_fail_percentage: 100
+  tasks:
+    - name: Check if openwrt_bridge group is already populated
+      ansible.builtin.set_fact:
+        _bridge_group_exists: "{{ groups['openwrt_bridge'] | default([]) | length > 0 }}"
+      run_once: true
+
+    - name: Reconstruct bridge group from existing containers
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/reconstruct_bridge_group.yml"
+      when: not (_bridge_group_exists | bool)
 
 - name: Configure WiFi Bridge
   hosts: openwrt_bridge
@@ -899,34 +827,6 @@
   tags: [kiosk, pihole, monitoring, homeassistant, media, moonlight, wireguard, gaming, mesh-wifi, bridge]
   roles:
     - kiosk_configure
-
-- name: Redistribute Cluster Manager SSH key (post-refresh)
-  hosts: kiosk_nodes
-  gather_facts: false
-  tags: [kiosk]
-  tasks:
-    - name: Read Cluster Manager public key
-      ansible.builtin.command:
-        cmd: pct exec {{ kiosk_ct_id }} -- cat /home/kiosk/.ssh/id_ed25519.pub
-      register: _cm_pubkey
-      changed_when: false
-      when: inventory_hostname in groups.get('router_nodes', [])
-
-    - name: Set Cluster Manager key fact
-      ansible.builtin.set_fact:
-        _cluster_manager_pubkey: "{{ hostvars[groups['router_nodes'][0]]._cm_pubkey.stdout }}"
-      when: groups.get('router_nodes', []) | length > 0
-
-    - name: Authorize Cluster Manager key on this host
-      ansible.posix.authorized_key:
-        user: root
-        key: "{{ _cluster_manager_pubkey }}"
-        comment: "cluster-manager-{{ groups['router_nodes'][0] }}"
-        state: present
-      when:
-        - _cluster_manager_pubkey is defined
-        - _cluster_manager_pubkey | length > 0
-        - inventory_hostname not in groups.get('router_nodes', [])
 
 # ── LAN display relays (router → LAN hosts) ──────────────────────
 # LAN hosts are unreachable from the operator's browser. The router

@@ -1,0 +1,69 @@
+---
+service: moonlight
+base_template: build-base-debian-12-amd64.tar.zst
+build_vmid: 988
+hostname: moonlight-build
+memory: 1024
+cores: 2
+disk: "4"
+unprivileged: true
+features: ""
+
+setup_commands: []
+
+install_commands:
+  - "bash -c 'export DEBIAN_FRONTEND=noninteractive && apt-get update -qq'"
+  - >-
+    bash -c 'apt-get install -y --no-install-recommends
+    libopus0 libexpat1 libasound2 libudev1 libavahi-client3
+    libcurl4 libevdev2 libpulse0 libsdl2-2.0-0
+    libavcodec59 libavutil57
+    intel-media-va-driver mesa-va-drivers vainfo
+    ca-certificates wget'
+  - >-
+    bash -c 'apt-get install -y --no-install-recommends
+    git cmake gcc g++ make pkg-config
+    libssl-dev libopus-dev libasound2-dev libudev-dev
+    libavahi-client-dev libcurl4-openssl-dev libevdev-dev
+    libexpat1-dev libpulse-dev uuid-dev
+    libsdl2-dev libavcodec-dev libavutil-dev'
+  - >-
+    bash -c 'cd /tmp &&
+    git clone --branch v2.7.1 --depth 1 https://github.com/moonlight-stream/moonlight-embedded.git &&
+    cd moonlight-embedded &&
+    git submodule update --init --recursive &&
+    mkdir build && cd build &&
+    cmake -DENABLE_X11=OFF .. &&
+    make -j$(nproc) &&
+    make install &&
+    ldconfig'
+  - >-
+    bash -c 'export DEBIAN_FRONTEND=noninteractive &&
+    apt-get purge -y
+    git cmake gcc g++ make pkg-config
+    libssl-dev libopus-dev libasound2-dev libudev-dev
+    libavahi-client-dev libcurl4-openssl-dev libevdev-dev
+    libexpat1-dev libpulse-dev uuid-dev
+    libsdl2-dev libavcodec-dev libavutil-dev &&
+    apt-get autoremove -y &&
+    apt-get clean 2>/dev/null || true &&
+    rm -rf /tmp/moonlight-embedded /var/lib/apt/lists/* /tmp/* /var/tmp/*'
+  - "bash -c 'useradd -r -m -G audio,video,input,render,ssl-cert -s /bin/bash moonlight 2>/dev/null || true'"
+  - "loginctl enable-linger moonlight 2>/dev/null || true"
+
+config_files: []
+
+post_commands: []
+
+callhome:
+  http_probes: ""
+  config_files: ""
+
+kasmvnc:
+  app_user: moonlight
+  vnc_port: 6083
+  display_num: 1
+  service_name: moonlight-display
+  xstartup_exec: |-
+    if ! grep -q '^address' /etc/moonlight.conf 2>/dev/null; then exec sleep infinity; fi
+    exec /usr/local/bin/moonlight stream -config /etc/moonlight.conf -app Desktop

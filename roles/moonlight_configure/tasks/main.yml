@@ -48,6 +48,7 @@
     body_format: json
     body: {}
     status_code: 200
+    timeout: 60
   delegate_to: localhost
   register: _restart_result
   when: moonlight_server_ip | default('', true) | length > 0

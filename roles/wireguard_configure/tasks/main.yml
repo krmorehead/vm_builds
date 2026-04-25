@@ -6,7 +6,10 @@
 
 - name: Check if key generation is needed
   ansible.builtin.set_fact:
-    _wg_needs_keygen: "{{ wireguard_private_key | length == 0 }}"
+    _wg_needs_keygen: >-
+      {{ wireguard_private_key | length != 44
+         or '$' in wireguard_private_key
+         or wireguard_private_key in ['None', 'null', 'true', 'false'] }}
 
 - name: Generate container private key
   ansible.builtin.command:
@@ -114,22 +117,27 @@
   when: wireguard_is_hub | bool
 
 - name: Resolve controller public key
+  vars:
+    _env_key: "{{ lookup('env', 'WIREGUARD_PUBLIC_KEY_CONTROLLER') }}"
+    _file_key: "{{ _ctrl_pubkey_from_file.stdout | default('') | trim }}"
   ansible.builtin.set_fact:
     _ctrl_pubkey_resolved: >-
-      {{ lookup('env', 'WIREGUARD_PUBLIC_KEY_CONTROLLER')
-         | default(_ctrl_pubkey_from_file.stdout | default(''), true) | trim }}
+      {{ _file_key if (_env_key in ['', 'None']) else _env_key }}
   when: wireguard_is_hub | bool
 
 - name: Add controller peer to hub
+  vars:
+    _raw_vpn_ip: "{{ lookup('env', 'CONTROLLER_VPN_IP') }}"
   ansible.builtin.set_fact:
     _wg_peers: >-
       {{ _wg_peers | default([]) + [{
         'public_key': _ctrl_pubkey_resolved,
-        'vpn_ip': lookup('env', 'CONTROLLER_VPN_IP') | default('10.0.0.7', true)
+        'vpn_ip': '10.0.0.7' if (_raw_vpn_ip in ['', 'None']) else _raw_vpn_ip
       }] }}
   when:
     - wireguard_is_hub | bool
     - _ctrl_pubkey_resolved | default('') | length > 0
+    - _ctrl_pubkey_resolved != 'None'
 
 # ── Client: resolve hub's public key ─────────────────────────
 - name: Resolve hub public key for clients
@@ -219,6 +227,7 @@
     body_format: json
     body: {}
     status_code: 200
+    timeout: 60
   delegate_to: localhost
 
 - name: Read LAN gateway from env.generated
@@ -259,17 +268,6 @@
       path: /usr/sbin/wireguard-firewall-setup
       content: "{{ lookup('file', playbook_dir + '/../scripts/image-builder/files-wireguard-lxc/usr/sbin/wireguard-firewall-setup') }}"
       mode: "0755"
-    status_code: 200
-  delegate_to: localhost
-
-- name: Flush old iptables rules before reapplying
-  ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ wireguard_ct_id }}/exec"
-    method: POST
-    body_format: json
-    body:
-      cmd: "iptables -t nat -F && iptables -F FORWARD"
-      timeout: 10
     status_code: 200
   delegate_to: localhost
 

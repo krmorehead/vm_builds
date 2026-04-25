@@ -25,6 +25,14 @@
     lxc_net_service_name: pihole
     lxc_net_ip_offset: "{{ pihole_ct_ip_offset }}"
 
+# ── Upload template to host if not cached ──────────────────────────
+- name: Upload Pi-hole template to Proxmox host
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/upload_lxc_template.yml"
+  vars:
+    lxc_upload_template_path: "{{ role_path }}/../../{{ pihole_ct_template_path }}"
+    lxc_upload_service_name: Pi-hole
+  when: not (_service_up_to_date | default(false) | bool)
+
 # ── Provision container via NM API (skipped when version matches) ─
 - name: Provision Pi-hole LXC via NM API
   ansible.builtin.uri:
@@ -47,7 +55,7 @@
       bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
       image_version: "{{ pihole_image_version }}"
     status_code: 200
-    timeout: 180
+    timeout: 660
   delegate_to: localhost
   register: _provision_result
   failed_when: not (_provision_result.json.success | default(false))

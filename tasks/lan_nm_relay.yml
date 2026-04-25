@@ -40,7 +40,9 @@
 
       [Service]
       Type=simple
-      ExecStart=/usr/bin/socat TCP-LISTEN:{{ item.listen_port }},reuseaddr,fork TCP:{{ item.target_ip }}:{{ item.target_port }}
+      ExecStart=/usr/bin/socat \
+        TCP-LISTEN:{{ item.listen_port }},reuseaddr,fork,keepalive,keepidle=15,keepcnt=3,keepintvl=5 \
+        TCP:{{ item.target_ip }}:{{ item.target_port }},keepalive,keepidle=15,keepcnt=3,keepintvl=5
       Restart=always
       RestartSec=3
 

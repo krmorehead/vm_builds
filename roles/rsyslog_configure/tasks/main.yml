@@ -79,6 +79,7 @@
     body_format: json
     body: {}
     status_code: 200
+    timeout: 60
   delegate_to: localhost
 
 # ── Post-restart health check ────────────────────────────────────

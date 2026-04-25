@@ -261,11 +261,25 @@
 # firmware regulatory state, enabling AP-capable channels on 6 GHz.
 # The lar_disable=1 modprobe option (if present in iwlwifi-options.conf
 # from previous runs) is also picked up on reload.
+#
+# SAFETY: Only reload on hosts that actually use WiFi (router, wifi,
+# bridge groups). Unloading WiFi modules causes a PCIe device reset
+# — on AMD APUs the NBIO handles all PCIe/USB/SATA on a shared die,
+# and a reset can cause delayed instability that kills USB ethernet
+# hours later.
+
+- name: Check if host uses WiFi
+  ansible.builtin.set_fact:
+    _host_uses_wifi: >-
+      {{ ('router_nodes' in group_names) or
+         ('wifi_nodes' in group_names) or
+         ('bridge_nodes' in group_names) }}
 
 - name: Check if iwlwifi module is loaded
   ansible.builtin.stat:
     path: /sys/module/iwlwifi
   register: _iwlwifi_module
+  when: _host_uses_wifi | bool
 
 - name: Check if iwlwifi PHY has self-managed regulatory
   ansible.builtin.shell:
@@ -273,14 +287,17 @@
     executable: /bin/bash
   register: _iwlwifi_self_managed
   changed_when: false
-  when: _iwlwifi_module.stat.exists
+  when:
+    - _host_uses_wifi | bool
+    - _iwlwifi_module.stat.exists | default(false)
 
 - name: Reload iwlwifi module stack for regulatory reinit
   ansible.builtin.command:
     cmd: bash -c 'modprobe -r iwlmvm iwlwifi 2>/dev/null || true; sleep 1; modprobe iwlwifi 2>/dev/null || true; sleep 2'
   changed_when: true
   when:
-    - _iwlwifi_module.stat.exists
+    - _host_uses_wifi | bool
+    - _iwlwifi_module.stat.exists | default(false)
     - (_iwlwifi_self_managed.stdout | default('0') | trim | int) > 0
 
 - name: Skip remaining tasks when no WiFi devices found
@@ -397,16 +414,23 @@
     - "'router_nodes' in group_names"
     - not iommu_active | bool
 
-- name: Add IOMMU to GRUB cmdline
-  ansible.builtin.lineinfile:
-    path: /etc/default/grub
-    regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
-    line: 'GRUB_CMDLINE_LINUX_DEFAULT="quiet {{ _iommu_param }} iommu=pt"'
-    backup: true
+- name: Add IOMMU to GRUB cmdline (preserving existing params)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      current=$(grep '^GRUB_CMDLINE_LINUX_DEFAULT=' /etc/default/grub | sed 's/^GRUB_CMDLINE_LINUX_DEFAULT="//;s/"$//')
+      new="$current"
+      for param in "{{ _iommu_param }}" "iommu=pt"; do
+        echo "$new" | grep -q "$param" || new="$new $param"
+      done
+      cp /etc/default/grub /etc/default/grub.bak
+      sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"${new}\"|" /etc/default/grub
+    executable: /bin/bash
   when:
     - wifi_pci_devices | length > 0
     - "'router_nodes' in group_names"
     - not iommu_active | bool
+  changed_when: true
   notify: Update grub
 
 - name: Ensure VFIO modules are loaded at boot

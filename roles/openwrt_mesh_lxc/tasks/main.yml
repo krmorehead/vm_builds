@@ -291,23 +291,3 @@
   ansible.builtin.command:
     cmd: "pct set {{ meshwifi_ct_id }} --hookscript local:snippets/mesh-wifi-phy-{{ meshwifi_ct_id }}.sh"
   changed_when: true
-
-# ── Host-side wrapper scripts for manager API ──────────────────
-# The manager SSHes to the Proxmox host and calls these scripts.
-# They forward to the container-side scripts via pct exec.
-
-- name: Deploy host-side wifi_setup.sh wrapper
-  ansible.builtin.copy:
-    content: |
-      #!/bin/sh
-      exec pct exec {{ meshwifi_ct_id }} -- /usr/sbin/wifi_setup.sh "$@"
-    dest: /usr/local/bin/wifi_setup.sh
-    mode: "0755"
-
-- name: Deploy host-side batman_trigger.sh wrapper
-  ansible.builtin.copy:
-    content: |
-      #!/bin/sh
-      exec pct exec {{ meshwifi_ct_id }} -- /usr/sbin/batman_trigger.sh "$@"
-    dest: /usr/local/bin/batman_trigger.sh
-    mode: "0755"

@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.no_infra
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -90,6 +92,27 @@ class TestBridgePage:
         async with infra_ctx(tmp_path) as user:
             await user.open(Routes.BRIDGE)
             await user.should_see(Labels.FORCE_REPAIR)
+
+    async def test_bridge_shows_setup_guide(self, tmp_path):
+        async with infra_ctx(tmp_path) as user:
+            await user.open(Routes.BRIDGE)
+            await user.should_see(Labels.BRIDGE_HOW_IT_WORKS)
+
+    async def test_bridge_shows_swap_roles_button(self, tmp_path):
+        async with infra_ctx(tmp_path) as user:
+            await user.open(Routes.BRIDGE)
+            await user.should_see(Labels.SWAP_ROLES)
+
+    async def test_bridge_shows_role_labels_in_guide(self, tmp_path):
+        async with infra_ctx(tmp_path) as user:
+            await user.open(Routes.BRIDGE)
+            await user.should_see("Broadcaster")
+            await user.should_see("Receiver")
+
+    async def test_bridge_disconnected_shows_diagnostic_hint(self, tmp_path):
+        async with infra_ctx(tmp_path) as user:
+            await user.open(Routes.BRIDGE)
+            await user.should_see("Both bridge hosts are offline")
 
 
 # ── Mesh page tests ──────────────────────────────────────────────────
@@ -495,3 +518,99 @@ class TestViewerBarStructure:
         async with viewer_ctx(tmp_path) as user:
             await user.open(f"{Routes.VIEW}?url=http://example.com&title=Pi-hole%20Admin")
             await user.should_see("Pi-hole Admin")
+
+
+# ── Bridge helper function tests (pure Python, no NiceGUI) ───────────
+
+
+class TestBridgeHelpers:
+    """Test pure-Python helpers from bridge.py without NiceGUI."""
+
+    def test_format_bytes_bytes(self):
+        from scripts.webui.pages.bridge import _format_bytes
+        assert _format_bytes(512) == "512 B"
+
+    def test_format_bytes_kb(self):
+        from scripts.webui.pages.bridge import _format_bytes
+        assert _format_bytes(2048) == "2.0 KB"
+
+    def test_format_bytes_mb(self):
+        from scripts.webui.pages.bridge import _format_bytes
+        assert _format_bytes(5 * 1024 * 1024) == "5.0 MB"
+
+    def test_format_bytes_gb(self):
+        from scripts.webui.pages.bridge import _format_bytes
+        assert _format_bytes(3 * 1024 * 1024 * 1024) == "3.00 GB"
+
+    def test_format_uptime_zero(self):
+        from scripts.webui.pages.bridge import _format_uptime
+        assert _format_uptime(0) == ""
+
+    def test_format_uptime_minutes(self):
+        from scripts.webui.pages.bridge import _format_uptime
+        assert _format_uptime(300) == "linked 5m"
+
+    def test_format_uptime_hours(self):
+        from scripts.webui.pages.bridge import _format_uptime
+        assert _format_uptime(7200) == "linked 2h 0m"
+
+    def test_format_uptime_hours_and_minutes(self):
+        from scripts.webui.pages.bridge import _format_uptime
+        assert _format_uptime(5430) == "linked 1h 30m"
+
+    def test_extract_link_summary_empty(self):
+        from scripts.webui.pages.bridge import _extract_link_summary
+        assert _extract_link_summary(None, None) == ""
+
+    def test_band_labels_cover_all_bands(self):
+        from scripts.webui.pages.bridge import _BAND_LABELS
+        assert "2g" in _BAND_LABELS
+        assert "5g" in _BAND_LABELS
+        assert "6g" in _BAND_LABELS
+
+    def test_width_labels_cover_standard_widths(self):
+        from scripts.webui.pages.bridge import _WIDTH_LABELS
+        for w in ("20", "40", "80", "160"):
+            assert w in _WIDTH_LABELS
+
+    def test_role_explanations_cover_ap_and_sta(self):
+        from scripts.webui.pages.bridge import _ROLE_EXPLANATIONS
+        assert "AP" in _ROLE_EXPLANATIONS
+        assert "STA" in _ROLE_EXPLANATIONS
+        for role_key, (icon, human_role, desc) in _ROLE_EXPLANATIONS.items():
+            assert icon, f"Missing icon for {role_key}"
+            assert human_role, f"Missing human role for {role_key}"
+            assert desc, f"Missing description for {role_key}"
+
+    def test_setup_steps_has_three_entries(self):
+        from scripts.webui.pages.bridge import _SETUP_STEPS
+        assert len(_SETUP_STEPS) == 3
+        for icon, title, desc in _SETUP_STEPS:
+            assert icon, "Missing icon in setup step"
+            assert title, "Missing title in setup step"
+            assert desc, "Missing description in setup step"
+
+
+class TestBridgeLabelsExist:
+    """Verify all new bridge labels are defined in data.py."""
+
+    def test_bridge_how_it_works_label(self):
+        assert Labels.BRIDGE_HOW_IT_WORKS
+
+    def test_bridge_step_deploy_label(self):
+        assert Labels.BRIDGE_STEP_DEPLOY
+
+    def test_bridge_step_negotiate_label(self):
+        assert Labels.BRIDGE_STEP_NEGOTIATE
+
+    def test_bridge_step_pair_label(self):
+        assert Labels.BRIDGE_STEP_PAIR
+
+    def test_swap_roles_label(self):
+        assert Labels.SWAP_ROLES
+
+    def test_bridge_nodes_have_roles(self):
+        nodes = data.get_bridge_nodes()
+        roles = {n["default_role"] for n in nodes}
+        assert "ap" in roles, "No AP node in bridge_nodes"
+        assert "sta" in roles, "No STA node in bridge_nodes"

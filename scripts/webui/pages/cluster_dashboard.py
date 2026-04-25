@@ -37,7 +37,7 @@ def register() -> None:
     def cluster_node_detail(node_id: str) -> None:
         with theme.cluster_page_shell("fleet"):
             mgr = manager.get_instance()
-            if not isinstance(mgr, manager.ClusterManager):
+            if not mgr.supports_fleet:
                 ui.label("Not a Cluster Manager").classes("text-xl")
                 return
 
@@ -109,7 +109,7 @@ def _render_fleet(container: ui.column) -> None:
     container.clear()
     with container:
         mgr = manager.get_instance()
-        if not isinstance(mgr, manager.ClusterManager):
+        if not mgr.supports_fleet:
             ui.label("Not a Cluster Manager").classes("text-xl")
             return
 

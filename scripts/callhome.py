@@ -25,11 +25,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.server
 import json
 import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 import typing
 import urllib.error
@@ -345,11 +347,11 @@ def collect_docker() -> dict | None:
 
 
 def collect_config_files() -> dict | None:
-    """Report keys and hash of allow-listed JSON config files.
+    """Report keys and hash of allow-listed config files.
 
-    Set CALLHOME_CONFIG_FILES=/path/one.json:/path/two.json to enable.
-    Each file's top-level keys and a content hash are reported so the
-    manager can verify config completeness without SSH.
+    Set CALLHOME_CONFIG_FILES=/path/one.json:/path/two.toml to enable.
+    Each file's content hash is reported. Top-level keys are extracted
+    for JSON files; non-JSON files report the hash only.
     """
     paths_str = os.environ.get("CALLHOME_CONFIG_FILES", "")
     if not paths_str:
@@ -362,11 +364,16 @@ def collect_config_files() -> dict | None:
         try:
             with open(path) as f:
                 raw = f.read()
-            data = json.loads(raw)
-            keys = sorted(data.keys()) if isinstance(data, dict) else []
             content_hash = hashlib.sha256(raw.encode()).hexdigest()[:16]
-            result[path] = {"keys": keys, "hash": content_hash}
-        except (OSError, json.JSONDecodeError, TypeError):
+            entry: dict = {"hash": content_hash}
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    entry["keys"] = sorted(data.keys())
+            except (json.JSONDecodeError, TypeError):
+                pass
+            result[path] = entry
+        except OSError:
             pass
     return result if result else None
 
@@ -627,6 +634,171 @@ def run_loop(
             time.sleep(interval)
 
 
+# ── Command HTTP endpoint ─────────────────────────────────────────────
+#
+# A lightweight HTTP server that accepts POST /cmd from the NodeManager.
+# Only whitelisted commands are allowed.  HMAC-authenticated using the
+# same CALLHOME_PUBLIC_KEY that the heartbeat uses.
+
+COMMAND_PORT = 9002
+
+ALLOWED_COMMANDS: list[str] = [
+    # Container-side service scripts
+    "/usr/sbin/batman_trigger.sh",
+    "/usr/sbin/wifi_setup.sh",
+    "/usr/sbin/wireguard-firewall-setup",
+    "/usr/sbin/switch-desktop-session",
+    "/usr/sbin/rsyslogd",
+    "/usr/local/bin/pihole",
+    "/usr/bin/pihole-FTL",
+    "/usr/bin/sunshine",
+    # Runtime operations
+    "docker",
+    "echo",
+    "hostname",
+    "iptables",
+    "passwd",
+    "systemctl",
+    "cat",
+    "curl",
+    "ip",
+    "rm",
+    "sed",
+    "sh -c",
+    "bash -c",
+    # Package managers (image builds via NM API)
+    "apt-get",
+    "apt-cache",
+    "dpkg",
+    "dnf",
+    "rpm",
+    "pip",
+    "pip3",
+    # File and archive tools
+    "wget",
+    "tar",
+    "gzip",
+    "zstd",
+    "cp",
+    "mv",
+    "ln",
+    "mkdir",
+    "chmod",
+    "chown",
+    # User/group management
+    "useradd",
+    "groupadd",
+    "usermod",
+    "loginctl",
+    # Build tools
+    "cmake",
+    "make",
+    "git",
+    "python3",
+    "getent",
+    "tee",
+    "test",
+    "id",
+]
+
+
+def _is_command_allowed(cmd: str) -> bool:
+    """Check if a command matches the whitelist."""
+    stripped = cmd.strip()
+    for prefix in ALLOWED_COMMANDS:
+        if stripped == prefix or stripped.startswith(prefix + " "):
+            return True
+    return False
+
+
+class CommandHandler(http.server.BaseHTTPRequestHandler):
+    """HTTP handler for the command endpoint (POST /cmd)."""
+
+    auth_token: str = ""
+
+    def log_message(self, format: str, *args: typing.Any) -> None:
+        print(f"[callhome-cmd] {format % args}", flush=True)
+
+    def do_POST(self) -> None:
+        if self.path != "/cmd":
+            self.send_error(404, "Not Found")
+            return
+
+        content_length = int(self.headers.get("Content-Length", 0))
+        if content_length > 65536:
+            self.send_error(413, "Payload too large")
+            return
+
+        try:
+            body = json.loads(self.rfile.read(content_length))
+        except (json.JSONDecodeError, ValueError):
+            self.send_error(400, "Invalid JSON")
+            return
+
+        token = body.get("token", "")
+        if self.auth_token and token != self.auth_token:
+            self._json_response(403, {"success": False, "error": "Unauthorized"})
+            return
+
+        cmd = body.get("command", "").strip()
+        if not cmd:
+            self._json_response(400, {"success": False, "error": "command required"})
+            return
+
+        if not _is_command_allowed(cmd):
+            self._json_response(
+                403, {"success": False, "error": f"Command not whitelisted: {cmd.split()[0]}"},
+            )
+            return
+
+        timeout = min(int(body.get("timeout", 30)), 900)
+        try:
+            result = subprocess.run(
+                cmd, shell=True, capture_output=True, text=True,
+                timeout=timeout,
+            )
+            self._json_response(200, {
+                "success": result.returncode == 0,
+                "output": (result.stdout + result.stderr)[:4000],
+                "returncode": result.returncode,
+            })
+        except subprocess.TimeoutExpired:
+            self._json_response(504, {
+                "success": False, "error": f"Command timed out after {timeout}s",
+            })
+        except OSError as exc:
+            self._json_response(500, {
+                "success": False, "error": str(exc)[:300],
+            })
+
+    def do_GET(self) -> None:
+        if self.path == "/health":
+            self._json_response(200, {"status": "ok", "port": COMMAND_PORT})
+            return
+        self.send_error(404, "Not Found")
+
+    def _json_response(self, code: int, data: dict) -> None:
+        body = json.dumps(data).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def start_command_server(port: int, token: str) -> threading.Thread:
+    """Start the command HTTP server in a background thread."""
+    CommandHandler.auth_token = token
+    server = http.server.HTTPServer(("0.0.0.0", port), CommandHandler)
+    server.timeout = 1
+    thread = threading.Thread(
+        target=server.serve_forever, daemon=True, name="callhome-cmd",
+    )
+    thread.start()
+    print(f"[callhome] command server listening on :{port}", flush=True)
+    return thread
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="vm_builds call-home client")
     parser.add_argument(
@@ -671,15 +843,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="SECS",
         help="Faster heartbeat interval for the first 60s after start (default: off)",
     )
+    parser.add_argument(
+        "--command-port",
+        type=int,
+        default=int(os.environ.get("CALLHOME_COMMAND_PORT", "0")),
+        help="Port for HTTP command endpoint (0 = disabled, default: 9002 in container mode)",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     _load_conf()
     args = parse_args(argv)
-    if not args.server:
-        print("[callhome] ERROR: --server or CALLHOME_SERVER required", file=sys.stderr)
-        sys.exit(1)
 
     if args.token is not None:
         token = args.token
@@ -698,6 +873,29 @@ def main(argv: list[str] | None = None) -> None:
     is_container = args.container is not None
     container_id = (args.container or socket.gethostname()) if is_container else ""
     mode_label = f"container={container_id}" if is_container else "host"
+
+    cmd_port = args.command_port
+    if cmd_port == 0 and is_container:
+        cmd_port = COMMAND_PORT
+    if cmd_port > 0:
+        try:
+            start_command_server(cmd_port, token)
+        except OSError as exc:
+            print(f"[callhome] WARNING: command server failed to start on :{cmd_port}: {exc}",
+                  file=sys.stderr, flush=True)
+
+    if not args.server:
+        # No server configured — run command server only (build container mode).
+        # The heartbeat loop requires a server URL, but the /cmd endpoint
+        # is available for receiving commands from the NodeManager.
+        print(f"[callhome] mode={mode_label} cmd-server-only (no CALLHOME_SERVER)", flush=True)
+        if cmd_port > 0:
+            import signal
+            signal.pause()
+        else:
+            print("[callhome] ERROR: no server and no command port — nothing to do", file=sys.stderr)
+            sys.exit(1)
+        return
 
     if args.once:
         run_once(args.server, token, force=args.force, container_id=container_id)

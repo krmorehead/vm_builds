@@ -365,9 +365,9 @@ def status_dot(status: str) -> ui.icon:
 
     Color semantics:
     - online → green (healthy, heartbeat active)
-    - reachable → orange (SSH up, but no heartbeat)
+    - reachable → orange (PVE API or NM reachable, but no heartbeat)
     - stale → orange (heartbeat was active, now stale)
-    - unreachable → red (SSH port 22 not responding)
+    - unreachable → red (PVE API and NM not responding)
     - offline → red (heartbeat reports offline)
     - unknown / anything else → grey (not probed yet)
     """
@@ -568,7 +568,7 @@ def kiosk_nav_bar() -> None:
     from scripts.webui import manager as _mgr
     from scripts.webui.data import KIOSK_NAV_ITEMS, Labels, Routes
 
-    is_cm = isinstance(_mgr.try_get_instance(), _mgr.ClusterManager)
+    mgr = _mgr.try_get_instance()
 
     with ui.element("div").style(bar_style):
         ui.button(
@@ -577,7 +577,7 @@ def kiosk_nav_bar() -> None:
         ui.label(Labels.HOME_HUB).classes("text-sm").style(f"color: {TEXT_SECONDARY}")
         ui.space()
         for nav_label, nav_path, nav_icon in KIOSK_NAV_ITEMS:
-            if nav_path == Routes.FLEET and not is_cm:
+            if nav_path == Routes.FLEET and (not mgr or not mgr.supports_fleet):
                 continue
             ui.button(
                 nav_label, icon=nav_icon,

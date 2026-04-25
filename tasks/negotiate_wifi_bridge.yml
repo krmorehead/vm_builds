@@ -7,18 +7,21 @@
 # Expected context: runs on bridge_nodes hosts with bridge_ct_id
 # defined and containers already provisioned and running.
 
-- name: Collect WiFi capabilities from bridge containers
-  ansible.builtin.command:
+- name: Collect WiFi capabilities from bridge containers via pct exec
+  ansible.builtin.shell:
     cmd: >-
-      pct exec {{ bridge_ct_id }} --
-      /usr/sbin/wifi_setup.sh capabilities
-  register: _bridge_caps
+      pct exec {{ bridge_ct_id }} -- /usr/sbin/wifi_setup.sh capabilities
+    executable: /bin/bash
+  register: _bridge_caps_raw
   changed_when: false
-  failed_when: _bridge_caps.rc != 0
+
+- name: Set capabilities output
+  ansible.builtin.set_fact:
+    _bridge_caps_stdout: "{{ _bridge_caps_raw.stdout }}"
 
 - name: Save capabilities to temp files
   ansible.builtin.copy:
-    content: "{{ _bridge_caps.stdout }}"
+    content: "{{ _bridge_caps_stdout }}"
     dest: "/tmp/wifi_caps_{{ inventory_hostname }}.txt"
     mode: "0644"
   delegate_to: localhost

@@ -1,0 +1,48 @@
+---
+service: pihole
+base_template: build-base-debian-12-amd64.tar.zst
+build_vmid: 998
+hostname: pihole-build
+memory: 512
+cores: 1
+disk: "2"
+unprivileged: true
+features: "nesting=1"
+
+setup_commands:
+  - "echo nameserver 8.8.8.8 > /etc/resolv.conf"
+  - "groupadd -r pihole 2>/dev/null || true"
+  - "useradd -r -g pihole -s /usr/sbin/nologin -d /home/pihole pihole 2>/dev/null || true"
+  - "mkdir -p /etc/pihole && chown pihole:pihole /etc/pihole && chmod 775 /etc/pihole"
+
+install_commands:
+  - "bash -c 'export DEBIAN_FRONTEND=noninteractive && apt-get update -qq'"
+  - "bash -c 'apt-get install -y --no-install-recommends curl procps ca-certificates'"
+  - "curl -sSL https://install.pi-hole.net -o /tmp/pihole-install.sh"
+  - "bash -c 'PIHOLE_SKIP_OS_CHECK=true bash /tmp/pihole-install.sh --unattended'"
+  - "rm -f /tmp/pihole-install.sh"
+  - "bash -c 'apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*'"
+
+config_files:
+  - path: /etc/pihole/pihole.toml
+    content: |
+      [dns]
+      upstreams = ["1.1.1.1", "1.0.0.1"]
+
+      [dhcp]
+      active = false
+
+      [database]
+      maxDBdays = 30
+    mode: "0644"
+    owner: "pihole:pihole"
+
+post_commands:
+  - "bash -c 'sed -i \"/X-Frame-Options: DENY/d\" /etc/pihole/pihole.toml'"
+  - "bash -c 'sed -i \"s/frame-ancestors .none./frame-ancestors */g\" /etc/pihole/pihole.toml'"
+
+callhome:
+  http_probes: "http://127.0.0.1/admin/"
+  config_files: "/etc/pihole/pihole.toml"
+
+kasmvnc: null

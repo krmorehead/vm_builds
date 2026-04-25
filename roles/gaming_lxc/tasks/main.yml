@@ -25,6 +25,14 @@
     lxc_net_ip_offset: "{{ gaming_ct_ip_offset }}"
     lxc_net_flavor_group: gaming_nodes
 
+# ── Upload template to host if not cached ──────────────────────────
+- name: Upload Gaming template to Proxmox host
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/upload_lxc_template.yml"
+  vars:
+    lxc_upload_template_path: "{{ role_path }}/../../{{ gaming_ct_template_path }}"
+    lxc_upload_service_name: Gaming
+  when: not (_service_up_to_date | default(false) | bool)
+
 # ── Provision container via NM API (skipped when version matches) ─
 - name: Provision Gaming LXC via NM API
   ansible.builtin.uri:
@@ -48,33 +56,41 @@
       nameserver: "{{ _lxc_net_nameserver }}"
       bridge: "{{ _lxc_net_bridge }}"
       skip_debian_cleanup: true
+      lxc_conf_entries:
+        - "lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir"
+        - "lxc.mount.entry: /dev/input dev/input none bind,optional,create=dir"
+        - "lxc.cgroup2.devices.allow: c 226:* rwm"
+        - "lxc.cgroup2.devices.allow: c 13:* rwm"
+        - "lxc.cgroup2.devices.allow: c 10:223 rwm"
       image_version: "{{ gaming_image_version }}"
     status_code: 200
-    timeout: 180
+    timeout: 660
   delegate_to: localhost
   register: _provision_result
   failed_when: not (_provision_result.json.success | default(false))
   when: not (_service_up_to_date | default(false) | bool)
 
-- name: Report provision result
-  ansible.builtin.debug:
-    msg: "Gaming LXC on {{ inventory_hostname }}: {{ _provision_result.json.status }} — {{ _provision_result.json.log | default([]) | join(', ') }}"
-  when: not (_service_up_to_date | default(false) | bool)
-
-# ── Device passthrough via lxc.mount.entry + cgroup allowlists ───
-# TODO: Convert lxc_device_passthrough to NM API in a future pass.
-# Kept as SSH for now — modifies pmxcfs config and restarts container.
-
-- name: Apply device passthrough (DRI + input + uinput)
-  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_device_passthrough.yml"
+# ── Apply privileged config on host (features/DRI/input need root@pam) ─
+- name: Apply privileged LXC config on host for Gaming
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/apply_privileged_lxc_config.yml"
   vars:
-    lxc_dev_ct_id: "{{ gaming_ct_id }}"
-    lxc_dev_conf_entries:
+    _priv_ct_id: "{{ gaming_ct_id }}"
+    _priv_features: "{{ gaming_ct_features | join(',') }}"
+    _priv_mount_entries: []
+    _priv_lxc_conf_entries:
       - "lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir"
       - "lxc.mount.entry: /dev/input dev/input none bind,optional,create=dir"
       - "lxc.cgroup2.devices.allow: c 226:* rwm"
       - "lxc.cgroup2.devices.allow: c 13:* rwm"
       - "lxc.cgroup2.devices.allow: c 10:223 rwm"
+  when:
+    - not (_service_up_to_date | default(false) | bool)
+    - (_provision_result.json.status | default('')) == 'created_needs_host_config'
+
+- name: Report provision result
+  ansible.builtin.debug:
+    msg: "Gaming LXC on {{ inventory_hostname }}: {{ _provision_result.json.status }} — {{ _provision_result.json.log | default([]) | join(', ') }}"
+  when: not (_service_up_to_date | default(false) | bool)
 
 # ── Configure callhome via NM API (skipped when version matches) ─
 - name: Configure callhome on Gaming LXC
@@ -105,58 +121,58 @@
     gaming_static_ip: "{{ _lxc_net_ip }}"
     cacheable: true
 
-# ── Sunshine port forwarding via NM API (WAN hosts only) ─────────
-- name: Add Sunshine DNAT + FORWARD rules via NM API (WAN hosts)
-  ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/host/iptables"
-    method: POST
-    body_format: json
-    body:
-      rules:
-        - chain: PREROUTING
-          table: nat
-          protocol: tcp
-          dport: "47984"
-          destination: "{{ _lxc_net_ip }}:47984"
-          interface: "{{ proxmox_wan_bridge }}"
-        - chain: PREROUTING
-          table: nat
-          protocol: tcp
-          dport: "47989"
-          destination: "{{ _lxc_net_ip }}:47989"
-          interface: "{{ proxmox_wan_bridge }}"
-        - chain: PREROUTING
-          table: nat
-          protocol: tcp
-          dport: "47990"
-          destination: "{{ _lxc_net_ip }}:47990"
-          interface: "{{ proxmox_wan_bridge }}"
-        - chain: PREROUTING
-          table: nat
-          protocol: udp
-          dport: "48010"
-          destination: "{{ _lxc_net_ip }}:48010"
-          interface: "{{ proxmox_wan_bridge }}"
-      forward_rules:
-        - in_interface: "{{ proxmox_wan_bridge }}"
-          out_interface: "{{ proxmox_container_bridge }}"
-          protocol: tcp
-          dport: "47984"
-        - in_interface: "{{ proxmox_wan_bridge }}"
-          out_interface: "{{ proxmox_container_bridge }}"
-          protocol: tcp
-          dport: "47989"
-        - in_interface: "{{ proxmox_wan_bridge }}"
-          out_interface: "{{ proxmox_container_bridge }}"
-          protocol: tcp
-          dport: "47990"
-        - in_interface: "{{ proxmox_wan_bridge }}"
-          out_interface: "{{ proxmox_container_bridge }}"
-          protocol: udp
-          dport: "48010"
-    status_code: 200
-  delegate_to: localhost
+# ── Sunshine port forwarding (WAN hosts only) ────────────────────
+- name: Add Sunshine DNAT rules (WAN hosts)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      DEST="{{ _lxc_net_ip }}:{{ item.port }}"
+      if iptables -t nat -C PREROUTING -i {{ proxmox_wan_bridge }} \
+          -p {{ item.proto }} --dport {{ item.port }} \
+          -j DNAT --to-destination "$DEST" 2>/dev/null; then
+        echo EXISTS
+      else
+        iptables -t nat -A PREROUTING -i {{ proxmox_wan_bridge }} \
+            -p {{ item.proto }} --dport {{ item.port }} \
+            -j DNAT --to-destination "$DEST"
+        echo ADDED
+      fi
+    executable: /bin/bash
+  register: _sunshine_dnat
+  loop:
+    - { proto: tcp, port: 47984 }
+    - { proto: tcp, port: 47989 }
+    - { proto: tcp, port: 47990 }
+    - { proto: udp, port: 48010 }
+  changed_when: "'ADDED' in _sunshine_dnat.stdout"
   when:
     - not (_service_up_to_date | default(false) | bool)
     - not (_lxc_net_on_lan | bool)
-  changed_when: true
+
+- name: Add Sunshine FORWARD rules (WAN hosts)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      if iptables -C FORWARD -i {{ proxmox_wan_bridge }} \
+          -o {{ proxmox_container_bridge }} \
+          -p {{ item.proto }} --dport {{ item.port }} \
+          -j ACCEPT 2>/dev/null; then
+        echo EXISTS
+      else
+        iptables -A FORWARD -i {{ proxmox_wan_bridge }} \
+            -o {{ proxmox_container_bridge }} \
+            -p {{ item.proto }} --dport {{ item.port }} \
+            -j ACCEPT
+        echo ADDED
+      fi
+    executable: /bin/bash
+  register: _sunshine_fwd
+  loop:
+    - { proto: tcp, port: 47984 }
+    - { proto: tcp, port: 47989 }
+    - { proto: tcp, port: 47990 }
+    - { proto: udp, port: 48010 }
+  changed_when: "'ADDED' in _sunshine_fwd.stdout"
+  when:
+    - not (_service_up_to_date | default(false) | bool)
+    - not (_lxc_net_on_lan | bool)

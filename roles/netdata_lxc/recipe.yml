@@ -1,0 +1,68 @@
+---
+service: netdata
+base_template: build-base-debian-12-amd64.tar.zst
+build_vmid: 996
+hostname: netdata-build
+memory: 512
+cores: 1
+disk: "2"
+unprivileged: true
+features: ""
+
+setup_commands: []
+
+install_commands:
+  - "bash -c 'export DEBIAN_FRONTEND=noninteractive && apt-get update -qq'"
+  - "bash -c 'apt-get install -y --no-install-recommends curl ca-certificates'"
+  - "curl -sSL https://get.netdata.cloud/kickstart.sh -o /tmp/netdata-kickstart.sh"
+  - "bash -c 'bash /tmp/netdata-kickstart.sh --stable-channel --dont-wait --no-updates --disable-telemetry'"
+  - "rm -f /tmp/netdata-kickstart.sh"
+
+config_files:
+  - path: /etc/systemd/system/netdata.service.d/lxc-override.conf
+    content: |
+      [Service]
+      LogNamespace=
+      ProtectSystem=false
+      ProtectHome=false
+      ProtectControlGroups=false
+      BindReadOnlyPaths=
+    mode: "0644"
+    mkdir: true
+
+post_commands:
+  - >-
+    bash -c 'CONF_DIR="";
+    if [ -f /etc/netdata/netdata.conf ]; then CONF_DIR=/etc/netdata;
+    elif [ -f /opt/netdata/etc/netdata/netdata.conf ]; then CONF_DIR=/opt/netdata/etc/netdata; fi;
+    if [ -n "$CONF_DIR" ]; then
+    cat > "$CONF_DIR/netdata.conf" << "EOF"
+    [global]
+        hostname = netdata-child
+        update every = 2
+    [db]
+        mode = dbengine
+        dbengine tier 0 retention = 3600
+    [directories]
+        proc = /host/proc
+        sys = /host/sys
+    [web]
+        bind to = *
+        default port = 19999
+    [plugins]
+        proc = yes
+        cgroups = yes
+        apps = no
+        charts.d = no
+        node.d = no
+        python.d = no
+    EOF
+    fi'
+  - "bash -c 'systemctl restart netdata 2>/dev/null || service netdata restart 2>/dev/null || true'"
+  - "bash -c 'apt-get clean 2>/dev/null || true && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*'"
+
+callhome:
+  http_probes: "http://127.0.0.1:19999"
+  config_files: ""
+
+kasmvnc: null

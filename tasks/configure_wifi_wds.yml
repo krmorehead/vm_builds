@@ -35,8 +35,8 @@
     'iw phy 2>/dev/null | grep -c "^Wiphy " || true'
   register: _wds_radio_count
   changed_when: false
-  retries: 10
-  delay: 3
+  retries: 6
+  delay: 2
   until: (_wds_radio_count.stdout | default('0') | trim | int) > 0
 
 - name: Get WiFi radio names
@@ -115,8 +115,8 @@
     'iw dev 2>/dev/null | grep -cE "type (AP|managed)" || true'
   register: _wds_iface_check
   changed_when: false
-  retries: 10
-  delay: 5
+  retries: 6
+  delay: 3
   until: (_wds_iface_check.stdout | default('0') | trim | int) > 0
 
 - name: Report WiFi interface status

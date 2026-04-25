@@ -1,28 +1,27 @@
 ---
 # Webui Python files, build.py, systemd units, and service enablement are
 # baked into the image by build-images.sh. This role handles ONLY
-# host-specific runtime config: render GID, config.json, SSH keys.
+# host-specific runtime config: render GID, config.json, callhome rewrite.
 #
-# BOOTSTRAP EXCEPTION: kiosk_configure is the ONE role that uses SSH + pct
-# exec instead of the NM API. This is required because:
-# 1. The kiosk IS the NodeManager — it cannot configure itself via its own API
-# 2. This role runs BEFORE VPN is established (WireGuard is provisioned later)
-# 3. SSH key generation and authorized_key require host-side access
-# 4. The sibling callhome rewrite needs pct exec into other containers
+# BOOTSTRAP EXCEPTION: kiosk_configure uses pct push/exec ONLY for the
+# kiosk container itself (5 operations: render group, config push, chown,
+# set callhome env, service restarts). The kiosk IS the NodeManager — it
+# cannot configure itself via its own API. After restarting kiosk-web, the
+# sibling callhome rewrite uses the NM exec API (HTTP, zero direct pct exec).
 #
 # Every other configure role uses ansible.builtin.uri → NM API exclusively.
-# If you are adding a new configure role, use the NM API pattern — NOT SSH.
+# If you are adding a new configure role, use the NM API pattern — NOT pct exec.
 
 # ── Ensure container is running ────────────────────────────────────
 
 - name: Ensure Kiosk container is running
   ansible.builtin.command:
-    cmd: "pct exec {{ kiosk_ct_id }} -- echo alive"
+    cmd: pct status {{ kiosk_ct_id }}
   register: _kiosk_alive
   changed_when: false
-  retries: 10
-  delay: 3
-  until: _kiosk_alive.rc == 0
+  retries: 5
+  delay: 2
+  until: "'running' in _kiosk_alive.stdout"
 
 # ── Configure iGPU access ───────────────────────────────────────
 
@@ -74,7 +73,7 @@
 
 # ── Detect local OpenWrt container IPs for metric collection ────
 
-- name: Detect bridge container IP (bridge_nodes only)
+- name: Detect bridge container IP from host config (bridge_nodes only)
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
@@ -85,7 +84,7 @@
   failed_when: false
   when: inventory_hostname in groups.get('bridge_nodes', [])
 
-- name: Detect mesh container IP (wifi_nodes except router_nodes)
+- name: Detect mesh container IP from host config (wifi_nodes except router_nodes)
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
@@ -211,6 +210,8 @@
       MESH_KEY: "{{ lookup('env', 'MESH_KEY') | default('', true) }}"
       HOST_IP: "{{ _kiosk_host_ip | trim }}"
       HOST_NAME: "{{ inventory_hostname }}"
+      PVE_API_TOKEN: "{{ proxmox_api_user }}!{{ proxmox_api_token_id }}={{ proxmox_api_token_secret }}"
+      PVE_NODE: "{{ proxmox_node }}"
       IS_CLUSTER_MANAGER: "{{ 'true' if inventory_hostname in groups.get('router_nodes', []) else 'false' }}"
       CHILD_MANAGER_IPS: >-
         {{ _child_manager_ips | default({}) }}
@@ -218,7 +219,7 @@
         {{ _kiosk_node_ips | default({}) }}
       STATE_DIR: /opt/kiosk/state
 
-# ── Deploy host-specific config.json via NM API ───────────────────
+# ── Deploy host-specific config.json via pct push ─────────────────
 
 - name: Build service URL config JSON
   ansible.builtin.set_fact:
@@ -244,37 +245,6 @@
   ansible.builtin.file:
     path: "/tmp/kiosk-config-{{ kiosk_ct_id }}.json"
     state: absent
-
-# ── SSH key for host management ────────────────────────────────────
-# TODO: authorized_key module requires SSH to host — keep as SSH for now
-
-- name: Generate SSH key if absent and read public key
-  ansible.builtin.command:
-    cmd: >-
-      pct exec {{ kiosk_ct_id }} -- bash -c '
-      if [ ! -f /home/kiosk/.ssh/id_ed25519 ]; then
-        mkdir -p /home/kiosk/.ssh;
-        ssh-keygen -t ed25519 -f /home/kiosk/.ssh/id_ed25519 -N "" -q;
-        chown -R kiosk:kiosk /home/kiosk/.ssh;
-        chmod 700 /home/kiosk/.ssh;
-        chmod 600 /home/kiosk/.ssh/id_ed25519;
-      fi;
-      cat /home/kiosk/.ssh/id_ed25519.pub'
-  register: _kiosk_pubkey_result
-  changed_when: false
-
-- name: Extract kiosk public key
-  ansible.builtin.set_fact:
-    _kiosk_pubkey: "{{ _kiosk_pubkey_result.stdout | trim }}"
-
-# TODO: authorized_key requires SSH access to the Proxmox host.
-# This task stays SSH-based until a host-level key management API exists.
-- name: Authorize kiosk key on Proxmox host
-  ansible.posix.authorized_key:
-    user: root
-    key: "{{ _kiosk_pubkey }}"
-    comment: "kiosk-manager-{{ inventory_hostname }}"
-    state: present
 
 # ── Ensure callhome reports config.json keys via heartbeat ───────
 # CALLHOME_CONFIG_FILES enables the config_files extension so verify.yml
@@ -309,49 +279,171 @@
   failed_when: false
 
 # ── Rewrite callhome on sibling containers → local Manager ───────
-# After the kiosk Manager is deployed, point all sibling containers
-# on this host to the local Manager. Uses sed to preserve baked
-# CALLHOME_HOSTNAME and other identity fields.
-#
-# Two callhome targets per host:
-#   - Debian containers (NAT bridge): use kiosk's container IP directly
-#   - OpenWrt containers (WAN/LAN bridge): use host's ansible_host:9001
-#     via the manager-api-proxy, since the kiosk NAT IP is unreachable
-#     from the WAN bridge
+# After kiosk-web restarts, point all sibling containers to the local
+# NM via the /api/container/{vmid}/exec endpoint (HTTP, not pct exec).
+# Two callhome targets:
+#   - Debian containers: kiosk container IP (same NAT bridge)
+#   - OpenWrt containers: host IP:9001 (via kiosk-manager-proxy socat)
 
-- name: Get kiosk container IP for sibling callhome rewrite
-  ansible.builtin.command:
-    cmd: "pct exec {{ kiosk_ct_id }} -- hostname -I"
-  register: _kiosk_ip_result
-  changed_when: false
-
-- name: Rewrite callhome config on sibling containers
+- name: Get kiosk container IP from config (no exec)
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
-      KIOSK_IP="{{ (_kiosk_ip_result.stdout | default('') | trim).split()[0] | default('') }}"
-      if [ -z "$KIOSK_IP" ]; then exit 0; fi
-      NAT_TARGET="http://${KIOSK_IP}:{{ kiosk_manager_port | default('9001') }}"
-      HOST_TARGET="http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}"
-      KEY="{{ callhome_public_key }}"
-      for ctid in $(pct list 2>/dev/null | awk 'NR>1 && $2=="running" {print $1}'); do
-        [ "$ctid" = "{{ kiosk_ct_id }}" ] && continue
-        pct exec "$ctid" -- sh -c "
-          [ -f /etc/default/callhome ] || exit 0
-          sed -i 's|^CALLHOME_PUBLIC_KEY=.*|CALLHOME_PUBLIC_KEY=$KEY|' /etc/default/callhome
-          if [ -x /usr/sbin/callhome.sh ] && [ ! -d /opt/callhome ]; then
-            sed -i 's|^CALLHOME_SERVER=.*|CALLHOME_SERVER=$HOST_TARGET|' /etc/default/callhome
-            grep -q '^CALLHOME_CONTAINER=' /etc/default/callhome || echo 'CALLHOME_CONTAINER=1' >> /etc/default/callhome
-            /etc/init.d/cron restart 2>/dev/null || true
-          else
-            sed -i 's|^CALLHOME_SERVER=.*|CALLHOME_SERVER=$NAT_TARGET|' /etc/default/callhome
-            systemctl restart callhome.service 2>/dev/null || true
-          fi
-        " 2>/dev/null || true
-      done
+      pct config {{ kiosk_ct_id }} 2>/dev/null | grep -oP 'ip=\K[^/]+' | head -1
     executable: /bin/bash
-  changed_when: true
+  register: _kiosk_ip_result
+  changed_when: false
+
+- name: Set NM API base URL (via host socat proxy)
+  ansible.builtin.set_fact:
+    _nm_api_url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}"
+
+- name: Allow kiosk-web to initialize before health check
+  ansible.builtin.pause:
+    seconds: 5
+
+- name: Wait for NM API to be ready after restart
+  ansible.builtin.uri:
+    url: "{{ _nm_api_url }}/api/health"
+    method: GET
+    status_code: 200
+    timeout: 10
+  register: _nm_health
+  retries: 12
+  delay: 5
+  until: _nm_health.status | default(0) == 200
+  delegate_to: localhost
+
+- name: Set callhome targets for sibling rewrite
+  ansible.builtin.set_fact:
+    _nat_target: >-
+      http://{{ (_kiosk_ip_result.stdout | trim) }}:{{ kiosk_manager_port
+      | default('9001') }}
+    _host_target: >-
+      http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port
+      | default(kiosk_manager_port) }}
+    _ch_key: "{{ callhome_public_key }}"
+
+- name: Rewrite callhome on Debian siblings via NM sed API
+  ansible.builtin.uri:
+    url: "{{ _nm_api_url }}/api/config/{{ item }}/sed"
+    method: POST
+    body_format: json
+    body:
+      path: /etc/default/callhome
+      pattern: "^CALLHOME_SERVER=.*"
+      replacement: "CALLHOME_SERVER={{ _nat_target | trim }}"
+    status_code: [200, 404]
+    timeout: 10
+  delegate_to: localhost
+  loop: >-
+    {{ [pihole_ct_id, rsyslog_ct_id, netdata_ct_id, wireguard_ct_id,
+        homeassistant_ct_id, jellyfin_ct_id, kodi_ct_id, moonlight_ct_id,
+        desktop_ct_id, gaming_ct_id]
+       | select('defined') | list }}
+  loop_control:
+    label: "CT {{ item }}"
+  register: _ch_server_result
+  changed_when: _ch_server_result.status | default(0) == 200
   failed_when: false
+
+- name: Rewrite callhome key on Debian siblings via NM sed API
+  ansible.builtin.uri:
+    url: "{{ _nm_api_url }}/api/config/{{ item }}/sed"
+    method: POST
+    body_format: json
+    body:
+      path: /etc/default/callhome
+      pattern: "^CALLHOME_PUBLIC_KEY=.*"
+      replacement: "CALLHOME_PUBLIC_KEY={{ _ch_key }}"
+    status_code: [200, 404]
+    timeout: 10
+  delegate_to: localhost
+  loop: >-
+    {{ [pihole_ct_id, rsyslog_ct_id, netdata_ct_id, wireguard_ct_id,
+        homeassistant_ct_id, jellyfin_ct_id, kodi_ct_id, moonlight_ct_id,
+        desktop_ct_id, gaming_ct_id]
+       | select('defined') | list }}
+  loop_control:
+    label: "CT {{ item }}"
+  changed_when: false
+  failed_when: false
+
+- name: Restart callhome on Debian siblings via NM service API
+  ansible.builtin.uri:
+    url: "{{ _nm_api_url }}/api/config/{{ item }}/service/callhome/restart"
+    method: POST
+    body_format: json
+    body: {}
+    status_code: [200, 404]
+    timeout: 10
+  delegate_to: localhost
+  loop: >-
+    {{ [pihole_ct_id, rsyslog_ct_id, netdata_ct_id, wireguard_ct_id,
+        homeassistant_ct_id, jellyfin_ct_id, kodi_ct_id, moonlight_ct_id,
+        desktop_ct_id, gaming_ct_id]
+       | select('defined') | list }}
+  loop_control:
+    label: "CT {{ item }}"
+  changed_when: false
+  failed_when: false
+
+- name: Rewrite callhome server on OpenWrt siblings via NM sed API
+  ansible.builtin.uri:
+    url: "{{ _nm_api_url }}/api/config/{{ item }}/sed"
+    method: POST
+    body_format: json
+    body:
+      path: /etc/default/callhome
+      pattern: "^CALLHOME_SERVER=.*"
+      replacement: "CALLHOME_SERVER={{ _host_target | trim }}"
+    status_code: [200, 404, 500]
+    timeout: 15
+  delegate_to: localhost
+  loop: >-
+    {{ [meshwifi_ct_id, bridge_ct_id]
+       | select('defined') | list }}
+  loop_control:
+    label: "CT {{ item }}"
+  failed_when: false
+  changed_when: false
+
+- name: Rewrite callhome key on OpenWrt siblings via NM sed API
+  ansible.builtin.uri:
+    url: "{{ _nm_api_url }}/api/config/{{ item }}/sed"
+    method: POST
+    body_format: json
+    body:
+      path: /etc/default/callhome
+      pattern: "^CALLHOME_PUBLIC_KEY=.*"
+      replacement: "CALLHOME_PUBLIC_KEY={{ _ch_key }}"
+    status_code: [200, 404, 500]
+    timeout: 15
+  delegate_to: localhost
+  loop: >-
+    {{ [meshwifi_ct_id, bridge_ct_id]
+       | select('defined') | list }}
+  loop_control:
+    label: "CT {{ item }}"
+  failed_when: false
+  changed_when: false
+
+- name: Restart cron on OpenWrt siblings via NM service API
+  ansible.builtin.uri:
+    url: "{{ _nm_api_url }}/api/config/{{ item }}/service/cron/restart"
+    method: POST
+    body_format: json
+    body: {}
+    status_code: [200, 404, 500]
+    timeout: 15
+  delegate_to: localhost
+  loop: >-
+    {{ [meshwifi_ct_id, bridge_ct_id]
+       | select('defined') | list }}
+  loop_control:
+    label: "CT {{ item }}"
+  failed_when: false
+  changed_when: false
 
 # ── Report completion ────────────────────────────────────────────
 

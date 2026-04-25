@@ -10,7 +10,7 @@
   register: all_eth
   changed_when: false
   retries: 6
-  delay: 5
+  delay: 2
   until: (all_eth.stdout_lines | difference([wan_device]) | length) > 0
 
 - name: Set LAN devices fact
@@ -122,7 +122,7 @@
 
 - name: Pause for services and network to stabilize
   ansible.builtin.pause:
-    seconds: 30
+    seconds: 15
 
 - name: Remove bootstrap IP from WAN bridge on Proxmox
   ansible.builtin.shell:
@@ -150,15 +150,15 @@
   ansible.builtin.wait_for:
     host: "{{ ansible_host }}"
     port: 22
-    delay: 5
-    timeout: 120
+    delay: 2
+    timeout: 45
   delegate_to: "{{ _proxmox_host }}"
 
 - name: Wait for WAN default route
   ansible.builtin.raw: ip -o route show default 2>/dev/null | head -1
   register: _wan_route
   changed_when: false
-  retries: 30
+  retries: 10
   delay: 3
   until: _wan_route.stdout | default('') | trim | length > 0
 
@@ -447,7 +447,7 @@
 
 - name: Pause for services and network to restart
   ansible.builtin.pause:
-    seconds: 20
+    seconds: 12
 
 - name: Clean up bootstrap IP from LAN bridge
   ansible.builtin.command:

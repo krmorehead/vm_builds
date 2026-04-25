@@ -8,7 +8,7 @@ from nicegui import ui
 
 from scripts.webui import data, theme
 from scripts.webui.data import Labels, PageTitles
-from scripts.webui.components import test_ssh_from_table
+from scripts.webui.components import test_api_from_table
 
 
 def register() -> None:
@@ -91,6 +91,6 @@ def register() -> None:
 
             with ui.row().classes("gap-3"):
                 ui.button(Labels.PROBE_ALL, icon="wifi_find", on_click=_probe_hosts).classes("action-btn")
-                ui.button(Labels.TEST_SSH, icon="terminal", on_click=lambda: test_ssh_from_table(table)).classes("outline-btn")
+                ui.button(Labels.TEST_API, icon="terminal", on_click=lambda: test_api_from_table(table)).classes("outline-btn")
 
             _populate_table()

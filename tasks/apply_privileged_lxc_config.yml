@@ -1,0 +1,68 @@
+---
+# Apply LXC configuration that requires root@pam privileges.
+#
+# PVE API tokens cannot set features on privileged containers or bind
+# mount entries. This task runs on the Proxmox HOST (not delegated) to
+# apply these settings via pct set, then starts the container.
+#
+# Required variables:
+#   _priv_ct_id: container VMID
+#   _priv_features: features string (e.g., "nesting=1"), empty to skip
+#   _priv_mount_entries: list of mount specs (default [])
+#   _priv_lxc_conf_entries: list of lxc.* conf lines (default [])
+#   _priv_ct_ostype: "unmanaged" for OpenWrt, omit for Debian
+
+- name: "Apply features via pct set — CT {{ _priv_ct_id }}"
+  ansible.builtin.command:
+    cmd: pct set {{ _priv_ct_id }} -features {{ _priv_features }}
+  changed_when: true
+  when: _priv_features | default('') | length > 0
+
+- name: "Apply bind mount entries via pct set — CT {{ _priv_ct_id }}"
+  ansible.builtin.command:
+    cmd: pct set {{ _priv_ct_id }} -mp{{ idx }} {{ item }}
+  loop: "{{ _priv_mount_entries | default([]) }}"
+  loop_control:
+    index_var: idx
+  changed_when: true
+
+- name: "Apply LXC conf entries — CT {{ _priv_ct_id }}"
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      conf="/etc/pve/lxc/{{ _priv_ct_id }}.conf"
+      [ -f "$conf" ] || conf="/etc/pve/nodes/$(hostname)/lxc/{{ _priv_ct_id }}.conf"
+      if [ -f "$conf" ]; then
+        entry='{{ item }}'
+        grep -qF "$entry" "$conf" || {
+          cp "$conf" "/tmp/lxc-{{ _priv_ct_id }}.conf"
+          echo "$entry" >> "/tmp/lxc-{{ _priv_ct_id }}.conf"
+          cp "/tmp/lxc-{{ _priv_ct_id }}.conf" "$conf"
+          rm -f "/tmp/lxc-{{ _priv_ct_id }}.conf"
+        }
+      fi
+    executable: /bin/bash
+  loop: "{{ _priv_lxc_conf_entries | default([]) }}"
+  changed_when: true
+
+- name: "Start container after host config — CT {{ _priv_ct_id }}"
+  ansible.builtin.command:
+    cmd: pct start {{ _priv_ct_id }}
+  changed_when: true
+
+- name: "Wait for container networking — CT {{ _priv_ct_id }}"
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      for i in $(seq 1 30); do
+        ip=$(pct exec {{ _priv_ct_id }} -- ip -4 addr show eth0 2>/dev/null \
+          | awk '/inet /{sub(/\/.*/, "", $2); print $2}' | head -1)
+        [ -n "$ip" ] && [ "$ip" != "127.0.0.1" ] && echo "$ip" && exit 0
+        sleep 2
+      done
+      exit 1
+    executable: /bin/bash
+  register: _priv_net_wait
+  changed_when: false
+  failed_when: _priv_net_wait.rc != 0
+  when: (_priv_ct_ostype | default('')) != 'unmanaged'

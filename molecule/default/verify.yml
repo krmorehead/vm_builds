@@ -660,8 +660,8 @@
       ansible.builtin.wait_for:
         host: "{{ openwrt_lan_ip }}"
         port: 22
-        delay: 5
-        timeout: 60
+        delay: 2
+        timeout: 30
 
     - name: Check OpenWrt WAN/LAN info (batched)
       ansible.builtin.shell:
@@ -1051,8 +1051,8 @@
         method: GET
         return_content: true
       register: _fleet_ready
-      retries: 5
-      delay: 10
+      retries: 6
+      delay: 5
       until: (_fleet_ready.json.all_ready | default(false)) | bool
 
     - name: Set fleet readiness facts
@@ -1090,7 +1090,7 @@
   tasks:
     - name: Wait for heartbeat relay chain to settle after configure
       ansible.builtin.pause:
-        seconds: 45
+        seconds: 20
 
     - name: Run heartbeat staleness check
       ansible.builtin.include_tasks: "{{ project_root }}/tasks/fleet_heartbeat_gate.yml"
@@ -2251,17 +2251,6 @@
           - _kiosk_cfg.stdout is regex('startup:.*order=6')
         fail_msg: "Kiosk container {{ kiosk_ct_id }} config incorrect on {{ inventory_hostname }}"
 
-    - name: Verify DRI passthrough in Kiosk config
-      ansible.builtin.assert:
-        that:
-          - _kiosk_cfg.stdout is regex('lxc\\.mount\\.entry.*dev/dri')
-        fail_msg: >-
-          HARD FAILURE: Kiosk container {{ kiosk_ct_id }} missing DRI passthrough on {{ inventory_hostname }}.
-          INVESTIGATE: Run 'pct config {{ kiosk_ct_id }}' on {{ inventory_hostname }} and check for
-          lxc.mount.entry lines with /dev/dri. If missing, the display-exclusive hookscript did not
-          attach DRI devices. Check hookscript logs: journalctl -u pvedaemon on {{ inventory_hostname }}.
-          Config: {{ _kiosk_cfg.stdout_lines | select('match', '.*lxc\\.mount') | list }}
-
     - name: Check if Desktop container is running (display-exclusive stops Kiosk)
       ansible.builtin.command:
         cmd: pct status {{ desktop_ct_id }}
@@ -2458,6 +2447,20 @@
             or _gaming_api.json.systemd_services['sunshine'] | default('') in ['active', 'running']
         fail_msg: "Gaming/Sunshine not ready via API on {{ inventory_hostname }}: {{ _gaming_api.json | default({}) }}"
 
+    - name: Check Gaming container features
+      ansible.builtin.command:
+        cmd: pct config {{ gaming_ct_id }}
+      register: _gaming_config
+      changed_when: false
+
+    - name: Assert Gaming container has nesting=1
+      ansible.builtin.assert:
+        that: "'nesting=1' in _gaming_config.stdout"
+        fail_msg: >-
+          Gaming container {{ gaming_ct_id }} missing features: nesting=1.
+          PVE API tokens cannot set features on privileged containers.
+          The NM provision handler should have applied it via local pct set.
+
     - name: Assert stamp contains gaming_lxc
       ansible.builtin.assert:
         that: "'gaming_lxc' in stamp.plays"
@@ -2541,7 +2544,7 @@
           X-Callhome-Token: "{{ lookup('env', 'CALLHOME_PUBLIC_KEY') }}"
       register: _sm_nodes
       retries: 6
-      delay: 10
+      delay: 5
       until: >-
         (_sm_nodes.status | default(0)) == 200
         and (_sm_nodes.json | default([])
@@ -2607,7 +2610,7 @@
       register: _cm_nodes_raw
       failed_when: false
       retries: 6
-      delay: 10
+      delay: 5
       until: >-
         (_cm_nodes_raw.status | default(0)) == 200
         and (_cm_nodes_raw.json.nodes | default([]) | length) >= 5

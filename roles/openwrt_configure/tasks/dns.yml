@@ -52,14 +52,14 @@
 
 - name: Wait for DNS to stabilize
   ansible.builtin.pause:
-    seconds: 8
+    seconds: 3
     prompt: Waiting for dnsmasq/https-dns-proxy to settle
 
 - name: Reconnect to OpenWrt after DNS restart
   ansible.builtin.raw: echo alive
   register: _dns_reconnect
-  retries: 6
-  delay: 5
+  retries: 4
+  delay: 3
   until: _dns_reconnect.rc == 0
 
 - name: Verify DNS resolution works

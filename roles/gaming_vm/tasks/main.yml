@@ -286,8 +286,8 @@
   ansible.builtin.command:
     cmd: qm guest cmd {{ gaming_vm_id }} ping
   register: _gvm_ga_ping
-  retries: 30
-  delay: 10
+  retries: 12
+  delay: 5
   until: _gvm_ga_ping.rc == 0
   changed_when: false
   failed_when: false
@@ -321,8 +321,8 @@
       "
     executable: /bin/bash
   register: _gvm_ip
-  retries: 18
-  delay: 10
+  retries: 10
+  delay: 5
   until: _gvm_ip.rc == 0
   changed_when: false
 

@@ -1,20 +1,23 @@
 """On-demand heartbeat subscription system for real-time node metrics.
 
-The management server owns all SSH access. Clients (kiosk, web UI) subscribe
-to metrics for specific nodes. While subscriptions are active, the server
-polls nodes via SSH and caches results. Subscriptions expire after a short
-TTL (default 30s) unless refreshed by the client.
+Clients (kiosk, web UI) subscribe to metrics for specific nodes. While
+subscriptions are active, the server collects results via HTTP (callhome
+command endpoint on port 9002) and caches them. Subscriptions expire after
+a short TTL (default 30s) unless refreshed by the client.
 
-No framework imports — pure data + subprocess.
+HTTP calls are protected by a per-host circuit breaker that backs off
+exponentially after consecutive failures.
+
+No framework imports — pure data + HTTP.
 """
 
 from __future__ import annotations
 
 import re
-import subprocess
 import threading
+import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 
@@ -157,51 +160,137 @@ class MetricCache:
             return list(self._cache.values())
 
 
-# ── SSH command helper ───────────────────────────────────────────────
-
-_SSH_BASE = [
-    "ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
-    "-o", "StrictHostKeyChecking=no",
-]
+# ── Per-host circuit breaker ─────────────────────────────────────────
 
 
-def _ssh_exec(
-    ip: str, command: str, timeout: int = 10,
-    user: str = "root", identity_file: str | None = None,
+@dataclass
+class _CircuitState:
+    """Per-host circuit breaker state for HTTP connections."""
+
+    consecutive_failures: int = 0
+    last_failure_time: float = 0.0
+    backoff_until: float = 0.0
+    total_failures: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    _BASE_BACKOFF = 15.0
+    _MAX_BACKOFF = 300.0
+
+    def record_failure(self) -> None:
+        with self.lock:
+            self.consecutive_failures += 1
+            self.total_failures += 1
+            self.last_failure_time = time.monotonic()
+            backoff = min(
+                self._BASE_BACKOFF * (2 ** (self.consecutive_failures - 1)),
+                self._MAX_BACKOFF,
+            )
+            self.backoff_until = self.last_failure_time + backoff
+
+    def record_success(self) -> None:
+        with self.lock:
+            self.consecutive_failures = 0
+            self.backoff_until = 0.0
+
+    def is_open(self) -> bool:
+        with self.lock:
+            if self.consecutive_failures < 2:
+                return False
+            return time.monotonic() < self.backoff_until
+
+    def backoff_remaining(self) -> float:
+        with self.lock:
+            return max(0.0, self.backoff_until - time.monotonic())
+
+
+_circuit_breakers: dict[str, _CircuitState] = {}
+_circuit_lock = threading.Lock()
+
+
+def _get_circuit(ip: str) -> _CircuitState:
+    with _circuit_lock:
+        if ip not in _circuit_breakers:
+            _circuit_breakers[ip] = _CircuitState()
+        return _circuit_breakers[ip]
+
+
+def get_circuit_status(ip: str) -> dict:
+    """Return circuit breaker state for a host (for diagnostics)."""
+    cb = _get_circuit(ip)
+    with cb.lock:
+        return {
+            "consecutive_failures": cb.consecutive_failures,
+            "total_failures": cb.total_failures,
+            "backoff_remaining_s": max(0.0, cb.backoff_until - time.monotonic()),
+            "is_open": cb.consecutive_failures >= 2 and time.monotonic() < cb.backoff_until,
+        }
+
+
+def reset_circuit(ip: str) -> None:
+    """Manually reset a circuit breaker (e.g. after physical recovery)."""
+    cb = _get_circuit(ip)
+    cb.record_success()
+
+
+# ── HTTP command execution ────────────────────────────────────────────
+
+CALLHOME_CMD_PORT = 9002
+
+OPENWRT_VMIDS: frozenset[int] = frozenset({100, 103, 104})
+
+
+def cmd_path_for_vmid(vmid: int | None) -> str:
+    """Return the HTTP path for the command endpoint based on container type."""
+    if vmid is not None and vmid in OPENWRT_VMIDS:
+        return "/cgi-bin/cmd"
+    return "/cmd"
+
+
+def _http_exec(
+    container_ip: str, command: str, token: str = "",
+    timeout: int = 10, vmid: int | None = None,
 ) -> tuple[bool, str]:
-    """Run a command on a remote host via SSH.
+    """Execute a command on a container via its callhome HTTP endpoint.
 
-    Returns (success, output_or_error).
+    Synchronous counterpart to _callhome_exec in manager.py, designed for
+    use in metric collectors that run in asyncio.to_thread().
+
+    Debian containers use /cmd, OpenWrt containers use /cgi-bin/cmd.
     """
-    ssh_cmd = list(_SSH_BASE)
-    if identity_file:
-        ssh_cmd.extend(["-i", identity_file])
-    ssh_cmd.append(f"{user}@{ip}")
-    ssh_cmd.append(command)
+    import json as _json
+    import urllib.request
+    import urllib.error
+
+    path = cmd_path_for_vmid(vmid)
+    url = f"http://{container_ip}:{CALLHOME_CMD_PORT}{path}"
+    payload = _json.dumps({"command": command, "token": token}).encode()
+    req = urllib.request.Request(
+        url, data=payload, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
     try:
-        result = subprocess.run(
-            ssh_cmd, capture_output=True, text=True, timeout=timeout,
-        )
-        if result.returncode == 0:
-            return True, result.stdout.strip()
-        return False, result.stderr.strip() or f"rc={result.returncode}"
-    except subprocess.TimeoutExpired:
-        return False, "SSH timed out"
-    except FileNotFoundError:
-        return False, "ssh binary not found"
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        body = _json.loads(resp.read().decode())
+        if body.get("success"):
+            return True, body.get("output", "")
+        return False, body.get("error", body.get("output", "command failed"))
+    except urllib.error.URLError as exc:
+        return False, f"HTTP error: {exc}"
+    except (TimeoutError, OSError) as exc:
+        return False, f"Connection error: {exc}"
+    except (_json.JSONDecodeError, ValueError, KeyError) as exc:
+        return False, f"Response parse error: {exc}"
 
 
 # ── Metric collectors ────────────────────────────────────────────────
 
 
-def collect_wifi_metrics(ip: str, node_id: str = "") -> HeartbeatCache:
-    """Collect WiFi interface and link metrics from an OpenWrt node.
+def collect_wifi_metrics(ip: str, node_id: str = "", *, token: str = "", vmid: int | None = None) -> HeartbeatCache:
+    """Collect WiFi interface and link metrics from an OpenWrt node via HTTP.
 
     Uses wifi_setup.sh (baked into mesh/bridge images) as the primary
-    data source. When the script is available, ALL data comes through
-    it — no raw iw/uci fallback (those commands run on the host, not
-    inside the container). Falls back to raw SSH only for nodes without
-    the script (e.g., the router VM where OpenWrt IS the SSH target).
+    data source via the container's callhome HTTP command endpoint.
+    Falls back to raw iw/uci commands for nodes without wifi_setup.sh.
     """
     now = datetime.now().isoformat(timespec="seconds")
     data: dict = {
@@ -209,8 +298,9 @@ def collect_wifi_metrics(ip: str, node_id: str = "") -> HeartbeatCache:
         "stations": [],
         "radio": {},
     }
+    _exec = lambda cmd, t=10: _http_exec(ip, cmd, token, t, vmid)
 
-    ok, metrics_out = _ssh_exec(ip, "/usr/local/bin/wifi_setup.sh metrics 2>/dev/null")
+    ok, metrics_out = _exec("/usr/sbin/wifi_setup.sh metrics 2>/dev/null")
     if ok and "PHY=" in metrics_out:
         data["script_status"] = _parse_key_value(metrics_out)
         data["raw_metrics"] = metrics_out[:2000]
@@ -226,7 +316,7 @@ def collect_wifi_metrics(ip: str, node_id: str = "") -> HeartbeatCache:
             collected_at=now, success=True,
         )
 
-    ok, iw_dev = _ssh_exec(ip, "iw dev")
+    ok, iw_dev = _exec("iw dev")
     if ok:
         data["interfaces"] = _parse_iw_dev(iw_dev)
     else:
@@ -235,11 +325,15 @@ def collect_wifi_metrics(ip: str, node_id: str = "") -> HeartbeatCache:
             collected_at=now, success=False, error=iw_dev,
         )
 
-    ok, station_dump = _ssh_exec(ip, "iw dev 2>/dev/null | awk '/Interface/{print $2}' | while read iface; do echo \"=== $iface ===\"; iw dev $iface station dump 2>/dev/null; done")
+    ok, station_dump = _exec(
+        "iw dev 2>/dev/null | awk '/Interface/{print $2}' | "
+        "while read iface; do echo \"=== $iface ===\"; "
+        "iw dev $iface station dump 2>/dev/null; done",
+    )
     if ok:
         data["stations"] = _parse_station_dump(station_dump)
 
-    ok, uci_out = _ssh_exec(ip, "uci show wireless 2>/dev/null | head -30")
+    ok, uci_out = _exec("uci show wireless 2>/dev/null | head -30")
     if ok:
         data["radio"] = _parse_uci_wireless(uci_out)
 
@@ -249,16 +343,16 @@ def collect_wifi_metrics(ip: str, node_id: str = "") -> HeartbeatCache:
     )
 
 
-def collect_bridge_metrics(ip: str, node_id: str = "") -> HeartbeatCache:
-    """Collect WiFi bridge metrics (superset of wifi metrics).
+def collect_bridge_metrics(ip: str, node_id: str = "", *, token: str = "", vmid: int | None = None) -> HeartbeatCache:
+    """Collect WiFi bridge metrics (superset of wifi metrics) via HTTP.
 
     When wifi_setup.sh is available, all data (interfaces, stations,
-    bridge, STP) comes from the script's metrics output — which runs
-    inside the container via the host-side wrapper. Raw brctl/iw
-    fallback is only for nodes where the script is absent.
+    bridge, STP) comes from the script's metrics output via the container's
+    HTTP command endpoint.
     """
-    wifi = collect_wifi_metrics(ip)
+    wifi = collect_wifi_metrics(ip, node_id, token=token, vmid=vmid)
     now = datetime.now().isoformat(timespec="seconds")
+    _exec = lambda cmd, t=10: _http_exec(ip, cmd, token, t, vmid)
 
     bridge_data = dict(wifi.data)
     bridge_data["bridge"] = {}
@@ -269,10 +363,10 @@ def collect_bridge_metrics(ip: str, node_id: str = "") -> HeartbeatCache:
         bridge_data["bridge"]["interfaces"] = _parse_brctl(bridge_section)
         bridge_data["bridge"]["stp"] = bridge_section[:500]
     else:
-        ok, brctl_out = _ssh_exec(ip, "brctl show 2>/dev/null || echo 'no-brctl'")
+        ok, brctl_out = _exec("brctl show 2>/dev/null || echo 'no-brctl'")
         if ok:
             bridge_data["bridge"]["interfaces"] = _parse_brctl(brctl_out)
-        ok, stp_out = _ssh_exec(ip, "brctl showstp br-lan 2>/dev/null || echo 'no-stp'")
+        ok, stp_out = _exec("brctl showstp br-lan 2>/dev/null || echo 'no-stp'")
         if ok:
             bridge_data["bridge"]["stp"] = stp_out[:500]
 
@@ -289,12 +383,17 @@ def collect_bridge_metrics(ip: str, node_id: str = "") -> HeartbeatCache:
     )
 
 
-def collect_router_metrics(ip: str, node_id: str = "") -> HeartbeatCache:
-    """Collect router-level metrics from an OpenWrt node."""
+def collect_router_metrics(ip: str, node_id: str = "", *, token: str = "", vmid: int | None = None) -> HeartbeatCache:
+    """Collect router-level metrics from an OpenWrt node via HTTP."""
     now = datetime.now().isoformat(timespec="seconds")
     data: dict = {}
+    _exec = lambda cmd, t=10: _http_exec(ip, cmd, token, t, vmid)
 
-    ok, wan_out = _ssh_exec(ip, "uci get network.wan.proto 2>/dev/null; ifstatus wan 2>/dev/null | jsonfilter -e '@[\"ipv4-address\"][0].address' -e '@[\"up\"]' -e '@.uptime'")
+    ok, wan_out = _exec(
+        "uci get network.wan.proto 2>/dev/null; "
+        "ifstatus wan 2>/dev/null | jsonfilter "
+        "-e '@[\"ipv4-address\"][0].address' -e '@[\"up\"]' -e '@.uptime'",
+    )
     if ok:
         lines = wan_out.strip().splitlines()
         data["wan"] = {
@@ -304,7 +403,12 @@ def collect_router_metrics(ip: str, node_id: str = "") -> HeartbeatCache:
             "uptime": lines[3] if len(lines) > 3 else "",
         }
 
-    ok, lan_out = _ssh_exec(ip, "uci get network.lan.ipaddr 2>/dev/null; uci get network.lan.netmask 2>/dev/null; uci get dhcp.lan.start 2>/dev/null; uci get dhcp.lan.limit 2>/dev/null")
+    ok, lan_out = _exec(
+        "uci get network.lan.ipaddr 2>/dev/null; "
+        "uci get network.lan.netmask 2>/dev/null; "
+        "uci get dhcp.lan.start 2>/dev/null; "
+        "uci get dhcp.lan.limit 2>/dev/null",
+    )
     if ok:
         lines = lan_out.strip().splitlines()
         data["lan"] = {
@@ -314,23 +418,29 @@ def collect_router_metrics(ip: str, node_id: str = "") -> HeartbeatCache:
             "dhcp_limit": lines[3] if len(lines) > 3 else "",
         }
 
-    ok, lease_out = _ssh_exec(ip, "cat /tmp/dhcp.leases 2>/dev/null | wc -l")
+    ok, lease_out = _exec("cat /tmp/dhcp.leases 2>/dev/null | wc -l")
     if ok:
         data["dhcp_lease_count"] = int(lease_out.strip() or "0")
 
-    ok, lease_detail = _ssh_exec(ip, "cat /tmp/dhcp.leases 2>/dev/null | head -20")
+    ok, lease_detail = _exec("cat /tmp/dhcp.leases 2>/dev/null | head -20")
     if ok:
         data["dhcp_leases"] = _parse_dhcp_leases(lease_detail)
 
-    ok, fw_out = _ssh_exec(ip, "fw4 -q zone 2>/dev/null || uci show firewall 2>/dev/null | grep '\\.name=' | head -10")
+    ok, fw_out = _exec(
+        "fw4 -q zone 2>/dev/null || "
+        "uci show firewall 2>/dev/null | grep '\\.name=' | head -10",
+    )
     if ok:
         data["firewall_zones"] = fw_out[:500]
 
-    ok, sys_out = _ssh_exec(ip, "uptime; free 2>/dev/null || cat /proc/meminfo | head -3; df / 2>/dev/null | tail -1")
+    ok, sys_out = _exec(
+        "uptime; free 2>/dev/null || cat /proc/meminfo | head -3; "
+        "df / 2>/dev/null | tail -1",
+    )
     if ok:
         data["system"] = _parse_system_info(sys_out)
 
-    ok, client_out = _ssh_exec(ip, "cat /proc/net/arp 2>/dev/null | tail -n +2 | wc -l")
+    ok, client_out = _exec("cat /proc/net/arp 2>/dev/null | tail -n +2 | wc -l")
     if ok:
         data["arp_client_count"] = int(client_out.strip() or "0")
 
@@ -340,13 +450,13 @@ def collect_router_metrics(ip: str, node_id: str = "") -> HeartbeatCache:
     )
 
 
-def collect_mesh_metrics(ip: str, node_id: str = "") -> HeartbeatCache:
-    """Collect mesh network metrics (WiFi + peer info).
+def collect_mesh_metrics(ip: str, node_id: str = "", *, token: str = "", vmid: int | None = None) -> HeartbeatCache:
+    """Collect mesh network metrics (WiFi + peer info) via HTTP.
 
     Role detection uses wifi_setup.sh when available (baked into the
     mesh/bridge image). Falls back to iw interface type parsing.
     """
-    wifi = collect_wifi_metrics(ip)
+    wifi = collect_wifi_metrics(ip, node_id, token=token, vmid=vmid)
     now = datetime.now().isoformat(timespec="seconds")
     mesh_data = dict(wifi.data)
 
@@ -675,14 +785,14 @@ def _parse_batman_interfaces(output: str) -> list[dict]:
     return interfaces
 
 
-def collect_batman_metrics(ip: str, node_id: str = "") -> HeartbeatCache:
-    """Collect batman-adv status from a node via SSH.
+def collect_batman_metrics(ip: str, node_id: str = "", *, token: str = "", vmid: int | None = None) -> HeartbeatCache:
+    """Collect batman-adv status from a node via HTTP command endpoint.
 
-    batman_trigger.sh lives inside the bridge LXC container (VMID 104),
-    so we run it via pct exec on the Proxmox host.
+    batman_trigger.sh runs inside the container. The command endpoint
+    executes it and returns the output.
     """
     now = datetime.now().isoformat(timespec="seconds")
-    ok, raw = _ssh_exec(ip, "pct exec 104 -- /usr/sbin/batman_trigger.sh status", timeout=10)
+    ok, raw = _http_exec(ip, "/usr/sbin/batman_trigger.sh status", token, 10, vmid)
     if not ok:
         return HeartbeatCache(
             node_id="", metric_type="batman",

@@ -15,7 +15,7 @@ Checked patterns:
 
 Safe patterns (allowed):
   - modprobe -r amdgpu gated on VGA count >= 2 (in same task block)
-  - modprobe -r iwlwifi / iwlmvm (WiFi, not dangerous)
+  - modprobe -r iwlwifi / iwlmvm (WiFi, gated on wifi group membership in role)
   - modprobe -r wireguard (network module, not dangerous)
   - PCI bus rescan (echo 1 > /sys/bus/pci/rescan) — always safe
 """
@@ -23,7 +23,10 @@ Safe patterns (allowed):
 import re
 from pathlib import Path
 
+import pytest
 import yaml
+
+pytestmark = pytest.mark.no_infra
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 

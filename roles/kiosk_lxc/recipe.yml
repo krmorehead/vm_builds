@@ -1,0 +1,135 @@
+---
+service: kiosk
+base_template: build-base-debian-12-amd64.tar.zst
+build_vmid: 992
+hostname: kiosk-build
+memory: 1024
+cores: 2
+disk: "4"
+unprivileged: true
+features: "nesting=1"
+
+setup_commands: []
+
+install_commands:
+  - "bash -c 'export DEBIAN_FRONTEND=noninteractive && apt-get update -qq'"
+  - >-
+    bash -c 'apt-get install -y --no-install-recommends
+    chromium dbus-x11 fonts-noto fonts-noto-color-emoji
+    libxtst6 openssh-client wget'
+  - "bash -c 'apt-get install -y --no-install-recommends intel-media-va-driver mesa-va-drivers vainfo'"
+  - "bash -c 'apt-get install -y --no-install-recommends python3 python3-pip'"
+  - "pip3 install --break-system-packages nicegui==3.9.0"
+  - "bash -c 'useradd -r -m -G video,render -s /bin/bash kiosk 2>/dev/null || true'"
+  - "bash -c 'mkdir -p /opt/kiosk/scripts/webui/pages && chown -R kiosk:kiosk /opt/kiosk'"
+  - "bash -c 'apt-get clean 2>/dev/null || true && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*'"
+
+config_files:
+  - path: /etc/systemd/system/kiosk-web.service
+    content: |
+      [Unit]
+      Description=Kiosk Home Hub Web Server (NiceGUI)
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      User=kiosk
+      Group=kiosk
+      Type=simple
+      WorkingDirectory=/opt/kiosk
+      ExecStart=/usr/bin/python3 /opt/kiosk/scripts/webui/kiosk_server.py --port 9001
+      Restart=always
+      RestartSec=3
+
+      [Install]
+      WantedBy=multi-user.target
+    mode: "0644"
+
+  - path: /opt/kiosk/wait-for-hub.sh
+    content: |
+      #!/bin/bash
+      for i in $(seq 1 15); do
+          wget -q -O /dev/null http://127.0.0.1:9001/ 2>/dev/null && exit 0
+          sleep 1
+      done
+      echo "Hub server not ready"
+      exit 1
+    mode: "0755"
+
+post_commands:
+  - "systemctl daemon-reload"
+  - "systemctl enable kiosk-web 2>/dev/null || true"
+  - "loginctl enable-linger kiosk 2>/dev/null || true"
+
+baked_webui:
+  files:
+    - __init__.py
+    - theme.py
+    - data.py
+    - heartbeat.py
+    - manager.py
+    - host_state.py
+    - api_client.py
+    - metric_controller.py
+    - display_transfer.py
+    - pve_api.py
+    - kiosk_server.py
+    - pages/__init__.py
+    - pages/hub.py
+    - pages/bridge.py
+    - pages/mesh.py
+    - pages/router.py
+    - pages/viewer.py
+    - pages/launch.py
+    - pages/containers.py
+    - pages/cluster_dashboard.py
+    - pages/remote_kiosk.py
+    - pages/console.py
+    - pages/display_shared.py
+  extra:
+    - src: build.py
+      dest: /opt/kiosk/build.py
+
+callhome:
+  http_probes: ""
+  config_files: "/opt/kiosk/config.json"
+
+kasmvnc:
+  app_user: kiosk
+  vnc_port: 6080
+  display_num: 1
+  service_name: kiosk-display
+  xstartup_exec: |-
+    export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+    mkdir -p "$XDG_RUNTIME_DIR"
+    chmod 700 "$XDG_RUNTIME_DIR"
+    export DBUS_SESSION_BUS_ADDRESS=$(dbus-daemon --session --fork --print-address)
+
+    for _i in $(seq 1 30); do
+        wget -q -O /dev/null http://127.0.0.1:9001/ 2>/dev/null && break
+        sleep 1
+    done
+
+    /usr/bin/chromium --kiosk --no-sandbox --disable-gpu-compositing \
+      --enable-features=NetworkServiceInProcess --noerrdialogs --disable-infobars \
+      --no-first-run --disable-translate --disable-features=TranslateUI \
+      --start-fullscreen http://127.0.0.1:9001/hub &
+    CHROME_PID=$!
+    (
+      for i in $(seq 1 24); do
+        sleep 5
+        if ss -tnp dst :9001 2>/dev/null | grep -q ESTAB; then exit 0; fi
+        python3 -c "
+    import ctypes, ctypes.util
+    x11 = ctypes.cdll.LoadLibrary(ctypes.util.find_library('X11'))
+    xtst = ctypes.cdll.LoadLibrary(ctypes.util.find_library('Xtst'))
+    dpy = x11.XOpenDisplay(None)
+    if dpy:
+        xtst.XTestFakeKeyEvent(dpy, 71, True, 0)
+        xtst.XTestFakeKeyEvent(dpy, 71, False, 0)
+        x11.XFlush(dpy)
+        x11.XCloseDisplay(dpy)
+    " 2>/dev/null
+      done
+    ) &
+    wait $CHROME_PID

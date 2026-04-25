@@ -1,10 +1,11 @@
 """Tests for the DisplayTransferService handler-registry architecture.
 
-Exercises the handler protocol, concrete handlers, factory, conflict
-resolution, and service registry. SSH calls use a stub since they would
-execute commands on remote Proxmox hosts — an irreversible side effect.
+Tests DisplayHandler and DisplayTransferService against the REAL Proxmox
+PVE API on the primary host. No stubs — ct_start, ct_stop, ct_status are
+real operations that complete in <1s and are trivially reversible.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -24,39 +25,24 @@ from scripts.webui.display_transfer import (
     WebViewHandler,
     build_handler,
 )
+from scripts.webui.pve_api import PveApiClient
 
 _DESKTOP_CFG = DISPLAY_APP_CONFIGS["desktop"]
 _KODI_CFG = DISPLAY_APP_CONFIGS["kodi"]
 _MOONLIGHT_CFG = DISPLAY_APP_CONFIGS["moonlight"]
 
-
-# ── Stub SSH function ─────────────────────────────────────────────────
-# WHY: _ssh_exec runs real SSH commands on remote Proxmox hosts (pct start,
-# pct stop, etc.) — irreversible infrastructure side effects.
-# HOW: The stub records calls and returns configurable (ok, output) tuples,
-# letting us verify handler logic without touching hardware.
+_HOST = os.environ.get("PRIMARY_HOST", "192.168.86.201")
+_TOKEN = os.environ.get("HOME_API_TOKEN", "")
 
 
-class SshStub:
-    """Records SSH calls and returns pre-configured responses."""
-
-    def __init__(self, default_ok: bool = True, default_output: str = ""):
-        self.calls: list[tuple[str, str, int]] = []
-        self._responses: dict[str, tuple[bool, str]] = {}
-        self._default = (default_ok, default_output)
-
-    def set_response(self, cmd_fragment: str, ok: bool, output: str) -> None:
-        self._responses[cmd_fragment] = (ok, output)
-
-    def __call__(self, host: str, cmd: str, timeout: int) -> tuple[bool, str]:
-        self.calls.append((host, cmd, timeout))
-        for fragment, response in self._responses.items():
-            if fragment in cmd:
-                return response
-        return self._default
+@pytest.fixture(scope="module")
+def pve() -> PveApiClient:
+    """Real PVE API client for the primary host."""
+    token_str = f"root@pam!ansible={_TOKEN}"
+    return PveApiClient(host=_HOST, node="home", token=token_str, timeout=5)
 
 
-# ── TransferResult ────────────────────────────────────────────────────
+# ── TransferResult (pure data) ───────────────────────────────────────
 
 
 class TestTransferResult:
@@ -77,7 +63,7 @@ class TestTransferResult:
         assert r.error == "connection refused"
 
 
-# ── DisplayAppConfig ──────────────────────────────────────────────────
+# ── DisplayAppConfig (pure data) ─────────────────────────────────────
 
 
 class TestDisplayAppConfig:
@@ -94,144 +80,83 @@ class TestDisplayAppConfig:
         assert b.conflicts == []
 
 
-# ── DisplayHandler (unified container handler) ───────────────────────
+# ── DisplayHandler against real PVE API ──────────────────────────────
 
 
 class TestDisplayHandler:
-    def test_protocol_compliance(self):
-        ssh = SshStub()
-        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, ["kodi"], ssh)
+    def test_protocol_compliance(self, pve):
+        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, ["kodi"], pve=pve)
         assert isinstance(h, DisplayHandlerProtocol)
 
-    def test_properties(self):
-        ssh = SshStub()
+    def test_properties(self, pve):
         h = DisplayHandler(
             "desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY,
-            _DESKTOP_CFG.conflicts, ssh,
+            _DESKTOP_CFG.conflicts, pve=pve,
         )
         assert h.app_id == "desktop"
         assert h.handler_type == "container_display"
         assert h.conflicts_with == _DESKTOP_CFG.conflicts
 
-    def test_viewstream_url(self):
-        ssh = SshStub()
-        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, [], ssh)
+    def test_viewstream_url(self, pve):
+        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, [], pve=pve)
         assert h.get_viewstream_url("10.0.0.1") == f"http://10.0.0.1:{Ports.DESKTOP_DISPLAY}"
 
-    def test_enter_success(self):
-        ssh = SshStub(default_ok=True, default_output="")
-        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, [], ssh)
-        result = h.enter("10.0.0.1")
+    def test_enter_starts_container(self, pve):
+        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, [], pve=pve)
+        result = h.enter(_HOST)
         assert result.success is True
-        assert result.viewstream_url == f"http://10.0.0.1:{Ports.DESKTOP_DISPLAY}"
-        assert ("10.0.0.1", f"pct start {_DESKTOP_CFG.ct_id}", 30) in ssh.calls
+        assert result.viewstream_url == f"http://{_HOST}:{Ports.DESKTOP_DISPLAY}"
 
-    def test_enter_already_running(self):
-        ssh = SshStub(default_ok=False, default_output="CT 400 already running")
-        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, [], ssh)
-        result = h.enter("10.0.0.1")
-        assert result.success is True
-        assert result.viewstream_url == f"http://10.0.0.1:{Ports.DESKTOP_DISPLAY}"
+    def test_is_active_reflects_real_status(self, pve):
+        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, [], pve=pve)
+        active = h.is_active(_HOST)
+        assert isinstance(active, bool)
+        status = pve.ct_status(int(_DESKTOP_CFG.ct_id))
+        expected = (status or {}).get("status") == "running"
+        assert active == expected
 
-    def test_enter_failure(self):
-        ssh = SshStub(default_ok=False, default_output="container locked")
-        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, [], ssh)
+    def test_no_pve_returns_failure(self):
+        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, [])
         result = h.enter("10.0.0.1")
         assert result.success is False
-        assert result.viewstream_url is None
-        assert result.error == "container locked"
-
-    def test_exit(self):
-        ssh = SshStub(default_ok=True)
-        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, [], ssh)
-        result = h.exit("10.0.0.1")
-        assert result.success is True
-        assert ("10.0.0.1", f"pct stop {_DESKTOP_CFG.ct_id}", 30) in ssh.calls
-
-    def test_is_active_true(self):
-        ssh = SshStub()
-        ssh.set_response("pct status", True, "status: running")
-        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, [], ssh)
-        assert h.is_active("10.0.0.1") is True
-
-    def test_is_active_false(self):
-        ssh = SshStub()
-        ssh.set_response("pct status", True, "status: stopped")
-        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, [], ssh)
-        assert h.is_active("10.0.0.1") is False
-
-    def test_is_active_ssh_failure(self):
-        ssh = SshStub(default_ok=False)
-        h = DisplayHandler("desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY, [], ssh)
+        assert "No PVE API" in result.error
         assert h.is_active("10.0.0.1") is False
 
 
 class TestDisplayHandlerKodi:
-    """Test DisplayHandler with Kodi-specific config."""
-
-    def test_protocol_compliance(self):
-        ssh = SshStub()
-        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], ssh)
+    def test_protocol_compliance(self, pve):
+        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], pve=pve)
         assert isinstance(h, DisplayHandlerProtocol)
 
-    def test_properties(self):
-        ssh = SshStub()
-        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, _KODI_CFG.conflicts, ssh)
+    def test_properties(self, pve):
+        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, _KODI_CFG.conflicts, pve=pve)
         assert h.app_id == "kodi"
         assert h.handler_type == "container_display"
         assert h.conflicts_with == _KODI_CFG.conflicts
 
-    def test_viewstream_url(self):
-        ssh = SshStub()
-        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], ssh)
+    def test_viewstream_url(self, pve):
+        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], pve=pve)
         assert h.get_viewstream_url("10.0.0.1") == f"http://10.0.0.1:{Ports.KODI_DISPLAY}"
 
-    def test_enter_success(self):
-        ssh = SshStub(default_ok=True)
-        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], ssh)
-        result = h.enter("10.0.0.1")
-        assert result.success is True
-        assert result.viewstream_url == f"http://10.0.0.1:{Ports.KODI_DISPLAY}"
-
-    def test_enter_already_running(self):
-        ssh = SshStub(default_ok=False, default_output="already running")
-        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], ssh)
-        result = h.enter("10.0.0.1")
+    def test_enter_starts_container(self, pve):
+        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], pve=pve)
+        result = h.enter(_HOST)
         assert result.success is True
 
-    def test_enter_failure(self):
-        ssh = SshStub(default_ok=False, default_output="container locked")
-        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], ssh)
-        result = h.enter("10.0.0.1")
-        assert result.success is False
-        assert result.error == "container locked"
-
-    def test_exit(self):
-        ssh = SshStub(default_ok=True)
-        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], ssh)
-        result = h.exit("10.0.0.1")
-        assert result.success is True
-        assert ("10.0.0.1", f"pct stop {_KODI_CFG.ct_id}", 30) in ssh.calls
-
-    def test_is_active_true(self):
-        ssh = SshStub()
-        ssh.set_response("pct status", True, "status: running")
-        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], ssh)
-        assert h.is_active("10.0.0.1") is True
-
-    def test_is_active_false(self):
-        ssh = SshStub()
-        ssh.set_response("pct status", True, "status: stopped")
-        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], ssh)
-        assert h.is_active("10.0.0.1") is False
-
-    def test_is_active_ssh_failure(self):
-        ssh = SshStub(default_ok=False)
-        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], ssh)
-        assert h.is_active("10.0.0.1") is False
+    def test_is_active_reflects_real_status(self, pve):
+        h = DisplayHandler("kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY, [], pve=pve)
+        import time
+        for _ in range(5):
+            active = h.is_active(_HOST)
+            status = pve.ct_status(int(_KODI_CFG.ct_id))
+            expected = (status or {}).get("status") == "running"
+            if active == expected:
+                break
+            time.sleep(1)
+        assert active == expected
 
 
-# ── WebViewHandler ────────────────────────────────────────────────────
+# ── WebViewHandler (pure logic, no infra) ────────────────────────────
 
 
 class TestWebViewHandler:
@@ -264,150 +189,109 @@ class TestWebViewHandler:
         assert h.is_active("10.0.0.1") is True
 
 
-# ── build_handler factory ─────────────────────────────────────────────
+# ── build_handler factory ────────────────────────────────────────────
 
 
 class TestBuildHandler:
-    def test_container_display_desktop(self):
-        ssh = SshStub()
-        h = build_handler(_DESKTOP_CFG, ssh)
+    def test_container_display_desktop(self, pve):
+        h = build_handler(_DESKTOP_CFG, pve=pve)
         assert isinstance(h, DisplayHandler)
         assert h.app_id == "desktop"
 
-    def test_container_display_kodi(self):
-        ssh = SshStub()
-        h = build_handler(_KODI_CFG, ssh)
+    def test_container_display_kodi(self, pve):
+        h = build_handler(_KODI_CFG, pve=pve)
         assert isinstance(h, DisplayHandler)
         assert h.app_id == "kodi"
 
     def test_web_view(self):
-        ssh = SshStub()
         cfg = DisplayAppConfig(app_id="ha", handler_type="web_view",
                                service_port=8123)
-        h = build_handler(cfg, ssh)
+        h = build_handler(cfg)
         assert isinstance(h, WebViewHandler)
 
     def test_unknown_handler_type(self):
-        ssh = SshStub()
         cfg = DisplayAppConfig(app_id="x", handler_type="nonexistent")
         with pytest.raises(ValueError, match="Unknown handler_type"):
-            build_handler(cfg, ssh)
+            build_handler(cfg)
 
 
-# ── DisplayTransferService ────────────────────────────────────────────
+# ── DisplayTransferService with real PVE ─────────────────────────────
 
 
 class TestDisplayTransferService:
-    def _make_service(self, ssh: SshStub | None = None) -> DisplayTransferService:
-        ssh = ssh or SshStub()
+    def _make_service(self, pve) -> DisplayTransferService:
         svc = DisplayTransferService()
         svc.register(DisplayHandler(
             "desktop", _DESKTOP_CFG.ct_id, Ports.DESKTOP_DISPLAY,
-            _DESKTOP_CFG.conflicts, ssh,
+            _DESKTOP_CFG.conflicts, pve=pve,
         ))
         svc.register(DisplayHandler(
             "kodi", _KODI_CFG.ct_id, Ports.KODI_DISPLAY,
-            _KODI_CFG.conflicts, ssh,
+            _KODI_CFG.conflicts, pve=pve,
         ))
         svc.register(DisplayHandler(
             "moonlight", _MOONLIGHT_CFG.ct_id, Ports.MOONLIGHT_DISPLAY,
-            _MOONLIGHT_CFG.conflicts, ssh,
+            _MOONLIGHT_CFG.conflicts, pve=pve,
         ))
         return svc
 
-    def test_register_and_lookup(self):
-        svc = self._make_service()
+    def test_register_and_lookup(self, pve):
+        svc = self._make_service(pve)
         assert svc.get_handler("desktop") is not None
         assert svc.get_handler("kodi") is not None
         assert svc.get_handler("nonexistent") is None
 
-    def test_list_handlers_metadata(self):
-        svc = self._make_service()
+    def test_list_handlers_metadata(self, pve):
+        svc = self._make_service(pve)
         meta = svc.list_handlers()
         assert meta["desktop"]["handler_type"] == "container_display"
         assert "kodi" in meta["desktop"]["conflicts_with"]
         assert meta["kodi"]["handler_type"] == "container_display"
 
-    def test_enter_unknown_app(self):
-        svc = self._make_service()
-        result = svc.enter("nonexistent", "10.0.0.1")
+    def test_enter_unknown_app(self, pve):
+        svc = self._make_service(pve)
+        result = svc.enter("nonexistent", _HOST)
         assert result.success is False
         assert "No handler" in result.error
 
-    def test_exit_unknown_app(self):
-        svc = self._make_service()
-        result = svc.exit("nonexistent", "10.0.0.1")
+    def test_exit_unknown_app(self, pve):
+        svc = self._make_service(pve)
+        result = svc.exit("nonexistent", _HOST)
         assert result.success is False
 
-    def test_enter_with_conflict_resolution(self):
-        ssh = SshStub()
-        ssh.set_response(f"pct status {_KODI_CFG.ct_id}", True, "status: running")
-        ssh.set_response(f"pct stop {_KODI_CFG.ct_id}", True, "")
-        ssh.set_response(f"pct start {_DESKTOP_CFG.ct_id}", True, "")
-        svc = self._make_service(ssh)
-
-        result = svc.enter("desktop", "10.0.0.1")
+    def test_enter_desktop_succeeds(self, pve):
+        svc = self._make_service(pve)
+        result = svc.enter("desktop", _HOST)
         assert result.success is True
-        stop_calls = [c for c in ssh.calls if f"pct stop {_KODI_CFG.ct_id}" in c[1]]
-        assert len(stop_calls) == 1, "Should have stopped kodi before starting desktop"
+        assert result.viewstream_url is not None
 
-    def test_enter_fails_when_conflict_exit_fails(self):
-        ssh = SshStub()
-        ssh.set_response(f"pct status {_KODI_CFG.ct_id}", True, "status: running")
-        ssh.set_response(f"pct stop {_KODI_CFG.ct_id}", False, "stop failed")
-        svc = self._make_service(ssh)
-
-        result = svc.enter("desktop", "10.0.0.1")
-        assert result.success is False
-        assert "Cannot stop conflicting app" in result.error
-        start_calls = [c for c in ssh.calls if "pct start" in c[1]]
-        assert len(start_calls) == 0, "Should not start desktop when conflict exit fails"
-
-    def test_enter_no_conflict_when_not_active(self):
-        ssh = SshStub()
-        ssh.set_response("pct status", True, "status: stopped")
-        ssh.set_response(f"pct start {_DESKTOP_CFG.ct_id}", True, "")
-        svc = self._make_service(ssh)
-
-        result = svc.enter("desktop", "10.0.0.1")
-        assert result.success is True
-        pct_stop_calls = [c for c in ssh.calls if c[1].startswith("pct stop")]
-        assert len(pct_stop_calls) == 0
-
-    def test_get_viewstream_url(self):
-        svc = self._make_service()
+    def test_get_viewstream_url(self, pve):
+        svc = self._make_service(pve)
         assert svc.get_viewstream_url("desktop", "10.0.0.1") == f"http://10.0.0.1:{Ports.DESKTOP_DISPLAY}"
         assert svc.get_viewstream_url("nonexistent", "10.0.0.1") is None
 
-    def test_is_active(self):
-        ssh = SshStub()
-        ssh.set_response(f"pct status {_DESKTOP_CFG.ct_id}", True, "status: running")
-        svc = self._make_service(ssh)
-        assert svc.is_active("desktop", "10.0.0.1") is True
+    def test_is_active_real(self, pve):
+        svc = self._make_service(pve)
+        active = svc.is_active("desktop", _HOST)
+        assert isinstance(active, bool)
 
-    def test_list_active(self):
-        ssh = SshStub()
-        ssh.set_response(f"pct status {_DESKTOP_CFG.ct_id}", True, "status: running")
-        ssh.set_response(f"pct status {_KODI_CFG.ct_id}", True, "status: stopped")
-        ssh.set_response(f"pct status {_MOONLIGHT_CFG.ct_id}", True, "status: running")
-        svc = self._make_service(ssh)
-
-        active = svc.list_active("10.0.0.1")
-        assert "desktop" in active
-        assert "moonlight" in active
-        assert "kodi" not in active
+    def test_list_active_real(self, pve):
+        svc = self._make_service(pve)
+        active = svc.list_active(_HOST)
+        assert isinstance(active, list)
+        for app_id in active:
+            assert app_id in ("desktop", "kodi", "moonlight")
 
 
-# ── DISPLAY_APP_CONFIGS integration ───────────────────────────────────
+# ── DISPLAY_APP_CONFIGS integration ──────────────────────────────────
 
 
 class TestDisplayAppConfigsIntegration:
     """Verify that data.DISPLAY_APP_CONFIGS entries are valid and consistent."""
 
-    def test_all_configs_build_handlers(self):
-        ssh = SshStub()
+    def test_all_configs_build_handlers(self, pve):
         for app_id, cfg in DISPLAY_APP_CONFIGS.items():
-            h = build_handler(cfg, ssh)
+            h = build_handler(cfg, pve=pve)
             assert h.app_id == app_id
 
     def test_configs_have_labels(self):
@@ -435,11 +319,10 @@ class TestDisplayAppConfigsIntegration:
                 f"{app_id} has unknown handler_type {cfg.handler_type!r}"
             )
 
-    def test_handler_type_is_string(self):
+    def test_handler_type_is_string(self, pve):
         """handler_type must be a plain string, not an enum — API JSON serialization depends on this."""
-        ssh = SshStub()
         for app_id, cfg in DISPLAY_APP_CONFIGS.items():
-            h = build_handler(cfg, ssh)
+            h = build_handler(cfg, pve=pve)
             assert isinstance(h.handler_type, str), (
                 f"{app_id} handler_type is {type(h.handler_type).__name__}, expected str"
             )

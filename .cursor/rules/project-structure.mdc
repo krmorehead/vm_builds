@@ -421,6 +421,7 @@ All VMIDs defined in `group_vars/all.yml`.
 | `tasks/reconstruct_lxc_group.yml` | Shared LXC group reconstruction (called by per-service wrappers) |
 | `tasks/lxc_device_passthrough.yml` | Shared device passthrough (DRI/ALSA/input bind mounts + cgroups) |
 | `tasks/verify_lxc_template.yml` | Shared pre-flight template existence check (10 LXC roles) |
+| `tasks/upload_lxc_template.yml` | Shared template upload to Proxmox host cache (10 API-driven LXC roles) |
 | `tasks/lxc_lan_network.yml` | Shared LAN-only container IP computation (5 LXC roles) |
 | `tasks/lxc_wan_or_lan_network.yml` | Shared container networking: LAN hosts use OpenWrt LAN, WAN hosts use NAT bridge (10.99.x.x) |
 | `tasks/bootstrap_lan_host.yml` | Reusable bootstrap for LAN hosts (DHCP lease + API token) |
@@ -745,6 +746,23 @@ returned "No route to host" for WAN hosts. Wasted the entire session.
 - Mount entries use full Proxmox mount specs: `/proc,mp=/host/proc,ro=1` — the `ro=1` flag makes them read-only.
 - The monitoring agent's config must point to `/host/proc` and `/host/sys` (baked into the image) so it reads host metrics, not container-local metrics.
 - Previous bug: unprivileged container with bind mounts — extraction failed (disk full at 1GB) and systemd sandboxing prevented service startup.
+
+## API-driven LXC provisioning requires template upload
+- When LXC roles use the NM API (`/api/provision/<service>`) instead of `include_role: proxmox_lxc`, the Ansible role MUST upload the template to the Proxmox host's `/var/lib/vz/template/cache/` BEFORE calling the API. The NM API passes the template path to PVE API's `pct create`, which requires the template to already exist on the host.
+- Use `tasks/upload_lxc_template.yml` to handle the upload. It checks if the template is cached and only uploads when missing.
+- Previous bug (2026-04-21): WireGuard containers were destroyed during version-mismatch recreation, then `pct create` failed with "volume does not exist" because the template wasn't on the host. The old `proxmox_lxc` include_role handled uploads, but the API-driven migration lost this step.
+- ALWAYS add a `pve_api.py` entry to the kiosk image's `tar_files` array in `build-images.sh` when adding new Python modules that `manager.py` imports.
+- Previous bug (2026-04-21): `manager.py` imported `pve_api` but `pve_api.py` wasn't in the kiosk image's baked file list. All 6 kiosk-web services crash-looped with `ModuleNotFoundError`. Fix: added to `tar_files` array and rebuilt kiosk image.
+
+## PVE SSL certificates and API health
+- Proxmox standalone nodes can lose their SSL certificates (`/etc/pve/local/pve-ssl.key`) after hostname changes, OS reinstalls, or pmxcfs corruption. Without the key, pveproxy workers log "failed to load local private key" and all HTTPS API calls hang during SSL handshake (TCP connects but handshake times out).
+- The infra pre_tasks in `site.yml` check for the SSL key and regenerate with `pvecm updatecerts --force` if missing, then restart pveproxy.
+- Standalone nodes can also enter a state where `pvesh get /nodes/<hostname>/status` returns "proxy not allowed" (HTTP 500). This is caused by stale PVE service state — restarting `pve-cluster`, `pvedaemon`, and `pveproxy` fixes it.
+- The infra pre_tasks also clean stale `/etc/pve/nodes/<old_name>/` directories left from hostname changes (e.g., mesh1 previously named "home").
+- `PveApiError` uses `self.status` (not `self.status_code`) for the HTTP status code. ALWAYS use `exc.status` when handling `PveApiError` exceptions.
+- Previous bug (2026-04-21): mesh2 and bridge-1 had missing SSL keys. All HTTPS API calls from their kiosk containers to the PVE API timed out during SSL handshake. Fix: `pvecm updatecerts --force` on both hosts.
+- Previous bug (2026-04-21): mesh1's PVE API returned "proxy not allowed" for `/nodes/mesh1/lxc` even though the hostname was correct. Root cause: stale pvedaemon state. Fix: restart all PVE services.
+- Previous bug (2026-04-21): `manager.py` used `exc.status_code` instead of `exc.status` when handling `PveApiError`. Fix: changed to `exc.status`.
 
 ## LXC container disk sizing
 - ALWAYS verify the compressed template size fits the target rootfs. A vzdump archive reports its compressed and extracted sizes, but the rootfs must have headroom for runtime data.

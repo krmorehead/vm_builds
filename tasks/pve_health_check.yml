@@ -1,0 +1,49 @@
+---
+- name: Check PVE SSL certificate validity
+  ansible.builtin.command:
+    cmd: test -f /etc/pve/local/pve-ssl.key
+  register: _pve_ssl_check
+  changed_when: false
+  failed_when: false
+
+- name: Regenerate PVE SSL certificates if missing
+  ansible.builtin.shell:
+    cmd: pvecm updatecerts --force && systemctl restart pveproxy
+    executable: /bin/bash
+  when: _pve_ssl_check.rc != 0
+  changed_when: true
+
+- name: Verify PVE API is responsive
+  ansible.builtin.shell:
+    cmd: pvesh get /nodes/{{ inventory_hostname }}/status --output-format json 2>&1
+    executable: /bin/bash
+  register: _pve_api_check
+  changed_when: false
+  failed_when: false
+
+- name: Restart PVE services if API is unresponsive
+  ansible.builtin.shell:
+    cmd: |
+      systemctl restart pve-cluster
+      sleep 2
+      systemctl restart pvedaemon pveproxy
+      sleep 1
+    executable: /bin/bash
+  when: _pve_api_check.rc != 0 or 'proxy not allowed' in (_pve_api_check.stderr | default(''))
+  changed_when: true
+
+- name: Clean stale pmxcfs node directories
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      local_node=$(hostname)
+      for d in /etc/pve/nodes/*/; do
+        node_name=$(basename "$d")
+        if [ "$node_name" != "$local_node" ]; then
+          rm -rf "$d"
+          echo "Removed stale node dir: $d"
+        fi
+      done
+    executable: /bin/bash
+  register: _stale_nodes_cleanup
+  changed_when: _stale_nodes_cleanup.stdout | length > 0

@@ -1,0 +1,95 @@
+---
+# Post-provision callhome rewrite for all sibling containers.
+#
+# kiosk_configure runs its sibling callhome rewrite BEFORE other
+# containers might be provisioned. This task runs AFTER all containers
+# exist, ensuring callhome points to the local NodeManager.
+#
+# Uses pct exec because the container's callhome HTTP endpoint (port 9002)
+# may not be running if CALLHOME_SERVER was never set during provisioning.
+# This is a bootstrap operation — the NM API can't reach containers that
+# have a crash-looping callhome agent.
+#
+# Runs on kiosk_nodes hosts (each Proxmox host with direct pct access).
+
+- name: Get kiosk container IP for callhome target
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail &&
+      pct exec {{ kiosk_ct_id }} -- ip -4 addr show eth0 2>/dev/null
+      | awk '/inet /{sub(/\/.*/, "", $2); print $2}'
+    executable: /bin/bash
+  register: _kiosk_ip
+  changed_when: false
+  failed_when: _kiosk_ip.rc != 0 or _kiosk_ip.stdout | trim | length == 0
+
+- name: Set callhome target URL (local NodeManager)
+  ansible.builtin.set_fact:
+    _nm_callhome_url: "http://{{ _kiosk_ip.stdout | trim }}:{{ kiosk_manager_port | default('9001') }}"
+
+- name: Rewrite callhome server on Debian siblings via pct exec
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      if pct status {{ item }} 2>/dev/null | grep -q running; then
+        pct exec {{ item }} -- sed -i \
+          's|^CALLHOME_SERVER=.*|CALLHOME_SERVER={{ _nm_callhome_url }}|' \
+          /etc/default/callhome 2>/dev/null
+        pct exec {{ item }} -- sed -i \
+          's|^CALLHOME_PUBLIC_KEY=.*|CALLHOME_PUBLIC_KEY={{ callhome_public_key }}|' \
+          /etc/default/callhome 2>/dev/null
+        echo "updated"
+      else
+        echo "skipped"
+      fi
+    executable: /bin/bash
+  register: _ch_rewrite
+  loop: >-
+    {{ [pihole_ct_id, rsyslog_ct_id, netdata_ct_id, wireguard_ct_id,
+        homeassistant_ct_id, jellyfin_ct_id, kodi_ct_id, moonlight_ct_id,
+        desktop_ct_id, gaming_ct_id]
+       | select('defined') | list }}
+  loop_control:
+    label: "CT {{ item }}"
+  changed_when: "'updated' in _ch_rewrite.stdout"
+
+- name: Restart callhome on updated Debian siblings
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.item }} -- systemctl restart callhome"
+  loop: "{{ _ch_rewrite.results }}"
+  loop_control:
+    label: "CT {{ item.item }}"
+  when: "'updated' in item.stdout"
+  changed_when: true
+  failed_when: false
+
+# ── OpenWrt siblings (mesh + bridge) use host IP as callhome target ──
+
+- name: Set OpenWrt callhome target (host proxy)
+  ansible.builtin.set_fact:
+    _owrt_callhome_url: >-
+      http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port
+      | default(kiosk_manager_port) }}
+
+- name: Rewrite callhome on OpenWrt siblings via pct exec
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      if pct status {{ item }} 2>/dev/null | grep -q running; then
+        pct exec {{ item }} -- sh -c \
+          "sed -i 's|^CALLHOME_SERVER=.*|CALLHOME_SERVER={{ _owrt_callhome_url | trim }}|' /etc/default/callhome; \
+           sed -i 's|^CALLHOME_PUBLIC_KEY=.*|CALLHOME_PUBLIC_KEY={{ callhome_public_key }}|' /etc/default/callhome; \
+           /etc/init.d/cron restart 2>/dev/null || true"
+        echo "updated"
+      else
+        echo "skipped"
+      fi
+    executable: /bin/bash
+  register: _owrt_rewrite
+  loop: >-
+    {{ [meshwifi_ct_id, bridge_ct_id]
+       | select('defined') | list }}
+  loop_control:
+    label: "CT {{ item }}"
+  changed_when: "'updated' in _owrt_rewrite.stdout"
+  failed_when: false

@@ -158,4 +158,4 @@
 
 - name: Wait for network to stabilize
   ansible.builtin.pause:
-    seconds: 10
+    seconds: 5

@@ -300,8 +300,11 @@
         uci set network.lan.gateway="{{ _bridge_ct_gateway }}"
         uci set network.lan.proto="static"
         uci delete network.lan.ip6assign 2>/dev/null
+        uci set dhcp.lan.ignore="1"
         uci commit network
+        uci commit dhcp
         /etc/init.d/network restart
+        /etc/init.d/dnsmasq restart
       '
   changed_when: true
 
@@ -383,26 +386,6 @@
   ansible.builtin.command:
     cmd: "pct set {{ bridge_ct_id }} --hookscript local:snippets/bridge-wifi-phy-{{ bridge_ct_id }}.sh"
   changed_when: true
-
-# ── Host-side wrapper scripts for manager API ──────────────────
-# The manager SSHes to the Proxmox host and calls these scripts.
-# They forward to the container-side scripts via pct exec.
-
-- name: Deploy host-side wifi_setup.sh wrapper
-  ansible.builtin.copy:
-    content: |
-      #!/bin/sh
-      exec pct exec {{ bridge_ct_id }} -- /usr/sbin/wifi_setup.sh "$@"
-    dest: /usr/local/bin/wifi_setup.sh
-    mode: "0755"
-
-- name: Deploy host-side batman_trigger.sh wrapper
-  ansible.builtin.copy:
-    content: |
-      #!/bin/sh
-      exec pct exec {{ bridge_ct_id }} -- /usr/sbin/batman_trigger.sh "$@"
-    dest: /usr/local/bin/batman_trigger.sh
-    mode: "0755"
 
 # ── Broadcast storm guard ──────────────────────────────────────
 # Lightweight watchdog that monitors broadcast packet rates on the

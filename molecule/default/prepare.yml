@@ -52,8 +52,10 @@
   gather_facts: false
   tasks:
     - name: Check if controller keypair already exists
+      vars:
+        _raw: "{{ lookup('env', 'WIREGUARD_PRIVATE_KEY_CONTROLLER') }}"
       ansible.builtin.set_fact:
-        _ctrl_key_exists: "{{ lookup('env', 'WIREGUARD_PRIVATE_KEY_CONTROLLER') | length > 0 }}"
+        _ctrl_key_exists: "{{ _raw | length == 44 and '$' not in _raw and _raw not in ['None', 'null'] }}"
 
     - name: Generate controller keypair via Python X25519
       ansible.builtin.command:

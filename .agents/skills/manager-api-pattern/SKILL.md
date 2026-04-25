@@ -189,8 +189,9 @@ Initial deploy (Ansible):
   host_vars → configure role → pct_remote → container-side script
 
 Runtime (Manager API):
-  UI page → HTTP → Manager endpoint → SSH → container-side script
+  UI page → HTTP → Manager endpoint → HTTP cmd endpoint → container-side script
   Heartbeat/callhome → /api/checkin → fleet readiness gate
+  Container lifecycle → Manager → PVE REST API (ct_start/ct_stop/ct_status)
 ```
 
 Both paths call the SAME container-side script. The script is baked into the
@@ -280,18 +281,20 @@ ClusterManager routes (with `include_fleet_storage=False`):
 
 All mutation endpoints:
 - Require `x-callhome-token` header when `CALLHOME_PRIVATE_KEY` is set
-- Validate input before performing any SSH operations
 - Return `{"success": bool, "output": str}` format
-- Use `heartbeat._ssh_exec()` for SSH operations
+- Use `_callhome_exec()` for container commands (HTTP to container cmd endpoint)
+- Use `PveApiClient` for container lifecycle (start/stop/status via PVE REST API)
+- NEVER use SSH. All container operations go through HTTP.
 
 ### Adding a new endpoint
 
 1. Define the handler function inside `register_api()` in `manager.py`
 2. Mutation: add `_check_mutation_auth()` call at the top
 3. Use `resolve_node_ip()` to find the target IP
-4. Use `heartbeat._ssh_exec()` for SSH commands
-5. Register the route with `starlette_app.routes.insert(0, Route(...))`
-6. Add tests in `tests/test_webui_app.py`
+4. Use `_callhome_exec()` for container-side script commands (HTTP)
+5. Use `self._pve` for container lifecycle (PVE REST API)
+6. Register the route with `starlette_app.routes.insert(0, Route(...))`
+7. Add tests in `tests/test_webui_app.py`
 
 ## API-Driven Architecture (MANDATORY)
 
@@ -421,11 +424,14 @@ _COLLECTOR_MAP = {
   endpoint, then the UI integration.
 
 ### Manager conventions
-- ALWAYS use `heartbeat._ssh_exec()` for SSH from the manager.
+- NEVER use SSH from the manager. ALL container commands go through
+  `_callhome_exec()` (HTTP POST to the container's command endpoint).
+- Container lifecycle (start/stop/status) uses `PveApiClient` (Proxmox REST API).
 - NEVER add mutation endpoints without `_check_mutation_auth()`.
-- Heartbeat collectors (`collect_*_metrics()`) SHOULD use container-side
-  scripts (`wifi_setup.sh metrics`) as their primary data source, falling
-  back to raw `iw`/`uci` for containers without the script (e.g., router VM).
+- Heartbeat collectors (`collect_*_metrics()`) use `_http_exec()` to call
+  container-side scripts (`wifi_setup.sh metrics`) via the HTTP command endpoint.
+- Debian containers expose `/cmd` via callhome.py's built-in HTTP server (port 9002).
+- OpenWrt containers expose `/cgi-bin/cmd` via uhttpd CGI (port 9002).
 
 ### Cluster Manager SSH key distribution (CRITICAL)
 - The Cluster Manager (home kiosk) SSHes to ALL Proxmox hosts for fleet ops

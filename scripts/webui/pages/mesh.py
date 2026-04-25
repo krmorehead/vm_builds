@@ -2,7 +2,7 @@
 
 Shows the router (AP) and all mesh satellite nodes (STA) with signal
 quality, bitrate, and traffic counters. Uses the heartbeat subscription
-system for on-demand SSH polling.
+system for on-demand HTTP polling.
 """
 
 from __future__ import annotations

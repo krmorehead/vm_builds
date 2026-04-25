@@ -193,6 +193,12 @@
 
 # ── Auto-start on Proxmox boot ──────────────────────────────────
 
+- name: Wait for VM config to be visible in pmxcfs
+  ansible.builtin.wait_for:
+    path: /etc/pve/qemu-server/{{ openwrt_vm_id }}.conf
+    timeout: 10
+  when: not vm_exists | bool
+
 - name: Configure VM to start on boot
   ansible.builtin.command:
     cmd: >-
@@ -340,8 +346,8 @@
   ansible.builtin.wait_for:
     host: "{{ _openwrt_connect_ip }}"
     port: 22
-    delay: 10
-    timeout: 120
+    delay: 3
+    timeout: 60
   when: _openwrt_needs_bootstrap | bool
 
 - name: Bootstrap diagnostics

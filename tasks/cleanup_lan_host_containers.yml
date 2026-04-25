@@ -1,0 +1,62 @@
+---
+# Destroy stale project containers on a LAN host via SSH from a router node.
+#
+# During molecule test, LAN hosts are unreachable during the cleanup phase
+# (router not yet deployed). Containers from the previous run survive.
+# This task runs AFTER LAN bootstrap to clean stale containers so the NM
+# provision handler only needs to do fresh creation (not destroy + create
+# within a single HTTP request, which exceeds the 300s timeout).
+#
+# Required vars:
+#   _lan_host_ip   – LAN IP of the target (e.g. 10.10.10.210)
+#   _lan_host_name – inventory hostname (e.g. mesh1)
+
+- name: Check if LAN host is reachable -- {{ _lan_host_name }}
+  ansible.builtin.command:
+    cmd: >-
+      ssh -o ConnectTimeout=5
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+      -o BatchMode=yes -o PasswordAuthentication=no
+      root@{{ _lan_host_ip }} hostname
+  register: _key_check
+  failed_when: false
+  changed_when: false
+
+- name: Skip container cleanup if LAN host is unreachable
+  ansible.builtin.debug:
+    msg: "{{ _lan_host_name }} is unreachable -- skipping stale container cleanup"
+  when: not (_key_check.rc == 0)
+
+- name: Destroy stale project containers on {{ _lan_host_name }}
+  ansible.builtin.shell:
+    cmd: >-
+      timeout 120 ssh
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+      -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3
+      root@{{ _lan_host_ip }} "
+      for ct in {{ wireguard_ct_id }} {{ meshwifi_ct_id }}
+      {{ bridge_ct_id }} {{ netdata_ct_id }} {{ rsyslog_ct_id }}
+      {{ pihole_ct_id }} {{ homeassistant_ct_id }} {{ jellyfin_ct_id }}
+      {{ kodi_ct_id }} {{ moonlight_ct_id }} {{ kiosk_ct_id }}
+      {{ gaming_ct_id }} {{ desktop_ct_id }}; do
+        pct status \$ct >/dev/null 2>&1 || continue;
+        echo \"Destroying stale CT \$ct\";
+        pct stop \$ct --timeout 15 2>/dev/null || true;
+        pct destroy \$ct --purge 2>/dev/null || true;
+      done;
+      for vm in {{ gaming_vm_id }}; do
+        qm status \$vm >/dev/null 2>&1 || continue;
+        echo \"Destroying stale VM \$vm\";
+        qm stop \$vm --timeout 15 2>/dev/null || true;
+        qm destroy \$vm --purge 2>/dev/null || true;
+      done"
+    executable: /bin/bash
+  register: _cleanup_result
+  when: _key_check.rc == 0
+  changed_when: "'Destroying' in (_cleanup_result.stdout | default(''))"
+  failed_when: false
+
+- name: Report stale container cleanup on {{ _lan_host_name }}
+  ansible.builtin.debug:
+    msg: "{{ _lan_host_name }}: {{ _cleanup_result.stdout_lines | default(['no stale containers']) | join(', ') }}"
+  when: _key_check.rc == 0

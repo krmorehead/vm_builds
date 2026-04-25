@@ -62,10 +62,10 @@
     body_format: json
     body: {}
     status_code: 200
-    timeout: 60
+    timeout: 30
   delegate_to: localhost
   retries: 2
-  delay: 5
+  delay: 3
   register: _netdata_restart
   until: (_netdata_restart.status | default(0)) == 200
 

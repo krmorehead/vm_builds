@@ -99,21 +99,26 @@
     body_format: json
     body: {}
     status_code: 200
+    timeout: 60
   delegate_to: localhost
+
+- name: Allow pihole-FTL to complete graceful stop (DB cleanup ~55s)
+  ansible.builtin.pause:
+    seconds: 60
 
 - name: Wait for pihole-FTL to be ready
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ pihole_ct_id }}/exec"
-    method: POST
-    body_format: json
-    body:
-      cmd: "{{ pihole_bin }} status"
-      timeout: 10
+    url: >-
+      http://{{ nm_api_host | default(ansible_host) }}:{{
+      nm_api_port | default(kiosk_manager_port) }}/api/config/{{
+      pihole_ct_id }}/service/pihole-FTL/status
+    method: GET
     status_code: 200
+    timeout: 10
   delegate_to: localhost
   register: _ftl_ready
-  retries: 10
-  delay: 2
+  retries: 6
+  delay: 5
   until: (_ftl_ready.json.success | default(false)) | bool
 
 # ── Update gravity database ───────────────────────────────────
@@ -127,10 +132,11 @@
       cmd: "{{ pihole_bin }} -g"
       timeout: 120
     status_code: 200
+    timeout: 150
   delegate_to: localhost
   register: _gravity_result
   retries: 3
-  delay: 10
+  delay: 5
   until: (_gravity_result.json.success | default(false)) | bool
 
 # ── Switch container DNS to localhost ──────────────────────────

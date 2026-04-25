@@ -1,0 +1,72 @@
+---
+service: rsyslog
+base_template: build-base-debian-12-amd64.tar.zst
+build_vmid: 997
+hostname: rsyslog-build
+memory: 256
+cores: 1
+disk: "1"
+unprivileged: true
+features: ""
+
+setup_commands: []
+
+install_commands:
+  - "bash -c 'apt-get update -qq && apt-get install -y --no-install-recommends rsyslog'"
+  - "mkdir -p /var/spool/rsyslog"
+  - "mkdir -p /var/log/remote"
+
+config_files:
+  - path: /etc/rsyslog.d/10-receive.conf
+    content: |
+      # TCP syslog receiver — enable imtcp on port 514.
+      # Actions for received messages are in 50-remote-route.conf (processed
+      # later so optional forwarding configs at 20-* can act first).
+      module(load="imtcp")
+      input(type="imtcp" port="514")
+
+      template(name="RemoteLogFile" type="string"
+          string="/var/log/remote/%HOSTNAME%/%PROGRAMNAME%.log")
+    mode: "0644"
+
+  - path: /etc/rsyslog.d/50-remote-route.conf
+    content: |
+      # Route TCP-received messages to per-hostname files, then stop so they
+      # do not duplicate into the local syslog.  Numbered 50 so that any
+      # forwarding config (20-forward.conf) is evaluated first.
+      if $inputname == "imtcp" then {
+          action(type="omfile" dynaFile="RemoteLogFile")
+          stop
+      }
+    mode: "0644"
+
+  - path: /etc/logrotate.d/rsyslog-remote
+    content: |
+      /var/log/remote/*/*.log {
+          daily
+          missingok
+          rotate 7
+          compress
+          delaycompress
+          notifempty
+          create 0640 root adm
+          sharedscripts
+          postrotate
+              /usr/lib/rsyslog/rsyslog-rotate
+          endscript
+      }
+    mode: "0644"
+
+post_commands:
+  - "bash -c 'systemctl restart rsyslog && sleep 1 && systemctl is-active rsyslog'"
+  - "/usr/sbin/rsyslogd -N1"
+  - "bash -c 'apt-get clean 2>/dev/null || true && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*'"
+
+smoke_tests:
+  - "systemctl is-active rsyslog"
+
+callhome:
+  http_probes: ""
+  config_files: ""
+
+kasmvnc: null

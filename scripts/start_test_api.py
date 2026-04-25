@@ -90,7 +90,10 @@ def _start_tunnel(state: Path, primary_host: str) -> subprocess.Popen:
         start_new_session=True,
     )
     tunnel_log.close()  # fd is dup'd by Popen; safe to close in parent
-    time.sleep(2)
+    for _ in range(10):
+        if tunnel.poll() is not None:
+            raise RuntimeError(f"SSH tunnel failed (exit {tunnel.returncode})")
+        time.sleep(0.2)
     if tunnel.poll() is not None:
         raise RuntimeError(f"SSH tunnel failed (exit {tunnel.returncode})")
     (state / "tunnel.pid").write_text(str(tunnel.pid))

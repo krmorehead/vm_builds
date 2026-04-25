@@ -240,8 +240,8 @@
   ansible.builtin.command:
     cmd: pct exec {{ lxc_ct_id }} -- ls /
   register: _ct_init
-  retries: 10
-  delay: 3
+  retries: 6
+  delay: 2
   until: _ct_init.rc == 0
   changed_when: false
 
@@ -251,6 +251,13 @@
 # The agent skeleton was baked into the image by inject_callhome_agent()
 # in build-images.sh. Containers without /opt/callhome are skipped.
 
+- name: Stage callhome agent on Proxmox host
+  ansible.builtin.copy:
+    src: "{{ project_root }}/scripts/callhome.py"
+    dest: /tmp/callhome_agent.py
+    mode: "0644"
+  when: callhome_server | default('') | length > 0
+
 - name: Push latest callhome agent and configure heartbeat
   ansible.builtin.shell:
     cmd: |
@@ -258,9 +265,7 @@
       if ! pct exec {{ lxc_ct_id }} -- test -d /opt/callhome; then
         exit 0
       fi
-      cp "{{ project_root }}/scripts/callhome.py" /tmp/callhome_agent.py
       pct push {{ lxc_ct_id }} /tmp/callhome_agent.py /opt/callhome/callhome.py
-      rm -f /tmp/callhome_agent.py
       pct exec {{ lxc_ct_id }} -- chmod +x /opt/callhome/callhome.py
       KIOSK_IP=$(pct config {{ kiosk_ct_id }} 2>/dev/null | grep -oP 'ip=\K[^/]+' | head -1)
       if [ -n "$KIOSK_IP" ]; then
@@ -278,29 +283,23 @@
   failed_when: false
   when: callhome_server | default('') | length > 0
 
-# ── Wait for container readiness (API-first, pct exec fallback) ─
-# When the callhome API is available, wait for the agent to report
-# ready (confirms systemd services up + networking). Falls back to
-# pct exec polling when the API is not configured.
+# ── Wait for container readiness (pct exec networking check) ──────
+# Poll container eth0 via pct exec until it has an IPv4 address.
+# Skipped for 'unmanaged' ostypes (OpenWrt) which lack standard
+# networking setup.
 
-- name: Set API readiness result
-  ansible.builtin.set_fact:
-    _ct_ready_via_api: false
-
-- name: Wait for container networking (pct exec fallback)
+- name: Wait for container networking
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
       pct exec {{ lxc_ct_id }} -- ip -o -4 addr show eth0 2>/dev/null | grep -c "inet "
     executable: /bin/bash
   register: _ct_addr
-  retries: 20
-  delay: 5
+  retries: 15
+  delay: 2
   until: (_ct_addr.stdout | default('0') | trim | int) > 0
   changed_when: false
-  when:
-    - lxc_ct_ostype != 'unmanaged'
-    - not (_ct_ready_via_api | bool)
+  when: lxc_ct_ostype != 'unmanaged'
 
 # ── Ensure clean apt baseline ────────────────────────────────────
 # Proxmox standard templates may ship with broken kernel metapackages

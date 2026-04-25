@@ -5,6 +5,10 @@ pci_passthrough_allow_reboot: true
 # Known issue: adapter silently drops network link under sustained SSH/pct-exec
 # traffic (no kernel log, host keeps running). Requires physical restart.
 # PCIe NIC (r8169 nic0) is present but has no cable connected.
+# AMD Raven Ridge APU — NBIO handles PCIe/USB/SATA on shared die. PCIe device
+# resets (modprobe -r of WiFi, GPU unbind) can cause delayed NBIO hang that
+# kills USB controller hours later. NEVER run modprobe -r on PCIe devices
+# unless the host actively uses them.
 wol_capable: false
 container_subnet_id: 3
 vpn_ip: 10.0.0.3

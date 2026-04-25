@@ -71,7 +71,7 @@ def _refresh_fleet(
 ) -> None:
     container.clear()
     with container:
-        fleet = data.build_fleet(env, state_dir)
+        fleet = data.build_fleet(env, state_dir, probe=False)
         _fleet_card(fleet, state_dir)
     _maybe_kickstart(fleet)
 

@@ -176,7 +176,7 @@
 
       [Service]
       Type=simple
-      ExecStart=/usr/bin/socat TCP-LISTEN:9001,reuseaddr,fork TCP:{{ _lxc_net_ip }}:9001
+      ExecStart=/usr/bin/socat TCP-LISTEN:9001,reuseaddr,fork,keepalive,keepidle=15,keepcnt=3,keepintvl=5 TCP:{{ _lxc_net_ip }}:9001,keepalive,keepidle=15,keepcnt=3,keepintvl=5
       Restart=always
       RestartSec=3
 
@@ -195,7 +195,9 @@
 
       [Service]
       Type=simple
-      ExecStart=/usr/bin/socat TCP-LISTEN:{{ kiosk_ws_port }},reuseaddr,fork TCP:{{ _lxc_net_ip }}:{{ kiosk_ws_port }}
+      ExecStart=/usr/bin/socat \
+        TCP-LISTEN:{{ kiosk_ws_port }},reuseaddr,fork,keepalive,keepidle=15,keepcnt=3,keepintvl=5 \
+        TCP:{{ _lxc_net_ip }}:{{ kiosk_ws_port }},keepalive,keepidle=15,keepcnt=3,keepintvl=5
       Restart=always
       RestartSec=3
 

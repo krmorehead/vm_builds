@@ -2088,23 +2088,85 @@ curl -s http://localhost:${WEBUI_PORT:-52525}/api/container/openwrt-bridge/ready
 
 **Expected:** `radios[0]` shows the negotiated band, htmode, channel.
 
-### 21.5 Verify Bridge page in Cluster Manager kiosk UI
+### 21.5 Verify Bridge page UI and UX in Cluster Manager kiosk
 
 Access the CM kiosk at `http://localhost:9098/bridge` (or via
 SM remote kiosk at `/remote/home`).
 
-**Expected on the Bridge page:**
-1. **Link banner** at the top shows:
-   - AP and STA icons connected with signal strength
-   - One-line link summary (e.g., "6 GHz · HE160 · ch1")
-   - Link uptime
-2. **Node cards** for Bridge 1 and Bridge 2 each show:
-   - "Negotiated Link" section with Band, HT Mode, Width, Channel,
-     Driver, Co-ex Scan (disabled), Power Save (off)
-   - Interface details (wlan0, mode, SSID, channel)
-   - Link Quality section with signal, TX/RX bitrate
-3. **Detail table** at the bottom includes Band and HT Mode columns
-   for both nodes, showing matching values
+#### 21.5a Page structure and layout
+
+**Expected page elements (top to bottom):**
+1. **Page header**: "WiFi Bridge" with subtitle "Dedicated wireless backhaul link"
+2. **"How It Works" expandable guide** (collapsed by default):
+   - Click to expand — should show role diagram and setup steps
+3. **Link banner**: AP/STA connection visualization with signal
+4. **Node cards**: One per bridge endpoint
+5. **Traffic card**: Sparkline chart
+6. **Detail table**: Both nodes with all metrics
+7. **Action buttons row**: Refresh, Restart WiFi, Force Re-pair,
+   Deploy Bridge, Swap Roles
+
+#### 21.5b "How It Works" setup guide
+
+1. Click the **"How It Works"** expansion panel
+2. **Role diagram** shows two cards:
+   - **Bridge 1 — Broadcaster** (AP): "Sends the WiFi signal" with
+     cell_tower icon and explanation about plugging into main switch
+   - **Bridge 2 — Receiver** (STA): "Receives the WiFi signal" with
+     router icon and explanation about remote location
+3. **Setup Process** shows 3 numbered steps:
+   - Step 1: **Deploy** — explains Ansible deployment and auto-negotiation
+   - Step 2: **Negotiate** — explains hardware capability detection
+   - Step 3: **Pair** — explains AP startup and STA auto-connection
+
+#### 21.5c Link banner states
+
+1. **When linked**: Shows Broadcaster icon ◄━━━ signal ━━━► Receiver
+   with signal strength, link summary (e.g., "6 GHz · HE160 · ch1"),
+   and uptime. Labels say "Broadcaster" and "Receiver" (not AP/STA)
+2. **When not linked**: Shows diagnostic hints:
+   - Both offline: "Both bridge hosts are offline. Deploy the bridge..."
+   - One offline: "[name] is offline. Check that the host is powered on..."
+   - Both online but unpaired: "Both hosts are online but not paired.
+     Try Force Re-pair to reconnect the receiver."
+
+#### 21.5d Node cards
+
+1. Each card shows the node name with a role badge:
+   - **"Broadcaster"** (teal badge) for the AP
+   - **"Receiver"** (blue badge) for the STA
+2. Paired status: green "Paired" or orange "Unpaired" badge
+3. **Negotiated Link section** (when data available):
+   - Band, HT Mode, Width, Channel, Driver, Co-ex Scan, Power Save
+   - Tooltip: "The system automatically tested both endpoints'..."
+4. **WiFi Interface section**: interface name, mode (with human label:
+   "Broadcaster (AP)" or "Receiver (managed)"), SSID, channel
+5. **Link Quality section**: signal with quality label, TX/RX bitrate,
+   packets, bytes, failed/retries
+
+#### 21.5e Action buttons
+
+1. **Refresh Now**: Triggers immediate data refresh
+2. **Restart WiFi**: Tooltip says "Restarts WiFi on both..." — click
+   and verify notification shows success count
+3. **Force Re-pair**: Tooltip says "Restarts WiFi on the receiver
+   only..." — click and verify notification
+4. **Deploy Bridge**: Tooltip says "Runs the full bridge deployment..."
+   — click and verify navigation to Services page with "bridge" tag
+   pre-selected
+5. **Swap Roles**: Tooltip says "Swap which host is the broadcaster..."
+   — click and verify confirmation dialog appears:
+   - Dialog shows which node switches from which role to which
+   - "The link will briefly disconnect" warning in orange
+   - Cancel button closes dialog
+   - "Swap Roles" button triggers the swap
+
+#### 21.5f Detail table
+
+1. Shows both nodes with columns: Node, Role (Broadcaster/Receiver),
+   Paired, Band, HT Mode, Signal, TX Rate, RX Rate, Updated
+2. Roles display as "Broadcaster"/"Receiver" (not raw AP/STA)
+3. When linked, both nodes show matching Band and HT Mode values
 
 ### 21.6 Verify asymmetric hardware handling (if available)
 
@@ -2135,10 +2197,25 @@ correctly handles asymmetric inputs (unit tested in
 | `NOSCAN=1` (co-ex scan disabled) | __ | __ |
 | `POWER_SAVE=off` | __ | __ |
 | Heartbeat `bridge_status.link_config` populated | __ | __ |
-| Bridge page shows "Negotiated Link" section | __ | __ |
-| Bridge page detail table has Band/HT Mode columns | __ | __ |
-| Link banner shows one-line config summary | __ | __ |
 | `wifi_negotiate.py` CLI produces correct JSON | __ | __ |
+
+**UI sign-off:**
+
+| Check | Pass? |
+|-------|:---:|
+| "How It Works" guide expands and shows role diagram | __ |
+| Role diagram shows Broadcaster/Receiver with descriptions | __ |
+| Setup steps show Deploy → Negotiate → Pair | __ |
+| Link banner uses "Broadcaster" / "Receiver" labels | __ |
+| Link banner shows one-line config summary when linked | __ |
+| Disconnected banner shows diagnostic hint | __ |
+| Node cards show "Broadcaster"/"Receiver" role badges | __ |
+| Node cards show "Negotiated Link" section with metrics | __ |
+| Detail table uses "Broadcaster"/"Receiver" role names | __ |
+| "Deploy Bridge" tooltip explains full deployment | __ |
+| "Swap Roles" button shows confirmation dialog | __ |
+| Swap confirmation dialog has Cancel and Swap buttons | __ |
+| "Force Re-pair" tooltip explains STA-only restart | __ |
 
 ## Known Issues and Workarounds
 

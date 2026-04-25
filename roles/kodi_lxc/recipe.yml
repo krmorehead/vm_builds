@@ -1,0 +1,63 @@
+---
+service: kodi
+base_template: build-base-debian-12-amd64.tar.zst
+build_vmid: 993
+hostname: kodi-build
+memory: 1024
+cores: 2
+disk: "4"
+unprivileged: true
+features: ""
+
+setup_commands: []
+
+install_commands:
+  - "bash -c 'export DEBIAN_FRONTEND=noninteractive && apt-get update -qq'"
+  - "bash -c 'apt-get install -y --no-install-recommends kodi kodi-peripheral-joystick libcec6 cec-utils alsa-utils wget'"
+  - "bash -c 'apt-get install -y --no-install-recommends intel-media-va-driver mesa-va-drivers vainfo'"
+  - "bash -c 'useradd -r -m -G audio,video,input,render,ssl-cert -s /bin/bash kodi 2>/dev/null || true'"
+  - "loginctl enable-linger kodi 2>/dev/null || true"
+  - "bash -c 'apt-get clean 2>/dev/null || true && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*'"
+
+config_files:
+  - path: /home/kodi/.kodi/userdata/advancedsettings.xml
+    content: |
+      <advancedsettings version="1.0">
+        <cache>
+          <memorysize>52428800</memorysize>
+          <readfactor>4</readfactor>
+        </cache>
+        <network>
+          <curlclienttimeout>30</curlclienttimeout>
+          <curllowspeedtime>30</curllowspeedtime>
+        </network>
+      </advancedsettings>
+    mode: "0644"
+    mkdir: true
+    owner: "kodi:kodi"
+
+  - path: /home/kodi/.kodi/userdata/guisettings.xml
+    content: |
+      <settings version="2">
+        <setting id="services.webserver">true</setting>
+        <setting id="services.webserverport">8080</setting>
+        <setting id="services.esallinterfaces">true</setting>
+        <setting id="services.esenabled">true</setting>
+        <setting id="services.esport">9090</setting>
+      </settings>
+    mode: "0644"
+    owner: "kodi:kodi"
+
+post_commands:
+  - "chown -R kodi:kodi /home/kodi/.kodi"
+
+callhome:
+  http_probes: ""
+  config_files: ""
+
+kasmvnc:
+  app_user: kodi
+  vnc_port: 6082
+  display_num: 1
+  service_name: kodi-display
+  xstartup_exec: "exec /usr/bin/kodi"

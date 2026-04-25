@@ -70,8 +70,10 @@ def _render_live_content(
     container: ui.column,
     env: dict[str, str],
     state_dir: Path,
+    *,
+    probe: bool = False,
 ) -> None:
-    fleet = data.build_fleet(env, state_dir)
+    fleet = data.build_fleet(env, state_dir, probe=probe)
     container.clear()
     with container:
         nodes = data.load_node_registry(state_dir)
@@ -309,7 +311,7 @@ def _single_node_card(host: Host, state_dir: Path) -> None:
                 f"color: {theme.TEXT_DISABLED}"
             )
         if host.status == "reachable":
-            ui.label("SSH up · no heartbeat").classes("text-xs").style(
+            ui.label("API up · no heartbeat").classes("text-xs").style(
                 f"color: {theme.COLOR_WARNING}"
             )
 
@@ -449,7 +451,7 @@ def _render_detail(
 ) -> None:
     container.clear()
     with container:
-        fleet = data.build_fleet(env, state_dir)
+        fleet = data.build_fleet(env, state_dir, probe=False)
         host = fleet.get_host(hostname)
 
         with ui.row().classes("items-center gap-2 w-full"):
@@ -513,7 +515,7 @@ def _detail_header(host: Host) -> None:
                 render_app_console_links(host.name, back=node_detail_back)
 
         if host.status == "reachable":
-            ui.label("SSH reachable — no callhome heartbeat").classes(
+            ui.label("API reachable — no callhome heartbeat").classes(
                 "text-xs mt-1"
             ).style(f"color: {theme.COLOR_WARNING}")
 
@@ -537,7 +539,7 @@ def _detail_header(host: Host) -> None:
 
 
 def _kickstart_button(host: Host) -> None:
-    """Button to SSH into a host and restart callhome on its containers."""
+    """Button to restart callhome on a host's containers via HTTP."""
     result_label = ui.label("").classes("text-xs mt-1")
     result_label.set_visibility(False)
 

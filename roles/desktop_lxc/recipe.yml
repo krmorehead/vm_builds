@@ -1,0 +1,161 @@
+---
+service: desktop
+base_template: build-base-debian-12-amd64.tar.zst
+build_vmid: 991
+hostname: desktop-build
+memory: 4096
+cores: 4
+disk: "16"
+unprivileged: false
+features: "nesting=1"
+
+setup_commands: []
+
+install_commands:
+  - "bash -c 'export DEBIAN_FRONTEND=noninteractive && apt-get update -qq'"
+  # KDE Plasma (Windows-style UX)
+  - >-
+    bash -c 'apt-get install -y --no-install-recommends
+    kde-plasma-desktop plasma-nm konsole dolphin kate ark breeze-icon-theme'
+  # GNOME (Mac-style UX)
+  - >-
+    bash -c 'apt-get install -y --no-install-recommends
+    gnome-core gnome-tweaks gnome-shell-extension-dashtodock nautilus gnome-terminal dbus-x11'
+  # Shared applications and infra
+  - >-
+    bash -c 'apt-get install -y --no-install-recommends
+    firefox-esr vlc flameshot xdg-user-dirs
+    fonts-noto fonts-noto-color-emoji
+    pipewire pipewire-audio wireplumber openssh-client wget'
+  # VA-API for Intel + AMD
+  - >-
+    bash -c 'apt-get install -y --no-install-recommends
+    intel-media-va-driver mesa-va-drivers mesa-vulkan-drivers vainfo libgl1-mesa-dri'
+  - "bash -c 'apt-get install -y --no-install-recommends network-manager-config-connectivity-debian'"
+  # NetworkManager managed mode + dns=none (order matters: dns first)
+  - "bash -c 'sed -i \"/^\\[main\\]/a dns=none\" /etc/NetworkManager/NetworkManager.conf'"
+  - "bash -c 'sed -i \"s/managed=false/managed=true/\" /etc/NetworkManager/NetworkManager.conf'"
+  # Desktop user
+  - >-
+    bash -c 'useradd -m -G video,render,audio,sudo -s /bin/bash desktop 2>/dev/null ||
+    usermod -a -G video,render,audio,sudo desktop'
+  - "passwd -d desktop"
+  # Disable display managers (KasmVNC manages X)
+  - "systemctl disable sddm 2>/dev/null || true"
+  - "systemctl disable gdm 2>/dev/null || true"
+  - "systemctl disable gdm3 2>/dev/null || true"
+  - "bash -c 'su - desktop -c \"xdg-user-dirs-update\" 2>/dev/null || true'"
+  - "bash -c 'apt-get clean 2>/dev/null || true && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*'"
+
+config_files:
+  # KDE config
+  - path: /home/desktop/.config/kdeglobals
+    content: |
+      [General]
+      ColorScheme=BreezeDark
+
+      [KDE]
+      LookAndFeelPackage=org.kde.breezedark.desktop
+      widgetStyle=Breeze
+    mode: "0644"
+    mkdir: true
+    owner: "desktop:desktop"
+
+  - path: /home/desktop/.config/plasmarc
+    content: |
+      [Theme]
+      name=breeze-dark
+    mode: "0644"
+    owner: "desktop:desktop"
+
+  - path: /home/desktop/.config/kwinrc
+    content: |
+      [org.kde.kdecoration2]
+      theme=Breeze
+      ButtonsOnLeft=M
+      ButtonsOnRight=IAX
+
+      [Desktops]
+      Number=2
+      Rows=1
+    mode: "0644"
+    owner: "desktop:desktop"
+
+  - path: /home/desktop/.config/kscreenlockerrc
+    content: |
+      [Daemon]
+      Autolock=false
+      LockOnResume=false
+    mode: "0644"
+    owner: "desktop:desktop"
+
+  # KDE xstartup
+  - path: /home/desktop/.vnc/xstartup-kde
+    content: |
+      #!/bin/bash
+      kwriteconfig5 --file kscreenlockerrc --group Daemon --key Autolock false
+      kwriteconfig5 --file kscreenlockerrc --group Daemon --key LockOnResume false
+      kwriteconfig5 --file kscreenlockerrc --group Daemon --key LockGrace 0
+      kwriteconfig5 --file powermanagementprofilesrc --group AC --group DPMSControl --key idleTime 0
+      kwriteconfig5 --file powermanagementprofilesrc --group AC --group DPMSControl --key lockBeforeTurnOff 0
+      exec startplasma-x11
+    mode: "0755"
+    mkdir: true
+    owner: "desktop:desktop"
+
+  # GNOME xstartup
+  - path: /home/desktop/.vnc/xstartup-gnome
+    content: |
+      #!/bin/bash
+      export XDG_CURRENT_DESKTOP=GNOME
+      exec dbus-launch --exit-with-session gnome-session
+    mode: "0755"
+    owner: "desktop:desktop"
+
+  # Session switch script
+  - path: /usr/sbin/switch-desktop-session
+    content: |
+      #!/bin/bash
+      set -e
+      SESSION="$1"
+      DHOME=/home/desktop
+      XSTARTUP="$DHOME/.vnc/xstartup"
+
+      case "$SESSION" in
+          kde|gnome)
+              rm -f "$XSTARTUP"
+              ln -s "xstartup-$SESSION" "$XSTARTUP"
+              systemctl restart desktop-display.service
+              echo "SESSION=$SESSION"
+              echo "STATUS=ok"
+              ;;
+          status)
+              TARGET=$(readlink -f "$XSTARTUP" 2>/dev/null || echo "unknown")
+              case "$TARGET" in
+                  *kde*)   echo "SESSION=kde" ;;
+                  *gnome*) echo "SESSION=gnome" ;;
+                  *)       echo "SESSION=unknown" ;;
+              esac
+              echo "STATUS=ok"
+              ;;
+          *)
+              echo "ERROR=invalid session: $SESSION (use kde or gnome)" >&2
+              exit 1
+              ;;
+      esac
+    mode: "0755"
+
+post_commands:
+  # Default to KDE session via symlink
+  - "bash -c 'rm -f /home/desktop/.vnc/xstartup && ln -s xstartup-kde /home/desktop/.vnc/xstartup && chown -h desktop:desktop /home/desktop/.vnc/xstartup'"
+
+callhome:
+  http_probes: ""
+  config_files: ""
+
+kasmvnc:
+  app_user: desktop
+  vnc_port: 6081
+  display_num: 1
+  service_name: desktop-display
+  xstartup_exec: "exec startplasma-x11"

@@ -47,8 +47,8 @@
   ansible.builtin.command:
     cmd: qm status {{ image_version_vm_id }}
   register: _vm_stop_status
-  retries: 12
-  delay: 5
+  retries: 8
+  delay: 3
   until: "'stopped' in _vm_stop_status.stdout"
   changed_when: false
   when: not _vm_version_match | bool

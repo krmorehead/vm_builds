@@ -224,8 +224,8 @@ def _validate_callhome_token(token: str) -> bool:
 def _init_manager() -> None:
     """Initialize the shared manager with an env-based node resolver.
 
-    app.py runs the SuperManager tier — it uses ClusterManager with
-    full fleet visibility. Config is loaded from the env file and passed
+    app.py runs the SuperManager tier — global fleet view with no local
+    host metrics. Config is loaded from the env file and passed
     explicitly. No fallbacks.
     """
     env = load_active_env()
@@ -364,8 +364,7 @@ def register_api() -> None:
         node = data.register_checkin(state_dir, checkin, remote_ip)
 
         mgr = manager.get_instance()
-        if isinstance(mgr, manager.ClusterManager):
-            mgr.register_child_checkin(body)
+        mgr.register_child_checkin(body)
 
         cluster_nodes = body.get("cluster_nodes", {})
         if cluster_nodes and isinstance(cluster_nodes, dict):
@@ -608,7 +607,7 @@ def register_api() -> None:
     app.routes.insert(0, Route("/api/timeline/current", _api_timeline_current, methods=["GET"]))
     app.routes.insert(0, Route("/api/hosts/register", _api_host_register, methods=["POST"]))
 
-    manager.register_sm_api(app)
+    manager.register_api(app)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

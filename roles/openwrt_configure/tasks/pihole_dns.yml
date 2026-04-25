@@ -82,14 +82,14 @@
 
 - name: Wait for DNS to stabilize
   ansible.builtin.pause:
-    seconds: 8
+    seconds: 3
     prompt: Waiting for dnsmasq to settle after Pi-hole DNS config
 
 - name: Reconnect to OpenWrt after dnsmasq restart
   ansible.builtin.raw: echo alive
   register: _pihole_dns_reconnect
-  retries: 6
-  delay: 5
+  retries: 4
+  delay: 3
   until: _pihole_dns_reconnect.rc == 0
 
 # ── Verify DNS works through Pi-hole ─────────────────────────────

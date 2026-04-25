@@ -15,7 +15,7 @@ import logging
 import os
 import secrets
 import shutil
-import subprocess
+
 import sys
 import threading
 import time
@@ -131,12 +131,17 @@ class Labels:
     SAVE = "Save"
     CREATE_ENV = "Create .env"
     PROBE_ALL = "Probe All"
-    TEST_SSH = "Test SSH"
+    TEST_API = "Test API"
     BUILD_SELECTED = "Build Selected"
     BUILD_ALL = "Build All"
     DEPLOY_BRIDGE = "Deploy Bridge"
     RESTART_WIFI = "Restart WiFi"
     FORCE_REPAIR = "Force Re-pair"
+    SWAP_ROLES = "Swap Roles"
+    BRIDGE_HOW_IT_WORKS = "How It Works"
+    BRIDGE_STEP_DEPLOY = "Deploy"
+    BRIDGE_STEP_NEGOTIATE = "Negotiate"
+    BRIDGE_STEP_PAIR = "Pair"
     ENABLE_BATMAN = "Enable Batman"
     DISABLE_BATMAN = "Disable Batman"
     REFRESH_STATUS = "Refresh Status"
@@ -494,8 +499,8 @@ class HostStatus:
 
 
 @dataclass
-class SshResult:
-    """Result of an SSH connection test."""
+class ApiProbeResult:
+    """Result of a PVE API connectivity probe."""
 
     success: bool
     output: str = ""
@@ -846,39 +851,57 @@ def get_known_hosts(env: dict[str, str]) -> list[HostInfo]:
 
 
 def probe_all_hosts(hosts: list[HostInfo]) -> list[HostStatus]:
-    """Probe each host for TCP connectivity."""
-    results: list[HostStatus] = []
-    for host in hosts:
+    """Probe all hosts for TCP connectivity in parallel.
+
+    Uses a thread pool so reachable hosts return instantly while
+    unreachable hosts wait for their timeout independently.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _probe_one(host: HostInfo) -> HostStatus:
         if not host.ip:
-            results.append(HostStatus(host=host, reachable=False, error="No IP configured"))
-            continue
+            return HostStatus(host=host, reachable=False, error="No IP configured")
         start = time.monotonic()
-        reachable = build.probe_host(host.ip)
+        reachable = build.probe_host(host.ip, timeout=2.0)
         elapsed = (time.monotonic() - start) * 1000
-        results.append(HostStatus(
+        return HostStatus(
             host=host,
             reachable=reachable,
             latency_ms=round(elapsed, 1) if reachable else None,
-            error="" if reachable else f"Connection to {host.ip}:22 timed out",
-        ))
-    return results
-
-
-def test_ssh_connection(ip: str) -> SshResult:
-    """Test SSH connectivity to a host."""
-    try:
-        result = subprocess.run(
-            ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
-             "-o", "StrictHostKeyChecking=no", f"root@{ip}", "echo ok"],
-            capture_output=True, text=True, timeout=10,
+            error="" if reachable else f"Host {host.ip} unreachable (TCP probe failed)",
         )
-        if result.returncode == 0:
-            return SshResult(success=True, output=result.stdout.strip())
-        return SshResult(success=False, error=result.stderr.strip())
-    except subprocess.TimeoutExpired:
-        return SshResult(success=False, error="SSH connection timed out")
-    except FileNotFoundError:
-        return SshResult(success=False, error="ssh binary not found")
+
+    with ThreadPoolExecutor(max_workers=min(len(hosts), 6)) as pool:
+        return list(pool.map(_probe_one, hosts))
+
+
+def test_api_connection(ip: str) -> ApiProbeResult:
+    """Test host connectivity via PVE API (HTTPS probe, no SSH).
+
+    Any HTTP response (including 401) means the host is reachable.
+    Only connection failures count as unreachable.
+    """
+    import urllib.request
+    import urllib.error
+    import ssl
+
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    url = f"https://{ip}:8006/api2/json/version"
+    start = time.monotonic()
+    try:
+        resp = urllib.request.urlopen(url, timeout=5, context=ctx)
+        resp.read()
+        elapsed = (time.monotonic() - start) * 1000
+        return ApiProbeResult(success=True, output=f"PVE API OK ({elapsed:.0f}ms)")
+    except urllib.error.HTTPError as exc:
+        elapsed = (time.monotonic() - start) * 1000
+        return ApiProbeResult(success=True, output=f"PVE API reachable, HTTP {exc.code} ({elapsed:.0f}ms)")
+    except urllib.error.URLError as exc:
+        return ApiProbeResult(success=False, error=f"PVE API unreachable: {exc.reason}")
+    except (TimeoutError, OSError) as exc:
+        return ApiProbeResult(success=False, error=f"PVE API timeout: {exc}")
 
 
 @dataclass
@@ -892,11 +915,11 @@ class KickstartResult:
 
 
 def kickstart_callhome(host: Host) -> KickstartResult:
-    """SSH to a host and restart callhome on all running LXC containers.
+    """Restart callhome on all running LXC containers for a host.
 
-    Uses the best reachable IP (primary or VPN). Discovers running
-    containers via ``pct list``, then restarts the callhome service
-    inside each one. Safe to call on hosts that are already healthy.
+    Uses HTTP via the NodeManager API exclusively (VPN or direct).
+    No SSH fallback — if the NM is unreachable, the 4-tier system
+    is broken and must be fixed, not worked around.
     """
     ip = host.reachable_ip
     if not ip:
@@ -904,71 +927,50 @@ def kickstart_callhome(host: Host) -> KickstartResult:
             success=False, message="No reachable IP for this host"
         )
 
-    ssh_base = [
-        "ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes",
-        "-o", "StrictHostKeyChecking=no", f"root@{ip}",
-    ]
+    log = logging.getLogger("vm_builds.kickstart")
+    import urllib.request
 
-    # Discover running containers
+    health_url = f"http://{ip}:{Ports.MANAGER}/api/health"
     try:
-        result = subprocess.run(
-            [*ssh_base, "pct list 2>/dev/null | tail -n +2 | awk '{print $1, $2}'"],
-            capture_output=True, text=True, timeout=15,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-        return KickstartResult(success=False, message=f"SSH failed: {exc}")
-
-    if result.returncode != 0:
+        req = urllib.request.Request(health_url, method="GET")
+        urllib.request.urlopen(req, timeout=5)
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
+        log.warning("NodeManager HTTP unreachable at %s: %s", ip, exc)
         return KickstartResult(
-            success=False, message=f"pct list failed: {result.stderr.strip()}"
+            success=False,
+            message=f"NodeManager unreachable at {ip}:{Ports.MANAGER} — "
+                    f"VPN or kiosk may be down: {exc}",
         )
 
-    running_vmids: list[str] = []
-    for line in result.stdout.strip().splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[1].lower() == "running":
-            running_vmids.append(parts[0])
-
-    if not running_vmids:
-        return KickstartResult(
-            success=True, restarted=0,
-            message="No running containers found",
-        )
-
-    restarted = 0
-    errors: list[str] = []
-    for vmid in running_vmids:
-        cmd = (
-            f"pct exec {vmid} -- "
-            f"sh -c 'if [ -f /etc/init.d/callhome ]; then /etc/init.d/callhome restart; "
-            f"elif command -v systemctl >/dev/null 2>&1; then systemctl restart callhome 2>/dev/null; "
-            f"else echo no-callhome; fi'"
-        )
-        try:
-            r = subprocess.run(
-                [*ssh_base, cmd],
-                capture_output=True, text=True, timeout=15,
+    restart_url = f"http://{ip}:{Ports.MANAGER}/api/callhome/restart"
+    try:
+        req2 = urllib.request.Request(restart_url, method="POST")
+        resp2 = urllib.request.urlopen(req2, timeout=15)
+        if resp2.status == 200:
+            return KickstartResult(
+                success=True, restarted=1,
+                message="Restarted callhome via NodeManager HTTP API",
             )
-            if r.returncode == 0 and "no-callhome" not in r.stdout:
-                restarted += 1
-            elif "no-callhome" not in r.stdout:
-                errors.append(f"CT {vmid}: {r.stderr.strip()}")
-        except subprocess.TimeoutExpired:
-            errors.append(f"CT {vmid}: timeout")
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
+        log.warning("callhome restart via HTTP failed for %s: %s", ip, exc)
+        return KickstartResult(
+            success=False,
+            message=f"callhome restart failed via HTTP: {exc}",
+        )
 
     return KickstartResult(
-        success=True,
-        restarted=restarted,
-        errors=errors,
-        message=f"Restarted callhome on {restarted}/{len(running_vmids)} containers",
+        success=False,
+        message="Unexpected: HTTP response was not 200",
     )
 
 
 # ── Auto-kickstart for active viewers ────────────────────────────────
 
 _KICKSTART_COOLDOWN: dict[str, float] = {}
-_KICKSTART_COOLDOWN_SECONDS = 300  # 5 minutes between kickstarts per host
-_kickstart_lock = threading.Lock()
+_KICKSTART_COOLDOWN_SECONDS = 600  # 10 minutes between kickstarts per host
+_KICKSTART_GLOBAL_LOCK = threading.Lock()
+_KICKSTART_IN_PROGRESS = False
+_MAX_KICKSTARTS_PER_CYCLE = 2
 
 
 def auto_kickstart_stale_fleet(fleet: "Fleet") -> list[str]:
@@ -976,26 +978,57 @@ def auto_kickstart_stale_fleet(fleet: "Fleet") -> list[str]:
 
     Called from page refresh cycles. For each host that is NOT online but
     IS reachable (has an IP or VPN IP), restarts callhome on its containers.
-    Rate-limited to once per 5 minutes per host to avoid spamming.
+
+    Rate-limited per host (10 min cooldown), globally serialized (only one
+    kickstart cycle at a time), and capped to 2 hosts per cycle to prevent
+    connection storms that overwhelm fragile links like USB ethernet.
 
     Returns list of host names where kickstart was triggered.
     """
+    global _KICKSTART_IN_PROGRESS
+    with _KICKSTART_GLOBAL_LOCK:
+        if _KICKSTART_IN_PROGRESS:
+            return []
+        _KICKSTART_IN_PROGRESS = True
+
+    try:
+        return _do_auto_kickstart(fleet)
+    finally:
+        with _KICKSTART_GLOBAL_LOCK:
+            _KICKSTART_IN_PROGRESS = False
+
+
+def _do_auto_kickstart(fleet: "Fleet") -> list[str]:
+    from scripts.webui import heartbeat
+
     now = time.monotonic()
     triggered: list[str] = []
+    log = logging.getLogger("vm_builds.auto_kickstart")
 
-    for host in fleet.hosts:
-        if host.online:
-            continue
-        if not host.reachable_ip:
+    stale_hosts = [
+        h for h in fleet.hosts
+        if not h.online and h.reachable_ip
+    ]
+
+    for host in stale_hosts:
+        if len(triggered) >= _MAX_KICKSTARTS_PER_CYCLE:
+            log.debug("Hit per-cycle cap (%d), deferring remaining hosts", _MAX_KICKSTARTS_PER_CYCLE)
+            break
+
+        cb_status = heartbeat.get_circuit_status(host.reachable_ip)
+        if cb_status["is_open"]:
+            log.debug(
+                "Skipping %s: circuit breaker open (%.0fs remaining)",
+                host.name, cb_status["backoff_remaining_s"],
+            )
             continue
 
-        with _kickstart_lock:
+        with _KICKSTART_GLOBAL_LOCK:
             last = _KICKSTART_COOLDOWN.get(host.name, 0)
             if now - last < _KICKSTART_COOLDOWN_SECONDS:
                 continue
             _KICKSTART_COOLDOWN[host.name] = now
 
-        log = logging.getLogger("vm_builds.auto_kickstart")
         log.info("Auto-kickstarting stale host: %s via %s", host.name, host.reachable_ip)
         result = kickstart_callhome(host)
         if result.success and result.restarted > 0:
@@ -1003,6 +1036,8 @@ def auto_kickstart_stale_fleet(fleet: "Fleet") -> list[str]:
             log.info("Kickstarted %s: %s", host.name, result.message)
         elif not result.success:
             log.warning("Kickstart failed for %s: %s", host.name, result.message)
+
+        time.sleep(0.5)
 
     return triggered
 
@@ -1034,7 +1069,7 @@ SERVICE_TAGS: list[ServiceTag] = [
     ServiceTag("media", "Jellyfin + Kodi", "Media", ["home"]),
     ServiceTag("moonlight", "Moonlight streaming client", "Media", ["mesh1"]),
     ServiceTag("desktop", "Debian XFCE desktop LXC", "Desktop", ["home", "mesh1", "ai", "mesh2", "bridge-1", "bridge-2"]),
-    ServiceTag("kiosk", "Custom UX kiosk", "Desktop", ["home", "mesh1", "ai", "mesh2"]),
+    ServiceTag("kiosk", "Custom UX kiosk", "Desktop", ["home", "mesh1", "ai", "mesh2", "bridge-1", "bridge-2"]),
     ServiceTag("mesh-wifi", "Mesh WiFi LXC", "WiFi", ["mesh1", "mesh2"]),
     ServiceTag("bridge", "Dedicated WiFi Bridge", "Network", ["bridge-1", "bridge-2"]),
     ServiceTag("gaming", "Gaming LXC (opt-in)", "Gaming", ["ai"], is_opt_in=True),
@@ -1274,7 +1309,7 @@ class Host:
         if self.telemetry and self.telemetry.status == "offline":
             issues.append("Host offline — no heartbeat received recently")
         elif not self.telemetry and self.reachable is False:
-            issues.append("Host unreachable — SSH port 22 not responding")
+            issues.append("Host unreachable — PVE API and NM not responding")
         return issues
 
     @property
@@ -1455,7 +1490,7 @@ class Fleet:
 
     @property
     def reachable_count(self) -> int:
-        """Hosts reachable via SSH (with or without heartbeat)."""
+        """Hosts reachable via PVE API or NM health check."""
         return sum(1 for h in self.hosts if h.online or h.reachable)
 
     @property
@@ -1530,14 +1565,23 @@ def _deploy_targets_host(record: DeployRecord, host_name: str) -> bool:
     return host_name in record.host_limit
 
 
-def build_fleet(env: dict[str, str], state_dir: Path) -> Fleet:
+def build_fleet(
+    env: dict[str, str],
+    state_dir: Path,
+    *,
+    probe: bool = True,
+) -> Fleet:
     """Build a Fleet from the HostRegistry, deploy history, and live telemetry.
 
     Wires together four data sources into a single domain object:
     1. Host identity from registry.json (via HostRegistry)
     2. Deploy history from deploy_history.json
     3. Live telemetry from nodes.json (callhome heartbeats)
-    4. TCP probes for hosts without heartbeat data
+    4. TCP probes for hosts without heartbeat data (when probe=True)
+
+    Set probe=False for timer-driven refreshes to avoid blocking the
+    event loop on network timeouts.  Probing is only needed for the
+    initial page load or explicit user-triggered refreshes.
     """
     registry = HostRegistry(state_dir)
     registry.seed_from_env(env)
@@ -1583,19 +1627,21 @@ def build_fleet(env: dict[str, str], state_dir: Path) -> Fleet:
             ))
         hosts.append(host)
 
-    _probe_reachable_hosts(hosts)
+    if probe:
+        _probe_reachable_hosts(hosts)
 
     return Fleet(hosts)
 
 
 def _probe_reachable_hosts(hosts: list[Host]) -> None:
-    """Fast parallel TCP port-22 probe for hosts without heartbeat data.
+    """Probe hosts for reachability via the NodeManager HTTP API.
 
-    Tries the primary IP first. For nationally distributed units behind
-    NAT/firewalls where the primary IP is unreachable, falls back to the
-    WireGuard VPN IP which traverses the firewall via the persistent
-    tunnel. LAN hosts (need ProxyCommand) are probed via VPN if
-    configured, since the VPN bypasses the router dependency.
+    HTTP health check on the NM API (port 9001) is the ONLY probe.
+    No SSH fallback — if the NM is unreachable, the host is down
+    for management purposes.
+
+    Tries VPN IP first (for NAT-traversal), then WAN IP.
+    Limits parallelism to 4 to avoid connection storms.
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -1604,16 +1650,27 @@ def _probe_reachable_hosts(hosts: list[Host]) -> None:
         return
 
     def _probe(host: Host) -> None:
-        if host.ip and not host.is_lan:
-            if build.probe_host(host.ip, timeout=2.0):
-                host.reachable = True
-                return
-        if host.vpn_ip:
-            host.reachable = build.probe_host(host.vpn_ip, timeout=2.0)
-        elif not host.is_lan:
-            host.reachable = False
+        from scripts.webui import heartbeat as hb
 
-    with ThreadPoolExecutor(max_workers=min(len(probeable), 10)) as pool:
+        for ip in [host.vpn_ip, host.ip if not host.is_lan else ""]:
+            if not ip:
+                continue
+            cb = hb.get_circuit_status(ip)
+            if cb["is_open"]:
+                continue
+            try:
+                import urllib.request
+                req = urllib.request.Request(
+                    f"http://{ip}:9001/api/health", method="GET",
+                )
+                resp = urllib.request.urlopen(req, timeout=3)
+                if resp.status == 200:
+                    host.reachable = True
+                    return
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError):
+                pass
+
+    with ThreadPoolExecutor(max_workers=min(len(probeable), 4)) as pool:
         list(pool.map(_probe, probeable))
 
 

@@ -1,0 +1,37 @@
+---
+# Shared task: upload LXC template to Proxmox host's cache if not present.
+# Used by all API-driven LXC provisioning roles.
+#
+# Required variables (set via include_tasks vars:):
+#   lxc_upload_template_path  — full path to the template on the controller
+#   lxc_upload_service_name   — human-readable name for log messages
+
+- name: "Check if template is cached on host — {{ lxc_upload_service_name }}"
+  ansible.builtin.command:
+    cmd: "test -f /var/lib/vz/template/cache/{{ lxc_upload_template_path | basename }}"
+  register: _upload_template_cached
+  changed_when: false
+  failed_when: false
+
+- name: "Upload template to Proxmox host — {{ lxc_upload_service_name }}"
+  ansible.builtin.copy:
+    src: "{{ lxc_upload_template_path }}"
+    dest: "/var/lib/vz/template/cache/{{ lxc_upload_template_path | basename }}"
+    mode: "0644"
+  when: _upload_template_cached.rc != 0
+
+- name: "Prune old templates — {{ lxc_upload_service_name }}"
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      prefix="{{ lxc_upload_template_path | basename | regex_replace('-[0-9]+\\.[0-9]+\\.[0-9]+.*', '') }}"
+      current="{{ lxc_upload_template_path | basename }}"
+      cd /var/lib/vz/template/cache
+      for f in ${prefix}-*; do
+        [ "$f" != "$current" ] && [ -f "$f" ] && rm -f "$f" && echo "removed: $f"
+      done
+      echo "done"
+    executable: /bin/bash
+  register: _template_prune
+  changed_when: "'removed:' in _template_prune.stdout"
+  when: _upload_template_cached.rc != 0

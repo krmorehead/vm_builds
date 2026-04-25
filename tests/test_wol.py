@@ -9,7 +9,10 @@ Run with: pytest tests/test_wol.py -v
 import re
 from pathlib import Path
 
+import pytest
 import yaml
+
+pytestmark = pytest.mark.no_infra
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WOL_SCRIPT = REPO_ROOT / "scripts" / "wol.sh"

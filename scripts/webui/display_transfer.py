@@ -6,7 +6,7 @@ between mutually exclusive display apps, and provides viewstream URL discovery.
 
 Two concrete handler types cover all current and future apps:
 
-    DisplayHandler  — LXC containers running KasmVNC Xvnc
+    DisplayHandler  — LXC containers running KasmVNC Xvnc (via PVE API)
     WebViewHandler  — Services with HTTP web UIs (no lifecycle management)
 """
 
@@ -14,16 +14,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass
-from typing import Callable, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 from scripts.webui.data import DisplayAppConfig
+from scripts.webui.pve_api import PveApiError
 
 log = logging.getLogger("vm_builds.display_transfer")
 
 ALREADY_RUNNING = "already running"
-SSH_STATUS_TIMEOUT = 10
-SSH_GUEST_OP_TIMEOUT = 30
-PROXMOX_STATUS_RUNNING = "status: running"
 
 
 # ── Models ────────────────────────────────────────────────────────────
@@ -47,7 +45,7 @@ class HandlerMetadata:
 # ── Handler Protocol ──────────────────────────────────────────────────
 
 
-SshExecFn = Callable[[str, str, int], tuple[bool, str]]
+PveApiLike = Any
 
 
 @runtime_checkable
@@ -76,11 +74,11 @@ class DisplayHandlerProtocol(Protocol):
 
 
 class DisplayHandler:
-    """Unified handler for LXC containers with KasmVNC displays.
+    """Manages display streaming for LXC containers with KasmVNC.
 
-    All managed display apps are LXC containers. The handler uses
-    pct start/stop for lifecycle and http://{host}:{port} for URL
-    discovery. Conflict resolution is handled by DisplayTransferService.
+    Uses the Proxmox REST API for container lifecycle (start/stop/status)
+    and http://{host}:{port} for viewstream URL discovery. Conflict
+    resolution is handled by DisplayTransferService.
     """
 
     def __init__(
@@ -89,13 +87,13 @@ class DisplayHandler:
         ct_id: str,
         port: int,
         conflicts: list[str],
-        ssh_exec: SshExecFn,
+        pve: PveApiLike | None = None,
     ) -> None:
         self._app_id = app_id
         self._ct_id = ct_id
         self._port = port
         self._conflicts = list(conflicts)
-        self._ssh = ssh_exec
+        self._pve = pve
 
     @property
     def app_id(self) -> str:
@@ -113,22 +111,33 @@ class DisplayHandler:
         return f"http://{host_ip}:{self._port}"
 
     def enter(self, host_ip: str) -> TransferResult:
-        ok, out = self._ssh(host_ip, f"pct start {self._ct_id}", SSH_GUEST_OP_TIMEOUT)
-        if not ok and ALREADY_RUNNING in out:
-            ok = True
-        url = self.get_viewstream_url(host_ip) if ok else None
-        return TransferResult(
-            success=ok, viewstream_url=url,
-            error=out if not ok else None,
-        )
+        if not self._pve:
+            return TransferResult(success=False, error="No PVE API configured")
+        try:
+            self._pve.ct_start(int(self._ct_id))
+            return TransferResult(success=True, viewstream_url=self.get_viewstream_url(host_ip))
+        except (PveApiError, OSError, TimeoutError) as exc:
+            if ALREADY_RUNNING in str(exc):
+                return TransferResult(success=True, viewstream_url=self.get_viewstream_url(host_ip))
+            return TransferResult(success=False, error=str(exc)[:300])
 
     def exit(self, host_ip: str) -> TransferResult:
-        ok, out = self._ssh(host_ip, f"pct stop {self._ct_id}", SSH_GUEST_OP_TIMEOUT)
-        return TransferResult(success=ok, error=out if not ok else None)
+        if not self._pve:
+            return TransferResult(success=False, error="No PVE API configured")
+        try:
+            self._pve.ct_stop(int(self._ct_id))
+            return TransferResult(success=True)
+        except (PveApiError, OSError, TimeoutError) as exc:
+            return TransferResult(success=False, error=str(exc)[:300])
 
     def is_active(self, host_ip: str) -> bool:
-        ok, out = self._ssh(host_ip, f"pct status {self._ct_id}", SSH_STATUS_TIMEOUT)
-        return ok and PROXMOX_STATUS_RUNNING in out
+        if not self._pve:
+            return False
+        try:
+            status = self._pve.ct_status(int(self._ct_id))
+            return (status or {}).get("status") == "running"
+        except (PveApiError, OSError, TimeoutError):
+            return False
 
 
 class WebViewHandler:
@@ -175,12 +184,12 @@ class WebViewHandler:
 # ── Handler Factory ───────────────────────────────────────────────────
 
 
-_HANDLER_BUILDERS: dict[str, Callable[[DisplayAppConfig, SshExecFn], DisplayHandlerProtocol]] = {
-    "container_display": lambda cfg, ssh: DisplayHandler(
+_HANDLER_BUILDERS: dict[str, Callable[..., DisplayHandlerProtocol]] = {
+    "container_display": lambda cfg, pve=None, **_kw: DisplayHandler(
         app_id=cfg.app_id, ct_id=cfg.ct_id, port=cfg.display_port,
-        conflicts=cfg.conflicts, ssh_exec=ssh,
+        conflicts=cfg.conflicts, pve=pve,
     ),
-    "web_view": lambda cfg, _ssh: WebViewHandler(
+    "web_view": lambda cfg, **_kw: WebViewHandler(
         app_id=cfg.app_id, service_port=cfg.service_port,
         service_path=cfg.service_path,
     ),
@@ -189,12 +198,15 @@ _HANDLER_BUILDERS: dict[str, Callable[[DisplayAppConfig, SshExecFn], DisplayHand
 HANDLER_TYPES: frozenset[str] = frozenset(_HANDLER_BUILDERS.keys())
 
 
-def build_handler(config: DisplayAppConfig, ssh_exec: SshExecFn) -> DisplayHandlerProtocol:
+def build_handler(
+    config: DisplayAppConfig,
+    pve: PveApiLike | None = None,
+) -> DisplayHandlerProtocol:
     """Build a concrete DisplayHandler from a DisplayAppConfig."""
     builder = _HANDLER_BUILDERS.get(config.handler_type)
     if builder is None:
         raise ValueError(f"Unknown handler_type: {config.handler_type!r}")
-    return builder(config, ssh_exec)
+    return builder(config, pve=pve)
 
 
 # ── Display Transfer Service ─────────────────────────────────────────

@@ -70,7 +70,7 @@
     status_code: 200
   delegate_to: localhost
   register: _jellyfin_ready
-  retries: 30
+  retries: 10
   delay: 2
   until: >-
     (_jellyfin_ready.json.success | default(false)) | bool

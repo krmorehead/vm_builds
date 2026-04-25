@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.no_infra
+
 from scripts.wifi_negotiate import (
     BAND_PRIORITY,
     BandCapabilities,

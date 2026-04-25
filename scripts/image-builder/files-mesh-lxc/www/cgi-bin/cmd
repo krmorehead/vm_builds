@@ -1,0 +1,87 @@
+#!/bin/sh
+# CGI command endpoint for OpenWrt/BusyBox containers.
+# Served by uhttpd on port 9002.
+# Accepts POST with JSON body: {"command": "...", "token": "..."}
+
+CONF="/etc/default/callhome"
+[ -f "$CONF" ] && . "$CONF"
+AUTH_TOKEN="${CALLHOME_PUBLIC_KEY:-}"
+
+ALLOWED_PREFIXES="/usr/sbin/batman_trigger.sh /usr/sbin/wifi_setup.sh cat iw uci brctl uptime free df /etc/init.d/callhome"
+
+is_allowed() {
+    local cmd="$1"
+    for prefix in $ALLOWED_PREFIXES; do
+        case "$cmd" in
+            "$prefix"|"$prefix "*)
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+json_response() {
+    local body="$1"
+    echo "Status: 200 OK"
+    echo "Content-Type: application/json"
+    echo ""
+    echo "$body"
+}
+
+json_error() {
+    local code="$1"
+    local body="$2"
+    echo "Status: $code"
+    echo "Content-Type: application/json"
+    echo ""
+    echo "$body"
+}
+
+if [ "$REQUEST_METHOD" = "GET" ] && [ "$PATH_INFO" = "/health" ]; then
+    json_response '{"status":"ok"}'
+    exit 0
+fi
+
+if [ "$REQUEST_METHOD" != "POST" ]; then
+    json_error "405 Method Not Allowed" '{"error":"POST required"}'
+    exit 0
+fi
+
+post_body=""
+if [ "${CONTENT_LENGTH:-0}" -gt 0 ] 2>/dev/null; then
+    post_body=$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)
+fi
+
+token=""
+cmd=""
+if command -v jsonfilter >/dev/null 2>&1; then
+    token=$(echo "$post_body" | jsonfilter -e '@.token' 2>/dev/null)
+    cmd=$(echo "$post_body" | jsonfilter -e '@.command' 2>/dev/null)
+else
+    token=$(echo "$post_body" | sed -n 's/.*"token" *: *"\([^"]*\)".*/\1/p')
+    cmd=$(echo "$post_body" | sed -n 's/.*"command" *: *"\([^"]*\)".*/\1/p')
+fi
+
+if [ -n "$AUTH_TOKEN" ] && [ "$token" != "$AUTH_TOKEN" ]; then
+    json_error "403 Forbidden" '{"success":false,"error":"Unauthorized"}'
+    exit 0
+fi
+
+if [ -z "$cmd" ]; then
+    json_error "400 Bad Request" '{"success":false,"error":"command required"}'
+    exit 0
+fi
+
+if ! is_allowed "$cmd"; then
+    json_error "403 Forbidden" '{"success":false,"error":"Command not whitelisted"}'
+    exit 0
+fi
+
+output=$(eval "$cmd" 2>&1)
+rc=$?
+success="false"
+[ "$rc" -eq 0 ] && success="true"
+
+output=$(echo "$output" | head -c 4000 | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' '|' | sed 's/|/\\n/g')
+json_response "{\"success\":${success},\"output\":\"${output}\",\"returncode\":${rc}}"

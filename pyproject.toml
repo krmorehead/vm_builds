@@ -6,6 +6,8 @@ requires-python = ">=3.10"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+timeout = 15
 markers = [
     "integration: Tests requiring real infrastructure (SSH, Proxmox hosts, deployed containers).",
+    "no_infra: Pure unit tests exempt from the VPN+Kiosk infrastructure gate.",
 ]

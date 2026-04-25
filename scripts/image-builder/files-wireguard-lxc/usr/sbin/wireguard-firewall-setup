@@ -4,8 +4,10 @@
 #
 # DNAT_TARGET is read from /etc/wireguard/firewall.env (set by wireguard_configure).
 # Falls back to the default gateway if the file doesn't exist.
+# LOCAL_VPN_IP restricts DNAT to traffic addressed to this node only,
+# preventing the hub from intercepting transit traffic for other peers.
 
-set -euo pipefail
+set -uo pipefail
 
 if [ -f /etc/wireguard/firewall.env ]; then
   . /etc/wireguard/firewall.env
@@ -14,13 +16,16 @@ fi
 TARGET="${DNAT_TARGET:-$(ip route show default | awk '{print $3}' | head -1)}"
 [ -z "$TARGET" ] && exit 0
 
+LOCAL_VPN_IP=$(ip -4 addr show wg0 2>/dev/null | awk '/inet /{sub(/\/.*/, "", $2); print $2}')
+[ -z "$LOCAL_VPN_IP" ] && exit 0
+
 iptables -t nat -C POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || \
   iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
 
 for PORT in 6080 6081 6082 6083 9001; do
-  iptables -t nat -C PREROUTING -i wg0 -p tcp --dport "$PORT" \
+  iptables -t nat -C PREROUTING -i wg0 -d "$LOCAL_VPN_IP" -p tcp --dport "$PORT" \
     -j DNAT --to-destination "$TARGET:$PORT" 2>/dev/null || \
-    iptables -t nat -A PREROUTING -i wg0 -p tcp --dport "$PORT" \
+    iptables -t nat -A PREROUTING -i wg0 -d "$LOCAL_VPN_IP" -p tcp --dport "$PORT" \
       -j DNAT --to-destination "$TARGET:$PORT"
 
   iptables -C FORWARD -i wg0 -d "$TARGET" -p tcp --dport "$PORT" \

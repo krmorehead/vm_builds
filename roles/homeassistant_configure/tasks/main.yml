@@ -28,8 +28,8 @@
     status_code: 200
   delegate_to: localhost
   register: _ha_services
-  retries: 30
-  delay: 10
+  retries: 10
+  delay: 3
   until: >-
     (_ha_services.json.success | default(false)) | bool
     and 'home-assistant' in (_ha_services.json.output | default(''))
@@ -56,8 +56,8 @@
     status_code: 200
   delegate_to: localhost
   register: _ha_http_check
-  retries: 15
-  delay: 10
+  retries: 10
+  delay: 3
   until: >-
     (_ha_http_check.json.success | default(false)) | bool
     and (_ha_http_check.json.output | default('') | trim) in ['200', '301', '302']

@@ -199,18 +199,41 @@ Wasted the entire testing session verifying expected failures.
 
 ## Diagnosing test failures
 
-When a test fails, follow this diagnostic order:
+When a test fails, ALWAYS check host logs BEFORE re-running. All 6 Proxmox
+hosts have persistent journalctl that survives across runs. NEVER blindly
+re-run a failed test — the answer is already in the logs.
 
-1. **Read the full error context** — grep for `FAILED`, `fatal:`, `UNREACHABLE` in the terminal output.
-2. **Check dmesg on the target** — kernel-level errors (IPv6 DAD, segfaults, interface errors) are often the root cause when application-level symptoms are misleading.
-3. **Check interface/bridge state** — `ip addr`, `ip route`, bridge memberships.
-4. **Check firewall state** — zone bindings, nftables chains.
-5. **Test actual protocols** — ICMP ping working does NOT mean TCP works. Always test with the protocol the application uses.
-6. **Add permanent diagnostics** — if you had to add ad-hoc debug tasks, generalize them and make them permanent so the next failure is easier to diagnose.
+Diagnostic order:
+
+1. **Check host logs on ALL 6 units** — `journalctl --since '<start>' -p err`
+   on each Proxmox host. This takes 30 seconds and immediately reveals errors
+   like failed `pct push`, container create failures, or service crashes.
+2. **Check NodeManager logs** — `journalctl -u kiosk-server` on each host
+   for API-level errors during the run.
+3. **Check container logs** — `pct exec <vmid> -- journalctl -u callhome`
+   for heartbeat failures inside containers.
+4. **Read the full error context** — grep for `FAILED`, `fatal:`, `UNREACHABLE`
+   in the terminal output (if captured).
+5. **Check dmesg on the target** — kernel-level errors (IPv6 DAD, segfaults,
+   interface errors, USB resets) are often the root cause.
+6. **Check interface/bridge state** — `ip addr`, `ip route`, bridge memberships.
+7. **Check firewall state** — zone bindings, nftables chains.
+8. **Test actual protocols** — ICMP ping working does NOT mean TCP works.
+9. **Add permanent diagnostics** — if you had to add ad-hoc debug tasks,
+   generalize them and make them permanent.
+
+NEVER start a new molecule test to "see what happens." Fix the root cause
+from the logs, THEN re-run. A 30-minute re-run that hits the same error
+is pure waste.
 
 Previous bug: `ping 8.8.8.8` worked but `wget` got EPERM. Root cause was
 IPv6 DAD failure from duplicate MAC corrupting uclient/libubox — only visible
 in `dmesg`.
+
+Previous waste (2026-04-24): molecule test failed with `pct push` errors on
+all 6 hosts. Instead of checking `journalctl -p err` (30 seconds, shows the
+error immediately), a second full molecule test was started — 30+ minutes
+wasted hitting the identical failure.
 
 ## SHOW STOPPER: Unreachable host protocol
 

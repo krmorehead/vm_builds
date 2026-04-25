@@ -1,0 +1,122 @@
+---
+service: gaming
+base_template: build-base-fedora-41-amd64.tar.zst
+base_template_url: https://images.linuxcontainers.org/images/fedora/41/amd64/default/
+build_vmid: 990
+hostname: gaming-build
+memory: 2048
+cores: 2
+disk: "8"
+unprivileged: false
+ostype: unmanaged
+features: "nesting=1"
+
+setup_commands:
+  - "echo nameserver 8.8.8.8 > /etc/resolv.conf"
+
+install_commands:
+  - >-
+    bash -c 'dnf install -y
+    https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-41.noarch.rpm
+    https://download1.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-41.noarch.rpm
+    2>&1 | tail -3'
+  - >-
+    bash -c 'dnf install -y --skip-unavailable
+    mesa-dri-drivers mesa-vulkan-drivers mesa-vdpau-drivers
+    libva-utils vulkan-tools
+    xorg-x11-server-Xorg xorg-x11-drv-modesetting xorg-x11-xinit xrandr
+    pipewire pipewire-pulseaudio wireplumber gamemode
+    python3 bash systemd dbus procps-ng iproute net-tools
+    curl wget ca-certificates
+    2>&1 | tail -10'
+  - "bash -c 'dnf swap -y mesa-va-drivers mesa-va-drivers-freeworld 2>&1 | tail -5'"
+  - "bash -c 'dnf install -y dsda-doom freedoom 2>&1 | tail -5'"
+  - "bash -c 'dnf copr enable -y lizardbyte/stable 2>&1 | tail -3'"
+  - "bash -c 'dnf install -y sunshine 2>&1 | tail -3'"
+
+config_files:
+  - path: /etc/X11/xorg-virtual.conf
+    content: |
+      Section "Device"
+          Identifier  "GPU"
+          Driver      "modesetting"
+      EndSection
+
+      Section "Screen"
+          Identifier  "Screen0"
+          Device      "GPU"
+          DefaultDepth 24
+          SubSection "Display"
+              Depth 24
+              Modes "1920x1080" "1280x720"
+          EndSubSection
+      EndSection
+
+      Section "ServerLayout"
+          Identifier  "Layout0"
+          Screen 0    "Screen0"
+      EndSection
+    mode: "0644"
+    mkdir: true
+
+  - path: /etc/systemd/system/xorg-virtual.service
+    content: |
+      [Unit]
+      Description=Headless Xorg display server
+      After=systemd-logind.service
+
+      [Service]
+      Type=simple
+      ExecStart=/usr/bin/Xorg :0 -config /etc/X11/xorg-virtual.conf -noreset
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+    mode: "0644"
+
+  - path: /etc/systemd/system/sunshine.service
+    content: |
+      [Unit]
+      Description=Sunshine game streaming server
+      After=xorg-virtual.service
+      Requires=xorg-virtual.service
+
+      [Service]
+      Type=simple
+      Environment=DISPLAY=:0
+      Environment=XDG_RUNTIME_DIR=/run/user/0
+      ExecStart=/usr/bin/sunshine
+      Restart=on-failure
+      RestartSec=10
+
+      [Install]
+      WantedBy=multi-user.target
+    mode: "0644"
+
+  - path: /etc/systemd/system/pipewire.service.d/override.conf
+    content: |
+      [Unit]
+      Description=PipeWire Multimedia Service (system)
+
+      [Service]
+      Type=simple
+      ExecStart=
+      ExecStart=/usr/bin/pipewire
+      Environment=XDG_RUNTIME_DIR=/run/user/0
+
+      [Install]
+      WantedBy=multi-user.target
+    mode: "0644"
+    mkdir: true
+
+post_commands:
+  - "systemctl enable xorg-virtual.service 2>/dev/null || true"
+  - "systemctl enable sunshine.service 2>/dev/null || true"
+  - "bash -c 'dnf clean all && rm -rf /var/cache/dnf /tmp/* /var/tmp/*'"
+
+callhome:
+  http_probes: "https://127.0.0.1:47990"
+  config_files: ""
+
+kasmvnc: null

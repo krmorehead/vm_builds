@@ -2,9 +2,9 @@
 
 Runs inside the kiosk LXC container on every Proxmox host. Serves the
 Home Hub dashboard and infrastructure detail pages (bridge, mesh, router).
-Also acts as the host's local manager: collects metrics from sibling
-containers via SSH, accepts heartbeat subscriptions, and handles batman
-trigger API calls.
+Also acts as the host's local manager: collects container health via
+callhome heartbeats, accepts heartbeat subscriptions, and handles batman
+trigger API calls over HTTP.
 
 Reads service URLs, node IPs, and MESH_KEY from /opt/kiosk/config.json.
 
@@ -28,8 +28,10 @@ _PROJECT_ROOT = _SCRIPT_DIR.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+import hmac as _hmac
+
 from scripts.webui import manager  # noqa: E402
-from scripts.webui.data import load_kiosk_config, set_server_port  # noqa: E402
+from scripts.webui.data import load_kiosk_config, set_server_port, validate_callhome_token  # noqa: E402
 
 
 def _build_node_resolver(config: dict) -> Callable[[str], str | None]:
@@ -40,6 +42,18 @@ def _build_node_resolver(config: dict) -> Callable[[str], str | None]:
         return node_ips.get(node_id)
 
     return resolver
+
+
+def _build_auth_validator(config: dict) -> Callable[[str], bool]:
+    """Build an auth validator from the callhome public key in config."""
+    public_key = config.get("CALLHOME_PUBLIC_KEY", "")
+
+    def validator(token: str) -> bool:
+        if not public_key:
+            return False
+        return _hmac.compare_digest(token, public_key)
+
+    return validator
 
 
 def create_app(config_path: Path | None = None) -> None:
@@ -55,6 +69,7 @@ def create_app(config_path: Path | None = None) -> None:
 
     manager.init(
         _build_node_resolver(urls),
+        auth_validator=_build_auth_validator(urls),
         config=urls,
         manager_class=mgr_class,
     )
@@ -134,8 +149,7 @@ def main() -> None:
 
     async def _on_startup() -> None:
         mgr = manager.get_instance()
-        if isinstance(mgr, manager.NodeManager):
-            await mgr.fetch_host_state_from_upstream()
+        await mgr.fetch_host_state_from_upstream()
         manager.start_poller()
 
     app.on_startup(_on_startup)

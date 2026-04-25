@@ -164,13 +164,13 @@
           ansible.builtin.shell:
             cmd: >-
               pct exec {{ pihole_ct_id }} -- /bin/sh -c
-              'systemctl restart pihole-FTL && sleep 5' &&
+              'systemctl restart pihole-FTL && sleep 3' &&
               pct exec {{ pihole_ct_id }} --
               dig @127.0.0.1 google.com +short +time=5
           register: _pihole_dns
           changed_when: false
           retries: 2
-          delay: 10
+          delay: 5
           until: >-
             _pihole_dns.rc == 0 and
             (_pihole_dns.stdout | trim | length > 0) and

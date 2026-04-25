@@ -30,7 +30,6 @@ platforms:
       - wifi_nodes
       - monitoring_nodes
       - streaming_nodes
-      - desktop_nodes
       - kiosk_nodes
   - name: ai
     groups:
@@ -38,7 +37,6 @@ platforms:
       - vpn_nodes
       - monitoring_nodes
       - gaming_nodes
-      - desktop_nodes
       - kiosk_nodes
   - name: mesh2
     groups:
@@ -46,21 +44,18 @@ platforms:
       - vpn_nodes
       - wifi_nodes
       - monitoring_nodes
-      - desktop_nodes
       - kiosk_nodes
   - name: bridge-1
     groups:
       - proxmox
       - vpn_nodes
       - bridge_nodes
-      - desktop_nodes
       - kiosk_nodes
   - name: bridge-2
     groups:
       - proxmox
       - vpn_nodes
       - bridge_nodes
-      - desktop_nodes
       - kiosk_nodes
 
 provisioner:
@@ -102,6 +97,12 @@ provisioner:
     WIREGUARD_PUBLIC_KEY_CONTROLLER: ${WIREGUARD_PUBLIC_KEY_CONTROLLER}
     WIREGUARD_SERVER_ENDPOINT: ${WIREGUARD_SERVER_ENDPOINT}
     WIREGUARD_HUB_PUBLIC_KEY: ${WIREGUARD_HUB_PUBLIC_KEY}
+    WIREGUARD_PRIVATE_KEY_HOME: ${WIREGUARD_PRIVATE_KEY_HOME}
+    WIREGUARD_PRIVATE_KEY_MESH1: ${WIREGUARD_PRIVATE_KEY_MESH1}
+    WIREGUARD_PRIVATE_KEY_AI: ${WIREGUARD_PRIVATE_KEY_AI}
+    WIREGUARD_PRIVATE_KEY_MESH2: ${WIREGUARD_PRIVATE_KEY_MESH2}
+    WIREGUARD_PRIVATE_KEY_BRIDGE_1: ${WIREGUARD_PRIVATE_KEY_BRIDGE_1}
+    WIREGUARD_PRIVATE_KEY_BRIDGE_2: ${WIREGUARD_PRIVATE_KEY_BRIDGE_2}
     CONTROLLER_VPN_IP: ${CONTROLLER_VPN_IP}
   inventory:
     links:

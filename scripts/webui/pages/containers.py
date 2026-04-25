@@ -76,9 +76,9 @@ async def _render_containers(fleet: Fleet) -> None:
                             f"color: {theme.TEXT_SECONDARY}"
                         )
                         theme.help_tooltip(
-                            "The manager could not reach the Proxmox host via SSH. "
-                            "Check that HOST_IP is set in config.json and the kiosk's "
-                            "SSH key is authorized on the host."
+                            "The manager could not reach the Proxmox host via PVE API. "
+                            "Check that HOST_IP is set in config.json and the PVE API "
+                            "token is configured."
                         )
                 return
 

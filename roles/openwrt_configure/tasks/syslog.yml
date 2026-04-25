@@ -7,27 +7,27 @@
 
 # ── Get rsyslog container IP from Proxmox ──────────────────────
 
-- name: Get rsyslog container IP from Proxmox config
+- name: Get rsyslog container IP from pct config
   ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      pct config {{ rsyslog_ct_id }} | grep -oP 'ip=\K[^/,]+'
+    cmd: >-
+      set -o pipefail &&
+      pct config {{ rsyslog_ct_id }} 2>/dev/null
+      | awk -F'[=,/]' '/^net0:.*ip=/{for(i=1;i<=NF;i++) if($i~/^ip$/) print $(i+1)}'
     executable: /bin/bash
-  register: _rsyslog_ip_query
-  changed_when: false
+  register: _rsyslog_pct_ip
   delegate_to: "{{ groups['router_nodes'][0] }}"
+  changed_when: false
 
 - name: Fail if rsyslog container IP not found
   ansible.builtin.fail:
     msg: >-
       Could not determine rsyslog container IP from pct config on
-      {{ groups['router_nodes'][0] }}. Is the rsyslog container (VMID
-      {{ rsyslog_ct_id }}) provisioned?
-  when: (_rsyslog_ip_query.stdout | trim) | length == 0
+      {{ groups['router_nodes'][0] }}. Is CT {{ rsyslog_ct_id }} provisioned?
+  when: (_rsyslog_pct_ip.stdout | default('') | trim) | length == 0
 
 - name: Set rsyslog static IP
   ansible.builtin.set_fact:
-    rsyslog_static_ip: "{{ _rsyslog_ip_query.stdout | trim }}"
+    rsyslog_static_ip: "{{ _rsyslog_pct_ip.stdout | trim }}"
 
 - name: Report syslog forwarding target
   ansible.builtin.debug:

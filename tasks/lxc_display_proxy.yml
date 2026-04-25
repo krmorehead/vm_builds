@@ -36,7 +36,9 @@
 
       [Service]
       Type=simple
-      ExecStart=/usr/bin/socat TCP-LISTEN:{{ _display_proxy_port }},reuseaddr,fork TCP:{{ _display_proxy_target }}:{{ _display_proxy_port }}
+      ExecStart=/usr/bin/socat \
+        TCP-LISTEN:{{ _display_proxy_port }},reuseaddr,fork,keepalive,keepidle=15,keepcnt=3,keepintvl=5 \
+        TCP:{{ _display_proxy_target }}:{{ _display_proxy_port }},keepalive,keepidle=15,keepcnt=3,keepintvl=5
       Restart=always
       RestartSec=3
 

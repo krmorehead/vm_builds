@@ -270,7 +270,8 @@
       ansible.builtin.shell:
         cmd: |
           for svc in kiosk-manager-proxy kiosk-display-proxy \
-                     manager-api-proxy kiosk-vnc-proxy; do
+                     manager-api-proxy kiosk-vnc-proxy \
+                     wireguard-udp-proxy; do
             systemctl stop "$svc" 2>/dev/null || true
             systemctl disable "$svc" 2>/dev/null || true
             rm -f "/etc/systemd/system/${svc}.service"
@@ -289,6 +290,7 @@
           systemctl daemon-reload 2>/dev/null || true
           pkill -f 'socat.*TCP-LISTEN:9001' || true
           pkill -f 'socat.*TCP-LISTEN:{{ kiosk_ws_port }}' || true
+          pkill -f 'socat.*UDP4-LISTEN:51820' || true
         executable: /bin/bash
       changed_when: true
       failed_when: false

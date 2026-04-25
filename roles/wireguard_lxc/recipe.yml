@@ -1,0 +1,50 @@
+---
+service: wireguard
+base_template: build-base-debian-12-amd64.tar.zst
+build_vmid: 989
+hostname: wireguard-build
+memory: 256
+cores: 1
+disk: "1"
+unprivileged: true
+features: "nesting=1"
+
+setup_commands: []
+
+install_commands:
+  - "bash -c 'export DEBIAN_FRONTEND=noninteractive && apt-get update -qq'"
+  - "bash -c 'apt-get install -y --no-install-recommends wireguard-tools iptables iptables-persistent'"
+  - "bash -c 'mkdir -p /etc/wireguard && chmod 0700 /etc/wireguard'"
+  - "systemctl enable wg-quick@wg0 2>/dev/null || true"
+  - "bash -c 'apt-get clean 2>/dev/null || true && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*'"
+
+config_files:
+  - path: /etc/sysctl.d/99-wireguard.conf
+    content: |
+      net.ipv4.ip_forward=1
+    mode: "0644"
+
+baked_files:
+  - src: scripts/image-builder/files-wireguard-lxc/usr/sbin/wireguard-firewall-setup
+    dest: /usr/sbin/wireguard-firewall-setup
+    mode: "0755"
+  - src: scripts/image-builder/files-wireguard-lxc/etc/systemd/system/wireguard-firewall.service
+    dest: /etc/systemd/system/wireguard-firewall.service
+    mode: "0644"
+
+post_commands:
+  - "systemctl daemon-reload"
+  - "systemctl enable wireguard-firewall.service 2>/dev/null || true"
+
+smoke_tests:
+  - "bash -c 'wg genkey | wg pubkey >/dev/null'"
+  - "test -d /etc/wireguard"
+  - "test -f /etc/sysctl.d/99-wireguard.conf"
+  - "test -x /usr/sbin/wireguard-firewall-setup"
+  - "bash -c 'grep -q \"awk.*print\" /usr/sbin/wireguard-firewall-setup'"
+
+callhome:
+  http_probes: ""
+  config_files: ""
+
+kasmvnc: null
