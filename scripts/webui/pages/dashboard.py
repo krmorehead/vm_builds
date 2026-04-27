@@ -124,7 +124,7 @@ def _host_card(fleet: Fleet) -> None:
                 host_label.style(f"color: {theme.TEXT_PRIMARY}")
                 host_name = h.name
                 host_label.on("click", lambda _, n=host_name: ui.navigate.to(f"/nodes/{n}"))
-                ui.label(h.ip).classes("text-xs").style(f"color: {theme.TEXT_SECONDARY}")
+                ui.label(h.reachable_ip).classes("text-xs").style(f"color: {theme.TEXT_SECONDARY}")
                 if h.telemetry:
                     ui.label(f"D:{h.disk_pct:.0f}%").classes("text-xs").style(
                         f"color: {theme.usage_color(data.usage_level(h.disk_pct))}"
@@ -132,8 +132,6 @@ def _host_card(fleet: Fleet) -> None:
                     ui.label(f"M:{h.memory_pct:.0f}%").classes("text-xs").style(
                         f"color: {theme.usage_color(data.usage_level(h.memory_pct))}"
                     )
-                if h.is_lan:
-                    ui.badge("LAN", color="blue").props("outline")
                 if not h.wol_capable:
                     ui.badge("No WoL", color="orange").props("outline")
 

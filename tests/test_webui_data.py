@@ -177,6 +177,10 @@ class TestGetKnownHosts:
             "PRIMARY_HOST": "192.168.86.201",
             "AI_HOST": "192.168.86.220",
             "MESH_2_HOST": "192.168.86.211",
+            "HOME_VPN_IP": "10.0.0.1",
+            "AI_VPN_IP": "10.0.0.3",
+            "MESH_2_VPN_IP": "10.0.0.4",
+            "MESH_1_VPN_IP": "10.0.0.2",
         }
         hosts = data.get_known_hosts(env)
         names = [h.name for h in hosts]
@@ -184,20 +188,34 @@ class TestGetKnownHosts:
         assert "ai" in names
         assert "mesh2" in names
         assert "mesh1" in names
+        home = next(h for h in hosts if h.name == "home")
+        assert home.ip == "10.0.0.1"
+        assert home.provisioning_ip == "192.168.86.201"
         mesh1 = next(h for h in hosts if h.name == "mesh1")
-        assert mesh1.is_lan is True
-        assert mesh1.ip == "10.10.10.210"
+        assert mesh1.ip == "10.0.0.2"
 
-    def test_get_known_hosts_missing_optional(self):
+    def test_get_known_hosts_missing_vpn_ip_excluded(self):
         env = {"PRIMARY_HOST": "192.168.86.201"}
+        hosts = data.get_known_hosts(env)
+        assert len(hosts) == 0
+
+    def test_get_known_hosts_partial_vpn(self):
+        env = {
+            "PRIMARY_HOST": "192.168.86.201",
+            "HOME_VPN_IP": "10.0.0.1",
+        }
         hosts = data.get_known_hosts(env)
         names = [h.name for h in hosts]
         assert "home" in names
-        assert "mesh1" in names
-        assert len(hosts) == 2
+        assert len(hosts) == 1
 
     def test_probe_all_hosts_mixed_results(self):
-        env = {"PRIMARY_HOST": "192.168.86.201", "AI_HOST": "10.254.254.254"}
+        env = {
+            "PRIMARY_HOST": "192.168.86.201",
+            "AI_HOST": "10.254.254.254",
+            "HOME_VPN_IP": "10.0.0.1",
+            "AI_VPN_IP": "10.254.254.254",
+        }
         hosts = data.get_known_hosts(env)
         results = data.probe_all_hosts(hosts)
         home_status = next(r for r in results if r.host.name == "home")
@@ -487,10 +505,9 @@ class TestHost:
         assert "unhealthy" in repr(host)
 
     def test_properties_passthrough(self):
-        host = data.Host("mesh1", "10.10.10.210", is_lan=True, wol_capable=False)
+        host = data.Host("mesh1", "10.0.0.2", wol_capable=False)
         assert host.name == "mesh1"
-        assert host.ip == "10.10.10.210"
-        assert host.is_lan is True
+        assert host.ip == "10.0.0.2"
         assert host.wol_capable is False
 
 
@@ -1332,17 +1349,19 @@ class TestVpnIpModel:
         host = data.Host("a", "")
         assert host.reachable_ip == ""
 
-    def test_reachable_ip_lan_host_prefers_vpn(self):
-        """LAN hosts can't be TCP-probed; VPN bypasses the router."""
-        host = data.Host("mesh1", "10.10.10.210", is_lan=True, vpn_ip="10.8.0.5")
+    def test_reachable_ip_vpn_is_the_only_path(self):
+        """VPN is the only runtime path — no fallback to provisioning IPs."""
+        host = data.Host("mesh1", "10.0.0.5", vpn_ip="10.8.0.5")
         assert host.reachable_ip == "10.8.0.5"
 
-    def test_host_info_vpn_ip(self):
+    def test_host_info_ip_is_vpn(self):
+        """HostInfo.ip is the VPN IP — the only runtime address."""
         info = data.HostInfo(
-            name="remote", ip="1.2.3.4", env_var="REMOTE_HOST",
-            wol_capable=True, vpn_ip="10.8.0.10",
+            name="remote", ip="10.8.0.10", env_var="REMOTE_HOST",
+            wol_capable=True, provisioning_ip="1.2.3.4",
         )
-        assert info.vpn_ip == "10.8.0.10"
+        assert info.ip == "10.8.0.10"
+        assert info.provisioning_ip == "1.2.3.4"
 
     def test_get_known_hosts_reads_vpn_env(self):
         env = {
@@ -1351,13 +1370,13 @@ class TestVpnIpModel:
         }
         hosts = data.get_known_hosts(env)
         home = next(h for h in hosts if h.name == "home")
-        assert home.vpn_ip == "10.8.0.1"
+        assert home.ip == "10.8.0.1"
 
-    def test_get_known_hosts_no_vpn_env(self):
+    def test_get_known_hosts_no_vpn_excluded(self):
+        """Hosts without VPN IPs are excluded — VPN is required."""
         env = {"PRIMARY_HOST": "192.168.86.201"}
         hosts = data.get_known_hosts(env)
-        home = next(h for h in hosts if h.name == "home")
-        assert home.vpn_ip == ""
+        assert len(hosts) == 0
 
     def test_detail_stat_shows_vpn(self):
         """VPN IP field is displayed in node detail header."""
@@ -1375,20 +1394,20 @@ class TestKickstartCallhome:
         assert "No reachable IP" in result.message
 
     def test_ssh_failure_unreachable_ip(self):
-        host = data.Host("bogus", "10.254.254.254")
+        host = data.Host("bogus", "10.254.254.254", vpn_ip="10.254.254.254")
         host.reachable = True
         result = data.kickstart_callhome(host)
         assert not result.success
 
     def test_kickstart_real_host(self):
-        """Kickstart via HTTP to the NM on the primary host.
+        """Kickstart via HTTP to the NM on the primary host over VPN.
 
         Requires the kiosk NM to be deployed with current code. If the
         NM has old code (no /api/callhome/restart), the test accepts the
         failure message — the function correctly reports the HTTP error
         instead of silently falling back to SSH.
         """
-        host = data.Host("home", "192.168.86.201")
+        host = data.Host("home", "10.0.0.1", vpn_ip="10.0.0.1")
         host.reachable = True
         result = data.kickstart_callhome(host)
         if result.success:
@@ -3574,12 +3593,11 @@ class TestHostRecord:
         assert r.bucket == ""
         assert r.source == "manual"
         assert r.wol_capable is True
-        assert r.is_lan is False
 
     def test_full_creation(self):
         r = data.HostRecord(
             name="home", ip="192.168.86.201", mac="aa:bb:cc:dd:ee:ff",
-            bucket="test", source="env", is_lan=False, wol_capable=True,
+            bucket="test", source="env", wol_capable=True,
             vpn_ip="10.99.0.1", first_seen="2026-01-01", last_seen="2026-01-02",
         )
         assert r.bucket == "test"
@@ -3633,7 +3651,7 @@ class TestHostRegistry:
     def test_json_round_trip(self, tmp_path):
         reg = data.HostRegistry(tmp_path)
         reg.register("a", "1.1.1.1", mac="aa:bb:cc:dd:ee:ff", bucket="test")
-        reg.register("b", "2.2.2.2", is_lan=True, wol_capable=False)
+        reg.register("b", "2.2.2.2", wol_capable=False)
         reg2 = data.HostRegistry(tmp_path)
         hosts = reg2.all()
         assert len(hosts) == 2
@@ -3643,7 +3661,6 @@ class TestHostRegistry:
         assert a.bucket == "test"
         b = reg2.find_by_name("b")
         assert b is not None
-        assert b.is_lan is True
         assert b.wol_capable is False
 
     def test_find_by_mac(self, tmp_path):

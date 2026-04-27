@@ -142,61 +142,29 @@ def register_pages() -> None:
 # ── Manager integration ──────────────────────────────────────────────
 
 
-_HAS_VPN: bool | None = None
-
-
-def _controller_has_vpn() -> bool:
-    """Cache whether this controller has a wg0 interface (VPN peer).
-
-    Checked once at process start; not refreshed if WireGuard is
-    toggled without restarting the SM.
-    """
-    global _HAS_VPN  # noqa: PLW0603
-    if _HAS_VPN is None:
-        _HAS_VPN = Path("/sys/class/net/wg0").exists()
-    return _HAS_VPN
-
 
 def _env_node_resolver(node_id: str) -> str | None:
     """Resolve a node_id to its VPN IP for SM-to-node communication.
 
-    The SuperManager uses VPN exclusively after initial registration.
-    When a host has a VPN IP configured, that IP is ALWAYS returned —
-    regardless of whether the controller currently has a wg0 interface.
-    This ensures the SM never silently falls back to unreachable LAN
-    IPs (which produce confusing blank iframes instead of clear errors).
-
-    Hosts without VPN IPs (e.g., openwrt router VM) use their direct IP.
+    ALL hosts are reached via VPN after base setup.  ``h.ip`` is the
+    VPN IP (set by ``get_known_hosts``).  No fallbacks.
     """
     if node_id == "openwrt":
         return manager.ROUTER_VM_LAN_IP
     env = load_active_env()
     known = data.get_known_hosts(env)
-    has_vpn = _controller_has_vpn()
     for h in known:
         if h.name == node_id:
-            if h.vpn_ip:
-                if not has_vpn:
-                    log.warning(
-                        "VPN IP configured for %s (%s) but controller "
-                        "has no wg0 — connection will fail until VPN is up",
-                        node_id, h.vpn_ip,
-                    )
-                return h.vpn_ip
             return h.ip or None
     return None
 
 
 def _env_display_resolver(node_id: str) -> tuple[str, int] | None:
-    """Resolve a node_id to a browser-reachable (ip, port_offset) for KasmVNC.
+    """Resolve a node_id to a browser-reachable (ip, port) for KasmVNC.
 
-    Display URLs are loaded in the user's browser, so they must use IPs
-    the browser can reach directly. WAN hosts use their WAN IP with
-    port offset 0 (standard ports).
-
-    LAN hosts (mesh1) are behind the OpenWrt router and unreachable from
-    the browser. Their displays are relayed through the primary host via
-    socat proxies at offset ports (e.g., 6080+100=6180 for kiosk).
+    All hosts are reached via their VPN IP.  The browser must be on the
+    VPN (or have a route to the VPN subnet) to reach display streams.
+    No LAN relay hacks — VPN is the universal transport.
     """
     if node_id == "openwrt":
         return (manager.ROUTER_VM_LAN_IP, 0)
@@ -204,11 +172,6 @@ def _env_display_resolver(node_id: str) -> tuple[str, int] | None:
     known = data.get_known_hosts(env)
     for h in known:
         if h.name == node_id:
-            if h.is_lan:
-                primary_ip = env.get("PRIMARY_HOST", "")
-                if not primary_ip:
-                    return None
-                return (primary_ip, data.Ports.LAN_DISPLAY_RELAY_OFFSET)
             return (h.ip, 0) if h.ip else None
     return None
 
@@ -587,7 +550,7 @@ def register_api() -> None:
             return (name, {"error": "unreachable"})
 
         async with httpx.AsyncClient(timeout=5) as client:
-            tasks = [_query(client, h.name, h.ip) for h in hosts if h.ip]
+            tasks = [_query(client, h.name, h.vpn_ip) for h in hosts if h.vpn_ip]
             results = await asyncio.gather(*tasks)
         return JSONResponse({"fleet_versions": dict(results)})
 

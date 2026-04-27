@@ -40,6 +40,42 @@ REAL_STATE_DIR = PROJECT_ROOT / ".state"
 REAL_ENV_PATH = PROJECT_ROOT / "test.env"
 
 
+def _read_vpn_ips_from_env() -> dict[str, str]:
+    """Read VPN IPs from test.env — single source of truth."""
+    vpn_ips: dict[str, str] = {}
+    if REAL_ENV_PATH.exists():
+        for line in REAL_ENV_PATH.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            if "_VPN_IP" in key:
+                vpn_ips[key] = val.strip().strip("'\"")
+    return vpn_ips
+
+
+_VPN_IPS = _read_vpn_ips_from_env()
+
+
+def _base_env(**overrides: str) -> str:
+    """Build test env content with VPN IPs from test.env.
+
+    VPN IPs are read once from test.env at import time — never
+    hardcoded.  Additional env vars can be passed as kwargs.
+    """
+    lines = [
+        f"PRIMARY_HOST={overrides.pop('PRIMARY_HOST', '192.168.86.201')}",
+        f"HOME_API_TOKEN={overrides.pop('HOME_API_TOKEN', 'test')}",
+        f"MESH_KEY={overrides.pop('MESH_KEY', 'test')}",
+    ]
+    for key, val in _VPN_IPS.items():
+        if key not in overrides:
+            lines.append(f"{key}={val}")
+    for key, val in overrides.items():
+        lines.append(f"{key}={val}")
+    return "\n".join(lines) + "\n"
+
+
 @asynccontextmanager
 async def webui(tmp_path: Path, env_file: str | None = None, **overrides):
     """Create a NiceGUI user simulation with all pages and real state.
@@ -899,10 +935,7 @@ class TestApiCheckin:
     async def test_checkin_valid_token(self, tmp_path):
         private_key, public_key = data.generate_callhome_keys()
         env_content = (
-            f"PRIMARY_HOST=192.168.86.201\n"
-            f"HOME_API_TOKEN=test\n"
-            f"MESH_KEY=test\n"
-            f"CALLHOME_PRIVATE_KEY={private_key}\n"
+            _base_env(CALLHOME_PRIVATE_KEY=private_key)
         )
         async with api_client(tmp_path, env_content=env_content) as client:
             resp = await client.post(
@@ -916,10 +949,7 @@ class TestApiCheckin:
     async def test_checkin_invalid_token(self, tmp_path):
         private_key, _ = data.generate_callhome_keys()
         env_content = (
-            f"PRIMARY_HOST=192.168.86.201\n"
-            f"HOME_API_TOKEN=test\n"
-            f"MESH_KEY=test\n"
-            f"CALLHOME_PRIVATE_KEY={private_key}\n"
+            _base_env(CALLHOME_PRIVATE_KEY=private_key)
         )
         async with api_client(tmp_path, env_content=env_content) as client:
             resp = await client.post(
@@ -933,10 +963,7 @@ class TestApiCheckin:
     async def test_checkin_missing_token_when_required(self, tmp_path):
         private_key, _ = data.generate_callhome_keys()
         env_content = (
-            f"PRIMARY_HOST=192.168.86.201\n"
-            f"HOME_API_TOKEN=test\n"
-            f"MESH_KEY=test\n"
-            f"CALLHOME_PRIVATE_KEY={private_key}\n"
+            _base_env(CALLHOME_PRIVATE_KEY=private_key)
         )
         async with api_client(tmp_path, env_content=env_content) as client:
             resp = await client.post(ApiRoutes.CHECKIN, json=SAMPLE_CHECKIN)
@@ -991,10 +1018,7 @@ class TestApiNodes:
     async def test_nodes_auth_required_when_key_set(self, tmp_path):
         private_key, _ = data.generate_callhome_keys()
         env_content = (
-            f"PRIMARY_HOST=192.168.86.201\n"
-            f"HOME_API_TOKEN=test\n"
-            f"MESH_KEY=test\n"
-            f"CALLHOME_PRIVATE_KEY={private_key}\n"
+            _base_env(CALLHOME_PRIVATE_KEY=private_key)
         )
         async with api_client(tmp_path, env_content=env_content) as client:
             resp = await client.get(ApiRoutes.NODES)
@@ -1004,10 +1028,7 @@ class TestApiNodes:
     async def test_nodes_auth_valid_token(self, tmp_path):
         private_key, public_key = data.generate_callhome_keys()
         env_content = (
-            f"PRIMARY_HOST=192.168.86.201\n"
-            f"HOME_API_TOKEN=test\n"
-            f"MESH_KEY=test\n"
-            f"CALLHOME_PRIVATE_KEY={private_key}\n"
+            _base_env(CALLHOME_PRIVATE_KEY=private_key)
         )
         async with api_client(tmp_path, env_content=env_content) as client:
             resp = await client.get(
@@ -1029,9 +1050,7 @@ class TestApiNodes:
 class TestHeartbeatSubscribe:
     async def test_subscribe_success(self, tmp_path):
         env_content = (
-            "PRIMARY_HOST=192.168.86.201\n"
-            "HOME_API_TOKEN=test\n"
-            "MESH_KEY=test\n"
+            _base_env()
         )
         async with api_client(tmp_path, env_content=env_content) as client:
             resp = await client.post(ApiRoutes.HEARTBEAT_SUBSCRIBE, json={
@@ -1053,9 +1072,7 @@ class TestHeartbeatSubscribe:
 
     async def test_subscribe_unknown_metric_type(self, tmp_path):
         env_content = (
-            "PRIMARY_HOST=192.168.86.201\n"
-            "HOME_API_TOKEN=test\n"
-            "MESH_KEY=test\n"
+            _base_env()
         )
         async with api_client(tmp_path, env_content=env_content) as client:
             resp = await client.post(ApiRoutes.HEARTBEAT_SUBSCRIBE, json={
@@ -1066,9 +1083,7 @@ class TestHeartbeatSubscribe:
 
     async def test_subscribe_refresh(self, tmp_path):
         env_content = (
-            "PRIMARY_HOST=192.168.86.201\n"
-            "HOME_API_TOKEN=test\n"
-            "MESH_KEY=test\n"
+            _base_env()
         )
         async with api_client(tmp_path, env_content=env_content) as client:
             resp1 = await client.post(ApiRoutes.HEARTBEAT_SUBSCRIBE, json={
@@ -1117,9 +1132,7 @@ class TestHeartbeatMetrics:
 
     async def test_unsubscribe(self, tmp_path):
         env_content = (
-            "PRIMARY_HOST=192.168.86.201\n"
-            "HOME_API_TOKEN=test\n"
-            "MESH_KEY=test\n"
+            _base_env()
         )
         async with api_client(tmp_path, env_content=env_content) as client:
             resp = await client.post(ApiRoutes.HEARTBEAT_SUBSCRIBE, json={
@@ -1133,9 +1146,7 @@ class TestHeartbeatMetrics:
 
     async def test_list_subscriptions(self, tmp_path):
         env_content = (
-            "PRIMARY_HOST=192.168.86.201\n"
-            "HOME_API_TOKEN=test\n"
-            "MESH_KEY=test\n"
+            _base_env()
         )
         async with api_client(tmp_path, env_content=env_content) as client:
             await client.post(ApiRoutes.HEARTBEAT_SUBSCRIBE, json={
@@ -1161,9 +1172,7 @@ class TestBatmanApi:
 
     async def test_batman_status_returns_fleet_state(self, tmp_path):
         env_content = (
-            "PRIMARY_HOST=192.168.86.201\n"
-            "HOME_API_TOKEN=test\n"
-            "MESH_KEY=test\n"
+            _base_env()
         )
         async with api_client(tmp_path, env_content=env_content) as client:
             resp = await client.get(ApiRoutes.BATMAN_STATUS)
@@ -1178,9 +1187,7 @@ class TestBatmanApi:
         fine. 502 means the CM relay itself is unreachable (VPN down).
         """
         env_content = (
-            "PRIMARY_HOST=192.168.86.201\n"
-            "HOME_API_TOKEN=test\n"
-            "MESH_KEY=test\n"
+            _base_env()
         )
         async with api_client(tmp_path, env_content=env_content) as client:
             resp_enable = await client.post(ApiRoutes.BATMAN_ENABLE)
@@ -1232,9 +1239,7 @@ class TestBridgeActionApi:
     async def test_restart_wifi_proxies_to_cm(self, tmp_path):
         """Restart WiFi forwards to CM — returns 502 without a real CM."""
         env_content = (
-            "PRIMARY_HOST=192.168.86.201\n"
-            "HOME_API_TOKEN=test\n"
-            "MESH_KEY=test\n"
+            _base_env()
         )
         async with api_client(tmp_path, env_content=env_content) as client:
             resp = await client.post(
@@ -1253,9 +1258,7 @@ class TestWifiModeApi:
     async def test_wifi_mode_proxies_to_cm(self, tmp_path):
         """WiFi mode switch forwards to CM — returns 502 without a real CM."""
         env_content = (
-            "PRIMARY_HOST=192.168.86.201\n"
-            "HOME_API_TOKEN=test\n"
-            "MESH_KEY=test\n"
+            _base_env()
         )
         async with api_client(tmp_path, env_content=env_content) as client:
             resp = await client.post("/api/wifi/mode/bridge-1/sta")
@@ -1264,8 +1267,7 @@ class TestWifiModeApi:
     async def test_wifi_status_proxies_to_cm(self, tmp_path):
         """WiFi status forwards to CM — returns 502 without a real CM."""
         env_content = (
-            "PRIMARY_HOST=192.168.86.201\n"
-            "HOME_API_TOKEN=test\n"
+            _base_env()
         )
         async with api_client(tmp_path, env_content=env_content) as client:
             resp = await client.get("/api/wifi/status/bridge-1")
@@ -1274,8 +1276,7 @@ class TestWifiModeApi:
     async def test_wifi_status_all_proxies_to_cm(self, tmp_path):
         """Aggregate WiFi status forwards to CM — returns 502 without a real CM."""
         env_content = (
-            "PRIMARY_HOST=192.168.86.201\n"
-            "HOME_API_TOKEN=test\n"
+            _base_env()
         )
         async with api_client(tmp_path, env_content=env_content) as client:
             resp = await client.get(ApiRoutes.WIFI_STATUS_ALL)
@@ -1308,9 +1309,7 @@ class TestGuestApi:
     async def test_guests_proxies_to_nm(self, tmp_path):
         """Guest list forwards to NM — returns 502 if NM unreachable."""
         env_content = (
-            "PRIMARY_HOST=192.168.86.201\n"
-            "HOME_API_TOKEN=test\n"
-            "MESH_KEY=test\n"
+            _base_env()
         )
         async with api_client(tmp_path, env_content=env_content) as client:
             resp = await client.get("/api/guests?node_id=home")
@@ -1319,9 +1318,7 @@ class TestGuestApi:
     async def test_guest_action_requires_node_id(self, tmp_path):
         """Guest actions require node_id query param."""
         env_content = (
-            "PRIMARY_HOST=192.168.86.201\n"
-            "HOME_API_TOKEN=test\n"
-            "MESH_KEY=test\n"
+            _base_env()
         )
         async with api_client(tmp_path, env_content=env_content) as client:
             resp = await client.post("/api/guests/100/start")
@@ -1740,9 +1737,7 @@ class TestEndToEndCallhomeFlow:
     async def test_guest_action_proxies_to_nm(self, tmp_path):
         """Guest action forwards to NM — returns 502 if NM unreachable."""
         env_content = (
-            "PRIMARY_HOST=192.168.86.201\n"
-            "HOME_API_TOKEN=test\n"
-            "MESH_KEY=test\n"
+            _base_env()
         )
         async with api_client(tmp_path, env_content=env_content) as client:
             resp = await client.post("/api/guests/100/start?node_id=home")

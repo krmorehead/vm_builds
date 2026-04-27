@@ -28,7 +28,7 @@ def register() -> None:
             table = ui.table(
                 columns=[
                     {"name": "host", "label": "Host", "field": "host", "align": "left"},
-                    {"name": "ip", "label": "IP", "field": "ip", "align": "left"},
+                    {"name": "ip", "label": "VPN IP", "field": "ip", "align": "left"},
                     {"name": "status", "label": "Status", "field": "status", "align": "center"},
                     {"name": "latency", "label": "Latency", "field": "latency", "align": "center"},
                     {"name": "wol", "label": "WoL", "field": "wol", "align": "center"},
@@ -55,8 +55,6 @@ def register() -> None:
                         latency = ""
                         notes = ""
                     wol = "Yes" if h.wol_capable else "No WoL"
-                    if h.is_lan:
-                        notes = notes or "Behind OpenWrt"
                     if not h.wol_capable:
                         notes = (notes + " " if notes else "") + "\u26a0 Physical power-on only"
                     rows.append({

@@ -487,14 +487,18 @@ def save_environment(path: Path, env: dict[str, str]) -> None:
 
 @dataclass
 class HostInfo:
-    """Static info about a known host."""
+    """Static info about a known host.
+
+    After base setup, ALL communication uses the VPN IP.  The
+    ``provisioning_ip`` is the WAN/LAN address used only during
+    initial Ansible provisioning — never for runtime operations.
+    """
 
     name: str
-    ip: str
+    ip: str  # VPN IP — the ONLY runtime address
     env_var: str
     wol_capable: bool
-    is_lan: bool = False
-    vpn_ip: str = ""
+    provisioning_ip: str = ""  # WAN/LAN IP for Ansible base setup only
 
 
 @dataclass
@@ -584,7 +588,6 @@ class HostRecord:
     mac: str = ""
     bucket: str = ""
     source: str = "manual"
-    is_lan: bool = False
     wol_capable: bool = True
     vpn_ip: str = ""
     first_seen: str = ""
@@ -650,7 +653,6 @@ class HostRegistry:
                     mac=r.get("mac", ""),
                     bucket=r.get("bucket", ""),
                     source=r.get("source", "manual"),
-                    is_lan=r.get("is_lan", False),
                     wol_capable=r.get("wol_capable", True),
                     vpn_ip=r.get("vpn_ip", ""),
                     first_seen=r.get("first_seen", ""),
@@ -670,7 +672,6 @@ class HostRegistry:
                 "mac": r.mac,
                 "bucket": r.bucket,
                 "source": r.source,
-                "is_lan": r.is_lan,
                 "wol_capable": r.wol_capable,
                 "vpn_ip": r.vpn_ip,
                 "first_seen": r.first_seen,
@@ -708,7 +709,6 @@ class HostRegistry:
         mac: str = "",
         bucket: str = "",
         source: str = "manual",
-        is_lan: bool = False,
         wol_capable: bool = True,
         vpn_ip: str = "",
     ) -> HostRecord:
@@ -754,7 +754,6 @@ class HostRegistry:
             mac=mac,
             bucket=resolved_bucket,
             source=source,
-            is_lan=is_lan,
             wol_capable=wol_capable,
             vpn_ip=vpn_ip,
             first_seen=now,
@@ -789,7 +788,6 @@ class HostRegistry:
             "mesh1",
             env.get("MESH_1_HOST", "10.10.10.210"),
             source="env",
-            is_lan=True,
             wol_capable=_read_wol_capable("mesh1"),
             vpn_ip=env.get(mesh1_vpn_env, "") if mesh1_vpn_env else "",
         )
@@ -832,52 +830,58 @@ def _read_wol_capable(name: str) -> bool:
 
 
 def get_known_hosts(env: dict[str, str]) -> list[HostInfo]:
-    """Discover hosts from env vars and inventory."""
-    hosts: list[HostInfo] = []
-    for env_var, name in _HOST_MAP.items():
-        ip = env.get(env_var, "")
-        if env_var == "PRIMARY_HOST" or ip:
-            vpn_env = _HOST_VPN_MAP.get(name, "")
-            hosts.append(HostInfo(
-                name=name,
-                ip=ip or env.get("PRIMARY_HOST", ""),
-                env_var=env_var,
-                wol_capable=_read_wol_capable(name),
-                is_lan=False,
-                vpn_ip=env.get(vpn_env, "") if vpn_env else "",
-            ))
+    """Discover hosts from env vars and inventory.
 
-    mesh1_vpn_env = _HOST_VPN_MAP.get("mesh1", "")
-    hosts.append(HostInfo(
-        name="mesh1",
-        ip="10.10.10.210",
-        env_var="MESH_1_HOST",
-        wol_capable=_read_wol_capable("mesh1"),
-        is_lan=True,
-        vpn_ip=env.get(mesh1_vpn_env, "") if mesh1_vpn_env else "",
-    ))
+    After base setup, every host is reached via its VPN IP.  The
+    provisioning IP (WAN/LAN) is retained for display context only.
+    """
+    hosts: list[HostInfo] = []
+    all_hosts = dict(_HOST_MAP)
+    all_hosts["MESH_1_HOST"] = "mesh1"
+
+    for env_var, name in all_hosts.items():
+        provisioning_ip = env.get(env_var, "")
+        if env_var == "PRIMARY_HOST" and not provisioning_ip:
+            continue
+        if env_var != "PRIMARY_HOST" and not provisioning_ip:
+            provisioning_ip = env.get(env_var, "")
+            if not provisioning_ip and env_var != "MESH_1_HOST":
+                continue
+
+        vpn_env = _HOST_VPN_MAP.get(name, "")
+        vpn_ip = env.get(vpn_env, "") if vpn_env else ""
+        if not vpn_ip:
+            continue
+
+        hosts.append(HostInfo(
+            name=name,
+            ip=vpn_ip,
+            env_var=env_var,
+            wol_capable=_read_wol_capable(name),
+            provisioning_ip=provisioning_ip,
+        ))
     return hosts
 
 
 def probe_all_hosts(hosts: list[HostInfo]) -> list[HostStatus]:
-    """Probe all hosts for TCP connectivity in parallel.
+    """Probe all hosts for TCP connectivity via VPN in parallel.
 
-    Uses a thread pool so reachable hosts return instantly while
-    unreachable hosts wait for their timeout independently.
+    Every host is probed on its VPN IP (``host.ip``).  If VPN is
+    unreachable, the host is DOWN — no fallback to provisioning IPs.
     """
     from concurrent.futures import ThreadPoolExecutor
 
     def _probe_one(host: HostInfo) -> HostStatus:
         if not host.ip:
-            return HostStatus(host=host, reachable=False, error="No IP configured")
+            return HostStatus(host=host, reachable=False, error="No VPN IP configured")
         start = time.monotonic()
-        reachable = build.probe_host(host.ip, timeout=2.0)
+        reachable = build.probe_host(host.ip, timeout=3.0)
         elapsed = (time.monotonic() - start) * 1000
         return HostStatus(
             host=host,
             reachable=reachable,
             latency_ms=round(elapsed, 1) if reachable else None,
-            error="" if reachable else f"Host {host.ip} unreachable (TCP probe failed)",
+            error="" if reachable else f"VPN unreachable at {host.ip}",
         )
 
     with ThreadPoolExecutor(max_workers=min(len(hosts), 6)) as pool:
@@ -926,9 +930,9 @@ class KickstartResult:
 def kickstart_callhome(host: Host) -> KickstartResult:
     """Restart callhome on all running LXC containers for a host.
 
-    Uses HTTP via the NodeManager API exclusively (VPN or direct).
-    No SSH fallback — if the NM is unreachable, the 4-tier system
-    is broken and must be fixed, not worked around.
+    Uses HTTP via the NodeManager API over VPN exclusively.
+    No fallback to provisioning IPs — if the NM is unreachable
+    via VPN, the system is broken and must be fixed.
     """
     ip = host.reachable_ip
     if not ip:
@@ -986,7 +990,7 @@ def auto_kickstart_stale_fleet(fleet: "Fleet") -> list[str]:
     """Kickstart heartbeats on stale hosts when a user is actively viewing.
 
     Called from page refresh cycles. For each host that is NOT online but
-    IS reachable (has an IP or VPN IP), restarts callhome on its containers.
+    IS reachable (has a VPN IP), restarts callhome on its containers.
 
     Rate-limited per host (10 min cooldown), globally serialized (only one
     kickstart cycle at a time), and capped to 2 hosts per cycle to prevent
@@ -1270,17 +1274,17 @@ class Host:
         name: str,
         ip: str,
         *,
-        is_lan: bool = False,
         wol_capable: bool = True,
         vpn_ip: str = "",
+        provisioning_ip: str = "",
         bucket: str = "",
         mac: str = "",
     ) -> None:
         self.name = name
         self.ip = ip
-        self.is_lan = is_lan
         self.wol_capable = wol_capable
         self.vpn_ip = vpn_ip
+        self.provisioning_ip = provisioning_ip
         self.bucket = bucket
         self.mac = mac
         self.deploys: list[DeployRecord] = []
@@ -1339,10 +1343,8 @@ class Host:
 
     @property
     def reachable_ip(self) -> str:
-        """Best IP to reach this host — always VPN when available."""
-        if self.vpn_ip:
-            return self.vpn_ip
-        return self.ip
+        """VPN IP — the only runtime address for this host."""
+        return self.vpn_ip
 
     @property
     def registered(self) -> bool:
@@ -1607,10 +1609,10 @@ def build_fleet(
     for rec in registry.all():
         host = Host(
             name=rec.name,
-            ip=rec.ip,
-            is_lan=rec.is_lan,
+            ip=rec.vpn_ip,
             wol_capable=rec.wol_capable,
             vpn_ip=rec.vpn_ip,
+            provisioning_ip=rec.ip,
             bucket=rec.bucket,
             mac=rec.mac,
         )
@@ -1643,41 +1645,35 @@ def build_fleet(
 
 
 def _probe_reachable_hosts(hosts: list[Host]) -> None:
-    """Probe hosts for reachability via the NodeManager HTTP API.
+    """Probe hosts for reachability via the NodeManager HTTP API over VPN.
 
-    HTTP health check on the NM API (port 9001) is the ONLY probe.
-    No SSH fallback — if the NM is unreachable, the host is down
-    for management purposes.
-
-    Tries VPN IP first (for NAT-traversal), then WAN IP.
-    Limits parallelism to 4 to avoid connection storms.
+    HTTP health check on the NM API (port 9001) via VPN IP is the
+    ONLY probe.  No fallback to WAN/LAN IPs — if VPN is down the
+    host is unreachable and must be fixed, not worked around.
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    probeable = [h for h in hosts if not h.telemetry and (h.ip or h.vpn_ip)]
+    probeable = [h for h in hosts if not h.telemetry and h.reachable_ip]
     if not probeable:
         return
 
     def _probe(host: Host) -> None:
         from scripts.webui import heartbeat as hb
 
-        for ip in [host.vpn_ip, host.ip if not host.is_lan else ""]:
-            if not ip:
-                continue
-            cb = hb.get_circuit_status(ip)
-            if cb["is_open"]:
-                continue
-            try:
-                import urllib.request
-                req = urllib.request.Request(
-                    f"http://{ip}:{Ports.MANAGER}/api/health", method="GET",
-                )
-                resp = urllib.request.urlopen(req, timeout=3)
-                if resp.status == 200:
-                    host.reachable = True
-                    return
-            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError):
-                pass
+        ip = host.reachable_ip
+        cb = hb.get_circuit_status(ip)
+        if cb["is_open"]:
+            return
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                f"http://{ip}:{Ports.MANAGER}/api/health", method="GET",
+            )
+            resp = urllib.request.urlopen(req, timeout=3)
+            if resp.status == 200:
+                host.reachable = True
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError):
+            pass
 
     with ThreadPoolExecutor(max_workers=min(len(probeable), 4)) as pool:
         list(pool.map(_probe, probeable))

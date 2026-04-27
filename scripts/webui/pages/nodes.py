@@ -236,9 +236,9 @@ def _add_host_form(state_dir: Path) -> None:
         "w-full mb-2"
     ):
         name_input = ui.input("Hostname", placeholder="e.g. edge-01").classes("w-64")
-        ip_input = ui.input("IP Address", placeholder="e.g. 192.168.1.100").classes("w-64")
+        vpn_input = ui.input("VPN IP", placeholder="e.g. 10.0.0.5").classes("w-64")
+        ip_input = ui.input("Provisioning IP (optional)", placeholder="e.g. 192.168.1.100").classes("w-64")
         mac_input = ui.input("MAC (optional)", placeholder="aa:bb:cc:dd:ee:ff").classes("w-64")
-        vpn_input = ui.input("VPN IP (optional)", placeholder="e.g. 10.99.0.5").classes("w-64")
         bucket_select = ui.select(
             options={
                 "": "Auto-detect from IP",
@@ -254,22 +254,23 @@ def _add_host_form(state_dir: Path) -> None:
 
         async def _submit() -> None:
             name = name_input.value.strip() if name_input.value else ""
-            ip = ip_input.value.strip() if ip_input.value else ""
-            if not name or not ip:
-                result_label.text = "Name and IP are required"
+            vpn_ip = vpn_input.value.strip() if vpn_input.value else ""
+            if not name or not vpn_ip:
+                result_label.text = "Hostname and VPN IP are required"
                 result_label.style(f"color: {theme.COLOR_ERROR}")
                 result_label.set_visibility(True)
                 return
+            provisioning_ip = ip_input.value.strip() if ip_input.value else ""
             registry = data.HostRegistry(state_dir)
             rec = registry.register(
                 name,
-                ip,
+                provisioning_ip or vpn_ip,
                 mac=mac_input.value.strip() if mac_input.value else "",
                 bucket=bucket_select.value or "",
-                vpn_ip=vpn_input.value.strip() if vpn_input.value else "",
+                vpn_ip=vpn_ip,
                 source="manual",
             )
-            result_label.text = f"Registered {rec.name} ({rec.bucket}) at {rec.ip}"
+            result_label.text = f"Registered {rec.name} ({rec.bucket}) — VPN: {rec.vpn_ip}"
             result_label.style(f"color: {theme.COLOR_SUCCESS}")
             result_label.set_visibility(True)
             name_input.value = ""
@@ -296,13 +297,9 @@ def _single_node_card(host: Host, state_dir: Path) -> None:
                 ui.badge(f"v{host.version}", color="blue").props("outline dense")
 
         with ui.row().classes("gap-4 mt-1"):
-            ui.label(host.ip or "no IP").classes("text-xs font-mono").style(
+            ui.label(host.reachable_ip or "no VPN IP").classes("text-xs font-mono").style(
                 f"color: {theme.TEXT_SECONDARY}"
             )
-            if host.vpn_ip:
-                ui.label(f"VPN {host.vpn_ip}").classes("text-xs font-mono").style(
-                    f"color: {theme.ACCENT_DIM}"
-                )
             if host.registered:
                 ui.label(host.uptime).classes("text-xs").style(
                     f"color: {theme.TEXT_SECONDARY}"
@@ -428,7 +425,7 @@ def _detail_table(fleet: Fleet) -> None:
     for h in fleet.hosts:
         rows.append({
             "hostname": h.name,
-            "ip": h.ip or "--",
+            "ip": h.reachable_ip or "--",
             "status": data.format_node_status(h.status),
             "uptime": h.uptime,
             "disk": f"{h.disk_pct:.0f}%" if h.disk_pct > 0 else "--",
@@ -492,8 +489,6 @@ def _detail_header(host: Host) -> None:
             with ui.row().classes("items-center gap-2"):
                 if host.version:
                     ui.badge(f"v{host.version}", color="blue").props("outline")
-                if host.is_lan:
-                    ui.badge("LAN", color="blue").props("outline")
                 if not host.wol_capable:
                     ui.badge("No WoL", color="orange").props("outline")
                 if host.healthy:
@@ -525,15 +520,15 @@ def _detail_header(host: Host) -> None:
             ui.label(err).classes("text-xs mt-1").style(f"color: {theme.COLOR_ERROR}")
 
         with ui.row().classes("gap-6 mt-2 flex-wrap"):
-            _detail_stat("IP", host.ip)
-            if host.vpn_ip:
-                _detail_stat("VPN", host.vpn_ip)
+            _detail_stat("VPN", host.reachable_ip or "--")
+            if host.provisioning_ip:
+                _detail_stat("Provisioning IP", host.provisioning_ip)
             _detail_stat("Status", host.status.title())
             _detail_stat("Uptime", host.uptime)
             _detail_stat("Last Seen", host.last_seen_relative)
             _detail_stat("Guests", str(host.guest_count))
 
-        can_kickstart = host.reachable or host.vpn_ip
+        can_kickstart = host.reachable or host.reachable_ip
         if can_kickstart and not host.online:
             _kickstart_button(host)
 
@@ -576,7 +571,7 @@ def _kickstart_button(host: Host) -> None:
         ).classes("action-btn").props("dense")
         spinner = ui.spinner(size="sm")
         spinner.set_visibility(False)
-        via = host.vpn_ip if host.vpn_ip and not (host.reachable and host.ip) else host.ip
+        via = host.reachable_ip
         ui.label(f"via {via}").classes("text-xs").style(
             f"color: {theme.TEXT_DISABLED}"
         )
