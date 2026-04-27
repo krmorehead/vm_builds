@@ -32,6 +32,17 @@
   ansible.builtin.command:
     cmd: "pct exec {{ _callhome_vmid }} -- systemctl restart callhome"
   changed_when: true
+  register: _callhome_restart
+  failed_when: false
   when:
     - not (_service_up_to_date | default(false) | bool)
     - callhome_server | default('') | length > 0
+
+- name: "Warn if callhome restart failed — CT {{ _callhome_vmid }}"
+  ansible.builtin.debug:
+    msg: >-
+      callhome restart on CT {{ _callhome_vmid }} returned rc={{ _callhome_restart.rc | default('N/A') }}.
+      Service will self-heal via Restart=always. stderr={{ _callhome_restart.stderr | default('') }}
+  when:
+    - _callhome_restart is defined
+    - (_callhome_restart.rc | default(0)) != 0

@@ -4,28 +4,20 @@
 # This role handles ONLY host-specific config: optional web port override.
 # All in-container operations go through the Node Manager API over VPN.
 
-# ── Ensure container is running ────────────────────────────────────
+# ── Update render GID to match host ────────────────────────────────
 
-- name: Check Kodi container status
-  ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ kodi_ct_id }}/exec"
-    method: POST
-    body_format: json
-    body:
-      cmd: "echo alive"
-      timeout: 10
-    status_code: 200
-  delegate_to: localhost
-  register: _kodi_alive
-  retries: 10
-  delay: 3
-  until: (_kodi_alive.json.success | default(false)) | bool
+- name: Sync render GID for Kodi
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_render_gid.yml"
+  vars:
+    _render_ct_id: "{{ kodi_ct_id }}"
+    _render_user: kodi
 
 # ── Override web port if non-default ────────────────────────────
 
 - name: Override Kodi web port if non-default
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ kodi_ct_id }}/sed"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:

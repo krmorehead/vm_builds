@@ -316,8 +316,8 @@ class PveApiClient:
                 f"/nodes/{self._node}/lxc/{vmid}/config",
                 data={"delete": "lock"},
             )
-        except PveApiError:
-            pass
+        except PveApiError as exc:
+            log.warning("ct_unlock(%s) failed: %s", vmid, exc)
 
     def ct_stop_and_destroy(self, vmid: int, timeout: int = 60) -> None:
         """Stop (if running) then destroy a container, waiting for each."""
@@ -365,6 +365,60 @@ class PveApiClient:
                     if ip and ip != "127.0.0.1":
                         return True
         return False
+
+    @staticmethod
+    def parse_net_field(net_str: str) -> dict[str, str]:
+        """Parse a PVE net0 field like ``name=eth0,bridge=vmbr1,ip=10.10.10.20/24,gw=10.10.10.1``
+        into a dict of key=value pairs."""
+        result: dict[str, str] = {}
+        for part in net_str.split(","):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                result[k.strip()] = v.strip()
+        return result
+
+    def discover_container_network(
+        self,
+        reference_vmid: int,
+        *,
+        ip_offset: int = 200,
+    ) -> dict[str, str]:
+        """Discover the bridge and networking from an existing container.
+
+        Returns a dict with ``net0`` (ready for ``ct_create``),
+        ``nameserver``, ``bridge``, and ``gateway``.  Works for both
+        LAN containers (OpenWrt bridge with DHCP) and NAT containers
+        (private bridge with static IP).
+
+        For NAT bridges (gateway present in the reference container),
+        assigns a static IP using the gateway's /24 subnet with
+        ``ip_offset`` as the host part (default .200).
+
+        For LAN bridges where OpenWrt provides DHCP, uses ``ip=dhcp``.
+
+        This is the standard pattern for "what network should a new
+        container use?" — build containers, hot-spares, etc.
+        """
+        config = self.ct_config(reference_vmid)
+        raw_net0 = config.get("net0", "")
+        parsed = self.parse_net_field(raw_net0)
+        bridge = parsed.get("bridge", "vmbr0")
+        gw = parsed.get("gw", "")
+        nameserver = config.get("nameserver", gw or "8.8.8.8")
+
+        if gw:
+            prefix = gw.rsplit(".", 1)[0]
+            static_ip = f"{prefix}.{ip_offset}"
+            net0 = f"name=eth0,bridge={bridge},ip={static_ip}/24,gw={gw}"
+        else:
+            net0 = f"name=eth0,bridge={bridge},ip=dhcp"
+
+        return {
+            "net0": net0,
+            "bridge": bridge,
+            "gateway": gw,
+            "nameserver": nameserver,
+        }
 
     def guest_type(self, vmid: int) -> str | None:
         """Determine if a VMID is an LXC container or QEMU VM.

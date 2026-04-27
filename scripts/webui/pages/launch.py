@@ -14,13 +14,30 @@ from nicegui import ui
 
 from scripts.webui import theme
 from scripts.webui.api_client import api
-from scripts.webui.data import DISPLAY_APPS, Labels, Routes, console_url
+from scripts.webui.data import DISPLAY_APPS, DISPLAY_APP_CONFIGS, Labels, Routes, console_url
 from scripts.webui.manager import try_get_instance
 
 
-async def _launch_guest(vmid: str) -> dict:
-    """Fire-and-forget start of a container/VM via the local manager API."""
-    result = await api.post_json(f"/api/guests/{vmid}/start", timeout=10)
+def _resolve_target_node(url_key: str) -> str:
+    """Determine which node hosts a display app from its static config."""
+    app_id = DISPLAY_APPS.get(url_key, {}).get("app_id", "")
+    cfg = DISPLAY_APP_CONFIGS.get(app_id)
+    if cfg and cfg.target_hosts:
+        return cfg.target_hosts[0]
+    mgr = try_get_instance()
+    return mgr.host_name if mgr else ""
+
+
+async def _launch_guest(vmid: str, node_id: str = "") -> dict:
+    """Fire-and-forget start of a container/VM via the local manager API.
+
+    When running on the SuperManager, ``node_id`` is required so the
+    proxy route can forward the request to the correct NodeManager.
+    """
+    params = {"node_id": node_id} if node_id else None
+    result = await api.post_json(
+        f"/api/guests/{vmid}/start", timeout=10, params=params,
+    )
     if result is not None:
         return result
     return {"success": False, "error": "Manager API unreachable"}
@@ -42,8 +59,9 @@ def register() -> None:
         description = app_info.get("description", "")
         app_id = app_info.get("app_id", "")
 
+        target_node = _resolve_target_node(url_key) if url_key else ""
         mgr = try_get_instance()
-        node_id = mgr.host_name if mgr else ""
+        node_id = target_node or (mgr.host_name if mgr else "")
 
         with ui.column().classes(
             "w-full max-w-[600px] mx-auto items-center justify-center gap-6 kiosk-body-offset"
@@ -83,7 +101,7 @@ def register() -> None:
                 launch_btn.disable()
                 status_label.text = f"Starting VMID {vmid}..."
                 status_label.style(f"color: {theme.COLOR_WARNING}")
-                result = await _launch_guest(vmid)
+                result = await _launch_guest(vmid, node_id=node_id)
                 if result.get("success"):
                     status_label.text = f"{title} is running."
                     status_label.style(f"color: {theme.ACCENT}")

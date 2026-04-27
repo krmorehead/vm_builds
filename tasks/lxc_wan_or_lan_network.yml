@@ -49,6 +49,17 @@
     - _lxc_net_on_lan | bool
     - (_lan_cidr | default('') | trim) | length == 0
 
+- name: "Fail if bridge list is missing on LAN host — {{ lxc_net_service_name }}"
+  ansible.builtin.fail:
+    msg: >-
+      proxmox_all_bridges is undefined on {{ inventory_hostname }}.
+      Run infra plays first (--tags infra) or use full converge.
+      LAN hosts require proxmox_bridges to detect the correct bridge.
+  when:
+    - _lxc_net_on_lan | bool
+    - "'router_nodes' in group_names"
+    - proxmox_all_bridges is not defined
+
 - name: "Set container network for OpenWrt LAN — {{ lxc_net_service_name }}"
   ansible.builtin.set_fact:
     _lxc_net_gateway: "{{ _lan_gateway }}"
@@ -57,7 +68,10 @@
       {{ _lan_gateway.split('.')[0:3] | join('.') }}.{{
          lxc_net_ip_offset + groups[lxc_net_flavor_group].index(inventory_hostname) }}
     _lxc_net_nameserver: "{{ _lan_gateway }}"
-    _lxc_net_bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
+    _lxc_net_bridge: >-
+      {{ (proxmox_all_bridges[1] | default('vmbr0'))
+         if proxmox_all_bridges is defined
+         else 'vmbr0' }}
   when: _lxc_net_on_lan | bool
 
 - name: "Set container network for NAT bridge — {{ lxc_net_service_name }}"

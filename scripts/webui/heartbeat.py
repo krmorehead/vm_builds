@@ -270,7 +270,7 @@ def _http_exec(
     )
     try:
         resp = urllib.request.urlopen(req, timeout=timeout)
-        body = _json.loads(resp.read().decode())
+        body = _json.loads(resp.read().decode(), strict=False)
         if body.get("success"):
             return True, body.get("output", "")
         return False, body.get("error", body.get("output", "command failed"))
@@ -686,14 +686,20 @@ def _parse_dhcp_leases(output: str) -> list[dict]:
 
 
 def _parse_system_info(output: str) -> dict:
-    """Parse combined uptime/free/df output."""
+    """Parse combined uptime/free/df output.
+
+    Handles both GNU coreutils uptime (``up X, N user, load average:``)
+    and BusyBox uptime (``up X, load average:`` — no user count).
+    """
     info: dict = {}
     lines = output.strip().splitlines()
     for line in lines:
         if "load average" in line:
             m = re.search(r"up\s+(.+?),\s+\d+ user", line)
+            if not m:
+                m = re.search(r"up\s+(.+?),\s+load average", line)
             if m:
-                info["uptime_str"] = m.group(1).strip()
+                info["uptime_str"] = m.group(1).strip().rstrip(",")
             m = re.search(r"load average:\s*(.+)", line)
             if m:
                 info["load"] = m.group(1).strip()
@@ -705,6 +711,12 @@ def _parse_system_info(output: str) -> dict:
             m = re.search(r"Mem\w+:\s+(\d+)", line)
             if m:
                 info["mem_avail_kb"] = int(m.group(1))
+        elif line.lstrip().startswith("Mem:"):
+            parts = line.split()
+            if len(parts) >= 4:
+                info["mem_total_kb"] = int(parts[1])
+                avail = int(parts[6]) if len(parts) >= 7 else int(parts[3])
+                info.setdefault("mem_avail_kb", avail)
         elif "%" in line and "/" in line:
             parts = line.split()
             if len(parts) >= 5:

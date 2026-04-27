@@ -108,6 +108,10 @@ class PageTitles:
     ENVIRONMENT = "Environment"
     CONTAINERS = "Containers & VMs"
     TIMELINE = "Deploy Timeline"
+    CLUSTER_FLEET = "Cluster Fleet"
+    WIREGUARD = "WireGuard VPN"
+    LOGS = "Centralized Logs"
+    VIEWER = "Service Viewer"
 
 
 class Labels:
@@ -174,6 +178,11 @@ class Labels:
         "started. View the console from the Manager or SuperManager fleet page."
     )
     GO_BACK = "Go Back"
+    BACK_TO_FLEET = "Back to Fleet"
+    NOT_CLUSTER_MANAGER = "Not a Cluster Manager"
+    NOT_FOUND_IN_CLUSTER = "Not found in cluster"
+    NO_URL_FOR_SERVICE = "No URL configured for this service"
+    AUTO_REFRESH = "Auto-refresh (5s)"
 
 
 class Ports:
@@ -1661,7 +1670,7 @@ def _probe_reachable_hosts(hosts: list[Host]) -> None:
             try:
                 import urllib.request
                 req = urllib.request.Request(
-                    f"http://{ip}:9001/api/health", method="GET",
+                    f"http://{ip}:{Ports.MANAGER}/api/health", method="GET",
                 )
                 resp = urllib.request.urlopen(req, timeout=3)
                 if resp.status == 200:
@@ -1879,6 +1888,7 @@ DISPLAY_APP_CONFIGS: dict[str, DisplayAppConfig] = {
         conflicts=["kodi", "moonlight"],
         label="Desktop", icon="\U0001f5a5",
         description="Full desktop \u2014 view remotely via KasmVNC. Switch between Windows (KDE) and Mac (GNOME) sessions.",
+        target_hosts=["home"],
     ),
     "kodi": DisplayAppConfig(
         app_id="kodi", handler_type="container_display",
@@ -1979,7 +1989,7 @@ def generate_sm_hub_urls(env: dict[str, str]) -> dict[str, str]:
     urls: dict[str, str] = {}
     for key, (offset, port, scheme) in SM_SERVICE_URLS.items():
         ip = f"{prefix}.{offset}"
-        suffix = f"/admin" if key == "PIHOLE_URL" else ""
+        suffix = "/admin" if key == "PIHOLE_URL" else ""
         if port in (80, 443):
             urls[key] = f"{scheme}://{ip}{suffix}"
         else:

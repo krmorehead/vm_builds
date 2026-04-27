@@ -210,13 +210,11 @@
   changed_when: true
   failed_when: false
 
-- name: Reload kernel modules and rescan PCI on LAN host  # noqa command-instead-of-shell
+- name: Unload wireguard and rescan PCI on LAN host  # noqa command-instead-of-shell
   ansible.builtin.shell:
     cmd: >-
       {{ _cleanup_ssh }} "
       modprobe -r wireguard 2>/dev/null || true;
-      modprobe -r iwlmvm iwlwifi 2>/dev/null || true;
-      modprobe iwlwifi 2>/dev/null || true;
       echo 1 > /sys/bus/pci/rescan 2>/dev/null || true"
   when: _host_reachable | bool
   changed_when: true

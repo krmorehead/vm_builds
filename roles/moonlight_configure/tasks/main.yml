@@ -20,11 +20,15 @@
       fps = {{ moonlight_fps }}
       codec = {{ moonlight_codec }}
       bitrate = {{ moonlight_bitrate }}
-      platform = auto
+      platform = sdl
+      nosops = true
+      localaudio = false
+      remote = yes
 
 - name: Push Moonlight config via NM API
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ moonlight_ct_id }}/file"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
@@ -44,6 +48,7 @@
       http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}
   ansible.builtin.uri:
     url: "{{ _nm_base | trim }}/api/config/{{ moonlight_ct_id }}/service/moonlight-display/restart"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body: {}
@@ -52,9 +57,19 @@
   delegate_to: localhost
   register: _restart_result
   when: moonlight_server_ip | default('', true) | length > 0
-  failed_when: not (_restart_result.json.success | default(false))
+  failed_when: >-
+    _restart_result.json is defined
+    and not (_restart_result.json.success | default(false))
+    and 'not found' not in (_restart_result.json.output | default(''))
 
 # ── Report completion ────────────────────────────────────────────
+
+- name: Fail if Moonlight server IP is not configured
+  ansible.builtin.assert:
+    that:
+      - moonlight_server_ip | default('', true) | length > 0
+    fail_msg: "moonlight_server_ip is empty. Set MOONLIGHT_SERVER_IP in .env"
+  when: moonlight_require_server | default(false) | bool
 
 - name: Report Moonlight configuration
   ansible.builtin.debug:
@@ -65,4 +80,3 @@
       Codec: {{ moonlight_codec }}, Bitrate: {{ moonlight_bitrate }}kbps
       Display: KasmVNC (X11)
       Display port: {{ moonlight_ws_port | default('6083') }}
-      HARD FAILURE if moonlight_server_ip is empty: set MOONLIGHT_SERVER_IP in .env

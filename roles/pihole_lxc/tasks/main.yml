@@ -37,6 +37,7 @@
 - name: Provision Pi-hole LXC via NM API
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/pihole"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:

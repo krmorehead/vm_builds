@@ -615,7 +615,7 @@ def _detail_guests(host: Host) -> None:
         return
     with ui.card().classes("w-full"):
         theme.card_title(f"Guests ({host.guest_count})")
-        table = ui.table(
+        ui.table(
             columns=[
                 {"name": "vmid", "label": "VMID", "field": "vmid", "align": "left", "sortable": True},
                 {"name": "name", "label": "Name", "field": "name", "align": "left"},
@@ -630,7 +630,6 @@ def _detail_guests(host: Host) -> None:
             } for g in sorted(host.guests, key=lambda g: int(g.vmid) if g.vmid.isdigit() else 0)],
             row_key="vmid",
         ).classes("w-full")
-        return table
 
 
 def _detail_network(host: Host) -> None:

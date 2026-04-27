@@ -21,10 +21,18 @@ wireguard_is_hub: "{{ vpn_ip | default('') == '10.0.0.1' }}"
 wireguard_hub_vpn_ip: "10.0.0.1"
 
 # Server endpoint — clients connect to the hub host's WAN IP on UDP 51820.
-wireguard_server_public_key: >-
+# Validate that the env var is a real 44-char WireGuard key and not a literal
+# ${VAR_NAME} from unexpanded molecule provisioner.env, or Python 'None'.
+_wg_raw_server_pk: >-
   {{ lookup('env', 'WIREGUARD_HUB_PUBLIC_KEY')
      | default(lookup('env', 'WIREGUARD_SERVER_PUBLIC_KEY'), true)
      | default('', true) }}
+wireguard_server_public_key: >-
+  {{ _wg_raw_server_pk
+     if (_wg_raw_server_pk | length == 44
+         and '$' not in _wg_raw_server_pk
+         and _wg_raw_server_pk not in ['None', 'null'])
+     else '' }}
 wireguard_server_endpoint: "{{ lookup('env', 'WIREGUARD_SERVER_ENDPOINT') | default('198.51.100.1:51820', true) }}"
 wireguard_allowed_ips: "{{ lookup('env', 'WIREGUARD_ALLOWED_IPS') | default('10.0.0.0/24', true) }}"
 wireguard_preshared_key: "{{ lookup('env', 'WIREGUARD_PRESHARED_KEY') | default('', true) }}"

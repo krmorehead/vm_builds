@@ -36,6 +36,7 @@
 - name: Provision Kodi LXC via NM API
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/kodi"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
@@ -53,6 +54,9 @@
       gateway: "{{ _lan_gateway }}"
       nameserver: "{{ _lan_gateway }}"
       bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
+      lxc_conf_entries:
+        - "lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir"
+        - "lxc.cgroup2.devices.allow: c 226:* rwm"
       image_version: "{{ kodi_image_version }}"
     status_code: 200
     timeout: 660
@@ -68,7 +72,9 @@
     _priv_ct_id: "{{ kodi_ct_id }}"
     _priv_features: "{{ kodi_ct_features | join(',') }}"
     _priv_mount_entries: []
-    _priv_lxc_conf_entries: []
+    _priv_lxc_conf_entries:
+      - "lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir"
+      - "lxc.cgroup2.devices.allow: c 226:* rwm"
   when:
     - not (_service_up_to_date | default(false) | bool)
     - (_provision_result.json.status | default('')) == 'created_needs_host_config'

@@ -5,20 +5,21 @@
 # device path, password, and service start.
 # All in-container operations go through the Node Manager API over VPN.
 
-# ── Configure iGPU access + start service (batched) ──────────────
+# ── Configure iGPU access ──────────────────────────────────────────
 
-- name: Update render group GID and start Jellyfin
+- name: Sync render GID for Jellyfin
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_render_gid.yml"
+  vars:
+    _render_ct_id: "{{ jellyfin_ct_id }}"
+    _render_user: jellyfin
+
+- name: Start Jellyfin service
+  vars:
+    _nm_url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}"
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ jellyfin_ct_id }}/exec"
+    url: "{{ _nm_url }}/api/config/{{ jellyfin_ct_id }}/service/jellyfin/restart"
+    headers: "{{ nm_auth_headers }}"
     method: POST
-    body_format: json
-    body:
-      cmd: >-
-        bash -c '
-        groupmod -g {{ igpu_render_gid }} render 2>/dev/null || true;
-        usermod -a -G render jellyfin 2>/dev/null || true;
-        systemctl start jellyfin 2>/dev/null || true'
-      timeout: 30
     status_code: 200
   delegate_to: localhost
 
@@ -48,6 +49,7 @@
 - name: Push transcoding config via NM API
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ jellyfin_ct_id }}/file"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
@@ -62,6 +64,7 @@
 - name: Wait for Jellyfin web interface to be ready
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ jellyfin_ct_id }}/exec"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:

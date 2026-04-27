@@ -64,7 +64,7 @@ ROUTER_PACKAGES=(
 )
 
 DEBIAN_BASE_TEMPLATE="debian-12-standard_12.12-1_amd64.tar.zst"
-FEDORA_BASE_TEMPLATE="fedora-41-default_20241004_amd64.tar.xz"
+FEDORA_BASE_TEMPLATE="fedora-41-default-amd64.tar.xz"
 BUILD_BASE_DEBIAN="build-base-debian-12-amd64.tar.zst"
 BUILD_BASE_FEDORA="build-base-fedora-41-amd64.tar.zst"
 BUILD_BASE_VMID=997
@@ -130,7 +130,12 @@ recipe_hash() {
     local target="$1"
     local recipe="${PROJECT_ROOT}/roles/${target}_lxc/recipe.yml"
     if [[ -f "$recipe" ]]; then
-        sha256sum "$recipe" | cut -d' ' -f1
+        local hash_input
+        hash_input="$(sha256sum "$recipe")"
+        if grep -q 'baked_webui:' "$recipe" 2>/dev/null; then
+            hash_input+="$(find "${PROJECT_ROOT}/scripts/webui" -name '*.py' -print0 2>/dev/null | sort -z | xargs -0 sha256sum 2>/dev/null)"
+        fi
+        echo "$hash_input" | sha256sum | cut -d' ' -f1
     else
         echo "no-recipe"
     fi
@@ -296,6 +301,18 @@ UDEV
             fi
         done
     '" 2>/dev/null
+
+    # Ensure MASQUERADE for the container NAT bridge (if it exists).
+    # Without this, build containers on NAT bridges can't reach the internet.
+    local has_vmbr_ct
+    has_vmbr_ct=$($ssh "ip -4 addr show vmbr_ct 2>/dev/null | grep -oP 'inet \K[0-9.]+' || echo ''")
+    if [[ -n "$has_vmbr_ct" ]]; then
+        local ct_subnet="${has_vmbr_ct%.*}.0/24"
+        log "  NAT bridge vmbr_ct detected (${has_vmbr_ct}), ensuring MASQUERADE for ${ct_subnet}..."
+        $ssh "iptables -t nat -C POSTROUTING -s ${ct_subnet} -o vmbr0 -j MASQUERADE 2>/dev/null \
+              || iptables -t nat -A POSTROUTING -s ${ct_subnet} -o vmbr0 -j MASQUERADE"
+        log "  MASQUERADE rule active."
+    fi
 
     log "  Host ${PROXMOX_HOST} ready."
 }

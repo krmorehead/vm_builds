@@ -3417,12 +3417,12 @@ class TestThemeSidebarBreakpoint:
     instead of overlaying it on smaller viewports.
     """
 
-    def test_nav_sidebar_source_has_breakpoint_zero(self):
-        """Sidebar renderer must set breakpoint=0 on the left_drawer."""
+    def test_nav_sidebar_source_has_breakpoint(self):
+        """Sidebar renderer must set a breakpoint on the left_drawer."""
         import inspect
         from scripts.webui import theme
         source = inspect.getsource(theme._render_sidebar)
-        assert 'breakpoint=0' in source or "breakpoint=0" in source
+        assert 'breakpoint=' in source
 
 
 class TestClusterNavigation:

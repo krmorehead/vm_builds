@@ -192,7 +192,7 @@ def _render_sidebar(items: list, title: str, active: str) -> None:
         f"{BG_SIDEBAR_INNER} 100%); "
         f"border-right: 1px solid {ACCENT_DIM};"
     )
-    with ui.left_drawer(value=True).props("breakpoint=0").style(
+    with ui.left_drawer(value=True).props("breakpoint=800 bordered").style(
         f"{sidebar_bg} width: {SIDEBAR_WIDTH}"
     ):
         ui.label(title).classes("text-lg font-medium text-center py-4").style(
@@ -610,16 +610,16 @@ def connection_indicator(status: str) -> None:
         color = COLOR_ERROR
         animation = ""
 
-    pulse_css = f"""
+    pulse_css = """
     <style>
-    @keyframes pulse-green {{
-        0%, 100% {{ box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.6); }}
-        50% {{ box-shadow: 0 0 0 6px rgba(52, 211, 153, 0); }}
-    }}
-    @keyframes pulse-yellow {{
-        0%, 100% {{ box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.6); }}
-        50% {{ box-shadow: 0 0 0 6px rgba(251, 191, 36, 0); }}
-    }}
+    @keyframes pulse-green {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.6); }
+        50% { box-shadow: 0 0 0 6px rgba(52, 211, 153, 0); }
+    }
+    @keyframes pulse-yellow {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.6); }
+        50% { box-shadow: 0 0 0 6px rgba(251, 191, 36, 0); }
+    }
     </style>
     """
     ui.add_head_html(pulse_css)

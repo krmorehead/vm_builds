@@ -8,7 +8,7 @@ memory: 2048
 cores: 2
 disk: "8"
 unprivileged: false
-ostype: unmanaged
+ostype: fedora
 features: "nesting=1"
 
 setup_commands:
@@ -79,13 +79,16 @@ config_files:
     content: |
       [Unit]
       Description=Sunshine game streaming server
-      After=xorg-virtual.service
+      After=xorg-virtual.service pipewire.service pipewire-pulse.service wireplumber.service
       Requires=xorg-virtual.service
+      Wants=pipewire.service pipewire-pulse.service wireplumber.service
 
       [Service]
       Type=simple
       Environment=DISPLAY=:0
       Environment=XDG_RUNTIME_DIR=/run/user/0
+      Environment=PULSE_SERVER=unix:/run/user/0/pulse/native
+      ExecStartPre=/bin/sh -c 'mkdir -p /run/user/0 && chmod 700 /run/user/0'
       ExecStart=/usr/bin/sunshine
       Restart=on-failure
       RestartSec=10
@@ -94,24 +97,69 @@ config_files:
       WantedBy=multi-user.target
     mode: "0644"
 
-  - path: /etc/systemd/system/pipewire.service.d/override.conf
+  - path: /etc/systemd/system/pipewire.service
     content: |
       [Unit]
-      Description=PipeWire Multimedia Service (system)
+      Description=PipeWire Multimedia Service (system-level)
+      After=systemd-logind.service
 
       [Service]
       Type=simple
-      ExecStart=
+      ExecStartPre=/bin/sh -c 'mkdir -p /run/user/0 && chmod 700 /run/user/0'
       ExecStart=/usr/bin/pipewire
       Environment=XDG_RUNTIME_DIR=/run/user/0
+      Environment=PULSE_RUNTIME_PATH=/run/user/0/pulse
+      Restart=on-failure
+      RestartSec=5
 
       [Install]
       WantedBy=multi-user.target
     mode: "0644"
-    mkdir: true
+
+  - path: /etc/systemd/system/pipewire-pulse.service
+    content: |
+      [Unit]
+      Description=PipeWire PulseAudio Service (system-level)
+      After=pipewire.service
+      Requires=pipewire.service
+
+      [Service]
+      Type=simple
+      ExecStartPre=/bin/sh -c 'mkdir -p /run/user/0 && chmod 700 /run/user/0'
+      ExecStart=/usr/bin/pipewire-pulse
+      Environment=XDG_RUNTIME_DIR=/run/user/0
+      Environment=PULSE_RUNTIME_PATH=/run/user/0/pulse
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+    mode: "0644"
+
+  - path: /etc/systemd/system/wireplumber.service
+    content: |
+      [Unit]
+      Description=WirePlumber Session Manager (system-level)
+      After=pipewire.service
+      Requires=pipewire.service
+
+      [Service]
+      Type=simple
+      ExecStartPre=/bin/sh -c 'mkdir -p /run/user/0 && chmod 700 /run/user/0'
+      ExecStart=/usr/bin/wireplumber
+      Environment=XDG_RUNTIME_DIR=/run/user/0
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+    mode: "0644"
 
 post_commands:
   - "systemctl enable xorg-virtual.service 2>/dev/null || true"
+  - "systemctl enable pipewire.service 2>/dev/null || true"
+  - "systemctl enable pipewire-pulse.service 2>/dev/null || true"
+  - "systemctl enable wireplumber.service 2>/dev/null || true"
   - "systemctl enable sunshine.service 2>/dev/null || true"
   - "bash -c 'dnf clean all && rm -rf /var/cache/dnf /tmp/* /var/tmp/*'"
 

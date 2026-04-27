@@ -35,6 +35,7 @@
 - name: Deploy forwarding config to rsyslog via NM API
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ rsyslog_ct_id }}/file"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
@@ -48,6 +49,7 @@
 - name: Remove forwarding config when home server is not set
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ rsyslog_ct_id }}/exec"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
@@ -62,6 +64,7 @@
 - name: Validate rsyslog configuration
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ rsyslog_ct_id }}/exec"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
@@ -75,6 +78,7 @@
   ansible.builtin.uri:
     url: >-
       http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ rsyslog_ct_id }}/service/rsyslog/restart
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body: {}
@@ -87,6 +91,7 @@
 - name: Wait for rsyslog readiness via API
   ansible.builtin.uri:
     url: "{{ callhome_server_local }}/api/container/rsyslog/ready"
+    headers: "{{ nm_auth_headers }}"
     return_content: true
   register: _rsyslog_api_check
   delegate_to: localhost

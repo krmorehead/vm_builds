@@ -66,7 +66,7 @@ def register() -> None:
                 "height: calc(100vh - 40px);"
             ):
                 ui.icon("link_off", size="xl").style(f"color: {theme.TEXT_DISABLED}")
-                ui.label("No URL configured for this service").style(
+                ui.label(Labels.NO_URL_FOR_SERVICE).style(
                     f"color: {theme.TEXT_SECONDARY}"
                 )
                 ui.button(

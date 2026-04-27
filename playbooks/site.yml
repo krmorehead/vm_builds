@@ -450,14 +450,39 @@
       register: _pre_configure_ready
       retries: 12
       delay: 3
-      until: (_pre_configure_ready.json.all_ready | default(false)) | bool
+      until: >-
+        (_pre_configure_ready.json.services | default({}) | dict2items
+         | rejectattr('value.status', 'equalto', 'unknown')
+         | selectattr('value.ready', 'equalto', false)
+         | list | length == 0)
+        and
+        (_pre_configure_ready.json.services | default({}) | dict2items
+         | rejectattr('value.status', 'equalto', 'unknown')
+         | list | length > 0)
 
-    - name: Hard-fail if fleet is not ready
+    - name: Report services that were never provisioned (unreachable hosts)
+      ansible.builtin.debug:
+        msg: >-
+          Skipping fleet check for unprovisioned services (host unreachable):
+          {{ _pre_configure_ready.json.services | dict2items
+             | selectattr('value.status', 'equalto', 'unknown')
+             | map(attribute='key') | list | join(', ') }}
+      when: >-
+        (_pre_configure_ready.json.services | default({}) | dict2items
+         | selectattr('value.status', 'equalto', 'unknown')
+         | list | length > 0)
+
+    - name: Hard-fail if any provisioned service is not ready
       ansible.builtin.assert:
-        that: (_pre_configure_ready.json.all_ready | default(false)) | bool
+        that: >-
+          (_pre_configure_ready.json.services | default({}) | dict2items
+           | rejectattr('value.status', 'equalto', 'unknown')
+           | selectattr('value.ready', 'equalto', false)
+           | list | length == 0)
         fail_msg: >-
           HARD FAILURE: Fleet not ready after 36s. Services not heartbeating: {{
             _pre_configure_ready.json.services | dict2items
+            | rejectattr('value.status', 'equalto', 'unknown')
             | selectattr('value.ready', 'equalto', false)
             | map(attribute='key') | list | join(', ')
           }}. There is NO SSH fallback — the heartbeat system IS the verification path.

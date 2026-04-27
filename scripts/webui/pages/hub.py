@@ -14,7 +14,7 @@ from nicegui import ui
 
 from scripts.webui import theme
 from scripts.webui.data import (
-    DISPLAY_APPS, INTERNAL_PAGES, HubService, PageTitles, Routes,
+    DISPLAY_APPS, INTERNAL_PAGES, HubService, Labels, PageTitles, Routes,
     generate_sm_hub_urls, get_hub_services, load_kiosk_config,
 )
 
@@ -116,7 +116,7 @@ def _card_content(
         )
 
     if not available:
-        ui.badge("Not available").classes("flex-shrink-0 text-xs").props("outline color=grey")
+        ui.badge(Labels.NOT_AVAILABLE).classes("flex-shrink-0 text-xs").props("outline color=grey")
     elif badge_label:
         ui.badge(badge_label).classes("flex-shrink-0 text-xs").props("outline color=green")
     else:

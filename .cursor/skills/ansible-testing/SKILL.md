@@ -578,7 +578,7 @@ by explicit VMID from `group_vars/all.yml`.
    Netdata (500), rsyslog (501), Gaming LXC (601).
 3. Unbind all devices from `vfio-pci`. Without this, WiFi hardware is invisible.
 4. Remove modprobe blacklist files (`/etc/modprobe.d/blacklist-wifi.conf`, `/etc/modprobe.d/vfio-pci.conf`).
-5. Reload WiFi kernel modules: `modprobe -r iwlmvm iwlwifi; modprobe iwlwifi`.
+5. Rebind WiFi PCI devices via sysfs: `tasks/sysfs_wifi_rebind.yml` (NEVER `modprobe -r`).
 6. Rescan PCI bus: `echo 1 > /sys/bus/pci/rescan`.
 7. Tear down stale bridges (skip vmbr0 management bridge).
 8. `ifup --all --force` to restore interfaces.

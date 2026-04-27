@@ -81,10 +81,11 @@ class ApiClient:
         *,
         json: dict | None = None,
         timeout: float | None = None,
+        params: dict[str, str] | None = None,
     ) -> dict | None:
         """POST and return parsed JSON, or ``None`` on any transport error."""
         try:
-            resp = await self.post(path, json=json, timeout=timeout)
+            resp = await self.post(path, json=json, timeout=timeout, params=params)
             if resp.is_success:
                 return resp.json()
             _log.debug("POST %s returned %d", path, resp.status_code)

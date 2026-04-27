@@ -9,6 +9,7 @@ from __future__ import annotations
 from nicegui import ui
 
 from scripts.webui import data, theme
+from scripts.webui.data import PageTitles
 
 
 def register() -> None:
@@ -52,7 +53,7 @@ def _fetch_rsyslog_data(state_dir) -> list[dict]:
 
 def _logs_content(state_dir) -> None:
     """Render the rsyslog status dashboard."""
-    theme.page_header("Centralized Logs", "rsyslog collector health and status")
+    theme.page_header(PageTitles.LOGS, "rsyslog collector health and status")
 
     status_container = ui.column().classes("w-full gap-4")
 

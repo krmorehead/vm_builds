@@ -28,6 +28,7 @@
 - name: Set Sunshine credentials and start display services
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ gaming_ct_id }}/exec"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:

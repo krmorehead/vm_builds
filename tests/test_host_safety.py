@@ -12,12 +12,19 @@ Checked patterns:
   1. modprobe -r amdgpu / modprobe -r i915 without VGA count guard
   2. shutdown / poweroff / halt / init 0 in cleanup or molecule files
   3. Broad-scope plays (hosts: proxmox) containing GPU driver unloads
+  4. ANY modprobe -r iwlwifi / iwlmvm (total ban — use sysfs rebind)
 
 Safe patterns (allowed):
   - modprobe -r amdgpu gated on VGA count >= 2 (in same task block)
-  - modprobe -r iwlwifi / iwlmvm (WiFi, gated on wifi group membership in role)
   - modprobe -r wireguard (network module, not dangerous)
   - PCI bus rescan (echo 1 > /sys/bus/pci/rescan) — always safe
+  - sysfs unbind + rescan + bind (tasks/sysfs_wifi_rebind.yml) — always safe
+
+BANNED: modprobe -r iwlwifi / iwlmvm — triggers PCIe device reset.
+On AMD APUs (Raven Ridge), the NBIO handles ALL PCIe, USB, and SATA
+traffic on a shared die. The PCIe reset destabilizes the NBIO, killing
+USB ethernet hours later. Use sysfs_wifi_rebind.yml instead.
+Previous bugs: 2026-04-21, 2026-04-24 — ai crashed both times.
 """
 
 import re
@@ -38,6 +45,7 @@ YAML_DIRS = [
 ]
 
 GPU_DRIVER_UNLOAD = re.compile(r"modprobe\s+-r\s+(amdgpu|i915)\b")
+WIFI_DRIVER_UNLOAD = re.compile(r"modprobe\s+-r\s+(iwlmvm|iwlwifi)\b")
 
 HOST_SHUTDOWN = re.compile(
     r"\b(shutdown|poweroff|halt|init\s+0|systemctl\s+poweroff)\b"
@@ -47,7 +55,7 @@ VGA_COUNT_GUARD = re.compile(
     r"(vga_count|VGA compatible controller|lspci.*grep.*VGA)", re.IGNORECASE
 )
 
-SAFE_MODPROBE_UNLOADS = {"iwlwifi", "iwlmvm", "wireguard", "vfio_pci", "vfio-pci"}
+SAFE_MODPROBE_UNLOADS = {"wireguard", "vfio_pci", "vfio-pci"}
 
 SHELL_DIRS = [
     REPO_ROOT / "scripts",
@@ -290,9 +298,41 @@ class TestModprobeRPatternSafety:
         assert not violations, (
             "Unrecognized or unguarded modprobe -r found. Each modprobe -r "
             "must be either:\n"
-            "  - A safe module (WiFi, wireguard)\n"
+            "  - A safe module (wireguard, vfio_pci)\n"
             "  - A GPU driver gated on VGA count >= 2\n"
             "  - In a narrow-scope play (not targeting all proxmox hosts)\n"
+            "Violations:\n  - " + "\n  - ".join(violations)
+        )
+
+
+class TestNoWiFiDriverUnload:
+    """modprobe -r iwlwifi/iwlmvm is BANNED everywhere.
+
+    On AMD APUs (Raven Ridge), the NBIO handles ALL PCIe traffic on a shared
+    die. A WiFi module unload triggers a PCIe device reset that destabilizes
+    the NBIO, killing USB ethernet adapters hours later. This has crashed ai
+    (wol_capable: false) multiple times, requiring physical power-on.
+
+    Use sysfs unbind + PCI rescan + explicit bind instead (the same pattern
+    proxmox_igpu uses for DRI recovery). See tasks/sysfs_wifi_rebind.yml.
+    """
+
+    def test_no_wifi_module_unload_anywhere(self):
+        """No YAML file may contain modprobe -r iwlwifi or iwlmvm."""
+        violations = []
+        for filepath in _collect_yaml_files():
+            content = filepath.read_text()
+            for match in WIFI_DRIVER_UNLOAD.finditer(content):
+                line_num = content[:match.start()].count("\n") + 1
+                rel = filepath.relative_to(REPO_ROOT)
+                violations.append(f"{rel}:{line_num}: {match.group()}")
+
+        assert not violations, (
+            "modprobe -r iwlwifi/iwlmvm is BANNED. On AMD APUs, WiFi module "
+            "unload triggers a PCIe device reset that kills USB ethernet via "
+            "NBIO destabilization.\n"
+            "Use sysfs unbind + PCI rescan + explicit bind instead:\n"
+            "  include_tasks: tasks/sysfs_wifi_rebind.yml\n"
             "Violations:\n  - " + "\n  - ".join(violations)
         )
 

@@ -140,7 +140,7 @@
     - _ctrl_pubkey_resolved != 'None'
 
 # ── Client: resolve hub's public key ─────────────────────────
-- name: Resolve hub public key for clients
+- name: Resolve hub public key from hostvars
   ansible.builtin.set_fact:
     _wg_server_pubkey: >-
       {{ wireguard_server_public_key
@@ -154,6 +154,42 @@
              | selectattr('value.wg_vpn_ip', 'equalto', wireguard_hub_vpn_ip)
              | map(attribute='key') | list)
          | first | default('') }}
+  when: not (wireguard_is_hub | bool)
+
+- name: Fallback — read hub public key from env.generated
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      grep '^WIREGUARD_HUB_PUBLIC_KEY=' "{{ env_generated_path }}" 2>/dev/null | cut -d= -f2-
+    executable: /bin/bash
+  register: _hub_pk_from_file
+  changed_when: false
+  failed_when: false
+  delegate_to: localhost
+  when:
+    - not (wireguard_is_hub | bool)
+    - _wg_server_pubkey | default('') | length != 44
+      or '$' in (_wg_server_pubkey | default(''))
+      or _wg_server_pubkey | default('') in ['None', 'null', '']
+
+- name: Apply env.generated hub public key
+  ansible.builtin.set_fact:
+    _wg_server_pubkey: "{{ _hub_pk_from_file.stdout | trim }}"
+  when:
+    - not (wireguard_is_hub | bool)
+    - _hub_pk_from_file is defined
+    - _hub_pk_from_file.stdout | default('') | trim | length == 44
+
+- name: Validate hub public key before writing config
+  ansible.builtin.assert:
+    that:
+      - _wg_server_pubkey | length == 44
+      - "'$' not in _wg_server_pubkey"
+      - _wg_server_pubkey not in ['None', 'null', '']
+    fail_msg: >-
+      Hub public key is invalid: '{{ _wg_server_pubkey }}'.
+      The hub (vpn_ip=10.0.0.1) must run configure first.
+      Check env.generated for WIREGUARD_HUB_PUBLIC_KEY.
   when: not (wireguard_is_hub | bool)
 
 # ── Build wg0 configuration content ─────────────────────────────
@@ -206,6 +242,7 @@
 - name: Push wg0.conf via NM API
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ wireguard_ct_id }}/file"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
@@ -223,6 +260,7 @@
     _nm_base: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}"
   ansible.builtin.uri:
     url: "{{ _nm_base }}/api/config/{{ wireguard_ct_id }}/service/wg-quick@wg0/restart"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body: {}
@@ -250,6 +288,7 @@
 - name: Push firewall.env with DNAT target
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ wireguard_ct_id }}/file"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
@@ -262,6 +301,7 @@
 - name: Push updated firewall setup script
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ wireguard_ct_id }}/file"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
@@ -274,6 +314,7 @@
 - name: Apply firewall rules (MASQUERADE + DNAT)
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ wireguard_ct_id }}/exec"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:

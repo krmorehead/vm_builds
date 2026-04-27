@@ -1,0 +1,75 @@
+---
+# Universal WiFi PCI device rebind via sysfs.
+# Mirrors the proxmox_igpu DRI recovery pattern: unbind from current
+# driver, clear driver_override, PCI rescan, explicitly bind to the
+# native WiFi driver.
+#
+# NEVER uses modprobe -r. Safe on all hardware including AMD APUs
+# with shared NBIO where PCIe device resets kill USB ethernet.
+#
+# Prerequisites: WiFi PCI devices must exist on the host.
+# Gate callers on _host_uses_wifi before including this file.
+
+- name: Find WiFi PCI devices for sysfs rebind
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      for phy in /sys/class/ieee80211/phy*; do
+        [ -e "$phy/device" ] || continue
+        PCI_ADDR=$(basename "$(readlink -f "$phy/device")" 2>/dev/null)
+        DRIVER=$(basename "$(readlink -f "$phy/device/driver")" 2>/dev/null)
+        echo "$PCI_ADDR $DRIVER"
+      done
+    executable: /bin/bash
+  register: _wifi_pci_list
+  changed_when: false
+  failed_when: false
+
+- name: Rebind WiFi PCI devices via sysfs
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      REBOUND=0
+      while IFS=' ' read -r PCI_ADDR DRIVER; do
+        [ -z "$PCI_ADDR" ] && continue
+
+        # Unbind from current driver
+        if [ -n "$DRIVER" ] && [ -e "/sys/bus/pci/drivers/$DRIVER/unbind" ]; then
+          echo "$PCI_ADDR" > "/sys/bus/pci/drivers/$DRIVER/unbind" 2>/dev/null || true
+        fi
+
+        # Clear driver_override so rescan can match the right driver
+        echo "" > "/sys/bus/pci/devices/$PCI_ADDR/driver_override" 2>/dev/null || true
+
+        REBOUND=$((REBOUND + 1))
+      done <<< "{{ _wifi_pci_list.stdout }}"
+
+      # Single PCI bus rescan for all devices
+      [ "$REBOUND" -gt 0 ] && echo 1 > /sys/bus/pci/rescan
+      sleep 1
+
+      # Explicitly bind each device back to its driver
+      while IFS=' ' read -r PCI_ADDR DRIVER; do
+        [ -z "$PCI_ADDR" ] && continue
+        [ -z "$DRIVER" ] && DRIVER="iwlwifi"
+
+        if [ -e "/sys/bus/pci/drivers/$DRIVER/bind" ]; then
+          echo "$PCI_ADDR" > "/sys/bus/pci/drivers/$DRIVER/bind" 2>/dev/null || true
+        fi
+      done <<< "{{ _wifi_pci_list.stdout }}"
+
+      sleep 2
+    executable: /bin/bash
+  changed_when: true
+  when: (_wifi_pci_list.stdout | default('') | trim) | length > 0
+
+- name: Verify WiFi PHYs reappeared after rebind
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      find /sys/class/ieee80211 -mindepth 1 -maxdepth 1 -name 'phy*' -print 2>/dev/null | wc -l
+    executable: /bin/bash
+  register: _wifi_rebind_phy_count
+  changed_when: false
+  failed_when: (_wifi_rebind_phy_count.stdout | default('0') | trim | int) == 0
+  when: (_wifi_pci_list.stdout | default('') | trim) | length > 0

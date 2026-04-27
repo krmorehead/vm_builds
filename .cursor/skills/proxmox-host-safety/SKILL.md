@@ -163,18 +163,27 @@ done
 # 2. Remove blacklist and vfio config files
 rm -f /etc/modprobe.d/blacklist-wifi.conf /etc/modprobe.d/vfio-pci.conf
 
-# 3. Reload original WiFi drivers
-modprobe -r iwlmvm iwlwifi 2>/dev/null; modprobe iwlwifi
+# 3. Rebind WiFi via sysfs (NEVER modprobe -r)
+# Use tasks/sysfs_wifi_rebind.yml or inline:
+for phy in /sys/class/ieee80211/phy*; do
+  PCI=$(basename $(readlink -f "$phy/device"))
+  DRV=$(basename $(readlink -f "$phy/device/driver"))
+  echo "$PCI" > /sys/bus/pci/drivers/$DRV/unbind
+  echo "" > /sys/bus/pci/devices/$PCI/driver_override
+done
 
-# 4. Rescan PCI bus
+# 4. Rescan PCI bus + explicit bind
 echo 1 > /sys/bus/pci/rescan
+sleep 1
+# Explicitly bind back (rescan alone won't auto-bind loaded modules)
+echo "$PCI" > /sys/bus/pci/drivers/$DRV/bind
 ```
 
-All four steps are required. Step 3 is critical -- `echo 1 > /sys/bus/pci/rescan` alone is insufficient because the kernel won't auto-bind drivers that were explicitly unbound.
+All steps are required. The explicit bind (step 4) is critical -- `echo 1 > /sys/bus/pci/rescan` alone is insufficient because the kernel won't auto-bind drivers that were explicitly unbound.
 
 ## GPU driver cleanup — SEPARATE from WiFi PCI cleanup
 
-GPU driver unload (i915/amdgpu) is NOT the same as WiFi driver unload. WiFi `modprobe -r iwlwifi` is always safe. GPU `modprobe -r amdgpu` on a single-GPU AMD host causes a **kernel panic**.
+GPU driver unload (i915/amdgpu) is NOT the same as WiFi driver unload. WiFi `modprobe -r iwlwifi/iwlmvm` is BANNED on ALL hardware. On AMD APUs, WiFi module unload destabilizes the NBIO via PCIe reset, killing USB ethernet hours later. Use `tasks/sysfs_wifi_rebind.yml` (sysfs unbind + PCI rescan + explicit bind) instead — universally safe on Intel and AMD. GPU `modprobe -r amdgpu` on a single-GPU AMD host causes a **kernel panic**.
 
 Rules:
 - NEVER run `modprobe -r amdgpu` or `modprobe -r i915` in broad-scope plays (hosts: proxmox*). PCI bus rescan after vfio-pci unbind is sufficient for E2E cleanup.

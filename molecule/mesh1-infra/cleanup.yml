@@ -87,12 +87,10 @@
       changed_when: true
       failed_when: false
 
-    - name: Reload kernel modules and rescan PCI on mesh1  # noqa command-instead-of-shell
+    - name: Rescan PCI bus on mesh1  # noqa command-instead-of-shell
       ansible.builtin.shell:
         cmd: >-
           {{ _cleanup_ssh }} "
-          modprobe -r iwlmvm iwlwifi 2>/dev/null || true;
-          modprobe iwlwifi 2>/dev/null || true;
           echo 1 > /sys/bus/pci/rescan 2>/dev/null || true"
       when: _mesh1_reachable | bool
       changed_when: true

@@ -73,11 +73,13 @@ alwaysApply: true
 - After unbinding from vfio-pci, PCI rescan does NOT auto-bind the native driver if the module is already loaded. Cleanup and hookscript post-stop MUST explicitly rebind (`echo PCI_ADDR > /sys/bus/pci/drivers/i915/bind`).
 - Previous bug: sysfs unbind of AMD Raven Ridge APU iGPU (1002:15dd) on `ai` via hookscript pre-start hung the system. Unlike discrete GPUs, the APU GPU reset freezes the NBIO, killing USB ethernet (EHOSTUNREACH). Required physical power-on.
 
-## WiFi kernel module reloads — scope to WiFi hosts only
-- NEVER run `modprobe -r iwlmvm iwlwifi` on hosts that don't actively use WiFi (not in `router_nodes`, `wifi_nodes`, or `bridge_nodes`). The module reload triggers a PCIe device reset and firmware unload/reload cycle.
+## WiFi kernel module reloads — BANNED (use sysfs rebind)
+- NEVER run `modprobe -r iwlmvm iwlwifi` on ANY host. The module unload triggers a PCIe device reset. Use sysfs unbind + PCI rescan + explicit bind instead (`tasks/sysfs_wifi_rebind.yml`).
 - On AMD APUs (Raven Ridge), the NBIO handles ALL PCIe, USB, and SATA traffic on a shared die. A PCIe device reset on ANY peripheral (WiFi, GPU, NVMe) can cause a delayed NBIO hang that kills USB controllers hours later — long after the `modprobe` command returns successfully.
-- The iwlwifi module auto-loads when an Intel WiFi card is physically present, even if the host doesn't use WiFi. Gate the reload on group membership, not just module presence.
-- Previous bug (2026-04-21): `proxmox_pci_passthrough` ran `modprobe -r iwlmvm iwlwifi` on `ai` (AMD Raven Ridge, AX210 in PCIe slot, USB ethernet, `wol_capable: false`). `ai` is not in `wifi_nodes` — the WiFi card is unused. The PCIe reset destabilized the NBIO. Three hours later, the USB ethernet adapter died. `ai` became permanently unreachable until physical power-on. Fix: gated iwlwifi reload on `_host_uses_wifi` (router_nodes OR wifi_nodes OR bridge_nodes).
+- The sysfs rebind pattern (`sysfs_wifi_rebind.yml`) is universally safe on Intel and AMD — no hardware-specific branching needed. It mirrors the proven `proxmox_igpu` DRI recovery pattern.
+- `test_host_safety.py::TestNoWiFiDriverUnload` enforces a total ban on `modprobe -r iwlwifi/iwlmvm` in all YAML files.
+- Previous bug (2026-04-21): `proxmox_pci_passthrough` ran `modprobe -r iwlmvm iwlwifi` on `ai` (AMD Raven Ridge, AX210 in PCIe slot, USB ethernet, `wol_capable: false`). The PCIe reset destabilized the NBIO. Three hours later, the USB ethernet adapter died. `ai` became permanently unreachable until physical power-on.
+- Previous bug (2026-04-24): Same pattern recurred via cleanup.yml and cleanup_lan_host.yml — ungated `modprobe -r iwlwifi` on all hosts. Fix: replaced ALL occurrences with sysfs rebind.
 
 ## PCI device cleanup after passthrough
 - After destroying VMs or running cleanup, devices remain bound to `vfio-pci`. They do NOT auto-revert.
@@ -399,7 +401,7 @@ is ALWAYS wrong for infrastructure hosts.
 - The udev rule is NOT removed during cleanup — it's a permanent host safety fix, not ephemeral playbook state. Removing it on `wol_capable: false` hosts creates unacceptable risk.
 - Three hosts have USB ethernet: ai (RTL8156), mesh2 (RTL8156), bridge-2 (RTL8156). All need the fix.
 - Previous bug (2026-04-20): `ai`'s NM heartbeat relay (1 HTTP POST/10s through USB ethernet) caused 1,080 suspend/resume cycles over 3 hours. One resume failed, adapter died silently. `ai` required physical power-on.
-- Previous bug (2026-04-21): Same mechanism — after `molecule converge` ended, the heartbeat traffic pattern triggered the autosuspend cycling again. Combined with unnecessary `modprobe -r iwlwifi` (now gated on WiFi hosts only) destabilizing the PCIe subsystem.
+- Previous bug (2026-04-21): Same mechanism — after `molecule converge` ended, the heartbeat traffic pattern triggered the autosuspend cycling again. Combined with `modprobe -r iwlwifi` (now banned — replaced with sysfs rebind) destabilizing the PCIe subsystem.
 
 ## WAN container IP collision (historical — resolved by NAT)
 - WAN containers now use private NAT subnets (10.99.x.x) instead of the household subnet. IP collisions with host management IPs are no longer possible.

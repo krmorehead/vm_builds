@@ -1,0 +1,30 @@
+---
+# Shared task: synchronize the container's render group GID with the host's
+# iGPU render group GID and add a service user to the render group.
+#
+# Required vars:
+#   _render_ct_id:   Container VMID
+#   _render_user:    Username to add to the render group (e.g. jellyfin, kodi)
+#
+# Host-scoped vars (from proxmox_igpu):
+#   igpu_render_gid: Host's render group GID
+
+- name: "Sync render GID for {{ _render_user }} (CT {{ _render_ct_id }})"
+  ansible.builtin.uri:
+    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ _render_ct_id }}/exec"
+    headers: "{{ nm_auth_headers }}"
+    method: POST
+    body_format: json
+    body:
+      cmd: >-
+        bash -c '
+        groupmod -g {{ igpu_render_gid }} render;
+        usermod -a -G render {{ _render_user }};
+        echo alive'
+      timeout: 30
+    status_code: 200
+  delegate_to: localhost
+  register: _render_gid_result
+  retries: 10
+  delay: 3
+  until: (_render_gid_result.json.success | default(false)) | bool

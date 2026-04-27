@@ -52,18 +52,27 @@ description: Proxmox cleanup completeness and maintenance safety patterns. Use w
    # 2. Remove blacklist and vfio config files
    rm -f /etc/modprobe.d/blacklist-wifi.conf /etc/modprobe.d/vfio-pci.conf
 
-   # 3. Reload original WiFi drivers
-   modprobe -r iwlmvm iwlwifi 2>/dev/null; modprobe iwlwifi
+   # 3. Rebind WiFi via sysfs (NEVER modprobe -r)
+   # Use tasks/sysfs_wifi_rebind.yml or inline:
+   for phy in /sys/class/ieee80211/phy*; do
+     PCI=$(basename $(readlink -f "$phy/device"))
+     DRV=$(basename $(readlink -f "$phy/device/driver"))
+     echo "$PCI" > /sys/bus/pci/drivers/$DRV/unbind
+     echo "" > /sys/bus/pci/devices/$PCI/driver_override
+   done
 
-   # 4. Rescan PCI bus
+   # 4. Rescan PCI bus + explicit bind
    echo 1 > /sys/bus/pci/rescan
+   sleep 1
+   echo "$PCI" > /sys/bus/pci/drivers/$DRV/bind
    ```
 
-8. All four steps are required. Step 3 is critical -- `echo 1 > /sys/bus/pci/rescan` alone is insufficient because the kernel won't auto-bind drivers that were explicitly unbound.
+8. All steps are required. The explicit bind (step 4) is critical -- `echo 1 > /sys/bus/pci/rescan` alone is insufficient because the kernel won't auto-bind drivers that were explicitly unbound.
+9. WiFi module unload (`modprobe -r iwlwifi/iwlmvm`) is BANNED on ALL hardware. On AMD APUs (Raven Ridge), the NBIO handles ALL PCIe, USB, and SATA on a shared die — a WiFi module unload triggers a PCIe reset that kills USB ethernet hours later. Use sysfs unbind + PCI rescan + explicit bind instead (`tasks/sysfs_wifi_rebind.yml`). This pattern is universally safe on Intel and AMD, with no hardware-specific branching.
 
 ## GPU Driver Cleanup — Separate from WiFi
 
-9. GPU driver cleanup (i915/amdgpu) is DIFFERENT from WiFi cleanup. WiFi `modprobe -r iwlwifi` is always safe. GPU `modprobe -r amdgpu` on a single-GPU AMD host causes a **kernel panic** (sole framebuffer removal).
+10. GPU driver cleanup (i915/amdgpu) is DIFFERENT from WiFi cleanup. GPU `modprobe -r amdgpu` on a single-GPU AMD host causes a **kernel panic** (sole framebuffer removal).
 
 10. NEVER run `modprobe -r amdgpu` or `modprobe -r i915` in broad-scope plays (hosts: proxmox*). For E2E cleanup, PCI bus rescan after vfio-pci unbind is sufficient — skip GPU driver unload.
 

@@ -1,5 +1,18 @@
 ---
-# ── Load WiFi kernel modules (unconditional, all hosts) ───────
+# ── Determine if host uses WiFi (MUST be first) ──────────────
+# CRITICAL: On AMD APUs (Raven Ridge), ANY WiFi module load/unload
+# triggers a PCIe device reset that destabilizes the NBIO, killing
+# USB ethernet adapters hours later. Gate ALL WiFi operations on
+# group membership — not hardware detection.
+
+- name: Check if host uses WiFi
+  ansible.builtin.set_fact:
+    _host_uses_wifi: >-
+      {{ ('router_nodes' in group_names) or
+         ('wifi_nodes' in group_names) or
+         ('bridge_nodes' in group_names) }}
+
+# ── Load WiFi kernel modules (WiFi hosts only) ───────────────
 # Ensure WiFi drivers are loaded BEFORE scanning for interfaces.
 # Fresh hosts without prior vfio-pci bindings may have no WiFi
 # driver loaded, causing interface detection to find nothing.
@@ -13,6 +26,7 @@
       sleep 2
     executable: /bin/bash
   changed_when: false
+  when: _host_uses_wifi | bool
 
 # ── Detect WiFi PCI controllers ──────────────────────────────
 # Check for WiFi hardware via lspci before interface scan.
@@ -42,9 +56,8 @@
   failed_when: false
 
 # ── Early PHY check ──────────────────────────────────────────
-# If PHYs already exist, firmware is loaded — skip firmware install.
 
-- name: Count WiFi PHYs before firmware check
+- name: Count WiFi PHYs
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
@@ -53,94 +66,16 @@
   register: _early_phy_count
   changed_when: false
 
-# ── Firmware verification and auto-install ────────────────────
-# If lspci shows a WiFi controller but no PHYs appeared,
-# firmware is likely missing. Install and reload for Intel WiFi.
-# On Proxmox VE, pve-firmware already bundles Intel WiFi firmware.
-# Installing the standalone firmware-iwlwifi package conflicts
-# with pve-firmware (apt tries to remove proxmox-ve meta-package).
-
-- name: Check if WiFi firmware is already available
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      if dpkg -l pve-firmware 2>/dev/null | grep -q '^ii'; then
-        echo "pve-firmware"
-      elif dpkg -l firmware-iwlwifi 2>/dev/null | grep -q '^ii'; then
-        echo "firmware-iwlwifi"
-      else
-        echo "none"
-      fi
-    executable: /bin/bash
-  register: _fw_provider
-  changed_when: false
-  when:
-    - (_early_phy_count.stdout | default('0') | trim | int) == 0
-    - (wifi_ifaces_raw.stdout_lines | default([])) | length == 0
-    - _wifi_pci_controllers.stdout is search('Intel')
-
-- name: Check DNS resolution before firmware install
-  ansible.builtin.command:
-    cmd: getent hosts deb.debian.org
-  register: _fw_dns_check
-  changed_when: false
-  failed_when: false
-  when:
-    - (_early_phy_count.stdout | default('0') | trim | int) == 0
-    - (wifi_ifaces_raw.stdout_lines | default([])) | length == 0
-    - _wifi_pci_controllers.stdout is search('Intel')
-    - (_fw_provider.stdout | default('none') | trim) == 'none'
-
-- name: Fix DNS to use gateway if external DNS is unreachable
-  ansible.builtin.copy:
-    dest: /etc/resolv.conf
-    mode: "0644"
-    content: |
-      nameserver {{ ansible_default_ipv4.gateway | default('8.8.8.8') }}
-      nameserver 8.8.8.8
-      nameserver 1.1.1.1
-  when:
-    - (_early_phy_count.stdout | default('0') | trim | int) == 0
-    - (wifi_ifaces_raw.stdout_lines | default([])) | length == 0
-    - _wifi_pci_controllers.stdout is search('Intel')
-    - (_fw_provider.stdout | default('none') | trim) == 'none'
-    - _fw_dns_check.rc | default(0) != 0
-
-- name: Install firmware-iwlwifi for Intel WiFi
-  ansible.builtin.apt:
-    name: firmware-iwlwifi
-    state: present
-    update_cache: true
-    cache_valid_time: 86400
-  when:
-    - (_early_phy_count.stdout | default('0') | trim | int) == 0
-    - (wifi_ifaces_raw.stdout_lines | default([])) | length == 0
-    - _wifi_pci_controllers.stdout is search('Intel')
-    - (_fw_provider.stdout | default('none') | trim) == 'none'
-
 - name: Install iw tool for WiFi PHY management
   ansible.builtin.apt:
     name: iw
     state: present
     cache_valid_time: 86400
   when:
+    - _host_uses_wifi | bool
     - (_wifi_pci_controllers.stdout_lines | default([])) | length > 0
 
-- name: Reload iwlwifi module after firmware install
-  ansible.builtin.shell:
-    cmd: |
-      modprobe -r iwlmvm iwlwifi 2>/dev/null || true
-      modprobe iwlwifi 2>/dev/null || true
-      sleep 3
-    executable: /bin/bash
-  changed_when: true
-  when:
-    - (_early_phy_count.stdout | default('0') | trim | int) == 0
-    - (wifi_ifaces_raw.stdout_lines | default([])) | length == 0
-    - _wifi_pci_controllers.stdout is search('Intel')
-    - (_fw_iwlwifi_installed.stdout | default('0') | trim | int) == 0
-
-- name: Re-detect WiFi interfaces after firmware install
+- name: Re-detect WiFi interfaces
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
@@ -255,31 +190,10 @@
       {{ wifi_driver_blacklist if wifi_driver_blacklist | length > 0
          else _auto_driver_blacklist | default([]) }}
 
-# ── Reload iwlwifi for consistent firmware regulatory state ──────
+# ── Rebind WiFi for consistent firmware regulatory state ─────
 # iwlwifi's self-managed regulatory starts in country 00 with
-# PASSIVE-SCAN on many bands. A module reload reinitializes the
+# PASSIVE-SCAN on many bands. A sysfs rebind reinitializes the
 # firmware regulatory state, enabling AP-capable channels on 6 GHz.
-# The lar_disable=1 modprobe option (if present in iwlwifi-options.conf
-# from previous runs) is also picked up on reload.
-#
-# SAFETY: Only reload on hosts that actually use WiFi (router, wifi,
-# bridge groups). Unloading WiFi modules causes a PCIe device reset
-# — on AMD APUs the NBIO handles all PCIe/USB/SATA on a shared die,
-# and a reset can cause delayed instability that kills USB ethernet
-# hours later.
-
-- name: Check if host uses WiFi
-  ansible.builtin.set_fact:
-    _host_uses_wifi: >-
-      {{ ('router_nodes' in group_names) or
-         ('wifi_nodes' in group_names) or
-         ('bridge_nodes' in group_names) }}
-
-- name: Check if iwlwifi module is loaded
-  ansible.builtin.stat:
-    path: /sys/module/iwlwifi
-  register: _iwlwifi_module
-  when: _host_uses_wifi | bool
 
 - name: Check if iwlwifi PHY has self-managed regulatory
   ansible.builtin.shell:
@@ -289,15 +203,11 @@
   changed_when: false
   when:
     - _host_uses_wifi | bool
-    - _iwlwifi_module.stat.exists | default(false)
 
-- name: Reload iwlwifi module stack for regulatory reinit
-  ansible.builtin.command:
-    cmd: bash -c 'modprobe -r iwlmvm iwlwifi 2>/dev/null || true; sleep 1; modprobe iwlwifi 2>/dev/null || true; sleep 2'
-  changed_when: true
+- name: Rebind WiFi devices for regulatory reinit (sysfs-only, no modprobe -r)
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/sysfs_wifi_rebind.yml"
   when:
     - _host_uses_wifi | bool
-    - _iwlwifi_module.stat.exists | default(false)
     - (_iwlwifi_self_managed.stdout | default('0') | trim | int) > 0
 
 - name: Skip remaining tasks when no WiFi devices found
@@ -691,16 +601,75 @@
     executable: /bin/bash
   register: _wifi_phy_count_raw
   changed_when: false
+  when: _host_uses_wifi | bool
 
-- name: Check if mesh container is running (PHY may be namespace-moved)
-  ansible.builtin.command:
-    cmd: pct status {{ meshwifi_ct_id }}
-  register: _mesh_ct_status
+- name: Check if WiFi container is running (PHY may be namespace-moved)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      for ct in {{ meshwifi_ct_id }} {{ bridge_ct_id }}; do
+        status=$(pct status "$ct" 2>/dev/null) || continue
+        echo "$ct $status"
+      done
+    executable: /bin/bash
+  register: _wifi_ct_status
   changed_when: false
   failed_when: false
   when:
+    - _host_uses_wifi | bool
     - (_wifi_pci_controllers.stdout_lines | default([])) | length > 0
     - (_wifi_phy_count_raw.stdout | default('0') | trim | int) == 0
+    - "'router_nodes' not in group_names"
+
+- name: Stop WiFi containers to release PHY back to host namespace
+  ansible.builtin.shell:
+    cmd: |
+      for ct in {{ meshwifi_ct_id }} {{ bridge_ct_id }}; do
+        pct status "$ct" 2>/dev/null | grep -q running || continue
+        pct stop "$ct" 2>/dev/null || true
+      done
+      sleep 3
+    executable: /bin/bash
+  changed_when: true
+  when:
+    - _host_uses_wifi | bool
+    - (_wifi_pci_controllers.stdout_lines | default([])) | length > 0
+    - (_wifi_phy_count_raw.stdout | default('0') | trim | int) == 0
+    - "'router_nodes' not in group_names"
+    - _wifi_ct_status.stdout | default('') is search('running')
+
+- name: Re-count WiFi PHYs after releasing from container
+  ansible.builtin.shell:
+    cmd: |
+      ls /sys/class/ieee80211/ 2>/dev/null | grep -c '^phy' || echo 0
+    executable: /bin/bash
+  register: _wifi_phy_count_raw
+  changed_when: false
+  when:
+    - _host_uses_wifi | bool
+    - (_wifi_pci_controllers.stdout_lines | default([])) | length > 0
+    - "'router_nodes' not in group_names"
+    - _wifi_ct_status.stdout | default('') is search('running')
+
+- name: Attempt sysfs WiFi rebind if PHY missing (driver may need re-probe)
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/sysfs_wifi_rebind.yml"
+  when:
+    - _host_uses_wifi | bool
+    - (_wifi_pci_controllers.stdout_lines | default([])) | length > 0
+    - (_wifi_phy_count_raw.stdout | default('0') | trim | int) == 0
+    - wifi_pci_devices | length > 0
+    - "'router_nodes' not in group_names"
+
+- name: Final WiFi PHY count after rebind attempt
+  ansible.builtin.shell:
+    cmd: |
+      ls /sys/class/ieee80211/ 2>/dev/null | grep -c '^phy' || echo 0
+    executable: /bin/bash
+  register: _wifi_phy_count_raw
+  changed_when: false
+  when:
+    - _host_uses_wifi | bool
+    - (_wifi_pci_controllers.stdout_lines | default([])) | length > 0
     - "'router_nodes' not in group_names"
 
 - name: Fail if WiFi PCI device detected but no PHY created (non-router only)
@@ -712,11 +681,11 @@
       On Proxmox VE, pve-firmware provides Intel WiFi firmware.
       On bare Debian: apt install firmware-iwlwifi
   when:
+    - _host_uses_wifi | bool
     - (_wifi_pci_controllers.stdout_lines | default([])) | length > 0
     - (_wifi_phy_count_raw.stdout | default('0') | trim | int) == 0
     - wifi_pci_devices | length > 0
     - "'router_nodes' not in group_names"
-    - _mesh_ct_status.stdout | default('') is not search('running')
 
 # ── Export WiFi facts (all hosts) ─────────────────────────────
 

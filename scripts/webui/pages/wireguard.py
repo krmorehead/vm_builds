@@ -9,6 +9,7 @@ from __future__ import annotations
 from nicegui import ui
 
 from scripts.webui import data, theme
+from scripts.webui.data import PageTitles
 
 
 def register() -> None:
@@ -52,7 +53,7 @@ def _fetch_wireguard_data(state_dir) -> list[dict]:
 
 def _wireguard_content(state_dir) -> None:
     """Render the WireGuard status dashboard."""
-    theme.page_header("WireGuard VPN", "Tunnel status and peer connectivity")
+    theme.page_header(PageTitles.WIREGUARD, "Tunnel status and peer connectivity")
 
     status_container = ui.column().classes("w-full gap-4")
 

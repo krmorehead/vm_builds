@@ -1,7 +1,7 @@
 ---
 moonlight_server_ip: "{{ lookup('env', 'MOONLIGHT_SERVER_IP') | default('', true) }}"
 moonlight_pair_pin: "{{ lookup('env', 'MOONLIGHT_PAIR_PIN') | default('', true) }}"
-moonlight_resolution: "1920x1080"
-moonlight_fps: 60
-moonlight_codec: "h265"
-moonlight_bitrate: 20000
+moonlight_resolution: "1280x720"
+moonlight_fps: 30
+moonlight_codec: "h264"
+moonlight_bitrate: 5000

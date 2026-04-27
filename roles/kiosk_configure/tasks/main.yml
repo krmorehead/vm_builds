@@ -71,6 +71,12 @@
     item in hostvars
     and hostvars[item].get('ansible_host', '') | length > 0
 
+# ── Compute LAN prefix for deterministic service IPs ─────────
+
+- name: Compute LAN IP prefix from gateway
+  ansible.builtin.set_fact:
+    _lan_prefix: "{{ _lan_gateway | regex_replace('\\.[0-9]+$', '') }}"
+
 # ── Detect local OpenWrt container IPs for metric collection ────
 
 - name: Detect bridge container IP from host config (bridge_nodes only)
@@ -97,7 +103,7 @@
     - inventory_hostname in groups.get('wifi_nodes', [])
     - inventory_hostname not in groups.get('router_nodes', [])
 
-- name: Build node IP map — service container IPs (always LAN-reachable)
+- name: Build node IP map — service container IPs from LAN topology
   ansible.builtin.set_fact:
     _kiosk_node_ips: >-
       {{ _kiosk_node_ips | default({})
@@ -109,14 +115,15 @@
       openwrt: "{{ _lan_gateway | default('10.10.10.1') }}"
       openwrt-bridge: "{{ _bridge_ct_ip.stdout | default('') }}"
       openwrt-mesh: "{{ _mesh_ct_ip.stdout | default('') }}"
-      pihole: "{{ pihole_static_ip | default('') }}"
-      wireguard: "{{ wireguard_static_ip | default('') }}"
-      netdata: "{{ netdata_static_ip | default('') }}"
-      homeassistant: "{{ homeassistant_static_ip | default('') }}"
-      jellyfin: "{{ jellyfin_static_ip | default('') }}"
-      kodi: "{{ kodi_static_ip | default('') }}"
-      moonlight: "{{ moonlight_static_ip | default('') }}"
-      rsyslog: "{{ rsyslog_static_ip | default('') }}"
+      pihole: "{{ _lan_prefix }}.{{ pihole_ct_ip_offset }}"
+      wireguard: "{{ _lan_prefix }}.3"
+      netdata: "{{ _lan_prefix }}.{{ netdata_ct_ip_offset }}"
+      homeassistant: "{{ _lan_prefix }}.{{ homeassistant_ct_ip_offset }}"
+      jellyfin: "{{ _lan_prefix }}.{{ jellyfin_ct_ip_offset }}"
+      kodi: "{{ _lan_prefix }}.{{ kodi_ct_ip_offset }}"
+      moonlight: "{{ _lan_prefix }}.{{ moonlight_ct_ip_offset }}"
+      rsyslog: "{{ _lan_prefix }}.{{ rsyslog_ct_ip_offset }}"
+      gaming: "{{ _lan_prefix }}.{{ gaming_ct_ip_offset }}"
   when: item.value | length > 0
 
 - name: Build node IP map — Proxmox host IPs
@@ -155,27 +162,19 @@
            else '' }}
       JELLYFIN_URL: >-
         {{ kiosk_jellyfin_url if kiosk_jellyfin_url | length > 0
-           else ('http://' + jellyfin_static_ip + ':8096')
-                if (jellyfin_static_ip | default('')) | length > 0
-           else '' }}
+           else 'http://' + _lan_prefix + '.' + (jellyfin_ct_ip_offset | string) + ':8096' }}
       KODI_URL: >-
         {{ kiosk_kodi_url if kiosk_kodi_url | length > 0
-           else ('http://' + kodi_static_ip + ':8080')
-                if (kodi_static_ip | default('')) | length > 0
-           else '' }}
+           else 'http://' + _lan_prefix + '.' + (kodi_ct_ip_offset | string) + ':8080' }}
       HOMEASSISTANT_URL: >-
         {{ kiosk_homeassistant_url if kiosk_homeassistant_url | length > 0
-           else ('http://' + homeassistant_static_ip + ':8123')
-                if (homeassistant_static_ip | default('')) | length > 0
-           else '' }}
+           else 'http://' + _lan_prefix + '.' + (homeassistant_ct_ip_offset | string) + ':8123' }}
       MOONLIGHT_URL: >-
         {{ kiosk_moonlight_url if kiosk_moonlight_url | length > 0
            else '' }}
       GAMING_URL: >-
         {{ kiosk_gaming_url if kiosk_gaming_url | length > 0
-           else ('https://' + gaming_static_ip + ':47990')
-                if (gaming_static_ip | default('')) | length > 0
-           else '' }}
+           else 'https://' + _lan_prefix + '.' + (gaming_ct_ip_offset | string) + ':47990' }}
       OPENWRT_URL: >-
         {{ kiosk_openwrt_url if kiosk_openwrt_url | length > 0
            else ('http://' + _lan_gateway)
@@ -183,17 +182,13 @@
            else '' }}
       PIHOLE_URL: >-
         {{ kiosk_pihole_url if kiosk_pihole_url | length > 0
-           else ('http://' + pihole_static_ip + '/admin')
-                if (pihole_static_ip | default('')) | length > 0
-           else '' }}
+           else 'http://' + _lan_prefix + '.' + (pihole_ct_ip_offset | string) + '/admin' }}
       WIREGUARD_URL: >-
         {{ kiosk_wireguard_url if kiosk_wireguard_url | length > 0
            else '' }}
       NETDATA_URL: >-
         {{ kiosk_netdata_url if kiosk_netdata_url | length > 0
-           else ('http://' + netdata_static_ip + ':19999')
-                if (netdata_static_ip | default('')) | length > 0
-           else '' }}
+           else 'http://' + _lan_prefix + '.' + (netdata_ct_ip_offset | string) + ':19999' }}
       RSYSLOG_URL: >-
         {{ kiosk_rsyslog_url if kiosk_rsyslog_url | length > 0
            else '' }}
@@ -250,6 +245,14 @@
 # CALLHOME_CONFIG_FILES enables the config_files extension so verify.yml
 # can check kiosk config keys via the heartbeat API instead of SSH.
 
+- name: Set kiosk callhome to point to its own NM (localhost)
+  ansible.builtin.command:
+    cmd: >-
+      pct exec {{ kiosk_ct_id }} -- bash -c
+      "sed -i 's|^CALLHOME_SERVER=.*|CALLHOME_SERVER=http://localhost:{{ kiosk_manager_port | default(9001) }}|' /etc/default/callhome
+      && sed -i 's|^CALLHOME_PUBLIC_KEY=.*|CALLHOME_PUBLIC_KEY={{ callhome_public_key }}|' /etc/default/callhome"
+  changed_when: true
+
 - name: Set CALLHOME_CONFIG_FILES for kiosk container
   ansible.builtin.command:
     cmd: >-
@@ -300,17 +303,18 @@
 
 - name: Allow kiosk-web to initialize before health check
   ansible.builtin.pause:
-    seconds: 5
+    seconds: 10
 
 - name: Wait for NM API to be ready after restart
   ansible.builtin.uri:
     url: "{{ _nm_api_url }}/api/health"
+    headers: "{{ nm_auth_headers }}"
     method: GET
     status_code: 200
-    timeout: 10
+    timeout: 15
   register: _nm_health
-  retries: 12
-  delay: 5
+  retries: 30
+  delay: 10
   until: _nm_health.status | default(0) == 200
   delegate_to: localhost
 
@@ -327,6 +331,7 @@
 - name: Rewrite callhome on Debian siblings via NM sed API
   ansible.builtin.uri:
     url: "{{ _nm_api_url }}/api/config/{{ item }}/sed"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
@@ -350,6 +355,7 @@
 - name: Rewrite callhome key on Debian siblings via NM sed API
   ansible.builtin.uri:
     url: "{{ _nm_api_url }}/api/config/{{ item }}/sed"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
@@ -372,6 +378,7 @@
 - name: Restart callhome on Debian siblings via NM service API
   ansible.builtin.uri:
     url: "{{ _nm_api_url }}/api/config/{{ item }}/service/callhome/restart"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body: {}
@@ -391,6 +398,7 @@
 - name: Rewrite callhome server on OpenWrt siblings via NM sed API
   ansible.builtin.uri:
     url: "{{ _nm_api_url }}/api/config/{{ item }}/sed"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
@@ -411,6 +419,7 @@
 - name: Rewrite callhome key on OpenWrt siblings via NM sed API
   ansible.builtin.uri:
     url: "{{ _nm_api_url }}/api/config/{{ item }}/sed"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
@@ -431,6 +440,7 @@
 - name: Restart cron on OpenWrt siblings via NM service API
   ansible.builtin.uri:
     url: "{{ _nm_api_url }}/api/config/{{ item }}/service/cron/restart"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body: {}

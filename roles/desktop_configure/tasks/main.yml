@@ -10,6 +10,7 @@
 - name: Detect local kiosk Manager IP for callhome target
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ kiosk_ct_id }}/exec"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
@@ -18,7 +19,7 @@
     status_code: 200
   delegate_to: localhost
   register: _desktop_kiosk_ip_result
-  failed_when: false
+  failed_when: _desktop_kiosk_ip_result.status != 200 and _desktop_kiosk_ip_result.status != -1
 
 - name: Extract kiosk IP
   ansible.builtin.set_fact:
@@ -37,6 +38,7 @@
 - name: Set desktop user password
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ desktop_ct_id }}/exec"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
@@ -51,6 +53,7 @@
 - name: Remove desktop user password if none provided
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ desktop_ct_id }}/exec"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
@@ -65,6 +68,7 @@
 - name: Configure callhome and start Desktop services
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ desktop_ct_id }}/exec"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
@@ -74,8 +78,8 @@
         sed -i "s|^CALLHOME_PUBLIC_KEY=.*|CALLHOME_PUBLIC_KEY={{ callhome_public_key }}|" /etc/default/callhome;
         grep -q "^CALLHOME_HOSTNAME=" /etc/default/callhome 2>/dev/null
           || echo "CALLHOME_HOSTNAME=desktop-{{ inventory_hostname }}" >> /etc/default/callhome;
-        systemctl restart callhome || true;
-        systemctl restart desktop-display || true'
+        systemctl restart callhome;
+        systemctl restart desktop-display'
       timeout: 30
     status_code: 200
   delegate_to: localhost

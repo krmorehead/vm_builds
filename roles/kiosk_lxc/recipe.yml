@@ -89,6 +89,8 @@ baked_webui:
   extra:
     - src: build.py
       dest: /opt/kiosk/build.py
+    - src: scripts/__init__.py
+      dest: /opt/kiosk/scripts/__init__.py
 
 callhome:
   http_probes: ""

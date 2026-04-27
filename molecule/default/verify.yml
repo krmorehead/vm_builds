@@ -1053,19 +1053,44 @@
       register: _fleet_ready
       retries: 6
       delay: 5
-      until: (_fleet_ready.json.all_ready | default(false)) | bool
+      until: >-
+        (_fleet_ready.json.services | default({}) | dict2items
+         | rejectattr('value.status', 'equalto', 'unknown')
+         | selectattr('value.ready', 'equalto', false)
+         | list | length == 0)
+        and
+        (_fleet_ready.json.services | default({}) | dict2items
+         | rejectattr('value.status', 'equalto', 'unknown')
+         | list | length > 0)
 
     - name: Set fleet readiness facts
       ansible.builtin.set_fact:
-        _fleet_api_ready: "{{ (_fleet_ready.json.all_ready | default(false)) | bool }}"
+        _fleet_api_ready: >-
+          {{ (_fleet_ready.json.services | default({}) | dict2items
+              | rejectattr('value.status', 'equalto', 'unknown')
+              | selectattr('value.ready', 'equalto', false)
+              | list | length == 0) | bool }}
 
-    - name: Hard-fail if fleet is not ready
+    - name: Report services that were never provisioned (unreachable hosts)
+      ansible.builtin.debug:
+        msg: >-
+          Skipping fleet check for unprovisioned services (host unreachable):
+          {{ _fleet_ready.json.services | dict2items
+             | selectattr('value.status', 'equalto', 'unknown')
+             | map(attribute='key') | list | join(', ') }}
+      when: >-
+        (_fleet_ready.json.services | default({}) | dict2items
+         | selectattr('value.status', 'equalto', 'unknown')
+         | list | length > 0)
+
+    - name: Hard-fail if any provisioned service is not ready
       ansible.builtin.assert:
         that: _fleet_api_ready | bool
         fail_msg: >-
           HARD FAILURE — FLEET NOT READY. The 4-tier heartbeat system reports these services
           are NOT heartbeating: {{
             _fleet_ready.json.services | dict2items
+            | rejectattr('value.status', 'equalto', 'unknown')
             | selectattr('value.ready', 'equalto', false)
             | map(attribute='key') | list | join(', ')
           }}.

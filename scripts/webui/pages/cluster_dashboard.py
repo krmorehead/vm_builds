@@ -11,7 +11,7 @@ from __future__ import annotations
 from nicegui import ui
 
 from scripts.webui import manager, theme
-from scripts.webui.data import Labels, Routes, format_uptime, usage_level
+from scripts.webui.data import Labels, PageTitles, Routes, format_uptime, usage_level
 from scripts.webui.pages.display_shared import render_app_console_links
 
 
@@ -19,7 +19,7 @@ def register() -> None:
     @ui.page(Routes.FLEET)
     def cluster_fleet_page() -> None:
         with theme.cluster_page_shell("fleet"):
-            theme.page_header("Cluster Fleet", "Nodes managed by this cluster")
+            theme.page_header(PageTitles.CLUSTER_FLEET, "Nodes managed by this cluster")
 
             with ui.column().classes("w-full gap-4") as fleet_container:
                 pass
@@ -29,7 +29,7 @@ def register() -> None:
             auto_refresh = ui.timer(5.0, lambda: _render_fleet(fleet_container))
 
             with ui.row().classes("items-center gap-3 mt-2"):
-                ui.switch("Auto-refresh (5s)", value=True).bind_value(
+                ui.switch(Labels.AUTO_REFRESH, value=True).bind_value(
                     auto_refresh, "active",
                 )
 
@@ -38,14 +38,14 @@ def register() -> None:
         with theme.cluster_page_shell("fleet"):
             mgr = manager.get_instance()
             if not mgr.supports_fleet:
-                ui.label("Not a Cluster Manager").classes("text-xl")
+                ui.label(Labels.NOT_CLUSTER_MANAGER).classes("text-xl")
                 return
 
             nodes = mgr.get_fleet_nodes()
             entry = nodes.get(node_id)
             if not entry:
-                theme.page_header(f"Node: {node_id}", "Not found in cluster")
-                ui.button("Back to Fleet", icon="arrow_back",
+                theme.page_header(f"Node: {node_id}", Labels.NOT_FOUND_IN_CLUSTER)
+                ui.button(Labels.BACK_TO_FLEET, icon="arrow_back",
                           on_click=lambda: ui.navigate.to(Routes.FLEET)).classes("mt-4")
                 return
 
@@ -101,7 +101,7 @@ def register() -> None:
             ui.label(f"Last heartbeat: {last_seen}").classes("text-xs mt-4").style(
                 f"color: {theme.TEXT_SECONDARY}",
             )
-            ui.button("Back to Fleet", icon="arrow_back",
+            ui.button(Labels.BACK_TO_FLEET, icon="arrow_back",
                       on_click=lambda: ui.navigate.to(Routes.FLEET)).classes("mt-4")
 
 

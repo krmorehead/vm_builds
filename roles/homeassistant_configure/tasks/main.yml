@@ -9,6 +9,7 @@
 - name: Start Home Assistant compose service
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ homeassistant_ct_id }}/exec"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
@@ -20,6 +21,7 @@
 - name: Wait for Home Assistant Docker container to be running
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ homeassistant_ct_id }}/exec"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
@@ -48,6 +50,7 @@
 - name: Wait for Home Assistant web interface
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ homeassistant_ct_id }}/exec"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
@@ -65,22 +68,26 @@
 - name: Create admin user via Home Assistant onboarding API
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ homeassistant_ct_id }}/exec"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
       cmd: >-
-        /bin/sh -c 'curl -s -X POST -H "Content-Type: application/json"
+        /bin/sh -c 'curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json"
         -d "{\"client_id\": \"http://homeassistant.local/\",
              \"name\": \"Administrator\",
              \"username\": \"admin\",
              \"password\": \"{{ _ha_admin_password }}\",
              \"language\": \"en\"}"
-        http://127.0.0.1:8123/api/onboarding/users 2>/dev/null || true'
+        http://127.0.0.1:8123/api/onboarding/users'
       timeout: 30
     status_code: 200
   delegate_to: localhost
   no_log: true
-  failed_when: false
+  register: _ha_onboard
+  failed_when: >-
+    not (_ha_onboard.json.success | default(false))
+    and 'already been done' not in (_ha_onboard.json.output | default(''))
 
 # ── Report completion ────────────────────────────────────────────
 

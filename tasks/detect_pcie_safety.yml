@@ -1,0 +1,60 @@
+---
+# Detect hardware properties relevant to PCIe safety.
+# AMD APUs (Raven Ridge, etc.) share a single NBIO die for PCIe, USB,
+# and SATA. A PCIe device reset on ANY peripheral can destabilize USB
+# controllers hours later. Hosts using USB ethernet as the management
+# NIC are unrecoverable if the adapter dies.
+#
+# Exported facts (cacheable):
+#   _mgmt_nic_is_usb   — management NIC is a USB adapter
+#   _cpu_has_shared_pcie — AMD APU with on-die iGPU (shared NBIO)
+#   _pcie_reset_safe    — safe to trigger PCIe device resets
+
+- name: Detect management NIC bus type
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      DEV=$(ip -o route show default 2>/dev/null | awk '{print $5}' | head -1)
+      if [ -z "$DEV" ]; then
+        echo "unknown"
+      else
+        DEVPATH=$(readlink -f /sys/class/net/$DEV/device 2>/dev/null || echo "")
+        case "$DEVPATH" in
+          *usb*) echo "usb" ;;
+          *)     echo "pcie" ;;
+        esac
+      fi
+    executable: /bin/bash
+  register: _mgmt_nic_bus
+  changed_when: false
+
+- name: Detect AMD APU with shared NBIO
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      IS_AMD=$(grep -c 'vendor_id.*AuthenticAMD' /proc/cpuinfo 2>/dev/null || echo 0)
+      if [ "$IS_AMD" -gt 0 ]; then
+        # AMD APU = on-die iGPU at PCI bus 00: (not a discrete card)
+        ON_DIE_GPU=$(lspci -n 2>/dev/null | grep -E '^00:' | grep -ciE '0300|0380' || echo 0)
+        if [ "$ON_DIE_GPU" -gt 0 ]; then
+          echo "apu"
+        else
+          echo "discrete"
+        fi
+      else
+        echo "non-amd"
+      fi
+    executable: /bin/bash
+  register: _cpu_type
+  changed_when: false
+
+- name: Export PCIe safety facts
+  ansible.builtin.set_fact:
+    _mgmt_nic_is_usb: "{{ (_mgmt_nic_bus.stdout | default('unknown') | trim) == 'usb' }}"
+    _cpu_has_shared_pcie: "{{ (_cpu_type.stdout | default('non-amd') | trim) == 'apu' }}"
+    _pcie_reset_safe: >-
+      {{ not (
+        ((_cpu_type.stdout | default('non-amd') | trim) == 'apu') and
+        ((_mgmt_nic_bus.stdout | default('unknown') | trim) == 'usb')
+      ) }}
+    cacheable: true

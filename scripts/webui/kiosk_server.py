@@ -31,7 +31,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 import hmac as _hmac
 
 from scripts.webui import manager  # noqa: E402
-from scripts.webui.data import load_kiosk_config, set_server_port, validate_callhome_token  # noqa: E402
+from scripts.webui.data import load_kiosk_config, set_server_port  # noqa: E402
 
 
 def _build_node_resolver(config: dict) -> Callable[[str], str | None]:

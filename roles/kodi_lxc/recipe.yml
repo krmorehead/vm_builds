@@ -13,7 +13,7 @@ setup_commands: []
 
 install_commands:
   - "bash -c 'export DEBIAN_FRONTEND=noninteractive && apt-get update -qq'"
-  - "bash -c 'apt-get install -y --no-install-recommends kodi kodi-peripheral-joystick libcec6 cec-utils alsa-utils wget'"
+  - "bash -c 'apt-get install -y --no-install-recommends kodi kodi-peripheral-joystick libcec6 cec-utils alsa-utils wget fonts-noto-core pulseaudio'"
   - "bash -c 'apt-get install -y --no-install-recommends intel-media-va-driver mesa-va-drivers vainfo'"
   - "bash -c 'useradd -r -m -G audio,video,input,render,ssl-cert -s /bin/bash kodi 2>/dev/null || true'"
   - "loginctl enable-linger kodi 2>/dev/null || true"
@@ -50,6 +50,7 @@ config_files:
 
 post_commands:
   - "chown -R kodi:kodi /home/kodi/.kodi"
+  - "bash -c 'mkdir -p /run/user/999 && chmod 700 /run/user/999 && chown kodi:kodi /run/user/999'"
 
 callhome:
   http_probes: ""
@@ -60,4 +61,11 @@ kasmvnc:
   vnc_port: 6082
   display_num: 1
   service_name: kodi-display
-  xstartup_exec: "exec /usr/bin/kodi"
+  xstartup_exec: |-
+    export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+    mkdir -p "$XDG_RUNTIME_DIR"
+    chmod 700 "$XDG_RUNTIME_DIR"
+    pulseaudio --start --exit-idle-time=-1 2>/dev/null
+    sleep 1
+    pactl load-module module-null-sink sink_name=dummy sink_properties=device.description=Dummy 2>/dev/null
+    exec /usr/bin/kodi

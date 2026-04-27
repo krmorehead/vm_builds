@@ -27,9 +27,6 @@ import json as _json
 import logging
 import random as _random
 import re as _re
-import shutil
-import socket
-import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -168,7 +165,7 @@ async def _callhome_exec(
     """
     path = heartbeat.cmd_path_for_vmid(vmid)
     url = f"http://{container_ip}:{heartbeat.CALLHOME_CMD_PORT}{path}"
-    payload = _json.dumps({"command": cmd, "token": token}).encode()
+    payload = _json.dumps({"command": cmd, "token": token, "timeout": timeout}).encode()
     req = urllib.request.Request(
         url, data=payload, method="POST",
         headers={"Content-Type": "application/json"},
@@ -183,6 +180,50 @@ async def _callhome_exec(
         return body.get("success", False), body.get("output", "")
     except (urllib.error.URLError, OSError, _json.JSONDecodeError) as exc:
         return False, str(exc)[:300]
+
+
+_CHUNK_SIZE = 30_000  # ~30KB raw → ~40KB base64 → well under 64KB callhome limit
+
+
+async def _callhome_write_file(
+    ct_ip: str,
+    dest: str,
+    content: str,
+    token: str,
+    mode: str = "644",
+    vmid: int | None = None,
+) -> tuple[bool, str]:
+    """Write a file to a container via callhome, chunking if needed.
+
+    Files under _CHUNK_SIZE are written in a single command.
+    Larger files are split into chunks that are appended sequentially.
+    """
+    import base64 as _b64
+    raw = content.encode()
+    parent = "/".join(dest.split("/")[:-1])
+    if parent:
+        await _callhome_exec(ct_ip, f"mkdir -p {parent}", token, 10, vmid=vmid)
+
+    if len(raw) <= _CHUNK_SIZE:
+        b64 = _b64.b64encode(raw).decode()
+        cmd = f"sh -c 'echo {b64} | base64 -d > {dest} && chmod {mode} {dest}'"
+        return await _callhome_exec(ct_ip, cmd, token, 30, vmid=vmid)
+
+    # Chunked write: truncate first, then append each chunk
+    ok, out = await _callhome_exec(ct_ip, f"sh -c '> {dest}'", token, 10, vmid=vmid)
+    if not ok:
+        return False, f"truncate failed: {out}"
+
+    for offset in range(0, len(raw), _CHUNK_SIZE):
+        chunk = raw[offset:offset + _CHUNK_SIZE]
+        b64 = _b64.b64encode(chunk).decode()
+        cmd = f"sh -c 'echo {b64} | base64 -d >> {dest}'"
+        ok, out = await _callhome_exec(ct_ip, cmd, token, 30, vmid=vmid)
+        if not ok:
+            return False, f"chunk write at offset {offset} failed: {out}"
+
+    ok, out = await _callhome_exec(ct_ip, f"chmod {mode} {dest}", token, 10, vmid=vmid)
+    return ok, out
 
 
 # ── Base Manager ─────────────────────────────────────────────────────
@@ -378,6 +419,7 @@ class BaseManager:
                     )
                     ip = self._resolve_collector_ip(nm_host, container_target)
                     if not ip:
+                        await self._fetch_metric_from_upstream(node_id, metric_type, log)
                         return
                     cb = heartbeat.get_circuit_status(ip)
                     if cb["is_open"]:
@@ -385,6 +427,7 @@ class BaseManager:
                             "Skipping %s/%s: circuit breaker open for %s (%.0fs)",
                             node_id, metric_type, ip, cb["backoff_remaining_s"],
                         )
+                        await self._fetch_metric_from_upstream(node_id, metric_type, log)
                         return
                     collector = self._collector_map.get(metric_type)
                     if not collector:
@@ -397,6 +440,7 @@ class BaseManager:
                         self.metric_cache.store(result)
                     except (OSError, ValueError, TypeError, RuntimeError) as exc:
                         log.warning("Collector %s for %s failed: %s", metric_type, node_id, exc)
+                        await self._fetch_metric_from_upstream(node_id, metric_type, log)
 
                 if active:
                     await asyncio.gather(
@@ -405,6 +449,35 @@ class BaseManager:
             except (OSError, ValueError, TypeError, RuntimeError) as exc:
                 log.error("Heartbeat poller error: %s", exc)
             await asyncio.sleep(5)
+
+    async def _fetch_metric_from_upstream(
+        self, node_id: str, metric_type: str, log: Any,
+    ) -> None:
+        """Query the CM for cached metric data when local collection fails.
+
+        NMs that can't reach a collection target directly (e.g., WAN kiosk
+        trying to collect router metrics on the LAN) proxy through the CM
+        via /api/metric/cache/{node_id}/{metric_type}.
+        """
+        if not self._management_server:
+            return
+        url = f"{self._management_server.rstrip('/')}/api/metric/cache/{node_id}/{metric_type}"
+        try:
+            import urllib.request
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                body = _json.loads(resp.read())
+                if body.get("success"):
+                    result = heartbeat.HeartbeatCache(
+                        node_id=body.get("node_id", node_id),
+                        metric_type=body.get("metric_type", metric_type),
+                        data=body.get("data", {}),
+                        collected_at=body.get("collected_at", ""),
+                        success=True,
+                    )
+                    self.metric_cache.store(result)
+        except (urllib.error.URLError, OSError, _json.JSONDecodeError, ValueError, KeyError) as exc:
+            log.debug("Upstream metric fetch for %s/%s failed: %s", node_id, metric_type, exc)
 
     def _resolve_collector_ip(
         self, nm_host: str, container_target: str,
@@ -2019,10 +2092,10 @@ class NodeManager(BaseManager):
             ct_ip = _resolve_container_ip(mgr, int(vmid))
             if not ct_ip:
                 return JSONResponse({"error": f"Cannot resolve IP for VMID {vmid}"}, status_code=404)
-            import base64 as _b64
-            b64 = _b64.b64encode(content.encode()).decode()
-            write_cmd = f"echo '{b64}' | base64 -d > {path} && chmod {mode} {path}"
-            ok, out = await _callhome_exec(ct_ip, write_cmd, mgr._callhome_public_key, 30, vmid=int(vmid))
+            ok, out = await _callhome_write_file(
+                ct_ip, path, content, mgr._callhome_public_key,
+                mode=mode, vmid=int(vmid),
+            )
             return JSONResponse({
                 "success": ok, "vmid": vmid, "path": path, "output": out[:300],
             })
@@ -2072,7 +2145,7 @@ class NodeManager(BaseManager):
                 return JSONResponse({"error": f"Cannot resolve IP for VMID {vmid}"}, status_code=404)
             ok, out = await _callhome_exec(
                 ct_ip, f"systemctl {action} {service}",
-                mgr._callhome_public_key, 30, vmid=int(vmid),
+                mgr._callhome_public_key, 90, vmid=int(vmid),
             )
             return JSONResponse({
                 "success": ok, "vmid": vmid,
@@ -2147,14 +2220,12 @@ class NodeManager(BaseManager):
 
         _build_locks: dict[str, asyncio.Lock] = {}
 
-
         async def _api_build_service(request: StarletteRequest) -> JSONResponse:
             """Build an LXC image from a YAML recipe on this host.
 
             POST /api/build/{service}
             Body: the full recipe YAML parsed as JSON.
             """
-            import base64 as _b64
             import yaml as _yaml
 
             service = request.path_params.get("service", "")
@@ -2178,7 +2249,7 @@ class NodeManager(BaseManager):
             try:
                 body_raw = await request.body()
                 recipe = _yaml.safe_load(body_raw.decode())
-            except Exception as exc:
+            except (_yaml.YAMLError, UnicodeDecodeError, ValueError, TypeError) as exc:
                 return JSONResponse(
                     {"error": f"Invalid recipe YAML: {exc}"}, status_code=400,
                 )
@@ -2202,15 +2273,25 @@ class NodeManager(BaseManager):
                     # 1. Destroy stale build container
                     await asyncio.to_thread(pve.ct_stop_and_destroy, build_vmid, 60)
 
-                    # 2. Create build container
+                    # 2. Discover network from the kiosk container (VMID 401)
+                    _KIOSK_VMID = 401
+                    host_net = await asyncio.to_thread(
+                        pve.discover_container_network, _KIOSK_VMID,
+                    )
+                    _log.info(
+                        "[%s] Using kiosk network: net0=%s ns=%s",
+                        service, host_net["net0"], host_net["nameserver"],
+                    )
+
+                    # 3. Create build container on the same network
                     create_kwargs: dict[str, str | int] = {
                         "ostemplate": f"local:vztmpl/{base_tpl}",
                         "hostname": hostname,
                         "memory": memory,
                         "cores": cores,
                         "rootfs": f"local-lvm:{disk}",
-                        "net0": "name=eth0,bridge=vmbr0,ip=dhcp",
-                        "nameserver": "8.8.8.8",
+                        "net0": host_net["net0"],
+                        "nameserver": host_net["nameserver"],
                     }
                     if unpriv:
                         create_kwargs["unprivileged"] = 1
@@ -2223,7 +2304,68 @@ class NodeManager(BaseManager):
                         pve.ct_create_and_start, build_vmid, 300, True, **create_kwargs,
                     )
 
-                    # 3. Wait for callhome agent to register
+                    # 3b. Get kiosk IP for callhome config
+                    _kiosk_ip = ""
+                    try:
+                        ifaces = await asyncio.to_thread(pve.ct_interfaces, 401)
+                        for ifc in ifaces:
+                            if ifc.get("name") != "eth0":
+                                continue
+                            for addr in ifc.get("ip-addresses", []):
+                                if addr.get("ip-address-type") == "inet":
+                                    _kiosk_ip = addr.get("ip-address", "")
+                                    break
+                    except (PveApiError, OSError, KeyError) as exc:
+                        _log.debug("Kiosk IP lookup failed: %s", exc)
+                    callhome_url = f"http://{_kiosk_ip or host_net.get('gateway', '') or mgr._host_ip}:9001"
+
+                    # 3c. Wait for build container IP, then configure callhome
+                    _log.info("[%s] Waiting for build CT IP...", service)
+                    ct_ip = None
+                    for _w in range(30):
+                        await asyncio.sleep(2)
+                        try:
+                            bi = await asyncio.to_thread(pve.ct_interfaces, build_vmid)
+                            for ifc in bi:
+                                if ifc.get("name") != "eth0":
+                                    continue
+                                for addr in ifc.get("ip-addresses", []):
+                                    if (
+                                        addr.get("ip-address-type") == "inet"
+                                        and addr.get("ip-address", "") != "127.0.0.1"
+                                    ):
+                                        ct_ip = addr["ip-address"]
+                                        break
+                        except (PveApiError, OSError, KeyError) as exc:
+                            _log.debug("Build CT IP lookup attempt failed: %s", exc)
+                        if ct_ip:
+                            break
+                    if not ct_ip:
+                        raise RuntimeError(f"Build CT {build_vmid} never got an IP")
+
+                    _log.info(
+                        "[%s] Build CT at %s, configuring callhome → %s",
+                        service, ct_ip, callhome_url,
+                    )
+                    conf_text = (
+                        f"CALLHOME_SERVER={callhome_url}\\n"
+                        f"CALLHOME_PUBLIC_KEY={mgr._callhome_public_key}\\n"
+                        f"CALLHOME_INTERVAL=5\\n"
+                        f"CALLHOME_MODE=container\\n"
+                    )
+                    write_cmd = f"bash -c 'printf \"{conf_text}\" > /etc/default/callhome && systemctl restart callhome'"
+                    for _retry in range(5):
+                        ok, out = await _callhome_exec(
+                            ct_ip, write_cmd,
+                            mgr._callhome_public_key, 15, vmid=build_vmid,
+                        )
+                        if ok:
+                            break
+                        await asyncio.sleep(3)
+                    if not ok:
+                        _log.warning("[%s] Failed to configure callhome: %s", service, out)
+
+                    # 4. Wait for callhome agent to register
                     _log.info("[%s] Waiting for callhome agent...", service)
                     ct_ip = None
                     for _attempt in range(45):
@@ -2241,7 +2383,7 @@ class NodeManager(BaseManager):
                         raise RuntimeError(f"Build CT {build_vmid} never registered with callhome")
                     _log.info("[%s] Callhome agent ready at %s", service, ct_ip)
 
-                    # 4. Execute setup_commands
+                    # 5. Execute setup_commands
                     for cmd in recipe.get("setup_commands", []):
                         _log.info("[%s] setup: %s", service, cmd[:80])
                         ok, out = await _callhome_exec(
@@ -2250,27 +2392,19 @@ class NodeManager(BaseManager):
                         if not ok:
                             raise RuntimeError(f"setup_command failed: {cmd}\n{out[:500]}")
 
-                    # 5. Push config_files via base64 (before install —
+                    # 6. Push config_files via base64 (before install —
                     #    installers often need pre-seeded config)
                     for cf in recipe.get("config_files", []):
                         fpath = cf.get("path", "")
                         content = cf.get("content", "")
                         mode = cf.get("mode", "0644")
-                        mkdir = cf.get("mkdir", False)
                         owner = cf.get("owner", "")
                         if not fpath:
                             continue
                         _log.info("[%s] config_file: %s", service, fpath)
-                        if mkdir:
-                            parent = "/".join(fpath.split("/")[:-1])
-                            await _callhome_exec(
-                                ct_ip, f"mkdir -p {parent}",
-                                mgr._callhome_public_key, 10, vmid=build_vmid,
-                            )
-                        b64 = _b64.b64encode(content.encode()).decode()
-                        write_cmd = f"sh -c 'echo {b64} | base64 -d > {fpath} && chmod {mode} {fpath}'"
-                        ok, out = await _callhome_exec(
-                            ct_ip, write_cmd, mgr._callhome_public_key, 30, vmid=build_vmid,
+                        ok, out = await _callhome_write_file(
+                            ct_ip, fpath, content, mgr._callhome_public_key,
+                            mode=mode, vmid=build_vmid,
                         )
                         if not ok:
                             raise RuntimeError(f"config_file write failed: {fpath}\n{out[:300]}")
@@ -2280,7 +2414,7 @@ class NodeManager(BaseManager):
                                 mgr._callhome_public_key, 10, vmid=build_vmid,
                             )
 
-                    # 6. Execute install_commands
+                    # 7. Execute install_commands
                     for cmd in recipe.get("install_commands", []):
                         _log.info("[%s] install: %s", service, cmd[:80])
                         ok, out = await _callhome_exec(
@@ -2289,7 +2423,7 @@ class NodeManager(BaseManager):
                         if not ok:
                             raise RuntimeError(f"install_command failed: {cmd}\n{out[:500]}")
 
-                    # 7. Push baked_files from controller filesystem
+                    # 8. Push baked_files from controller filesystem
                     for bf in recipe.get("baked_files", []):
                         src = bf.get("src", "")
                         dest = bf.get("dest", "")
@@ -2303,20 +2437,14 @@ class NodeManager(BaseManager):
                         if not src_path.exists():
                             raise RuntimeError(f"baked_file source not found: {src_path}")
                         content = src_path.read_text()
-                        b64 = _b64.b64encode(content.encode()).decode()
-                        parent = "/".join(dest.split("/")[:-1])
-                        await _callhome_exec(
-                            ct_ip, f"mkdir -p {parent}",
-                            mgr._callhome_public_key, 10, vmid=build_vmid,
-                        )
-                        write_cmd = f"sh -c 'echo {b64} | base64 -d > {dest} && chmod {mode} {dest}'"
-                        ok, out = await _callhome_exec(
-                            ct_ip, write_cmd, mgr._callhome_public_key, 30, vmid=build_vmid,
+                        ok, out = await _callhome_write_file(
+                            ct_ip, dest, content, mgr._callhome_public_key,
+                            mode=mode, vmid=build_vmid,
                         )
                         if not ok:
                             raise RuntimeError(f"baked_file write failed: {dest}\n{out[:300]}")
 
-                    # 8. Write service-specific callhome env vars
+                    # 9. Write service-specific callhome env vars
                     # The callhome agent + systemd service are already in the
                     # base template. We only add service-specific probes/config.
                     callhome_cfg = recipe.get("callhome", {}) or {}
@@ -2345,7 +2473,204 @@ class NodeManager(BaseManager):
                                 mgr._callhome_public_key, 10, vmid=build_vmid,
                             )
 
-                    # 9. Execute post_commands
+                    # 9b. Push baked_webui files from controller's scripts/webui/
+                    baked_webui = recipe.get("baked_webui", {})
+                    if baked_webui:
+                        webui_files = baked_webui.get("files", [])
+                        extras = baked_webui.get("extra", [])
+                        webui_src = Path(__file__).resolve().parent
+                        dest_base = "/opt/kiosk/scripts/webui"
+                        await _callhome_exec(
+                            ct_ip, f"mkdir -p {dest_base}/pages",
+                            mgr._callhome_public_key, 10, vmid=build_vmid,
+                        )
+                        for fname in webui_files:
+                            src_file = webui_src / fname
+                            if not src_file.exists():
+                                _log.warning("[%s] webui file not found: %s", service, src_file)
+                                continue
+                            content = src_file.read_text()
+                            dst = f"{dest_base}/{fname}"
+                            ok, out = await _callhome_write_file(
+                                ct_ip, dst, content, mgr._callhome_public_key,
+                                vmid=build_vmid,
+                            )
+                            if not ok:
+                                raise RuntimeError(f"webui file write failed: {dst}\n{out[:300]}")
+                        for extra in extras:
+                            src_file = Path(__file__).resolve().parent.parent.parent / extra["src"]
+                            if not src_file.exists():
+                                _log.warning("[%s] extra file not found: %s", service, src_file)
+                                continue
+                            content = src_file.read_text()
+                            dst = extra["dest"]
+                            ok, out = await _callhome_write_file(
+                                ct_ip, dst, content, mgr._callhome_public_key,
+                                vmid=build_vmid,
+                            )
+                            if not ok:
+                                raise RuntimeError(f"extra file write failed: {dst}\n{out[:300]}")
+                        _log.info("[%s] Deployed %d webui files + %d extras", service, len(webui_files), len(extras))
+
+                    # 9c. Install KasmVNC display service (if recipe defines kasmvnc section)
+                    kasmvnc_cfg = recipe.get("kasmvnc") or {}
+                    if kasmvnc_cfg and kasmvnc_cfg.get("service_name"):
+                        _log.info("[%s] Installing KasmVNC display service", service)
+                        kv_user = kasmvnc_cfg["app_user"]
+                        kv_port = int(kasmvnc_cfg.get("vnc_port", 6080))
+                        kv_display = int(kasmvnc_cfg.get("display_num", 1))
+                        kv_svc = kasmvnc_cfg["service_name"]
+                        kv_xstartup = kasmvnc_cfg.get("xstartup_exec", "")
+
+                        _KASMVNC_URL = (
+                            "https://github.com/kasmtech/KasmVNC/releases/download/"
+                            "v1.4.0/kasmvncserver_bookworm_1.4.0_amd64.deb"
+                        )
+                        # Ensure DNS works, then download KasmVNC
+                        _log.info("[%s] Downloading KasmVNC inside build CT", service)
+                        _dl_ok, _dl_out = await _callhome_exec(
+                            ct_ip,
+                            "bash -c '"
+                            "if ! getent hosts github.com >/dev/null 2>&1; then"
+                            "  echo \"nameserver 8.8.8.8\" >> /etc/resolv.conf;"
+                            "  echo \"DNS: added 8.8.8.8 fallback\";"
+                            "fi;"
+                            f"wget --no-check-certificate -O /tmp/kasmvnc.deb \"{_KASMVNC_URL}\" 2>&1"
+                            " && ls -la /tmp/kasmvnc.deb'",
+                            mgr._callhome_public_key, 300, vmid=build_vmid,
+                        )
+                        if not _dl_ok:
+                            raise RuntimeError(f"KasmVNC download failed:\n{(_dl_out or '')[:500]}")
+
+                        # Install KasmVNC (with dependency resolution) and pre-create VNC user
+                        for _kv_cmd in [
+                            "bash -c 'DEBIAN_FRONTEND=noninteractive apt-get update -qq'",
+                            "bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y -f /tmp/kasmvnc.deb && rm -f /tmp/kasmvnc.deb'",
+                            f"bash -c 'usermod -a -G ssl-cert {kv_user} 2>/dev/null || true'",
+                            f"chown {kv_user}:{kv_user} /home/{kv_user}",
+                            f"bash -c 'printf \"password\\npassword\\n\" | su - {kv_user} -c \"kasmvncpasswd -u {kv_user} -w\"'",
+                        ]:
+                            _log.info("[%s] kasmvnc: %s", service, _kv_cmd[:80])
+                            ok, out = await _callhome_exec(
+                                ct_ip, _kv_cmd, mgr._callhome_public_key, 300, vmid=build_vmid,
+                            )
+                            if not ok:
+                                raise RuntimeError(f"KasmVNC install failed: {_kv_cmd}\n{out[:500]}")
+
+                        # Create xstartup script
+                        kv_home = f"/home/{kv_user}"
+                        xstartup_content = f"#!/bin/bash\n{kv_xstartup}\n"
+                        await _callhome_exec(
+                            ct_ip, f"mkdir -p {kv_home}/.vnc",
+                            mgr._callhome_public_key, 10, vmid=build_vmid,
+                        )
+                        ok, out = await _callhome_write_file(
+                            ct_ip, f"{kv_home}/.vnc/xstartup", xstartup_content,
+                            mgr._callhome_public_key, mode="0755", vmid=build_vmid,
+                        )
+                        if not ok:
+                            raise RuntimeError(f"xstartup write failed: {out[:300]}")
+                        await _callhome_exec(
+                            ct_ip,
+                            f"touch {kv_home}/.vnc/.de-was-selected",
+                            mgr._callhome_public_key, 10, vmid=build_vmid,
+                        )
+
+                        # Create kasmvnc.yaml (no-auth for iframe embedding)
+                        kv_yaml = (
+                            "network:\n"
+                            "  protocol: http\n"
+                            f"  websocket_port: {kv_port}\n"
+                            "  ssl:\n"
+                            "    require_ssl: false\n"
+                            "  udp:\n"
+                            "    public_ip: 0.0.0.0\n"
+                            "desktop:\n"
+                            "  resolution:\n"
+                            "    width: 1920\n"
+                            "    height: 1080\n"
+                            "  allow_resize: true\n"
+                        )
+                        ok, out = await _callhome_write_file(
+                            ct_ip, f"{kv_home}/.vnc/kasmvnc.yaml", kv_yaml,
+                            mgr._callhome_public_key, mode="0644", vmid=build_vmid,
+                        )
+                        if not ok:
+                            raise RuntimeError(f"kasmvnc.yaml write failed: {out[:300]}")
+
+                        # Create xvnc-run.sh — wrapper that launches vncserver
+                        # non-interactively (DE pre-selected, user pre-created)
+                        xvnc_run = (
+                            "#!/bin/bash\n"
+                            f"export HOME={kv_home}\n"
+                            f"export USER={kv_user}\n"
+                            f"touch {kv_home}/.vnc/.de-was-selected\n"
+                            f"exec /usr/bin/vncserver :{kv_display} "
+                            f"-websocketPort {kv_port} "
+                            "-disableBasicAuth "
+                            "-fg\n"
+                        )
+                        ok, out = await _callhome_write_file(
+                            ct_ip, f"{kv_home}/.vnc/xvnc-run.sh", xvnc_run,
+                            mgr._callhome_public_key, mode="0755", vmid=build_vmid,
+                        )
+                        if not ok:
+                            raise RuntimeError(f"xvnc-run.sh write failed: {out[:300]}")
+
+                        # Create systemd display service using vncserver -fg
+                        # (community-standard foreground mode for systemd)
+                        svc_content = (
+                            "[Unit]\n"
+                            f"Description=KasmVNC display ({kv_svc})\n"
+                            "After=network-online.target\n"
+                            "Wants=network-online.target\n\n"
+                            "[Service]\n"
+                            f"User={kv_user}\n"
+                            f"Group={kv_user}\n"
+                            "Type=simple\n"
+                            f"ExecStartPre=+/bin/sh -c "
+                            f"'rm -f /tmp/.X{kv_display}-lock /tmp/.X11-unix/X{kv_display}; "
+                            f"chown -R {kv_user}:{kv_user} {kv_home}/.vnc {kv_home}/.kasmpasswd {kv_home}/.config 2>/dev/null; true'\n"
+                            f"ExecStart=/bin/bash {kv_home}/.vnc/xvnc-run.sh\n"
+                            "KillMode=control-group\n"
+                            "TimeoutStopSec=10\n"
+                            "Restart=on-failure\n"
+                            "RestartSec=5\n"
+                            f"Environment=HOME={kv_home}\n"
+                            f"Environment=DISPLAY=:{kv_display}\n\n"
+                            "[Install]\n"
+                            "WantedBy=multi-user.target\n"
+                        )
+                        ok, out = await _callhome_write_file(
+                            ct_ip, f"/etc/systemd/system/{kv_svc}.service", svc_content,
+                            mgr._callhome_public_key, mode="0644", vmid=build_vmid,
+                        )
+                        if not ok:
+                            raise RuntimeError(f"{kv_svc}.service write failed: {out[:300]}")
+
+                        # Fix ownership of home dir, .vnc, and .kasmpasswd
+                        ok, out = await _callhome_exec(
+                            ct_ip,
+                            f"chown {kv_user}:{kv_user} {kv_home} && "
+                            f"chown -R {kv_user}:{kv_user} {kv_home}/.vnc && "
+                            f"[ -e {kv_home}/.kasmpasswd ] && "
+                            f"chown {kv_user}:{kv_user} {kv_home}/.kasmpasswd || true",
+                            mgr._callhome_public_key, 10, vmid=build_vmid,
+                        )
+                        if not ok:
+                            raise RuntimeError(f"chown .vnc failed: {out[:300]}")
+
+                        # Enable the service
+                        for _kv_cmd in [
+                            "systemctl daemon-reload",
+                            f"systemctl enable {kv_svc}",
+                        ]:
+                            await _callhome_exec(
+                                ct_ip, _kv_cmd, mgr._callhome_public_key, 15, vmid=build_vmid,
+                            )
+                        _log.info("[%s] KasmVNC display service '%s' installed (port %d)", service, kv_svc, kv_port)
+
+                    # 10. Execute post_commands
                     for cmd in recipe.get("post_commands", []):
                         _log.info("[%s] post: %s", service, cmd[:80])
                         ok, out = await _callhome_exec(
@@ -2354,7 +2679,16 @@ class NodeManager(BaseManager):
                         if not ok:
                             _log.warning("[%s] post_command returned non-zero: %s", service, cmd[:80])
 
-                    # 10. Write image version
+                    # 10b. Run smoke_tests
+                    for test_cmd in recipe.get("smoke_tests", []):
+                        _log.info("[%s] smoke: %s", service, test_cmd[:80])
+                        ok, out = await _callhome_exec(
+                            ct_ip, test_cmd, mgr._callhome_public_key, 30, vmid=build_vmid,
+                        )
+                        if not ok:
+                            raise RuntimeError(f"smoke_test failed: {test_cmd}\n{out[:300]}")
+
+                    # 11. Write image version
                     version = f"{time.strftime('%Y%m%d')}.{_random.randint(100, 999)}"
                     await _callhome_exec(
                         ct_ip, f"sh -c 'echo {version} > /etc/image_version'",
@@ -2392,13 +2726,13 @@ class NodeManager(BaseManager):
                     _log.info("[%s] Build complete in %.0fs: %s", service, elapsed, archive_path)
                     return JSONResponse(result)
 
-                except Exception as exc:
+                except (RuntimeError, PveApiError, OSError, asyncio.TimeoutError) as exc:
                     elapsed = time.monotonic() - t0
                     _log.error("[%s] Build failed after %.0fs: %s", service, elapsed, exc)
                     try:
                         await asyncio.to_thread(pve.ct_stop_and_destroy, build_vmid, 30)
-                    except Exception:
-                        pass
+                    except (PveApiError, OSError) as cleanup_exc:
+                        _log.warning("[%s] Cleanup of build CT %s failed: %s", service, build_vmid, cleanup_exc)
                     return JSONResponse(
                         {"error": str(exc)[:500], "service": service, "elapsed_seconds": round(elapsed, 1)},
                         status_code=500,
@@ -2816,6 +3150,31 @@ class ClusterManager(NodeManager):
             starlette_app.routes.insert(0, Route(
                 "/api/fleet/ready", _api_cluster_fleet_ready, methods=["GET"],
             ))
+
+        # ── Metric cache proxy (NMs query CM for fleet-level metrics) ──
+
+        async def _api_metric_cache(request: StarletteRequest) -> JSONResponse:
+            """Serve cached metric data to child NMs that can't collect directly."""
+            node_id = request.path_params.get("node_id", "")
+            metric_type = request.path_params.get("metric_type", "")
+            if not node_id or not metric_type:
+                return JSONResponse({"error": "Missing node_id or metric_type"}, status_code=400)
+            cached = cluster.metric_cache.get(node_id, metric_type)
+            if cached is None:
+                return JSONResponse({"error": "No cached data"}, status_code=404)
+            return JSONResponse({
+                "node_id": cached.node_id,
+                "metric_type": cached.metric_type,
+                "success": cached.success,
+                "data": cached.data,
+                "error": cached.error,
+                "collected_at": cached.collected_at,
+            })
+
+        starlette_app.routes.insert(0, Route(
+            "/api/metric/cache/{node_id}/{metric_type}",
+            _api_metric_cache, methods=["GET"],
+        ))
 
         # ── Fleet batman endpoints ───────────────────────────────
 

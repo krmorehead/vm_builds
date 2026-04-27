@@ -43,7 +43,7 @@ NEVER restore host config from backup — redundant with explicit file removal, 
 2. Destroy project containers by explicit VMID (check with `pct status` first)
 3. Unbind all devices from `vfio-pci`
 4. Remove modprobe blacklist files: `blacklist-wifi.conf`, `vfio-pci.conf`
-5. Reload WiFi kernel modules: `modprobe -r iwlmvm iwlwifi && modprobe iwlwifi`
+5. Rebind WiFi PCI devices via sysfs: `tasks/sysfs_wifi_rebind.yml` (NEVER `modprobe -r`)
 6. Rescan PCI bus: `echo 1 > /sys/bus/pci/rescan`
 7. Tear down stale bridges (skip vmbr0 management bridge)
 8. `ifup --all --force` to restore interfaces

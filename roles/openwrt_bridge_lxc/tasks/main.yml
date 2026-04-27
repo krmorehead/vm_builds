@@ -299,12 +299,12 @@
         uci set network.lan.netmask="255.255.255.0"
         uci set network.lan.gateway="{{ _bridge_ct_gateway }}"
         uci set network.lan.proto="static"
-        uci delete network.lan.ip6assign 2>/dev/null
-        uci set dhcp.lan.ignore="1"
+        uci delete network.lan.ip6assign 2>/dev/null || true
+        uci set dhcp.lan.ignore="1" 2>/dev/null || true
         uci commit network
-        uci commit dhcp
+        uci commit dhcp 2>/dev/null || true
         /etc/init.d/network restart
-        /etc/init.d/dnsmasq restart
+        [ -x /etc/init.d/dnsmasq ] && /etc/init.d/dnsmasq restart || true
       '
   changed_when: true
 

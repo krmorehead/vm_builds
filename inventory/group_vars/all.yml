@@ -27,6 +27,11 @@ callhome_server_local: "http://localhost:{{ callhome_port }}"
 callhome_public_key: "{{ lookup('env', 'CALLHOME_PUBLIC_KEY') }}"
 callhome_private_key: "{{ lookup('env', 'CALLHOME_PRIVATE_KEY') }}"
 
+# Auth header dict for all ansible.builtin.uri calls to NM mutation endpoints.
+# Usage: headers: "{{ nm_auth_headers }}"
+nm_auth_headers:
+  x-callhome-token: "{{ callhome_public_key }}"
+
 # Single source of truth for fleet service names used by readiness gates,
 # staleness checks, and the heartbeat watchdog. Add new services HERE.
 fleet_monitored_services:
@@ -80,7 +85,7 @@ proxmox_lxc_template_path: images/debian-12-standard_12.12-1_amd64.tar.zst
 
 # ── OpenWrt LXC (mesh satellite nodes) ────────────────────────────
 openwrt_lxc_image_version: "{{ lookup('file', project_root + '/images/mesh.version') }}"
-openwrt_lxc_template_path: "images/openwrt-mesh-lxc-{{ openwrt_lxc_image_version }}-24.10.0-x86-64-rootfs.tar.gz"
+openwrt_lxc_template_path: "images/mesh-{{ openwrt_lxc_image_version }}-openwrt-24.10.0-x86-64-rootfs.tar.gz"
 
 # ── Pi-hole LXC ──────────────────────────────────────────────────
 pihole_image_version: "{{ lookup('file', project_root + '/images/pihole.version') }}"
@@ -133,7 +138,7 @@ desktop_ct_ip_offset: 50
 
 # ── OpenWrt Router (VM) ──────────────────────────────────────────
 openwrt_image_version: "{{ lookup('file', project_root + '/images/router.version') }}"
-openwrt_image_path: "images/openwrt-router-{{ openwrt_image_version }}-24.10.0-x86-64-combined.img.gz"
+openwrt_image_path: "images/router-{{ openwrt_image_version }}-openwrt-24.10.0-x86-64-combined-ext4.img.gz"
 openwrt_vm_id: 100
 openwrt_vm_name: openwrt-router
 openwrt_vm_memory: 512

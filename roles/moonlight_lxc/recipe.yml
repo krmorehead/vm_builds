@@ -65,5 +65,13 @@ kasmvnc:
   display_num: 1
   service_name: moonlight-display
   xstartup_exec: |-
+    export XDG_RUNTIME_DIR="/tmp/moonlight-runtime-$(id -u)"
+    mkdir -p "$XDG_RUNTIME_DIR"
+    chmod 700 "$XDG_RUNTIME_DIR"
+    export SDL_AUDIODRIVER=dummy
+    sleep 3
     if ! grep -q '^address' /etc/moonlight.conf 2>/dev/null; then exec sleep infinity; fi
-    exec /usr/local/bin/moonlight stream -config /etc/moonlight.conf -app Desktop
+    while true; do
+      /usr/local/bin/moonlight stream -config /etc/moonlight.conf -app Desktop
+      sleep 10
+    done

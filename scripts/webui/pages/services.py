@@ -20,7 +20,7 @@ def register() -> None:
 
             with ui.row().classes("gap-4 items-center"):
                 profile_options = {p.name: p.name for p in profiles}
-                profile_select = ui.select(
+                ui.select(
                     options=profile_options,
                     label="Deploy Profile",
                     on_change=lambda e: _apply_profile(e.value),

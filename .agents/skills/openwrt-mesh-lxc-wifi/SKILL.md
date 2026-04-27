@@ -68,9 +68,10 @@ description: OpenWrt Mesh LXC container WiFi PHY management and namespace handli
 17. Intel AX210 `iwlwifi` self-managed regulatory (LAR) blocks 5GHz AP mode
     (PASSIVE-SCAN on all 5GHz channels). The `lar_disable` module parameter does
     NOT exist in kernel 6.17+. However, 6GHz channels ARE AP-capable with
-    self-managed regulatory. A module reload (`modprobe -r iwlmvm iwlwifi &&
-    modprobe iwlwifi`) in `proxmox_pci_passthrough` reinitializes the firmware
-    regulatory state, enabling AP-capable 6GHz channels.
+    self-managed regulatory. A sysfs rebind (`tasks/sysfs_wifi_rebind.yml`)
+    in `proxmox_pci_passthrough` reinitializes the firmware regulatory state,
+    enabling AP-capable 6GHz channels. NEVER use `modprobe -r` — use sysfs
+    unbind + PCI rescan + explicit bind instead.
 
 18. `wifi_setup.sh` now has a `capabilities` subcommand that outputs structured
     `KEY=value` data: supported bands, AP-capable channels, DFS channels, maximum

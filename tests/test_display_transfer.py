@@ -337,7 +337,7 @@ class TestDisplayAppConfigsIntegration:
     def test_target_hosts_constrained_apps(self):
         """Apps with hardware constraints must specify target_hosts."""
         desktop = DISPLAY_APP_CONFIGS["desktop"]
-        assert desktop.target_hosts == [], "Desktop LXC is on all hosts"
+        assert desktop.target_hosts == ["home"], "Desktop LXC is only on home"
         kodi = DISPLAY_APP_CONFIGS["kodi"]
         assert kodi.target_hosts == ["home"], "Kodi is only on home"
         moonlight = DISPLAY_APP_CONFIGS["moonlight"]

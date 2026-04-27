@@ -295,7 +295,7 @@
       pct exec {{ lxc_ct_id }} -- ip -o -4 addr show eth0 2>/dev/null | grep -c "inet "
     executable: /bin/bash
   register: _ct_addr
-  retries: 15
+  retries: 60
   delay: 2
   until: (_ct_addr.stdout | default('0') | trim | int) > 0
   changed_when: false

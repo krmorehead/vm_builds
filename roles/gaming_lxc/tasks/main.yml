@@ -37,6 +37,7 @@
 - name: Provision Gaming LXC via NM API
   ansible.builtin.uri:
     url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/gaming"
+    headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
@@ -143,6 +144,19 @@
     - { proto: tcp, port: 47984 }
     - { proto: tcp, port: 47989 }
     - { proto: tcp, port: 47990 }
+    - { proto: tcp, port: 48010 }
+    - { proto: udp, port: 47998 }
+    - { proto: udp, port: 47999 }
+    - { proto: udp, port: 48000 }
+    - { proto: udp, port: 48001 }
+    - { proto: udp, port: 48002 }
+    - { proto: udp, port: 48003 }
+    - { proto: udp, port: 48004 }
+    - { proto: udp, port: 48005 }
+    - { proto: udp, port: 48006 }
+    - { proto: udp, port: 48007 }
+    - { proto: udp, port: 48008 }
+    - { proto: udp, port: 48009 }
     - { proto: udp, port: 48010 }
   changed_when: "'ADDED' in _sunshine_dnat.stdout"
   when:
@@ -171,6 +185,19 @@
     - { proto: tcp, port: 47984 }
     - { proto: tcp, port: 47989 }
     - { proto: tcp, port: 47990 }
+    - { proto: tcp, port: 48010 }
+    - { proto: udp, port: 47998 }
+    - { proto: udp, port: 47999 }
+    - { proto: udp, port: 48000 }
+    - { proto: udp, port: 48001 }
+    - { proto: udp, port: 48002 }
+    - { proto: udp, port: 48003 }
+    - { proto: udp, port: 48004 }
+    - { proto: udp, port: 48005 }
+    - { proto: udp, port: 48006 }
+    - { proto: udp, port: 48007 }
+    - { proto: udp, port: 48008 }
+    - { proto: udp, port: 48009 }
     - { proto: udp, port: 48010 }
   changed_when: "'ADDED' in _sunshine_fwd.stdout"
   when:
