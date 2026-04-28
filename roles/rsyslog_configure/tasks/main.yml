@@ -34,7 +34,7 @@
 
 - name: Deploy forwarding config to rsyslog via NM API
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ rsyslog_ct_id }}/file"
+    url: "{{ nm_api_url }}/api/config/{{ rsyslog_ct_id }}/file"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -48,7 +48,7 @@
 
 - name: Remove forwarding config when home server is not set
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ rsyslog_ct_id }}/exec"
+    url: "{{ nm_api_url }}/api/provision/{{ rsyslog_ct_id }}/exec"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -63,7 +63,7 @@
 
 - name: Validate rsyslog configuration
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ rsyslog_ct_id }}/exec"
+    url: "{{ nm_api_url }}/api/provision/{{ rsyslog_ct_id }}/exec"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -77,14 +77,18 @@
 - name: Restart rsyslog service via NM API
   ansible.builtin.uri:
     url: >-
-      http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ rsyslog_ct_id }}/service/rsyslog/restart
+      {{ nm_api_url }}/api/config/{{ rsyslog_ct_id }}/service/rsyslog/restart
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body: {}
     status_code: 200
-    timeout: 60
+    timeout: 120
   delegate_to: localhost
+  retries: 5
+  delay: 10
+  register: _rsyslog_restart
+  until: (_rsyslog_restart.status | default(0)) == 200
 
 # ── Post-restart health check ────────────────────────────────────
 

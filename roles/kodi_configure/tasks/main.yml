@@ -16,7 +16,7 @@
 
 - name: Override Kodi web port if non-default
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ kodi_ct_id }}/sed"
+    url: "{{ nm_api_url }}/api/config/{{ kodi_ct_id }}/sed"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json

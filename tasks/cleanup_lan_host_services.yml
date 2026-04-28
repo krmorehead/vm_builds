@@ -1,0 +1,105 @@
+---
+# Per-LAN-host SERVICE cleanup tasks — destroys service containers only.
+# Base layer (Kiosk/NM) is PRESERVED.
+#
+# Required vars:
+#   _lan_host_ip   – LAN IP of the target (e.g. 10.10.10.210)
+#   _lan_host_name – inventory hostname (e.g. mesh1)
+
+- name: Check if LAN host is reachable -- {{ _lan_host_name }}
+  ansible.builtin.command:
+    cmd: >-
+      ssh -o ConnectTimeout=5
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+      -o BatchMode=yes -o PasswordAuthentication=no
+      root@{{ _lan_host_ip }} hostname
+  register: _key_check
+  failed_when: false
+  changed_when: false
+
+- name: Set reachability fact
+  ansible.builtin.set_fact:
+    _host_reachable: "{{ _key_check.rc == 0 }}"
+    _cleanup_ssh: >-
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+      -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3
+      root@{{ _lan_host_ip }}
+
+- name: Skip cleanup if LAN host is unreachable
+  ansible.builtin.debug:
+    msg: "{{ _lan_host_name }} is unreachable -- skipping cleanup"
+  when: not (_host_reachable | bool)
+
+- name: Stop and destroy SERVICE containers on LAN host  # noqa command-instead-of-shell
+  ansible.builtin.shell:
+    cmd: >-
+      timeout 180 {{ _cleanup_ssh }} "
+      for vm in {{ service_vm_ids | join(' ') }}; do
+        qm status \$vm >/dev/null 2>&1 || continue;
+        qm stop \$vm --timeout 15 2>/dev/null || true;
+        qm destroy \$vm --purge 2>/dev/null || true;
+      done;
+      for ct in {{ service_ct_ids | join(' ') }}; do
+        pct status \$ct >/dev/null 2>&1 || continue;
+        pct stop \$ct 2>/dev/null || true;
+        pct destroy \$ct --purge 2>/dev/null || true;
+      done"
+  when: _host_reachable | bool
+  changed_when: true
+  failed_when: false
+
+- name: Deregister LAN host SERVICE containers from Manager
+  ansible.builtin.include_tasks: "{{ project_root }}/tasks/manager_register.yml"
+  vars:
+    register_path: "api/host/{{ _lan_host_name }}/containers/{{ _deregister_vmid }}"
+    register_body: {}
+    register_method: DELETE
+    register_ignore_errors: true
+  loop: "{{ service_ct_ids }}"
+  loop_control:
+    loop_var: _deregister_vmid
+
+- name: Stop and remove service-specific proxy units on LAN host  # noqa command-instead-of-shell
+  ansible.builtin.shell:
+    cmd: >-
+      {{ _cleanup_ssh }} "
+      for svc in wireguard-udp-proxy
+      desktop-display-proxy desktop-vnc-ws
+      kodi-display-proxy kodi-vnc-proxy
+      moonlight-display-proxy moonlight-vnc-proxy; do
+        systemctl stop \$svc 2>/dev/null || true;
+        systemctl disable \$svc 2>/dev/null || true;
+        rm -f /etc/systemd/system/\${svc}.service;
+      done;
+      systemctl daemon-reload 2>/dev/null || true"
+  when: _host_reachable | bool
+  changed_when: true
+  failed_when: false
+
+- name: Remove service hookscripts on LAN host  # noqa command-instead-of-shell
+  ansible.builtin.shell:
+    cmd: |
+      {{ _cleanup_ssh }} "rm -f
+        /var/lib/vz/snippets/mesh-wifi-phy-*.sh
+        /var/lib/vz/snippets/bridge-wifi-phy-*.sh
+        /var/lib/vz/snippets/gpu-passthrough-hook.sh
+        /var/lib/vz/snippets/display-exclusive.sh"
+  when: _host_reachable | bool
+  changed_when: true
+  failed_when: false
+
+- name: Clean stale pmxcfs node configs on LAN host  # noqa command-instead-of-shell
+  ansible.builtin.shell:
+    cmd: >-
+      {{ _cleanup_ssh }} "
+      local_node=\$(hostname);
+      for nodedir in /etc/pve/nodes/*/; do
+        node=\$(basename \"\$nodedir\");
+        [ \"\$node\" = \"\$local_node\" ] && continue;
+        for conf in \"\$nodedir\"lxc/*.conf \"\$nodedir\"qemu-server/*.conf; do
+          [ -f \"\$conf\" ] && rm -v \"\$conf\";
+        done;
+      done"
+  when: _host_reachable | bool
+  changed_when: true
+  failed_when: false

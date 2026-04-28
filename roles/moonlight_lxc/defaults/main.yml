@@ -5,7 +5,7 @@ moonlight_ct_cores: 1
 moonlight_ct_disk: "2"
 moonlight_ct_template_path: "{{ moonlight_lxc_template_path }}"
 moonlight_ct_onboot: false
+moonlight_ct_startup_order: 0
 moonlight_ct_unprivileged: false
 moonlight_ct_features:
   - "nesting=1"
-moonlight_ct_ip_offset: "{{ moonlight_ct_ip_offset | default(17) }}"

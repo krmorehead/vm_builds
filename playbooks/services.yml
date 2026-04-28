@@ -1,0 +1,614 @@
+---
+# ══════════════════════════════════════════════════════════════════
+# SERVICES LAYER: All services that build on top of base state
+# ══════════════════════════════════════════════════════════════════
+# Requires base state to be established first (infra, OpenWrt, LAN,
+# Kiosk/NM, WireGuard VPN). All plays here use NM APIs via VPN.
+#
+# Run independently: molecule converge -s default (after base passes)
+# Run as part of full deploy: molecule test -s default (imports site.yml)
+#
+# The base state gate at the top validates prerequisites. When called
+# from site.yml (which runs base.yml first), the gate always passes.
+# When called standalone, it confirms that:
+#   - Controller has wg0 up
+#   - All Node Manager APIs are responding
+#   - All WireGuard tunnels have active handshakes
+#   - Fleet health API is available
+
+# ── Base state prerequisite gate ────────────────────────────────
+- name: Validate base state prerequisites
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Check base state
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/base_state_gate.yml"
+
+    - name: Fail if base state is not established
+      ansible.builtin.assert:
+        that: _base_state_valid | bool
+        fail_msg: >-
+          HARD FAILURE: Base state is not established.
+          {{ _base_state_details | to_nice_json }}
+          Run base.yml first: molecule converge -s base
+          Or run the full pipeline: molecule test -s default
+
+# ── SM liveness gate (pre-provision) ──────────────────────────────
+# The SM IS the heartbeat. If it's dead, nothing else matters.
+# This check takes <1 second. No retries. No fallbacks.
+
+- name: "SM liveness gate: pre-provision"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [pihole, monitoring, homeassistant, media, moonlight, wireguard, kiosk, gaming, mesh-wifi, bridge, desktop]
+  tasks:
+    - name: Assert SM is alive before provisioning
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/sm_liveness_gate.yml"
+
+# ── Service provisioning (API-driven via NM) ──────────────────────
+# All NMs are verified running and VPN is up. Service provisioning
+# and configuration uses NM APIs. Containers boot in parallel, then
+# fleet readiness gate waits for heartbeats.
+
+- name: Provision Pi-hole LXC (API-driven)
+  hosts: dns_nodes
+  gather_facts: false
+  tags: [pihole]
+  roles:
+    - pihole_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: pihole_lxc
+
+- name: Provision rsyslog LXC
+  hosts: monitoring_nodes
+  gather_facts: false
+  tags: [monitoring]
+  roles:
+    - rsyslog_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: rsyslog_lxc
+
+- name: Provision Netdata LXC
+  hosts: monitoring_nodes
+  gather_facts: false
+  tags: [monitoring]
+  roles:
+    - netdata_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: netdata_lxc
+
+- name: Provision Home Assistant LXC
+  hosts: service_nodes
+  gather_facts: false
+  tags: [homeassistant]
+  roles:
+    - homeassistant_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: homeassistant_lxc
+
+- name: Provision Jellyfin LXC
+  hosts: media_nodes
+  gather_facts: false
+  tags: [media]
+  roles:
+    - jellyfin_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: jellyfin_lxc
+
+- name: Provision Kodi LXC
+  hosts: media_nodes
+  gather_facts: false
+  tags: [media]
+  roles:
+    - kodi_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: kodi_lxc
+
+- name: Provision Moonlight LXC
+  hosts: streaming_nodes
+  gather_facts: false
+  tags: [moonlight]
+  roles:
+    - moonlight_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: moonlight_lxc
+
+- name: Provision OpenWrt Mesh LXC
+  hosts: wifi_nodes:!router_nodes
+  gather_facts: false
+  tags: [mesh-wifi]
+  roles:
+    - openwrt_mesh_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: openwrt_mesh_lxc
+
+- name: Provision WiFi Bridge LXC
+  hosts: bridge_nodes
+  gather_facts: false
+  tags: [bridge]
+  max_fail_percentage: 100
+  roles:
+    - openwrt_bridge_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: openwrt_bridge_lxc
+
+- name: Provision Desktop LXC
+  hosts: desktop_nodes
+  gather_facts: false
+  tags: [desktop]
+  roles:
+    - desktop_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: desktop_lxc
+
+- name: Provision Gaming LXC
+  hosts: gaming_nodes
+  gather_facts: true
+  tags: [gaming]
+  roles:
+    - gaming_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: gaming_lxc
+
+# ── Post-provision callhome rewrite ─────────────────────────────────
+# kiosk_configure runs its sibling callhome rewrite BEFORE other
+# services are provisioned (they get 404). Re-run the rewrite now
+# that all containers exist and are running.
+- name: Post-provision callhome rewrite
+  hosts: kiosk_nodes
+  gather_facts: false
+  tags: [pihole, monitoring, homeassistant, media, moonlight, wireguard, kiosk, gaming]
+  tasks:
+    - name: Rewrite callhome on all Debian siblings
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/post_provision_callhome.yml"
+
+# ── SM liveness gate (pre-fleet-readiness) ────────────────────────
+- name: "SM liveness gate: pre-fleet-readiness"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [pihole, monitoring, homeassistant, media, moonlight, wireguard, kiosk, gaming]
+  tasks:
+    - name: Assert SM is alive before fleet readiness check
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/sm_liveness_gate.yml"
+
+# ── Fleet readiness gate (hard-fail, no SSH fallback) ─────────────
+# All containers have been provisioned and started. Wait for the
+# heartbeat system to confirm readiness. If any service fails to
+# heartbeat, that IS the failure — no SSH fallback.
+
+- name: Fleet readiness gate (pre-configure)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [pihole, monitoring, homeassistant, media, moonlight, wireguard, kiosk, gaming]
+  tasks:
+    - name: Query fleet readiness from API
+      ansible.builtin.uri:
+        url: >-
+          {{ callhome_server_local }}/api/fleet/ready?services={{
+            fleet_ready_services | join(',')
+          }}
+        return_content: true
+      register: _pre_configure_ready
+      retries: 12
+      delay: 3
+      until: >-
+        (_pre_configure_ready.json.services | default({}) | dict2items
+         | rejectattr('value.status', 'equalto', 'unknown')
+         | selectattr('value.ready', 'equalto', false)
+         | list | length == 0)
+        and
+        (_pre_configure_ready.json.services | default({}) | dict2items
+         | rejectattr('value.status', 'equalto', 'unknown')
+         | list | length > 0)
+
+    - name: Compute fleet readiness summary facts
+      vars:
+        _all_services: "{{ _pre_configure_ready.json.services | default({}) | dict2items }}"
+        _provisioned: "{{ _all_services | rejectattr('value.status', 'equalto', 'unknown') | list }}"
+        _unknown: "{{ _all_services | selectattr('value.status', 'equalto', 'unknown') | list }}"
+        _not_ready: "{{ _provisioned | selectattr('value.ready', 'equalto', false) | list }}"
+      ansible.builtin.set_fact:
+        _fleet_unknown_services: "{{ _unknown | map(attribute='key') | list }}"
+        _fleet_not_ready_services: "{{ _not_ready | map(attribute='key') | list }}"
+
+    - name: Report services that were never provisioned (unreachable hosts)
+      ansible.builtin.debug:
+        msg: >-
+          Skipping fleet check for unprovisioned services (host unreachable):
+          {{ _fleet_unknown_services | join(', ') }}
+      when: _fleet_unknown_services | length > 0
+
+    - name: Hard-fail if any provisioned service is not ready
+      ansible.builtin.assert:
+        that: _fleet_not_ready_services | length == 0
+        fail_msg: >-
+          HARD FAILURE: Fleet not ready after 36s. Services not heartbeating:
+          {{ _fleet_not_ready_services | join(', ') }}.
+          There is NO SSH fallback — the heartbeat system IS the verification path.
+          INVESTIGATE:
+          1. Check which containers are not heartbeating: curl {{ callhome_server_local }}/api/fleet/ready?services={{ fleet_ready_services | join(',') }}
+          2. For each missing service, check if the container is running on its host
+          3. Check callhome service inside the container: systemctl status callhome
+          4. Check if callhome can reach the Node Manager: /etc/default/callhome has CALLHOME_SERVER set
+          5. Check the Node Manager relay chain: Container → NM → CM → SM
+
+# ── SM liveness gate (pre-configure) ──────────────────────────────
+- name: "SM liveness gate: pre-configure"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [pihole, monitoring, homeassistant, media, moonlight, wireguard, kiosk, gaming, mesh-wifi, bridge, desktop]
+  tasks:
+    - name: Assert SM is alive before configuration phase
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/sm_liveness_gate.yml"
+
+# ── Service configuration (API-driven) ────────────────────────────
+# All containers confirmed ready via heartbeat API. Configure plays
+# apply host-specific settings via NM API calls.
+
+- name: Configure Pi-hole (API-driven)
+  hosts: dns_nodes
+  gather_facts: false
+  tags: [pihole]
+  roles:
+    - pihole_configure
+
+- name: Configure rsyslog (API-driven)
+  hosts: monitoring_nodes
+  gather_facts: false
+  tags: [monitoring]
+  roles:
+    - rsyslog_configure
+
+- name: Configure Netdata (API-driven)
+  hosts: monitoring_nodes
+  gather_facts: false
+  tags: [monitoring]
+  roles:
+    - netdata_configure
+
+- name: Configure Home Assistant (API-driven)
+  hosts: service_nodes
+  gather_facts: false
+  tags: [homeassistant]
+  roles:
+    - homeassistant_configure
+
+- name: Configure Jellyfin (API-driven)
+  hosts: media_nodes
+  gather_facts: false
+  tags: [media]
+  roles:
+    - jellyfin_configure
+
+- name: Configure Kodi (API-driven)
+  hosts: media_nodes
+  gather_facts: false
+  tags: [media]
+  roles:
+    - kodi_configure
+
+- name: Configure Moonlight
+  hosts: streaming_nodes
+  gather_facts: false
+  tags: [moonlight]
+  roles:
+    - moonlight_configure
+
+- name: Configure OpenWrt Mesh
+  hosts: openwrt_mesh
+  gather_facts: false
+  tags: [mesh-wifi]
+  roles:
+    - openwrt_mesh_configure
+
+# ── WiFi Bridge Link Negotiation ────────────────────────────────
+# Collects WiFi capabilities from both bridge endpoints and runs
+# the Python negotiation module to determine optimal shared band,
+# channel, and htmode. Results stored as hostvars on bridge_nodes
+# for consumption by openwrt_bridge_configure.
+
+- name: Negotiate WiFi bridge link parameters
+  hosts: bridge_nodes
+  gather_facts: false
+  tags: [bridge]
+  max_fail_percentage: 100
+  tasks:
+    - name: Run WiFi negotiation
+      ansible.builtin.include_tasks:
+        file: "{{ project_root }}/tasks/negotiate_wifi_bridge.yml"
+
+- name: Reconstruct WiFi bridge group (in case provision was skipped)
+  hosts: bridge_nodes
+  gather_facts: false
+  tags: [bridge]
+  max_fail_percentage: 100
+  tasks:
+    - name: Check if openwrt_bridge group is already populated
+      ansible.builtin.set_fact:
+        _bridge_group_exists: "{{ groups['openwrt_bridge'] | default([]) | length > 0 }}"
+      run_once: true
+
+    - name: Reconstruct bridge group from existing containers
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/reconstruct_bridge_group.yml"
+      when: not (_bridge_group_exists | bool)
+
+- name: Configure WiFi Bridge
+  hosts: openwrt_bridge
+  gather_facts: false
+  tags: [bridge]
+  max_fail_percentage: 100
+  roles:
+    - openwrt_bridge_configure
+
+- name: Configure Desktop LXC (API-driven)
+  hosts: desktop_nodes
+  gather_facts: false
+  tags: [desktop]
+  roles:
+    - desktop_configure
+
+- name: Configure Gaming LXC (API-driven)
+  hosts: gaming_nodes
+  gather_facts: false
+  tags: [gaming]
+  roles:
+    - gaming_lxc_configure
+
+# ── Attach display-exclusive hookscripts (post-configure) ────────
+# Hookscripts are deployed by kiosk_lxc but not attached until after
+# all configure plays finish. The kiosk is NOT a display-exclusive app
+# (it uses headless rendering and stays alive during display launches).
+
+- name: Attach display-exclusive hookscripts
+  hosts: desktop_nodes
+  gather_facts: false
+  tags: [kiosk, desktop, media, moonlight]
+  tasks:
+    - name: Check display-exclusive hookscript exists
+      ansible.builtin.stat:
+        path: /var/lib/vz/snippets/display-exclusive.sh
+      register: _hookscript_exists
+
+    - name: Attach hookscript to display containers
+      ansible.builtin.command:
+        cmd: pct set {{ item }} --hookscript local:snippets/display-exclusive.sh
+      loop:
+        - "{{ kodi_ct_id }}"
+        - "{{ moonlight_ct_id }}"
+        - "{{ desktop_ct_id }}"
+      loop_control:
+        label: "CT {{ item }}"
+      register: _attach_ct
+      failed_when: false
+      changed_when: _attach_ct.rc == 0
+      when: _hookscript_exists.stat.exists | default(false)
+
+# ── Heartbeat circuit breaker (post-configure) ──────────────────
+# All configure plays have run. Verify that every container that was
+# healthy at the Phase 3b gate is still heartbeating. If any
+# previously-healthy service has gone stale, abort immediately.
+
+- name: Heartbeat circuit breaker (post-configure)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [pihole, monitoring, homeassistant, media, moonlight, wireguard, kiosk, gaming, mesh-wifi, bridge]
+  tasks:
+    - name: Run heartbeat staleness check
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/fleet_heartbeat_gate.yml"
+      vars:
+        gate_services: "{{ fleet_monitored_services }}"
+        gate_max_age_seconds: 180
+      when: callhome_server | default('') | length > 0
+
+# Callhome sibling rewrite is now baked into kiosk_configure. No separate
+# "Configure callhome on LXC containers" play needed — kiosk_configure
+# rewrites all sibling containers on each host during its run, using sed
+# to preserve baked CALLHOME_HTTP_PROBES.
+
+# ── Kiosk config refresh (populate service URLs + callhome rewrite) ──
+
+- name: Refresh Kiosk Config
+  hosts: kiosk_nodes
+  gather_facts: false
+  tags: [kiosk, pihole, monitoring, homeassistant, media, moonlight, wireguard, gaming, mesh-wifi, bridge]
+  roles:
+    - kiosk_configure
+
+# ── LAN display relays (router → LAN hosts) ──────────────────────
+# LAN hosts are unreachable from the operator's browser. The router
+# node relays KasmVNC traffic at offset ports (base + 100) to each
+# LAN host's display services.
+- name: Deploy LAN display relays
+  hosts: router_nodes
+  gather_facts: false
+  tags: [kiosk]
+  tasks:
+    - name: Deploy LAN display relay services
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/lan_display_relay.yml"
+      when: groups.get('lan_hosts', []) | length > 0
+
+# ── Per-feature plays ────────────────────────────────────────────
+# The openwrt dynamic group's SSH connection goes stale during the 20+
+# min of service plays. Reconstruct the group with fresh SSH args
+# before the first per-feature play.
+
+- name: Reconstruct openwrt group for per-feature plays
+  hosts: router_nodes
+  gather_facts: true
+  tags:
+    - openwrt-security
+    - openwrt-vlans
+    - openwrt-dns
+    - openwrt-mesh
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/reconstruct_openwrt_group.yml"
+
+- name: Harden OpenWrt security
+  hosts: openwrt
+  gather_facts: false
+  tags: [openwrt-security]
+  tasks:
+    - name: Apply security hardening
+      ansible.builtin.include_role:
+        name: openwrt_configure
+        tasks_from: security.yml
+
+- name: Record security hardening
+  hosts: router_nodes
+  gather_facts: false
+  tags: [openwrt-security]
+  roles:
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: openwrt_security
+
+- name: Configure OpenWrt VLANs
+  hosts: openwrt
+  gather_facts: false
+  tags: [openwrt-vlans]
+  tasks:
+    - name: Apply VLAN configuration
+      ansible.builtin.include_role:
+        name: openwrt_configure
+        tasks_from: vlans.yml
+
+- name: Record VLAN configuration
+  hosts: router_nodes
+  gather_facts: false
+  tags: [openwrt-vlans]
+  roles:
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: openwrt_vlans
+
+- name: Configure OpenWrt encrypted DNS
+  hosts: openwrt
+  gather_facts: false
+  tags: [openwrt-dns]
+  tasks:
+    - name: Apply encrypted DNS
+      ansible.builtin.include_role:
+        name: openwrt_configure
+        tasks_from: dns.yml
+
+- name: Record encrypted DNS
+  hosts: router_nodes
+  gather_facts: false
+  tags: [openwrt-dns]
+  roles:
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: openwrt_dns
+
+- name: Configure OpenWrt mesh enhancements
+  hosts: openwrt
+  gather_facts: false
+  tags: [openwrt-mesh]
+  tasks:
+    - name: Apply mesh enhancements
+      ansible.builtin.include_role:
+        name: openwrt_configure
+        tasks_from: mesh.yml
+
+- name: Record mesh enhancements
+  hosts: router_nodes
+  gather_facts: false
+  tags: [openwrt-mesh]
+  roles:
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: openwrt_mesh
+
+- name: Reconstruct openwrt group for syslog forwarding
+  hosts: router_nodes
+  gather_facts: true
+  tags:
+    - openwrt-syslog
+    - openwrt-syslog-rollback
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/reconstruct_openwrt_group.yml"
+
+- name: Apply syslog forwarding to OpenWrt
+  hosts: openwrt
+  gather_facts: false
+  tags: [openwrt-syslog]
+  tasks:
+    - name: Include syslog tasks
+      ansible.builtin.include_role:
+        name: openwrt_configure
+        tasks_from: syslog.yml
+
+- name: Record syslog forwarding
+  hosts: router_nodes
+  gather_facts: false
+  tags: [openwrt-syslog]
+  roles:
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: openwrt_syslog
+
+- name: Reconstruct openwrt group for Pi-hole DNS forwarding
+  hosts: router_nodes
+  gather_facts: true
+  tags:
+    - openwrt-pihole-dns
+    - openwrt-pihole-dns-rollback
+  tasks:
+    - name: Include group reconstruction
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/reconstruct_openwrt_group.yml"
+
+- name: Apply Pi-hole DNS forwarding to OpenWrt
+  hosts: openwrt
+  gather_facts: false
+  tags: [openwrt-pihole-dns]
+  tasks:
+    - name: Include Pi-hole DNS tasks
+      ansible.builtin.include_role:
+        name: openwrt_configure
+        tasks_from: pihole_dns.yml
+
+- name: Record Pi-hole DNS forwarding
+  hosts: router_nodes
+  gather_facts: false
+  tags: [openwrt-pihole-dns]
+  roles:
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: openwrt_pihole_dns
+
+- name: Clean up bootstrap networking
+  hosts: proxmox:!lan_hosts
+  gather_facts: false
+  tags: [cleanup]
+  vars:
+    openwrt_bootstrap_ip: 192.168.1.2
+    openwrt_bootstrap_cidr: 24
+  tasks:
+    - name: Remove temporary bootstrap IP from LAN bridge
+      ansible.builtin.command:
+        cmd: >-
+          ip addr del
+          {{ openwrt_bootstrap_ip }}/{{ openwrt_bootstrap_cidr }}
+          dev {{ _bootstrap_bridge }}
+      failed_when: false
+      changed_when: true
+      when: _bootstrap_bridge is defined

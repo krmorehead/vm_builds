@@ -1,0 +1,102 @@
+---
+dependency:
+  name: galaxy
+  options:
+    requirements-file: ${MOLECULE_PROJECT_DIRECTORY}/requirements.yml
+
+driver:
+  name: default
+  options:
+    managed: false
+
+platforms:
+  - name: home
+    groups:
+      - proxmox
+      - router_nodes
+      - vpn_nodes
+      - wifi_nodes
+      - kiosk_nodes
+  - name: mesh1
+    groups:
+      - proxmox
+      - lan_hosts
+      - vpn_nodes
+      - wifi_nodes
+      - kiosk_nodes
+  - name: ai
+    groups:
+      - proxmox
+      - vpn_nodes
+      - kiosk_nodes
+  - name: mesh2
+    groups:
+      - proxmox
+      - vpn_nodes
+      - wifi_nodes
+      - kiosk_nodes
+  - name: bridge-1
+    groups:
+      - proxmox
+      - vpn_nodes
+      - bridge_nodes
+      - kiosk_nodes
+  - name: bridge-2
+    groups:
+      - proxmox
+      - vpn_nodes
+      - bridge_nodes
+      - kiosk_nodes
+
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      roles_path: ${MOLECULE_PROJECT_DIRECTORY}/roles
+      collections_paths: ${MOLECULE_PROJECT_DIRECTORY}/collections
+      host_key_checking: false
+      retry_files_enabled: false
+    ssh_connection:
+      pipelining: true
+  env:
+    HOME_API_TOKEN: ${HOME_API_TOKEN}
+    MESH1_API_TOKEN: ${MESH1_API_TOKEN}
+    MESH2_API_TOKEN: ${MESH2_API_TOKEN}
+    AI_API_TOKEN: ${AI_API_TOKEN}
+    BRIDGE_1_API_TOKEN: ${BRIDGE_1_API_TOKEN}
+    BRIDGE_2_API_TOKEN: ${BRIDGE_2_API_TOKEN}
+    PRIMARY_HOST: ${PRIMARY_HOST}
+    AI_HOST: ${AI_HOST}
+    MESH_2_HOST: ${MESH_2_HOST}
+    BRIDGE_1_HOST: ${BRIDGE_1_HOST}
+    BRIDGE_2_HOST: ${BRIDGE_2_HOST}
+    MESH_KEY: ${MESH_KEY}
+    CALLHOME_PUBLIC_KEY: ${CALLHOME_PUBLIC_KEY}
+    CALLHOME_PRIVATE_KEY: ${CALLHOME_PRIVATE_KEY}
+    WIREGUARD_PRIVATE_KEY_CONTROLLER: ${WIREGUARD_PRIVATE_KEY_CONTROLLER}
+    WIREGUARD_PUBLIC_KEY_CONTROLLER: ${WIREGUARD_PUBLIC_KEY_CONTROLLER}
+    WIREGUARD_SERVER_ENDPOINT: ${WIREGUARD_SERVER_ENDPOINT}
+    WIREGUARD_HUB_PUBLIC_KEY: ${WIREGUARD_HUB_PUBLIC_KEY}
+    WIREGUARD_PRIVATE_KEY_HOME: ${WIREGUARD_PRIVATE_KEY_HOME}
+    WIREGUARD_PRIVATE_KEY_MESH1: ${WIREGUARD_PRIVATE_KEY_MESH1}
+    WIREGUARD_PRIVATE_KEY_AI: ${WIREGUARD_PRIVATE_KEY_AI}
+    WIREGUARD_PRIVATE_KEY_MESH2: ${WIREGUARD_PRIVATE_KEY_MESH2}
+    WIREGUARD_PRIVATE_KEY_BRIDGE_1: ${WIREGUARD_PRIVATE_KEY_BRIDGE_1}
+    WIREGUARD_PRIVATE_KEY_BRIDGE_2: ${WIREGUARD_PRIVATE_KEY_BRIDGE_2}
+    CONTROLLER_VPN_IP: ${CONTROLLER_VPN_IP}
+  inventory:
+    links:
+      host_vars: ../../inventory/host_vars/
+      group_vars: ../../inventory/group_vars/
+
+verifier:
+  name: ansible
+
+scenario:
+  test_sequence:
+    - dependency
+    - cleanup
+    - syntax
+    - prepare
+    - converge
+    - verify

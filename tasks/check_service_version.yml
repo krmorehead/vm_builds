@@ -12,7 +12,7 @@
 
 - name: Query NM for service version
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/images/versions"
+    url: "{{ nm_api_url }}/api/images/versions"
     return_content: true
     timeout: 5
   register: _nm_version_check

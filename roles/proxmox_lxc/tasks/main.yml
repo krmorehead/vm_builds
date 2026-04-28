@@ -175,6 +175,16 @@
     cmd: "{{ _pct_create_cmd }}"
   when: not lxc_exists | bool
 
+- name: Stamp image version on container description
+  ansible.builtin.command:
+    cmd: >-
+      pct set {{ lxc_ct_id }}
+      --description "image_version={{ lxc_ct_image_version }}"
+  changed_when: true
+  when:
+    - not lxc_exists | bool
+    - lxc_ct_image_version | default('') | length > 0
+
 # ── Bind mounts ───────────────────────────────────────────────────
 # Entries are full pct mount specs, e.g.:
 #   /proc,mp=/host/proc,ro=1     (host /proc → container /host/proc, read-only)
@@ -194,12 +204,27 @@
 
 # ── Auto-start (runs unconditionally to self-heal) ────────────────
 
+- name: Check current auto-start config
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      CFG=$(pct config {{ lxc_ct_id }})
+      ONBOOT=$(echo "$CFG" | grep -oP '^onboot:\s*\K\d' || echo "0")
+      STARTUP=$(echo "$CFG" | grep -oP 'order=\K\d+' || echo "0")
+      echo "onboot=${ONBOOT} startup=${STARTUP}"
+    executable: /bin/bash
+  register: _autostart_check
+  changed_when: false
+
 - name: Configure container auto-start
   ansible.builtin.command:
     cmd: >-
       pct set {{ lxc_ct_id }}
       --onboot {{ '1' if lxc_ct_onboot else '0' }}
       --startup order={{ lxc_ct_startup_order }}
+  when: >-
+    ('onboot=' + ('1' if lxc_ct_onboot else '0')) not in (_autostart_check.stdout | default(''))
+    or ('startup=' + (lxc_ct_startup_order | string)) not in (_autostart_check.stdout | default(''))
   changed_when: true
 
 # ── Bridge netfilter bypass (required for LXC DHCP) ──────────
@@ -248,8 +273,8 @@
 # ── Configure callhome agent (early — before readiness wait) ───
 # Push agent + config FIRST so the callhome service starts sending
 # heartbeats while we wait for full readiness via the API.
-# The agent skeleton was baked into the image by inject_callhome_agent()
-# in build-images.sh. Containers without /opt/callhome are skipped.
+# The agent skeleton was baked into the base template by build-images.sh.
+# Containers without /opt/callhome are skipped.
 
 - name: Stage callhome agent on Proxmox host
   ansible.builtin.copy:
@@ -265,21 +290,33 @@
       if ! pct exec {{ lxc_ct_id }} -- test -d /opt/callhome; then
         exit 0
       fi
-      pct push {{ lxc_ct_id }} /tmp/callhome_agent.py /opt/callhome/callhome.py
-      pct exec {{ lxc_ct_id }} -- chmod +x /opt/callhome/callhome.py
+      CHANGED=0
+      LOCAL_HASH=$(md5sum /tmp/callhome_agent.py | awk '{print $1}')
+      REMOTE_HASH=$(pct exec {{ lxc_ct_id }} -- md5sum /opt/callhome/callhome.py 2>/dev/null | awk '{print $1}')
+      if [ "$LOCAL_HASH" != "$REMOTE_HASH" ]; then
+        pct push {{ lxc_ct_id }} /tmp/callhome_agent.py /opt/callhome/callhome.py
+        pct exec {{ lxc_ct_id }} -- chmod +x /opt/callhome/callhome.py
+        CHANGED=1
+      fi
       KIOSK_IP=$(pct config {{ kiosk_ct_id }} 2>/dev/null | grep -oP 'ip=\K[^/]+' | head -1)
       if [ -n "$KIOSK_IP" ]; then
         TARGET="http://${KIOSK_IP}:{{ kiosk_manager_port | default('9001') }}"
       else
         TARGET="{{ callhome_server }}"
       fi
-      # Use sed to update SERVER/KEY, preserving baked CALLHOME_HTTP_PROBES
-      pct exec {{ lxc_ct_id }} -- bash -c "
-        sed -i 's|^CALLHOME_SERVER=.*|CALLHOME_SERVER=$TARGET|' /etc/default/callhome
-        sed -i 's|^CALLHOME_PUBLIC_KEY=.*|CALLHOME_PUBLIC_KEY={{ callhome_public_key }}|' /etc/default/callhome
-        systemctl restart callhome.service 2>/dev/null || true"
+      CURRENT_SERVER=$(pct exec {{ lxc_ct_id }} -- grep '^CALLHOME_SERVER=' /etc/default/callhome 2>/dev/null | cut -d= -f2-)
+      CURRENT_KEY=$(pct exec {{ lxc_ct_id }} -- grep '^CALLHOME_PUBLIC_KEY=' /etc/default/callhome 2>/dev/null | cut -d= -f2-)
+      if [ "$CURRENT_SERVER" != "$TARGET" ] || [ "$CURRENT_KEY" != "{{ callhome_public_key }}" ]; then
+        pct exec {{ lxc_ct_id }} -- bash -c "
+          sed -i 's|^CALLHOME_SERVER=.*|CALLHOME_SERVER=$TARGET|' /etc/default/callhome
+          sed -i 's|^CALLHOME_PUBLIC_KEY=.*|CALLHOME_PUBLIC_KEY={{ callhome_public_key }}|' /etc/default/callhome
+          systemctl restart callhome.service 2>/dev/null || true"
+        CHANGED=1
+      fi
+      if [ "$CHANGED" -eq 1 ]; then echo CHANGED; fi
     executable: /bin/bash
-  changed_when: true
+  register: _callhome_push
+  changed_when: "'CHANGED' in _callhome_push.stdout"
   failed_when: false
   when: callhome_server | default('') | length > 0
 

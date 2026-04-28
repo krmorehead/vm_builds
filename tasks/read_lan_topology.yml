@@ -1,0 +1,30 @@
+---
+# Shared task: read LAN topology facts from the generated env file.
+#
+# Reads LAN_GATEWAY and LAN_CIDR written by openwrt_configure during
+# the base state deployment.  Used by multiple roles that need to
+# compute host-specific IPs or routing targets.
+#
+# Exported facts:
+#   _lan_gateway     — OpenWrt LAN gateway IP (e.g. 10.10.10.1)
+#   _lan_cidr        — LAN CIDR prefix length (e.g. 24)
+#   _lxc_net_on_lan  — whether this host is behind OpenWrt (bool string)
+#   _lan_prefix      — first 3 octets of the LAN gateway (e.g. 10.10.10)
+
+- name: Determine if host is on the OpenWrt LAN
+  ansible.builtin.set_fact:
+    _lxc_net_on_lan: >-
+      {{ 'router_nodes' in group_names or 'lan_hosts' in group_names }}
+
+- name: Read LAN topology from generated env
+  ansible.builtin.set_fact:
+    _lan_gateway: >-
+      {{ lookup('pipe', 'grep "^LAN_GATEWAY=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
+         | default('10.10.10.1', true) | trim }}
+    _lan_cidr: >-
+      {{ lookup('pipe', 'grep "^LAN_CIDR=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
+         | default('24', true) | trim }}
+
+- name: Derive LAN prefix
+  ansible.builtin.set_fact:
+    _lan_prefix: "{{ _lan_gateway.split('.')[0:3] | join('.') }}"

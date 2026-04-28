@@ -66,14 +66,26 @@
   register: _early_phy_count
   changed_when: false
 
-- name: Install iw tool for WiFi PHY management
-  ansible.builtin.apt:
-    name: iw
-    state: present
-    cache_valid_time: 86400
+- name: Assert iw tool is pre-installed (baked by prepare_host)
+  ansible.builtin.command:
+    cmd: which iw
+  changed_when: false
+  failed_when: false
+  register: _iw_check
   when:
     - _host_uses_wifi | bool
     - (_wifi_pci_controllers.stdout_lines | default([])) | length > 0
+
+- name: Hard-fail if iw is missing
+  ansible.builtin.fail:
+    msg: >-
+      HARD FAILURE: 'iw' not installed on {{ inventory_hostname }}.
+      Run: ./scripts/build-images.sh --host {{ ansible_host }} --only <any>
+      (prepare_host installs iw automatically)
+  when:
+    - _host_uses_wifi | bool
+    - (_wifi_pci_controllers.stdout_lines | default([])) | length > 0
+    - _iw_check.rc != 0
 
 - name: Re-detect WiFi interfaces
   ansible.builtin.shell:
@@ -569,7 +581,7 @@
     executable: /bin/bash
   loop: "{{ wifi_pci_devices }}"
   register: _vfio_bind_results
-  changed_when: true
+  changed_when: "'already_bound' not in _vfio_bind_results.stdout | default('')"
   when:
     - wifi_pci_devices | length > 0
     - "'router_nodes' in group_names"

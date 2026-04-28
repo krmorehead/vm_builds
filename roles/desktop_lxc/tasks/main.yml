@@ -36,7 +36,7 @@
 # ── Provision container via NM API (skipped when version matches) ─
 - name: Provision Desktop LXC via NM API
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/desktop"
+    url: "{{ nm_api_url }}/api/provision/desktop"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -64,7 +64,9 @@
     timeout: 660
   delegate_to: localhost
   register: _provision_result
-  failed_when: not (_provision_result.json.success | default(false))
+  until: _provision_result.json.success | default(false)
+  retries: 2
+  delay: 10
   when: not (_service_up_to_date | default(false) | bool)
 
 # ── Apply privileged config on host (features/DRI need root@pam) ─
@@ -112,7 +114,7 @@
 # ── Export static IP for downstream roles ─────────────────────────
 - name: Export Desktop container static IP
   ansible.builtin.set_fact:
-    _lxc_ct_ip: "{{ _lxc_net_ip }}"
+    desktop_static_ip: "{{ _lxc_net_ip }}"
     cacheable: true
 
 # ── Port forwarding for Desktop display ──────────────────────────

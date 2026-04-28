@@ -99,6 +99,13 @@ For any non-trivial code change:
 When adding a new feature: write the verify assertion that checks the feature
 works, then implement the feature.
 
+## Two-layer pipeline (base + services)
+
+Deployment is split into two independently testable layers:
+- **`molecule test -s base`** — Validates infrastructure, OpenWrt, Kiosk/NM, WireGuard VPN (~8 min). Run when base components change.
+- **`molecule converge -s default` + `molecule verify -s default`** — Day-to-day service iteration. Base is already up (idempotent). PRIMARY iteration loop.
+- **`molecule test -s default`** — Full E2E clean-state proof (CI, pre-commit). Runs base + services.
+
 ## Converge vs full test (baseline workflow)
 
 - Use `molecule converge` + `molecule verify` for day-to-day iteration. This
@@ -250,16 +257,23 @@ authentication is rejected: FULL STOP.
    ai is down, Moonlight verification is IMPOSSIBLE regardless of what passes on home.
 6. **Block the session on recovery.** No further progress is possible until the host is restored.
 
-### Mandatory fleet health checks
+### Fleet health monitoring (API-first)
 
-- **Before any multi-host session:** SSH to ALL hosts to verify connectivity.
-- **After EVERY build/deploy:** SSH to ALL hosts, not just the target. Collateral
-  damage happens — network changes, key corruption, service crashes.
-- **During long sessions:** Re-check all hosts every 30 minutes.
-- SSH "Permission denied" is a SHOW STOPPER. It means you lost management access.
-  Treat it identically to EHOSTUNREACH.
-- Host metrics at 0% in the SuperManager means the Manager can't SSH to its host.
-  Investigate immediately — don't assume "it'll fix itself."
+**PRIMARY: heartbeat system.** Once base state is established, fleet health
+is the 4-tier heartbeat system's job — not SSH:
+- `curl $CALLHOME_URL/api/fleet/health` — overall fleet status
+- `curl $CALLHOME_URL/api/fleet/stale` — circuit breaker for stale services
+- `curl $CALLHOME_URL/api/nodes` — per-node health + extensions
+- The heartbeat watchdog kills the run within 5 seconds of SM API death
+  or any service going stale. NEVER rely on manual checks.
+- Host metrics at 0% in the SuperManager means the Manager can't reach its
+  host. Investigate immediately via the API, not SSH.
+
+**SECONDARY: Ansible management access.** SSH is for validating that
+Ansible can REACH hosts for provisioning — not for health monitoring:
+- **Before first molecule run:** verify Ansible can reach PRIMARY_HOST
+- **After network-changing operations:** confirm management path survived
+- SSH "Permission denied" is a SHOW STOPPER (lost management access)
 
 ### Previous catastrophes
 

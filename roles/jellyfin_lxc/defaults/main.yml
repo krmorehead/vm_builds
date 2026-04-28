@@ -6,9 +6,7 @@ jellyfin_ct_disk: "8"
 jellyfin_ct_template_path: "{{ jellyfin_lxc_template_path }}"
 jellyfin_ct_onboot: true
 jellyfin_ct_startup_order: 5
-jellyfin_ct_ip_offset: "{{ jellyfin_ct_ip_offset | default(15) }}"
 jellyfin_ct_unprivileged: false
 jellyfin_ct_features:
   - "nesting=1"
-jellyfin_media_path: "{{ jellyfin_media_path }}"
 igpu_render_device: "/dev/dri/renderD128"

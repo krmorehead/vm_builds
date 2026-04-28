@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -25,7 +25,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.webui.heartbeat import (
     HeartbeatCache,
-    HeartbeatSubscription,
     MetricCache,
     SubscriptionManager,
     _CircuitState,
@@ -319,7 +318,7 @@ class TestRealWifiCollectors:
         ip = env.get("BRIDGE_1_HOST", "")
         assert ip, "BRIDGE_1_HOST not set"
         assert host_has_container("BRIDGE_1_HOST", "openwrt-bridge"), (
-            f"Bridge container NOT running on bridge-1. Run 'molecule converge'."
+            "Bridge container NOT running on bridge-1. Run 'molecule converge'."
         )
         result = _nm_api_get(ip, "/api/wifi/local/status")
         mode = result.get("bridge", {}).get("mode", "unknown")
@@ -349,7 +348,7 @@ class TestRealWifiCollectors:
         ip = env.get("MESH_2_HOST", "")
         assert ip, "MESH_2_HOST not set"
         assert host_has_container("MESH_2_HOST", "openwrt-mesh"), (
-            f"Mesh container NOT running on mesh2. Run 'molecule converge'."
+            "Mesh container NOT running on mesh2. Run 'molecule converge'."
         )
         result = _nm_api_get(ip, "/api/wifi/local/status")
         mode = result.get("mesh", {}).get("mode", "unknown")
@@ -681,7 +680,7 @@ class TestCollectBatmanMetricsReal:
             f"Bridge container NOT running on bridge-1 ({ip}). Run 'molecule converge'."
         )
         result = _nm_api_get(ip, "/api/batman/local/status")
-        assert len(result) > 0, f"Empty batman response from bridge-1"
+        assert len(result) > 0, "Empty batman response from bridge-1"
         node_key = next(iter(result))
         node_data = result[node_key]
         assert "active" in node_data, (
@@ -698,7 +697,7 @@ class TestCollectBatmanMetricsReal:
             f"Bridge container NOT running on bridge-2 ({ip}). Run 'molecule converge'."
         )
         result = _nm_api_get(ip, "/api/batman/local/status")
-        assert len(result) > 0, f"Empty batman response from bridge-2"
+        assert len(result) > 0, "Empty batman response from bridge-2"
         node_key = next(iter(result))
         node_data = result[node_key]
         assert "active" in node_data, (
@@ -780,7 +779,7 @@ class TestCircuitBreaker:
     def test_get_circuit_status_dict(self):
         test_ip = "192.168.99.98"
         try:
-            cb = _get_circuit(test_ip)
+            _get_circuit(test_ip)
             status = get_circuit_status(test_ip)
             assert "consecutive_failures" in status
             assert "total_failures" in status

@@ -38,17 +38,16 @@
         pct exec {{ item }} -- sed -i \
           's|^CALLHOME_PUBLIC_KEY=.*|CALLHOME_PUBLIC_KEY={{ callhome_public_key }}|' \
           /etc/default/callhome 2>/dev/null
+        pct exec {{ item }} -- sed -i \
+          's|^CALLHOME_INTERVAL=.*|CALLHOME_INTERVAL={{ callhome_heartbeat_interval }}|' \
+          /etc/default/callhome 2>/dev/null
         echo "updated"
       else
         echo "skipped"
       fi
     executable: /bin/bash
   register: _ch_rewrite
-  loop: >-
-    {{ [pihole_ct_id, rsyslog_ct_id, netdata_ct_id, wireguard_ct_id,
-        homeassistant_ct_id, jellyfin_ct_id, kodi_ct_id, moonlight_ct_id,
-        desktop_ct_id, gaming_ct_id]
-       | select('defined') | list }}
+  loop: "{{ debian_sibling_ct_ids }}"
   loop_control:
     label: "CT {{ item }}"
   changed_when: "'updated' in _ch_rewrite.stdout"
@@ -67,9 +66,7 @@
 
 - name: Set OpenWrt callhome target (host proxy)
   ansible.builtin.set_fact:
-    _owrt_callhome_url: >-
-      http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port
-      | default(kiosk_manager_port) }}
+    _owrt_callhome_url: "{{ nm_api_url }}"
 
 - name: Rewrite callhome on OpenWrt siblings via pct exec
   ansible.builtin.shell:
@@ -86,9 +83,7 @@
       fi
     executable: /bin/bash
   register: _owrt_rewrite
-  loop: >-
-    {{ [meshwifi_ct_id, bridge_ct_id]
-       | select('defined') | list }}
+  loop: "{{ openwrt_sibling_ct_ids }}"
   loop_control:
     label: "CT {{ item }}"
   changed_when: "'updated' in _owrt_rewrite.stdout"

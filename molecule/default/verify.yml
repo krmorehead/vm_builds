@@ -70,30 +70,23 @@
           IOMMU {{ 'active' if (iommu_verify.stdout | int) > 0
           else 'not active (no WiFi passthrough)' }}
 
-    # ── Container NAT bridge (WAN hosts only) ───────────────────────
+    # ── Container NAT bridge (ALL hosts — uniform topology) ──────────
 
-    - name: Determine if host should have container NAT bridge
-      ansible.builtin.set_fact:
-        _verify_needs_ct_bridge: >-
-          {{ 'router_nodes' not in group_names and 'lan_hosts' not in group_names }}
-
-    - name: Check container bridge exists (WAN hosts)
+    - name: Check container bridge exists
       ansible.builtin.command:
         cmd: ip link show vmbr_ct
       register: _ct_bridge_check
       changed_when: false
       failed_when: false
-      when: _verify_needs_ct_bridge | bool
 
-    - name: Assert container bridge exists on WAN hosts
+    - name: Assert container bridge exists on all hosts
       ansible.builtin.assert:
         that: _ct_bridge_check.rc == 0
         fail_msg: >-
-          Container NAT bridge (vmbr_ct) not found on WAN host {{ inventory_hostname }}.
-          The proxmox_bridges role should create it for non-LAN hosts.
-      when: _verify_needs_ct_bridge | bool
+          Container NAT bridge (vmbr_ct) not found on {{ inventory_hostname }}.
+          Every host should have a container NAT bridge for uniform topology.
 
-    - name: Get container bridge IP (WAN hosts)
+    - name: Get container bridge IP
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
@@ -101,9 +94,7 @@
         executable: /bin/bash
       register: _ct_bridge_ip
       changed_when: false
-      when:
-        - _verify_needs_ct_bridge | bool
-        - _ct_bridge_check.rc == 0
+      when: _ct_bridge_check.rc == 0
 
     - name: Assert container bridge has correct subnet IP
       ansible.builtin.assert:
@@ -112,11 +103,9 @@
         fail_msg: >-
           Container bridge IP mismatch. Expected 10.99.{{ container_subnet_id }}.1/24,
           got {{ _ct_bridge_ip.stdout | trim }}
-      when:
-        - _verify_needs_ct_bridge | bool
-        - _ct_bridge_check.rc == 0
+      when: _ct_bridge_check.rc == 0
 
-    - name: Check iptables MASQUERADE rule for container subnet (WAN hosts)
+    - name: Check iptables MASQUERADE rule for container subnet
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
@@ -125,44 +114,24 @@
       register: _nat_rule_check
       changed_when: false
       failed_when: false
-      when: _verify_needs_ct_bridge | bool
 
-    - name: Assert MASQUERADE rule exists on WAN hosts
+    - name: Assert MASQUERADE rule exists
       ansible.builtin.assert:
         that: (_nat_rule_check.stdout | int) > 0
         fail_msg: >-
           Missing iptables MASQUERADE rule for container subnet
           10.99.{{ container_subnet_id }}.0/24 on {{ inventory_hostname }}
-      when: _verify_needs_ct_bridge | bool
 
-    - name: Check IP forwarding is enabled (WAN hosts)
+    - name: Check IP forwarding is enabled
       ansible.builtin.command:
         cmd: sysctl -n net.ipv4.ip_forward
       register: _ip_fwd_check
       changed_when: false
-      when: _verify_needs_ct_bridge | bool
 
-    - name: Assert IP forwarding is enabled on WAN hosts
+    - name: Assert IP forwarding is enabled
       ansible.builtin.assert:
         that: _ip_fwd_check.stdout | trim == "1"
         fail_msg: "IP forwarding not enabled on {{ inventory_hostname }}"
-      when: _verify_needs_ct_bridge | bool
-
-    - name: Assert container bridge does NOT exist on LAN hosts
-      ansible.builtin.command:
-        cmd: ip link show vmbr_ct
-      register: _ct_bridge_lan_check
-      changed_when: false
-      failed_when: false
-      when: not (_verify_needs_ct_bridge | bool)
-
-    - name: Assert no container bridge on LAN hosts
-      ansible.builtin.assert:
-        that: _ct_bridge_lan_check.rc != 0
-        fail_msg: >-
-          Container NAT bridge (vmbr_ct) found on LAN host {{ inventory_hostname }}.
-          LAN hosts should NOT have a container bridge — they use OpenWrt LAN.
-      when: not (_verify_needs_ct_bridge | bool)
 
     # ── iGPU detection (Intel or AMD) ──────────────────────────────
 
@@ -1373,18 +1342,16 @@
           - "'nesting=1' in wg_ct_cfg.stdout"
         fail_msg: "WireGuard container {{ wireguard_ct_id }} config incorrect on {{ inventory_hostname }}"
 
-    - name: Assert WireGuard on WAN hosts uses NAT bridge (not household subnet)
+    - name: Assert WireGuard has correct network topology
       ansible.builtin.assert:
         that:
-          - wg_ct_cfg.stdout is search('vmbr_ct')
-          - wg_ct_cfg.stdout is search('10\\.99\\.')
+          - wg_ct_cfg.stdout is regex('net0:.*bridge=')
+          - wg_ct_cfg.stdout is regex('net0:.*ip=10\\.')
         fail_msg: >-
-          WireGuard container on WAN host {{ inventory_hostname }} should use
-          vmbr_ct (NAT bridge) with 10.99.x.x IP, not the household subnet.
+          WireGuard container on {{ inventory_hostname }} network config issue.
           Got: {{ wg_ct_cfg.stdout | regex_search('net0:.*') }}
-      when: "'router_nodes' not in group_names and 'lan_hosts' not in group_names"
 
-    - name: Assert WireGuard DNAT rule exists (WAN hosts)
+    - name: Assert WireGuard DNAT rule exists
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
@@ -1393,15 +1360,13 @@
       register: _wg_dnat_check
       changed_when: false
       failed_when: false
-      when: "'router_nodes' not in group_names and 'lan_hosts' not in group_names"
 
     - name: Assert WireGuard DNAT rule present
       ansible.builtin.assert:
         that: (_wg_dnat_check.stdout | int) > 0
         fail_msg: >-
-          Missing WireGuard DNAT rule on WAN host {{ inventory_hostname }}.
+          Missing WireGuard DNAT rule on {{ inventory_hostname }}.
           UDP 51820 should be forwarded to the WireGuard container.
-      when: "'router_nodes' not in group_names and 'lan_hosts' not in group_names"
 
     - name: Query WireGuard extensions from API
       ansible.builtin.uri:
@@ -2315,7 +2280,7 @@
           via heartbeat. INVESTIGATE: Check that CALLHOME_CONFIG_FILES=/opt/kiosk/config.json
           is set in /etc/default/callhome inside the kiosk container (CT {{ kiosk_ct_id }}).
           Then restart callhome: pct exec {{ kiosk_ct_id }} -- systemctl restart callhome.
-          If missing, rebuild kiosk image with updated inject_callhome_agent.
+          If missing, rebuild kiosk image (build-images.sh --only kiosk).
       when: "'running' in _kiosk_cfg.stdout"
 
     - name: Set kiosk config keys from heartbeat API

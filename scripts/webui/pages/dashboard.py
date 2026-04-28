@@ -11,7 +11,7 @@ from scripts.webui.data import Fleet, HostBucket, Labels, PageTitles, Routes
 
 
 def register() -> None:
-    @ui.page("/")
+    @ui.page(Routes.DASHBOARD)
     def dashboard_page() -> None:
         from scripts.webui.app import get_env_path, get_images_dir, get_state_dir, load_active_env
 

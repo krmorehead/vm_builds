@@ -34,11 +34,7 @@
       -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
       -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3
       root@{{ _lan_host_ip }} "
-      for ct in {{ wireguard_ct_id }} {{ meshwifi_ct_id }}
-      {{ bridge_ct_id }} {{ netdata_ct_id }} {{ rsyslog_ct_id }}
-      {{ pihole_ct_id }} {{ homeassistant_ct_id }} {{ jellyfin_ct_id }}
-      {{ kodi_ct_id }} {{ moonlight_ct_id }} {{ kiosk_ct_id }}
-      {{ gaming_ct_id }} {{ desktop_ct_id }}; do
+      for ct in {{ (debian_sibling_ct_ids + openwrt_sibling_ct_ids + [kiosk_ct_id | string]) | join(' ') }}; do
         pct status \$ct >/dev/null 2>&1 || continue;
         echo \"Destroying stale CT \$ct\";
         pct stop \$ct --timeout 15 2>/dev/null || true;

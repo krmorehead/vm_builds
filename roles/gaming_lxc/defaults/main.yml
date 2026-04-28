@@ -7,7 +7,26 @@ gaming_ct_disk: "16"
 gaming_ct_template_path: "{{ gaming_lxc_template_path }}"
 gaming_ct_onboot: true
 gaming_ct_startup_order: 1
-gaming_ct_ip_offset: "{{ gaming_ct_ip_offset | default(18) }}"
 gaming_ct_unprivileged: false
 gaming_ct_features:
   - "nesting=1"
+
+# Sunshine streaming ports — used by DNAT+FORWARD iptables tasks
+_sunshine_ports:
+  - {proto: tcp, port: 47984}
+  - {proto: tcp, port: 47989}
+  - {proto: tcp, port: 47990}
+  - {proto: tcp, port: 48010}
+  - {proto: udp, port: 47998}
+  - {proto: udp, port: 47999}
+  - {proto: udp, port: 48000}
+  - {proto: udp, port: 48001}
+  - {proto: udp, port: 48002}
+  - {proto: udp, port: 48003}
+  - {proto: udp, port: 48004}
+  - {proto: udp, port: 48005}
+  - {proto: udp, port: 48006}
+  - {proto: udp, port: 48007}
+  - {proto: udp, port: 48008}
+  - {proto: udp, port: 48009}
+  - {proto: udp, port: 48010}

@@ -44,10 +44,10 @@ molecule cleanup       # reset host
     echo "HOME_API_TOKEN: $HOME_API_TOKEN"
     echo "PRIMARY_HOST: $PRIMARY_HOST"
     
-    # Test SSH connectivity
-    ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST "echo 'SSH test successful'"
+    # If base state established, use heartbeat system:
+    curl -sf http://localhost:$WEBUI_PORT/api/fleet/health && echo "Fleet OK"
     
-    # Test Ansible connectivity  
+    # If pre-base-state (first run), verify Ansible access:
     ansible home -m ping
     ```
 
@@ -128,14 +128,15 @@ Before any molecule work, ALWAYS verify environment:
 echo "HOME_API_TOKEN: $HOME_API_TOKEN"
 echo "PRIMARY_HOST: $PRIMARY_HOST"
 
-# Test SSH connectivity  
-ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST "echo 'SSH test successful'"
+# If base state is already established, check the heartbeat system:
+curl -sf http://localhost:$WEBUI_PORT/api/fleet/health && echo "Fleet OK"
+curl -sf http://localhost:$WEBUI_PORT/api/nodes | python3 -m json.tool
 
-# Test Ansible connectivity
+# If pre-base-state (first run), verify Ansible management access:
 ansible home -m ping
 ```
 
-**CRITICAL**: If any of these fail, DO NOT proceed with molecule commands. Fix environment first.
+**CRITICAL**: If the SM API is not responding (and base state should be up), that means the heart stopped. Fix the SM. If any of these fail, DO NOT proceed with molecule commands.
 
 ## When to Test (PROACTIVE TRIGGERS)
 

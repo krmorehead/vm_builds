@@ -10,12 +10,12 @@ from __future__ import annotations
 from nicegui import ui
 
 from scripts.webui import theme
-from scripts.webui.data import Labels, PageTitles, format_uptime, get_router_node
+from scripts.webui.data import Labels, PageTitles, Routes, format_uptime, get_router_node
 from scripts.webui.heartbeat import signal_quality
 
 
 def register() -> None:
-    @ui.page("/router")
+    @ui.page(Routes.ROUTER)
     def router_page() -> None:
         with theme.page_shell("router"):
             _router_content()
@@ -155,11 +155,11 @@ def _render_lan_card(cached) -> None:
             theme.section_label("DHCP Leases")
             rows = [
                 {
-                    "hostname": l.get("hostname", "?"),
-                    "ip": l.get("ip", "?"),
-                    "mac": l.get("mac", "?"),
+                    "hostname": lease.get("hostname", "?"),
+                    "ip": lease.get("ip", "?"),
+                    "mac": lease.get("mac", "?"),
                 }
-                for l in leases[:10]
+                for lease in leases[:10]
             ]
             ui.table(
                 columns=[
@@ -195,7 +195,7 @@ def _render_firewall_card(cached) -> None:
         fw = cached.data.get("firewall_zones", "")
         if fw:
             ui.code(fw).classes("w-full text-xs").style(
-                f"background: rgba(4, 10, 22, 0.8); color: {theme.TEXT_PRIMARY}; "
+                f"background: {theme.CODE_BG}; color: {theme.TEXT_PRIMARY}; "
                 "max-height: 200px; overflow-y: auto;"
             )
         else:

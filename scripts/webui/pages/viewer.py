@@ -17,7 +17,7 @@ from scripts.webui.data import Labels, Routes
 
 
 def register() -> None:
-    @ui.page("/view")
+    @ui.page(Routes.VIEW)
     async def viewer_page(url: str = "", title: str = "App") -> None:
         title = unquote(title)
 

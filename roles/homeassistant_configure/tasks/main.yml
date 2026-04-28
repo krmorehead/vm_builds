@@ -8,7 +8,7 @@
 
 - name: Start Home Assistant compose service
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ homeassistant_ct_id }}/exec"
+    url: "{{ nm_api_url }}/api/provision/{{ homeassistant_ct_id }}/exec"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -20,7 +20,7 @@
 
 - name: Wait for Home Assistant Docker container to be running
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ homeassistant_ct_id }}/exec"
+    url: "{{ nm_api_url }}/api/provision/{{ homeassistant_ct_id }}/exec"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -45,29 +45,36 @@
          if ha_admin_password | length > 0
          else lookup('password', '/dev/null chars=ascii_letters,digits length=32') }}
 
-# ── Wait for web UI and create admin user ────────────────────────
+# ── Wait for onboarding API readiness ────────────────────────────
 
-- name: Wait for Home Assistant web interface
+- name: Wait for Home Assistant onboarding API
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ homeassistant_ct_id }}/exec"
+    url: "{{ nm_api_url }}/api/provision/{{ homeassistant_ct_id }}/exec"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
-      cmd: "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8123"
-      timeout: 15
+      cmd: "curl -s http://127.0.0.1:{{ homeassistant_web_port }}/api/onboarding"
+      timeout: 10
     status_code: 200
   delegate_to: localhost
-  register: _ha_http_check
-  retries: 10
-  delay: 3
+  register: _ha_onboard_check
+  retries: 20
+  delay: 10
   until: >-
-    (_ha_http_check.json.success | default(false)) | bool
-    and (_ha_http_check.json.output | default('') | trim) in ['200', '301', '302']
+    (_ha_onboard_check.json.success | default(false)) | bool
+    and 'user' in (_ha_onboard_check.json.output | default(''))
+
+# ── Create admin user (idempotent) ───────────────────────────────
+# POST /api/onboarding/users returns:
+#   - 200 + {"auth_code":"..."} on first setup  → NM returns success=true
+#   - 403 + "User step already done" on re-runs → NM returns success=false
+#     because curl exits non-zero on HTTP 403
+# Both outcomes are treated as success by the until condition.
 
 - name: Create admin user via Home Assistant onboarding API
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ homeassistant_ct_id }}/exec"
+    url: "{{ nm_api_url }}/api/provision/{{ homeassistant_ct_id }}/exec"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -79,15 +86,18 @@
              \"username\": \"admin\",
              \"password\": \"{{ _ha_admin_password }}\",
              \"language\": \"en\"}"
-        http://127.0.0.1:8123/api/onboarding/users'
+        http://127.0.0.1:{{ homeassistant_web_port }}/api/onboarding/users'
       timeout: 30
     status_code: 200
   delegate_to: localhost
   no_log: true
   register: _ha_onboard
-  failed_when: >-
-    not (_ha_onboard.json.success | default(false))
-    and 'already been done' not in (_ha_onboard.json.output | default(''))
+  retries: 6
+  delay: 15
+  until: >-
+    'auth_code' in (_ha_onboard.json.output | default(''))
+    or '403' in (_ha_onboard.json.output | default(''))
+    or 'already' in (_ha_onboard.json.output | default(''))
 
 # ── Report completion ────────────────────────────────────────────
 
@@ -95,5 +105,5 @@
   ansible.builtin.debug:
     msg: >-
       Home Assistant configured: ct={{ homeassistant_ct_id }},
-      web=http://localhost:8123, admin=admin,
+      web=http://localhost:{{ homeassistant_web_port }}, admin=admin,
       config={{ homeassistant_config_path }}

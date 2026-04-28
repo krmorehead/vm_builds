@@ -29,7 +29,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from nicegui import app as nicegui_app, ui
 from nicegui.testing import user_simulation
 
 from scripts.webui import manager

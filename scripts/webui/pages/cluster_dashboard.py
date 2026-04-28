@@ -110,7 +110,7 @@ def _render_fleet(container: ui.column) -> None:
     with container:
         mgr = manager.get_instance()
         if not mgr.supports_fleet:
-            ui.label("Not a Cluster Manager").classes("text-xl")
+            ui.label(Labels.NOT_CLUSTER_MANAGER).classes("text-xl")
             return
 
         nodes = mgr.get_fleet_nodes()

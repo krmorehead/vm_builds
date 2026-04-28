@@ -64,6 +64,9 @@ post_commands:
 baked_webui:
   files:
     - __init__.py
+    - constants.py
+    - callhome_crypto.py
+    - fleet_telemetry.py
     - theme.py
     - data.py
     - heartbeat.py

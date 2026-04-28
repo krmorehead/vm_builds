@@ -35,7 +35,7 @@ Use when running molecule tests, implementing TDD workflow, diagnosing test fail
 
 **Environment and Setup Validation:**
 9. ALWAYS validate environment before ANY molecule commands: `set -a && source test.env && set +a`
-10. ALWAYS test SSH and Ansible connectivity before running molecule: `ansible home -m ping`
+10. ALWAYS verify Ansible can reach PRIMARY_HOST before first molecule run; after base state, use `curl $CALLHOME_URL/api/fleet/health`
 11. ALWAYS run lint checks (`ansible-lint && yamllint .`) after ANY code changes
 
 **Proactive Testing Triggers:**
@@ -270,19 +270,26 @@ When ANY host in the fleet is unreachable OR SSH authentication fails:
 5. **NEVER say "pre-existing" or "not caused by our changes."** Every
    unreachable host was caused by something. Find it.
 
-### Mandatory fleet connectivity checks
+### Fleet health monitoring (API-first)
 
-Run SSH to ALL hosts at these checkpoints — no exceptions:
-1. **Session start** — before beginning any work
-2. **After every build/deploy/converge** — ALL hosts, not just the target
-3. **Before proceeding to next host** — in sequential multi-host operations
-4. **Every 30 minutes** — during long sessions
+**PRIMARY: heartbeat system.** Once base state is established, fleet
+health is the 4-tier heartbeat system's job:
+- `curl $CALLHOME_URL/api/fleet/health` — overall fleet status
+- `curl $CALLHOME_URL/api/fleet/stale` — circuit breaker
+- `curl $CALLHOME_URL/api/nodes` — per-node container health
+- Heartbeat watchdog kills the run within 5 seconds of SM API death or stale
+
+NEVER SSH to hosts for health checks when the heartbeat system exists.
+
+**SECONDARY: Ansible management access** (pre-base-state only):
+- Verify Ansible can reach PRIMARY_HOST before first molecule run
+- SSH failures during Ansible plays are caught by `unreachable=1` in recap
 
 What counts as a failure (ALL are SHOW STOPPERS):
-- SSH "Permission denied" (lost management access)
-- SSH connection refused or timed out (host or sshd down)
+- SM API not responding (heartbeat system dead)
+- `/api/fleet/stale` returns stale services
+- SSH "Permission denied" (lost Ansible management access)
 - Proxmox API (port 8006) connection refused
-- SuperManager showing 0% disk AND 0% memory (Manager SSH failing)
 - Ansible `unreachable=1` in any play recap
 
 ### Previous catastrophes

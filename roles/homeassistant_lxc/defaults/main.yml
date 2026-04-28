@@ -8,5 +8,4 @@ homeassistant_ct_onboot: true
 homeassistant_ct_startup_order: 5
 homeassistant_ct_features:
   - "nesting=1"
-homeassistant_ct_ip_offset: "{{ homeassistant_ct_ip_offset | default(14) }}"
 homeassistant_usb_devices: []

@@ -6,7 +6,7 @@
 
 - name: Set Pi-hole web admin password
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ pihole_ct_id }}/exec"
+    url: "{{ nm_api_url }}/api/provision/{{ pihole_ct_id }}/exec"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -20,7 +20,7 @@
 
 - name: Set empty password if none provided
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ pihole_ct_id }}/exec"
+    url: "{{ nm_api_url }}/api/provision/{{ pihole_ct_id }}/exec"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -35,7 +35,7 @@
 
 - name: Detect container default gateway
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ pihole_ct_id }}/exec"
+    url: "{{ nm_api_url }}/api/provision/{{ pihole_ct_id }}/exec"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -62,7 +62,7 @@
 
 - name: Read current upstream DNS
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ pihole_ct_id }}/exec"
+    url: "{{ nm_api_url }}/api/provision/{{ pihole_ct_id }}/exec"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -75,7 +75,7 @@
 
 - name: Set upstream DNS servers
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ pihole_ct_id }}/exec"
+    url: "{{ nm_api_url }}/api/provision/{{ pihole_ct_id }}/exec"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -99,14 +99,18 @@
 - name: Restart pihole-FTL service
   ansible.builtin.uri:
     url: >-
-      http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ pihole_ct_id }}/service/pihole-FTL/restart
+      {{ nm_api_url }}/api/config/{{ pihole_ct_id }}/service/pihole-FTL/restart
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body: {}
     status_code: 200
-    timeout: 60
+    timeout: 120
   delegate_to: localhost
+  register: _ftl_restart
+  retries: 5
+  delay: 10
+  until: (_ftl_restart.status | default(-1)) == 200
 
 - name: Allow pihole-FTL to complete graceful stop (DB cleanup ~55s)
   ansible.builtin.pause:
@@ -114,10 +118,7 @@
 
 - name: Wait for pihole-FTL to be ready
   ansible.builtin.uri:
-    url: >-
-      http://{{ nm_api_host | default(ansible_host) }}:{{
-      nm_api_port | default(kiosk_manager_port) }}/api/config/{{
-      pihole_ct_id }}/service/pihole-FTL/status
+    url: "{{ nm_api_url }}/api/config/{{ pihole_ct_id }}/service/pihole-FTL/status"
     headers: "{{ nm_auth_headers }}"
     method: GET
     status_code: 200
@@ -132,7 +133,7 @@
 
 - name: Update Pi-hole gravity database
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ pihole_ct_id }}/exec"
+    url: "{{ nm_api_url }}/api/provision/{{ pihole_ct_id }}/exec"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -151,7 +152,7 @@
 
 - name: Point container DNS to itself
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ pihole_ct_id }}/file"
+    url: "{{ nm_api_url }}/api/config/{{ pihole_ct_id }}/file"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -166,12 +167,14 @@
 
 - name: Set CALLHOME_CONFIG_FILES for pihole container
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ pihole_ct_id }}/exec"
+    url: "{{ nm_api_url }}/api/provision/{{ pihole_ct_id }}/exec"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body:
-      cmd: "/bin/sh -c 'grep -q CALLHOME_CONFIG_FILES /etc/default/callhome 2>/dev/null || echo CALLHOME_CONFIG_FILES=/etc/pihole/pihole.toml >> /etc/default/callhome'"
+      cmd: >-
+        /bin/sh -c 'grep -q CALLHOME_CONFIG_FILES /etc/default/callhome 2>/dev/null
+        || echo CALLHOME_CONFIG_FILES=/etc/pihole/pihole.toml >> /etc/default/callhome'
       timeout: 10
     status_code: 200
   delegate_to: localhost
@@ -179,10 +182,7 @@
 
 - name: Restart callhome on pihole to pick up config_files setting
   ansible.builtin.uri:
-    url: >-
-      http://{{ nm_api_host | default(ansible_host) }}:{{
-      nm_api_port | default(kiosk_manager_port) }}/api/config/{{
-      pihole_ct_id }}/service/callhome/restart
+    url: "{{ nm_api_url }}/api/config/{{ pihole_ct_id }}/service/callhome/restart"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json

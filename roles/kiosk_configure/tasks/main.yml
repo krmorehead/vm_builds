@@ -43,20 +43,31 @@
          else (igpu_render_gid | default('993')) }}
 
 - name: Create render group and add kiosk user to groups
-  ansible.builtin.command:
-    cmd: >-
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
       pct exec {{ kiosk_ct_id }} -- bash -c '
-      groupadd -g {{ _render_gid }} render 2>/dev/null || groupmod -g {{ _render_gid }} render 2>/dev/null || true;
-      usermod -a -G render,video kiosk 2>/dev/null || true'
-  changed_when: true
+        CHANGED=0
+        if ! getent group render >/dev/null 2>&1; then
+          groupadd -g {{ _render_gid }} render
+          CHANGED=1
+        elif [ "$(getent group render | cut -d: -f3)" != "{{ _render_gid }}" ]; then
+          groupmod -g {{ _render_gid }} render
+          CHANGED=1
+        fi
+        if ! id -nG kiosk 2>/dev/null | grep -qw render; then
+          usermod -a -G render,video kiosk
+          CHANGED=1
+        fi
+        if [ $CHANGED -eq 1 ]; then echo CHANGED; fi'
+    executable: /bin/bash
+  register: _render_group
+  changed_when: "'CHANGED' in _render_group.stdout"
 
 # ── Resolve LAN gateway for OpenWrt URL ─────────────────────────
 
-- name: Read LAN gateway from generated env
-  ansible.builtin.set_fact:
-    _lan_gateway: >-
-      {{ lookup('pipe', 'grep "^LAN_GATEWAY=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
-         | default('10.10.10.1', true) | trim }}
+- name: Read LAN topology facts
+  ansible.builtin.include_tasks: "{{ project_root }}/tasks/read_lan_topology.yml"
 
 # ── Build node IP map for the per-host manager ──────────────────
 
@@ -112,11 +123,11 @@
   loop: "{{ _service_ip_entries | dict2items }}"
   vars:
     _service_ip_entries:
-      openwrt: "{{ _lan_gateway | default('10.10.10.1') }}"
+      openwrt: "{{ _lan_gateway | default(openwrt_lan_ip) }}"
       openwrt-bridge: "{{ _bridge_ct_ip.stdout | default('') }}"
       openwrt-mesh: "{{ _mesh_ct_ip.stdout | default('') }}"
       pihole: "{{ _lan_prefix }}.{{ pihole_ct_ip_offset }}"
-      wireguard: "{{ _lan_prefix }}.3"
+      wireguard: "{{ container_subnet_prefix }}.{{ container_subnet_id }}.{{ wireguard_ct_ip_offset }}"
       netdata: "{{ _lan_prefix }}.{{ netdata_ct_ip_offset }}"
       homeassistant: "{{ _lan_prefix }}.{{ homeassistant_ct_ip_offset }}"
       jellyfin: "{{ _lan_prefix }}.{{ jellyfin_ct_ip_offset }}"
@@ -162,19 +173,19 @@
            else '' }}
       JELLYFIN_URL: >-
         {{ kiosk_jellyfin_url if kiosk_jellyfin_url | length > 0
-           else 'http://' + _lan_prefix + '.' + (jellyfin_ct_ip_offset | string) + ':8096' }}
+           else 'http://' + _lan_prefix + '.' + (jellyfin_ct_ip_offset | string) + ':' + (jellyfin_web_port | string) }}
       KODI_URL: >-
         {{ kiosk_kodi_url if kiosk_kodi_url | length > 0
-           else 'http://' + _lan_prefix + '.' + (kodi_ct_ip_offset | string) + ':8080' }}
+           else 'http://' + _lan_prefix + '.' + (kodi_ct_ip_offset | string) + ':' + (kodi_web_port | string) }}
       HOMEASSISTANT_URL: >-
         {{ kiosk_homeassistant_url if kiosk_homeassistant_url | length > 0
-           else 'http://' + _lan_prefix + '.' + (homeassistant_ct_ip_offset | string) + ':8123' }}
+           else 'http://' + _lan_prefix + '.' + (homeassistant_ct_ip_offset | string) + ':' + (homeassistant_web_port | string) }}
       MOONLIGHT_URL: >-
         {{ kiosk_moonlight_url if kiosk_moonlight_url | length > 0
            else '' }}
       GAMING_URL: >-
         {{ kiosk_gaming_url if kiosk_gaming_url | length > 0
-           else 'https://' + _lan_prefix + '.' + (gaming_ct_ip_offset | string) + ':47990' }}
+           else 'https://' + _lan_prefix + '.' + (gaming_ct_ip_offset | string) + ':' + (sunshine_web_port | string) }}
       OPENWRT_URL: >-
         {{ kiosk_openwrt_url if kiosk_openwrt_url | length > 0
            else ('http://' + _lan_gateway)
@@ -188,7 +199,7 @@
            else '' }}
       NETDATA_URL: >-
         {{ kiosk_netdata_url if kiosk_netdata_url | length > 0
-           else 'http://' + _lan_prefix + '.' + (netdata_ct_ip_offset | string) + ':19999' }}
+           else 'http://' + _lan_prefix + '.' + (netdata_ct_ip_offset | string) + ':' + (netdata_web_port | string) }}
       RSYSLOG_URL: >-
         {{ kiosk_rsyslog_url if kiosk_rsyslog_url | length > 0
            else '' }}
@@ -220,66 +231,109 @@
   ansible.builtin.set_fact:
     _kiosk_config_json: "{{ _kiosk_urls | to_json }}"
 
+- name: Read existing config.json from container
+  ansible.builtin.command:
+    cmd: "pct exec {{ kiosk_ct_id }} -- cat /opt/kiosk/config.json"
+  register: _existing_config
+  changed_when: false
+  failed_when: false
+
+- name: Check if config needs updating
+  ansible.builtin.set_fact:
+    _kiosk_config_changed: >-
+      {{ (_existing_config.rc | default(1)) != 0
+         or (_existing_config.stdout | default('') | from_json | default({}))
+            != (_kiosk_config_json | from_json) }}
+
 - name: Write config.json to host temp file
   ansible.builtin.copy:
     content: "{{ _kiosk_config_json }}"
     dest: "/tmp/kiosk-config-{{ kiosk_ct_id }}.json"
     mode: "0644"
+  when: _kiosk_config_changed | bool
 
 - name: Push config.json into container
   ansible.builtin.command:
     cmd: "pct push {{ kiosk_ct_id }} /tmp/kiosk-config-{{ kiosk_ct_id }}.json /opt/kiosk/config.json"
-  changed_when: true
+  when: _kiosk_config_changed | bool
+  changed_when: _kiosk_config_changed | bool
 
 - name: Set config.json ownership
   ansible.builtin.command:
     cmd: "pct exec {{ kiosk_ct_id }} -- chown kiosk:kiosk /opt/kiosk/config.json"
-  changed_when: true
+  changed_when: false
+  when: _kiosk_config_changed | bool
 
 - name: Clean up host temp file
   ansible.builtin.file:
     path: "/tmp/kiosk-config-{{ kiosk_ct_id }}.json"
     state: absent
+  when: _kiosk_config_changed | bool
 
 # ── Ensure callhome reports config.json keys via heartbeat ───────
 # CALLHOME_CONFIG_FILES enables the config_files extension so verify.yml
 # can check kiosk config keys via the heartbeat API instead of SSH.
 
 - name: Set kiosk callhome to point to its own NM (localhost)
-  ansible.builtin.command:
-    cmd: >-
-      pct exec {{ kiosk_ct_id }} -- bash -c
-      "sed -i 's|^CALLHOME_SERVER=.*|CALLHOME_SERVER=http://localhost:{{ kiosk_manager_port | default(9001) }}|' /etc/default/callhome
-      && sed -i 's|^CALLHOME_PUBLIC_KEY=.*|CALLHOME_PUBLIC_KEY={{ callhome_public_key }}|' /etc/default/callhome"
-  changed_when: true
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct exec {{ kiosk_ct_id }} -- bash -c '
+        cur_server=$(grep "^CALLHOME_SERVER=" /etc/default/callhome 2>/dev/null | cut -d= -f2-)
+        cur_key=$(grep "^CALLHOME_PUBLIC_KEY=" /etc/default/callhome 2>/dev/null | cut -d= -f2-)
+        changed=0
+        [ "$cur_server" != "http://localhost:{{ kiosk_manager_port | default(9001) }}" ] && {
+          sed -i "s|^CALLHOME_SERVER=.*|CALLHOME_SERVER=http://localhost:{{ kiosk_manager_port | default(9001) }}|" /etc/default/callhome
+          changed=1
+        }
+        [ "$cur_key" != "{{ callhome_public_key }}" ] && {
+          sed -i "s|^CALLHOME_PUBLIC_KEY=.*|CALLHOME_PUBLIC_KEY={{ callhome_public_key }}|" /etc/default/callhome
+          changed=1
+        }
+        if [ $changed -eq 1 ]; then echo CHANGED; fi'
+    executable: /bin/bash
+  register: _callhome_set
+  changed_when: "'CHANGED' in _callhome_set.stdout"
 
 - name: Set CALLHOME_CONFIG_FILES for kiosk container
-  ansible.builtin.command:
-    cmd: >-
-      pct exec {{ kiosk_ct_id }} -- bash -c
-      "grep -q '^CALLHOME_CONFIG_FILES=' /etc/default/callhome 2>/dev/null
-      && sed -i 's|^CALLHOME_CONFIG_FILES=.*|CALLHOME_CONFIG_FILES=/opt/kiosk/config.json|' /etc/default/callhome
-      || echo 'CALLHOME_CONFIG_FILES=/opt/kiosk/config.json' >> /etc/default/callhome"
-  changed_when: true
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct exec {{ kiosk_ct_id }} -- bash -c '
+        if grep -q "^CALLHOME_CONFIG_FILES=/opt/kiosk/config.json" /etc/default/callhome 2>/dev/null; then
+          exit 0
+        fi
+        if grep -q "^CALLHOME_CONFIG_FILES=" /etc/default/callhome 2>/dev/null; then
+          sed -i "s|^CALLHOME_CONFIG_FILES=.*|CALLHOME_CONFIG_FILES=/opt/kiosk/config.json|" /etc/default/callhome
+        else
+          echo "CALLHOME_CONFIG_FILES=/opt/kiosk/config.json" >> /etc/default/callhome
+        fi
+        echo CHANGED'
+    executable: /bin/bash
+  register: _callhome_cfg_files
+  changed_when: "'CHANGED' in _callhome_cfg_files.stdout"
 
-# ── Restart kiosk services with new config ───────────────────────
+# ── Restart kiosk services only when config changed ──────────────
 
 - name: Restart kiosk-web (Manager API) with new config
   ansible.builtin.command:
     cmd: "pct exec {{ kiosk_ct_id }} -- systemctl restart kiosk-web"
   changed_when: true
+  when: _kiosk_config_changed | bool or _callhome_set is changed
 
 - name: Restart kiosk-display so Chromium reconnects to new kiosk-web
   ansible.builtin.command:
     cmd: "pct exec {{ kiosk_ct_id }} -- systemctl restart kiosk-display"
   changed_when: true
   failed_when: false
+  when: _kiosk_config_changed | bool
 
 - name: Restart callhome so it reports config_files extension
   ansible.builtin.command:
     cmd: "pct exec {{ kiosk_ct_id }} -- systemctl restart callhome"
   changed_when: true
   failed_when: false
+  when: _callhome_set is changed or _callhome_cfg_files is changed
 
 # ── Rewrite callhome on sibling containers → local Manager ───────
 # After kiosk-web restarts, point all sibling containers to the local
@@ -297,17 +351,13 @@
   register: _kiosk_ip_result
   changed_when: false
 
-- name: Set NM API base URL (via host socat proxy)
-  ansible.builtin.set_fact:
-    _nm_api_url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}"
-
 - name: Allow kiosk-web to initialize before health check
   ansible.builtin.pause:
     seconds: 10
 
 - name: Wait for NM API to be ready after restart
   ansible.builtin.uri:
-    url: "{{ _nm_api_url }}/api/health"
+    url: "{{ nm_api_url }}/api/health"
     headers: "{{ nm_auth_headers }}"
     method: GET
     status_code: 200
@@ -318,19 +368,18 @@
   until: _nm_health.status | default(0) == 200
   delegate_to: localhost
 
-- name: Set callhome targets for sibling rewrite
+- name: Set callhome targets and sibling VMID lists
   ansible.builtin.set_fact:
     _nat_target: >-
-      http://{{ (_kiosk_ip_result.stdout | trim) }}:{{ kiosk_manager_port
-      | default('9001') }}
-    _host_target: >-
-      http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port
-      | default(kiosk_manager_port) }}
+      http://{{ (_kiosk_ip_result.stdout | trim) }}:{{ kiosk_manager_port }}
+    _host_target: "{{ nm_api_url }}"
     _ch_key: "{{ callhome_public_key }}"
+    _debian_sibling_ids: "{{ debian_sibling_ct_ids }}"
+    _openwrt_sibling_ids: "{{ openwrt_sibling_ct_ids }}"
 
 - name: Rewrite callhome on Debian siblings via NM sed API
   ansible.builtin.uri:
-    url: "{{ _nm_api_url }}/api/config/{{ item }}/sed"
+    url: "{{ nm_api_url }}/api/config/{{ item }}/sed"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -341,11 +390,7 @@
     status_code: [200, 404]
     timeout: 10
   delegate_to: localhost
-  loop: >-
-    {{ [pihole_ct_id, rsyslog_ct_id, netdata_ct_id, wireguard_ct_id,
-        homeassistant_ct_id, jellyfin_ct_id, kodi_ct_id, moonlight_ct_id,
-        desktop_ct_id, gaming_ct_id]
-       | select('defined') | list }}
+  loop: "{{ _debian_sibling_ids }}"
   loop_control:
     label: "CT {{ item }}"
   register: _ch_server_result
@@ -354,7 +399,7 @@
 
 - name: Rewrite callhome key on Debian siblings via NM sed API
   ansible.builtin.uri:
-    url: "{{ _nm_api_url }}/api/config/{{ item }}/sed"
+    url: "{{ nm_api_url }}/api/config/{{ item }}/sed"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -365,11 +410,26 @@
     status_code: [200, 404]
     timeout: 10
   delegate_to: localhost
-  loop: >-
-    {{ [pihole_ct_id, rsyslog_ct_id, netdata_ct_id, wireguard_ct_id,
-        homeassistant_ct_id, jellyfin_ct_id, kodi_ct_id, moonlight_ct_id,
-        desktop_ct_id, gaming_ct_id]
-       | select('defined') | list }}
+  loop: "{{ _debian_sibling_ids }}"
+  loop_control:
+    label: "CT {{ item }}"
+  changed_when: false
+  failed_when: false
+
+- name: Rewrite callhome interval on Debian siblings via NM sed API
+  ansible.builtin.uri:
+    url: "{{ nm_api_url }}/api/config/{{ item }}/sed"
+    headers: "{{ nm_auth_headers }}"
+    method: POST
+    body_format: json
+    body:
+      path: /etc/default/callhome
+      pattern: "^CALLHOME_INTERVAL=.*"
+      replacement: "CALLHOME_INTERVAL={{ callhome_heartbeat_interval }}"
+    status_code: [200, 404]
+    timeout: 10
+  delegate_to: localhost
+  loop: "{{ _debian_sibling_ids }}"
   loop_control:
     label: "CT {{ item }}"
   changed_when: false
@@ -377,7 +437,7 @@
 
 - name: Restart callhome on Debian siblings via NM service API
   ansible.builtin.uri:
-    url: "{{ _nm_api_url }}/api/config/{{ item }}/service/callhome/restart"
+    url: "{{ nm_api_url }}/api/config/{{ item }}/service/callhome/restart"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -385,11 +445,7 @@
     status_code: [200, 404]
     timeout: 10
   delegate_to: localhost
-  loop: >-
-    {{ [pihole_ct_id, rsyslog_ct_id, netdata_ct_id, wireguard_ct_id,
-        homeassistant_ct_id, jellyfin_ct_id, kodi_ct_id, moonlight_ct_id,
-        desktop_ct_id, gaming_ct_id]
-       | select('defined') | list }}
+  loop: "{{ _debian_sibling_ids }}"
   loop_control:
     label: "CT {{ item }}"
   changed_when: false
@@ -397,7 +453,7 @@
 
 - name: Rewrite callhome server on OpenWrt siblings via NM sed API
   ansible.builtin.uri:
-    url: "{{ _nm_api_url }}/api/config/{{ item }}/sed"
+    url: "{{ nm_api_url }}/api/config/{{ item }}/sed"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -408,9 +464,7 @@
     status_code: [200, 404, 500]
     timeout: 15
   delegate_to: localhost
-  loop: >-
-    {{ [meshwifi_ct_id, bridge_ct_id]
-       | select('defined') | list }}
+  loop: "{{ _openwrt_sibling_ids }}"
   loop_control:
     label: "CT {{ item }}"
   failed_when: false
@@ -418,7 +472,7 @@
 
 - name: Rewrite callhome key on OpenWrt siblings via NM sed API
   ansible.builtin.uri:
-    url: "{{ _nm_api_url }}/api/config/{{ item }}/sed"
+    url: "{{ nm_api_url }}/api/config/{{ item }}/sed"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -429,9 +483,7 @@
     status_code: [200, 404, 500]
     timeout: 15
   delegate_to: localhost
-  loop: >-
-    {{ [meshwifi_ct_id, bridge_ct_id]
-       | select('defined') | list }}
+  loop: "{{ _openwrt_sibling_ids }}"
   loop_control:
     label: "CT {{ item }}"
   failed_when: false
@@ -439,7 +491,7 @@
 
 - name: Restart cron on OpenWrt siblings via NM service API
   ansible.builtin.uri:
-    url: "{{ _nm_api_url }}/api/config/{{ item }}/service/cron/restart"
+    url: "{{ nm_api_url }}/api/config/{{ item }}/service/cron/restart"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -447,9 +499,7 @@
     status_code: [200, 404, 500]
     timeout: 15
   delegate_to: localhost
-  loop: >-
-    {{ [meshwifi_ct_id, bridge_ct_id]
-       | select('defined') | list }}
+  loop: "{{ _openwrt_sibling_ids }}"
   loop_control:
     label: "CT {{ item }}"
   failed_when: false

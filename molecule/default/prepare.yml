@@ -108,3 +108,26 @@
     - name: Report API server URL
       ansible.builtin.debug:
         msg: "Heartbeat API server: {{ _api_start.stdout }}"
+
+    - name: Read callhome URL for health check
+      ansible.builtin.command:
+        cmd: cat "{{ _project_root }}/.state/callhome_url"
+      register: _callhome_url_check
+      changed_when: false
+
+    - name: Verify SuperManager API is responding
+      ansible.builtin.uri:
+        url: "{{ _callhome_url_check.stdout | trim }}/api/fleet/health"
+        timeout: 5
+        return_content: true
+      register: _sm_health
+      retries: 10
+      delay: 2
+      until: (_sm_health.status | default(0)) == 200
+
+    - name: "HARD FAIL if SM API did not start"
+      ansible.builtin.assert:
+        that: (_sm_health.status | default(0)) == 200
+        fail_msg: >-
+          SuperManager API failed to start. The heartbeat system is DEAD before
+          converge even begins. Check .state/api_server.log and .state/test_api.pid.

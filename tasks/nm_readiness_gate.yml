@@ -1,0 +1,37 @@
+---
+# Shared NM API readiness gate.
+# Waits for a Node Manager endpoint to return HTTP 200, then hard-fails
+# if it never responds.
+#
+# Required vars:
+#   _nm_gate_url:     Full URL to probe (e.g. http://host:9001/api/health)
+#   _nm_gate_retries: Number of retry attempts (default: 12)
+#   _nm_gate_delay:   Seconds between retries (default: 5)
+#
+# Optional vars:
+#   _nm_gate_label:   Human label for error messages (default: inventory_hostname)
+
+- name: "Wait for NM API — {{ _nm_gate_label | default(inventory_hostname) }}"
+  ansible.builtin.uri:
+    url: "{{ _nm_gate_url }}"
+    return_content: true
+    timeout: 5
+  register: _nm_gate_result
+  retries: "{{ _nm_gate_retries | default(12) }}"
+  delay: "{{ _nm_gate_delay | default(5) }}"
+  until: (_nm_gate_result.status | default(0)) == 200
+  delegate_to: localhost
+
+- name: "Assert NM responding — {{ _nm_gate_label | default(inventory_hostname) }}"
+  ansible.builtin.assert:
+    that: (_nm_gate_result.status | default(0)) == 200
+    fail_msg: >-
+      HARD FAILURE: Node Manager on {{ _nm_gate_label | default(inventory_hostname) }}
+      ({{ _nm_gate_url }}) did not respond after {{ _nm_gate_retries | default(12) }}
+      attempts ({{ (_nm_gate_retries | default(12) | int) * (_nm_gate_delay | default(5) | int) }}s).
+      INVESTIGATE:
+      1. Is kiosk CT {{ kiosk_ct_id }} running? → pct status {{ kiosk_ct_id }}
+      2. Is kiosk-web service active? → pct exec {{ kiosk_ct_id }} -- systemctl status kiosk-web
+      3. Is port {{ kiosk_manager_port }} listening? → pct exec {{ kiosk_ct_id }} -- ss -tlnp | grep {{ kiosk_manager_port }}
+      4. For LAN hosts: is the NM relay service active? → systemctl status nm-relay-{{ inventory_hostname }}
+      5. Can you reach the NM? → curl -s {{ _nm_gate_url }}

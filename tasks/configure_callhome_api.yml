@@ -11,6 +11,18 @@
 #   _callhome_vmid         (str) — container VMID
 #   _service_up_to_date    (bool) — set by check_service_version.yml
 
+- name: "Check current callhome config — CT {{ _callhome_vmid }}"
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct exec {{ _callhome_vmid }} -- grep -E '^CALLHOME_(SERVER|PUBLIC_KEY)=' /etc/default/callhome 2>/dev/null || true
+    executable: /bin/bash
+  register: _callhome_current
+  changed_when: false
+  when:
+    - not (_service_up_to_date | default(false) | bool)
+    - callhome_server | default('') | length > 0
+
 - name: "Bootstrap callhome config — CT {{ _callhome_vmid }}"
   ansible.builtin.shell:
     cmd: |
@@ -21,12 +33,18 @@
       pct exec {{ _callhome_vmid }} -- sed -i \
         's|^CALLHOME_PUBLIC_KEY=.*|CALLHOME_PUBLIC_KEY={{ callhome_public_key }}|' \
         /etc/default/callhome
+      pct exec {{ _callhome_vmid }} -- sed -i \
+        's|^CALLHOME_INTERVAL=.*|CALLHOME_INTERVAL={{ callhome_heartbeat_interval }}|' \
+        /etc/default/callhome
     executable: /bin/bash
   register: _callhome_bootstrap
   changed_when: true
   when:
     - not (_service_up_to_date | default(false) | bool)
     - callhome_server | default('') | length > 0
+    - >-
+      'CALLHOME_SERVER=' + callhome_server not in (_callhome_current.stdout | default(''))
+      or 'CALLHOME_PUBLIC_KEY=' + callhome_public_key not in (_callhome_current.stdout | default(''))
 
 - name: "Restart callhome service — CT {{ _callhome_vmid }}"
   ansible.builtin.command:
@@ -34,9 +52,7 @@
   changed_when: true
   register: _callhome_restart
   failed_when: false
-  when:
-    - not (_service_up_to_date | default(false) | bool)
-    - callhome_server | default('') | length > 0
+  when: _callhome_bootstrap is defined and (_callhome_bootstrap.rc | default(1)) == 0
 
 - name: "Warn if callhome restart failed — CT {{ _callhome_vmid }}"
   ansible.builtin.debug:

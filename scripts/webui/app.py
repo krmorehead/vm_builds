@@ -143,20 +143,32 @@ def register_pages() -> None:
 
 
 
-def _env_node_resolver(node_id: str) -> str | None:
-    """Resolve a node_id to its VPN IP for SM-to-node communication.
+_SERVICE_HOST_MAP: dict[str, str] = {
+    "openwrt": data.get_mesh_nodes()[0],
+}
+
+
+def _resolve_vpn_ip(node_id: str) -> str | None:
+    """Resolve a node_id to its VPN IP.
 
     ALL hosts are reached via VPN after base setup.  ``h.ip`` is the
     VPN IP (set by ``get_known_hosts``).  No fallbacks.
+
+    Service node_ids (e.g. ``openwrt``) are resolved through their
+    hosting Proxmox node — the SM never dials service LAN IPs directly.
     """
-    if node_id == "openwrt":
-        return manager.ROUTER_VM_LAN_IP
+    hosting_node = _SERVICE_HOST_MAP.get(node_id, node_id)
     env = load_active_env()
     known = data.get_known_hosts(env)
     for h in known:
-        if h.name == node_id:
+        if h.name == hosting_node:
             return h.ip or None
     return None
+
+
+def _env_node_resolver(node_id: str) -> str | None:
+    """Resolve a node_id to its VPN IP for SM-to-node communication."""
+    return _resolve_vpn_ip(node_id)
 
 
 def _env_display_resolver(node_id: str) -> tuple[str, int] | None:
@@ -164,16 +176,9 @@ def _env_display_resolver(node_id: str) -> tuple[str, int] | None:
 
     All hosts are reached via their VPN IP.  The browser must be on the
     VPN (or have a route to the VPN subnet) to reach display streams.
-    No LAN relay hacks — VPN is the universal transport.
     """
-    if node_id == "openwrt":
-        return (manager.ROUTER_VM_LAN_IP, 0)
-    env = load_active_env()
-    known = data.get_known_hosts(env)
-    for h in known:
-        if h.name == node_id:
-            return (h.ip, 0) if h.ip else None
-    return None
+    ip = _resolve_vpn_ip(node_id)
+    return (ip, 0) if ip else None
 
 
 def _validate_callhome_token(token: str) -> bool:

@@ -1,0 +1,36 @@
+---
+# Add a VPN subnet route on the Proxmox host pointing to the local
+# WireGuard container. Idempotent: checks existing route first.
+# Also exports host_vpn_ip fact for downstream plays.
+
+- name: Get WireGuard container IP from pct config
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pct config {{ wireguard_ct_id }} | awk -F'[=,/]' '/^net0:/{for(i=1;i<=NF;i++) if($i~"ip") print $(i+1)}'
+    executable: /bin/bash
+  register: _wg_ct_ip
+  changed_when: false
+
+- name: Check existing VPN subnet route
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      ip route show {{ vpn_subnet }} 2>/dev/null | grep -c 'via {{ _wg_ct_ip.stdout | trim }}' || echo 0
+    executable: /bin/bash
+  register: _vpn_route_exists
+  changed_when: false
+  when: _wg_ct_ip.stdout | trim | length > 0
+
+- name: Add VPN subnet route via WireGuard container
+  ansible.builtin.command:
+    cmd: ip route replace {{ vpn_subnet }} via {{ _wg_ct_ip.stdout | trim }}
+  changed_when: true
+  when:
+    - _wg_ct_ip.stdout | trim | length > 0
+    - (_vpn_route_exists.stdout | default('0') | trim | int) == 0
+
+- name: Export host VPN IP fact
+  ansible.builtin.set_fact:
+    host_vpn_ip: "{{ vpn_ip }}"
+    cacheable: true

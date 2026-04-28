@@ -62,27 +62,34 @@ Do not continue development. Do not build other hosts. Do not "skip and continue
 5. Do NOT build other hosts while one is down. ALL hosts must be healthy first.
 6. Report severity to the user explicitly. This is a 5-alarm emergency.
 
-## Mandatory connectivity checks
+## Fleet health monitoring (API-first, not SSH)
 
-- ALWAYS run an SSH connectivity check to ALL hosts BEFORE starting any
-  multi-host work session.
-- ALWAYS re-check ALL hosts after EVERY build/deploy/converge operation,
-  not just the host you targeted. Collateral damage is real.
-- SSH "Permission denied" is JUST AS MUCH a show stopper as EHOSTUNREACH.
-  Both mean you've lost management access.
-- If a host's Proxmox API (port 8006) stops responding, that's a show
-  stopper too — it indicates service-level failure on the host.
+**PRIMARY: heartbeat system.** Once the base state is established, fleet
+health is monitored via the 4-tier heartbeat chain. The heartbeat watchdog
+kills the run within 5 seconds of any failure:
+- `curl $CALLHOME_URL/api/fleet/health` — overall fleet status
+- `curl $CALLHOME_URL/api/fleet/stale` — circuit breaker
+- `curl $CALLHOME_URL/api/nodes` — per-node container health
+- SM API death (5 consecutive failures) → watchdog kills the run
+
+NEVER SSH to hosts to check if they're "alive" when the heartbeat system
+already does this. If the API says they're healthy, they're healthy. If the
+API says they're stale, THAT is the problem to fix.
+
+**SECONDARY: Ansible management access.** SSH checks validate that Ansible
+can REACH hosts for provisioning (pre-base-state, or after network changes).
 - NEVER proceed to "build the next host" when any host is inaccessible.
+- SSH "Permission denied" means lost Ansible management access — a SHOW STOPPER.
 
 ## What counts as "unreachable"
 
 All of these are SHOW STOPPERS:
+- SM API not responding (heartbeat system dead — the heart stopped)
+- `/api/fleet/stale` returns stale services (container/host went down)
 - `unreachable=1` in Ansible play recap
-- SSH connection refused or timed out
-- SSH "Permission denied" (authentication failure = lost access)
+- SSH "Permission denied" (lost Ansible management access)
 - Proxmox API (port 8006) connection refused
-- Host stops responding to ping
-- Host metrics showing 0% for all values (indicates SSH failure from Manager)
+- Host metrics showing 0% for all values (Manager can't reach its host)
 
 ## Previous catastrophes
 

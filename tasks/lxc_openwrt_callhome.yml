@@ -10,13 +10,11 @@
 #   _callhome_hostname    — hostname identity (e.g., openwrt_mesh_ct_hostname)
 
 - name: Configure callhome on OpenWrt container {{ _callhome_hostname }}
-  vars:
-    _callhome_url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}"
   ansible.builtin.shell:
     cmd: |
       pct exec {{ _callhome_ct_id }} -- sh -c \
         "printf 'CALLHOME_SERVER=%s\nCALLHOME_PUBLIC_KEY=%s\nCALLHOME_CONTAINER=1\nCALLHOME_HOSTNAME=%s\n' \
-        '{{ _callhome_url }}' '{{ callhome_public_key }}' '{{ _callhome_hostname }}' \
+        '{{ nm_api_url }}' '{{ callhome_public_key }}' '{{ _callhome_hostname }}' \
         > /etc/default/callhome; \
         /etc/init.d/cron restart 2>/dev/null || true"
     executable: /bin/bash

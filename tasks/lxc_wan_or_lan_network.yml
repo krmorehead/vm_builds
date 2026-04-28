@@ -18,18 +18,8 @@
 #   _lxc_net_nameserver — DNS nameserver for the container
 #   _lxc_net_bridge     — Proxmox bridge to attach to
 
-- name: Determine if host is on the OpenWrt LAN
-  ansible.builtin.set_fact:
-    _lxc_net_on_lan: >-
-      {{ 'router_nodes' in group_names or 'lan_hosts' in group_names }}
-
-- name: Read LAN gateway from generated env
-  ansible.builtin.set_fact:
-    _lan_gateway: >-
-      {{ lookup('pipe', 'grep "^LAN_GATEWAY=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2') }}
-    _lan_cidr: >-
-      {{ lookup('pipe', 'grep "^LAN_CIDR=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2') }}
-  when: _lxc_net_on_lan | bool
+- name: Read LAN topology facts
+  ansible.builtin.include_tasks: "{{ project_root }}/tasks/read_lan_topology.yml"
 
 - name: "Fail if LAN_GATEWAY is missing — {{ lxc_net_service_name }}"
   ansible.builtin.fail:
@@ -65,7 +55,7 @@
     _lxc_net_gateway: "{{ _lan_gateway }}"
     _lxc_net_cidr: "{{ _lan_cidr }}"
     _lxc_net_ip: >-
-      {{ _lan_gateway.split('.')[0:3] | join('.') }}.{{
+      {{ _lan_prefix }}.{{
          lxc_net_ip_offset + groups[lxc_net_flavor_group].index(inventory_hostname) }}
     _lxc_net_nameserver: "{{ _lan_gateway }}"
     _lxc_net_bridge: >-

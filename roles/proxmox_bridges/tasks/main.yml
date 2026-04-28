@@ -200,13 +200,13 @@
 # NAT (MASQUERADE) for outbound traffic. This eliminates IP
 # collisions on the household subnet.
 #
-# LAN hosts (behind OpenWrt) don't need this — their containers
-# are already on the isolated OpenWrt LAN (10.10.10.x).
+# EVERY host gets a NAT bridge — uniform topology across all units.
+# Services that need external reachability (WireGuard) use DNAT on the
+# WAN bridge to forward into the NAT bridge, identical on every host.
 
-- name: Determine if host needs container NAT bridge
+- name: Every host gets a container NAT bridge
   ansible.builtin.set_fact:
-    _needs_container_bridge: >-
-      {{ 'router_nodes' not in group_names and 'lan_hosts' not in group_names }}
+    _needs_container_bridge: true
 
 - name: Deploy container bridge configuration
   ansible.builtin.template:
@@ -236,6 +236,16 @@
     reload: true
   when: _needs_container_bridge | bool
 
+- name: Enable per-interface forwarding on all bridges
+  ansible.posix.sysctl:
+    name: "net.ipv4.conf.{{ item }}.forwarding"
+    value: "1"
+    sysctl_set: true
+    state: present
+    reload: false
+  loop: "{{ proxmox_all_bridges + [container_bridge_name] }}"
+  when: _needs_container_bridge | bool
+
 - name: Add iptables MASQUERADE rule for container subnet
   ansible.builtin.shell:
     cmd: |
@@ -244,10 +254,12 @@
       WAN_IF="{{ proxmox_wan_bridge }}"
       if ! iptables -t nat -C POSTROUTING -s "$SUBNET" -o "$WAN_IF" -j MASQUERADE 2>/dev/null; then
         iptables -t nat -A POSTROUTING -s "$SUBNET" -o "$WAN_IF" -j MASQUERADE
+        echo "ADDED"
       fi
     executable: /bin/bash
+  register: _masquerade_result
   when: _needs_container_bridge | bool
-  changed_when: true
+  changed_when: "'ADDED' in _masquerade_result.stdout"
 
 - name: Add iptables FORWARD rules for container traffic
   ansible.builtin.shell:
@@ -256,21 +268,25 @@
       SUBNET="{{ container_subnet_prefix }}.{{ container_subnet_id }}.0/24"
       CT_BR="{{ container_bridge_name }}"
       WAN_IF="{{ proxmox_wan_bridge }}"
+      CHANGED=0
       if ! iptables -C FORWARD -i "$CT_BR" -o "$WAN_IF" -j ACCEPT 2>/dev/null; then
         iptables -A FORWARD -i "$CT_BR" -o "$WAN_IF" -j ACCEPT
+        CHANGED=1
       fi
       if ! iptables -C FORWARD -i "$WAN_IF" -o "$CT_BR" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
         iptables -A FORWARD -i "$WAN_IF" -o "$CT_BR" -m state --state RELATED,ESTABLISHED -j ACCEPT
+        CHANGED=1
       fi
+      [ "$CHANGED" -eq 1 ] && echo "ADDED"
+      true
     executable: /bin/bash
+  register: _forward_result
   when: _needs_container_bridge | bool
-  changed_when: true
+  changed_when: "'ADDED' in _forward_result.stdout"
 
 - name: Export container bridge fact
   ansible.builtin.set_fact:
-    proxmox_container_bridge: >-
-      {{ container_bridge_name if (_needs_container_bridge | bool)
-         else (proxmox_all_bridges[1] | default(proxmox_wan_bridge)) }}
+    proxmox_container_bridge: "{{ container_bridge_name }}"
     cacheable: true
 
 - name: Report container bridge setup

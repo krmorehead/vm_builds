@@ -9,6 +9,8 @@
 
 set -uo pipefail
 
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
 if [ -f /etc/wireguard/firewall.env ]; then
   . /etc/wireguard/firewall.env
 fi

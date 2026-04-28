@@ -209,25 +209,9 @@ forwarding port 9001 from the host IP to the container IP fixed it.
 
 55. The `community.proxmox.proxmox_pct_remote` connection plugin uses paramiko for SSH, which can hang indefinitely during connection setup — even with `serial: 1`. Adding `timeout = 60` to `ansible.cfg` and `host_key_auto_add = True` under `[paramiko_connection]` does NOT prevent the hang.
 
-56. When a configure play only checks service health (no container-internal configuration), BYPASS `pct_remote` entirely. Target the Proxmox HOST group and use `ansible.builtin.command` with `pct exec` directly:
+56. NEVER use `pct exec ... systemctl is-active` to check service health. The heartbeat system (4-tier callhome chain) monitors all services continuously. Use the fleet readiness API (`/api/fleet/ready?services=netdata`, `/api/container/netdata/ready`) for health verification. If the fleet API reports a service as not ready, the service IS not ready. If the fleet API is unreachable, the heartbeat watchdog kills the Ansible run within 5 seconds.
 
-    ```yaml
-    - name: Configure Netdata
-      hosts: monitoring_nodes
-      gather_facts: false
-      tasks:
-        - name: Check netdata service health
-          ansible.builtin.command:
-            cmd: pct exec {{ netdata_ct_id }} -- systemctl is-active netdata
-          register: _check
-          changed_when: false
-          failed_when: false
-          retries: 10
-          delay: 3
-          until: _check.stdout | trim == 'active'
-    ```
-
-57. Previous bug: `Configure Netdata` play targeted `netdata` dynamic group with `pct_remote`. Hung intermittently on `Detect netdata config directory` task (0% CPU, blocked on paramiko SSH handshake). Adding `serial: 1` and paramiko config changes did not fix it. Fix: rewrote to target `monitoring_nodes` directly using `pct exec`.
+57. Previous bug: `Configure Netdata` play targeted `netdata` dynamic group with `pct_remote`. Hung intermittently on `Detect netdata config directory` task (0% CPU, blocked on paramiko SSH handshake). The fleet API would have returned the health status in <1 second without any SSH overhead.
 
 ## Device Passthrough in LXC Containers
 

@@ -53,16 +53,17 @@
   loop: "{{ _lan_nm_relays }}"
   loop_control:
     label: "{{ item.name }}"
+  register: _relay_units
 
 - name: Enable and start LAN NM relays
   ansible.builtin.systemd:
-    name: "{{ item.name }}"
-    daemon_reload: true
+    name: "{{ item.item.name }}"
+    daemon_reload: "{{ item is changed }}"
     enabled: true
-    state: restarted
-  loop: "{{ _lan_nm_relays }}"
+    state: "{{ 'restarted' if item is changed else 'started' }}"
+  loop: "{{ _relay_units.results }}"
   loop_control:
-    label: "{{ item.name }}"
+    label: "{{ item.item.name }}"
 
 - name: Report LAN NM relay endpoints
   ansible.builtin.debug:

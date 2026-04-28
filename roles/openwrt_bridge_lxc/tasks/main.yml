@@ -216,7 +216,7 @@
 - name: Fail if bridge LXC image is missing
   ansible.builtin.fail:
     msg: >-
-      Custom mesh LXC image not found: {{ openwrt_lxc_template_path }}.
+      Custom bridge LXC image not found: {{ openwrt_lxc_template_path }}.
       Bridge reuses the mesh image. Run ./build-images.sh --only mesh
   when: not (_bridge_lxc_stat.stat.exists | default(false))
 
@@ -326,31 +326,10 @@
 
 # ── Move WiFi PHY into container namespace ───────────────────────
 
-- name: Move WiFi PHY devices into container namespace
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      pid=$(lxc-info -n {{ bridge_ct_id }} 2>/dev/null | awk '/^PID:/{print $2}')
-      if [ -z "$pid" ] || [ "$pid" = "-1" ]; then
-        echo "ERROR: cannot determine PID for container {{ bridge_ct_id }}" >&2
-        exit 1
-      fi
-      for phy in {{ _wifi_phys | join(' ') }}; do
-        iw phy "$phy" set netns "$pid"
-      done
-    executable: /bin/bash
-  changed_when: true
-
-# ── Register PHY namespace move with Manager ─────────────────────
-
-- name: Update PHY namespaces in Manager after move
-  ansible.builtin.include_tasks: "{{ project_root }}/tasks/manager_register.yml"
+- name: Move WiFi PHYs into bridge container
+  ansible.builtin.include_tasks: "{{ project_root }}/tasks/lxc_wifi_phy_move.yml"
   vars:
-    register_path: "api/host/{{ inventory_hostname }}/hardware/phy/{{ item }}"
-    register_body:
-      namespace: "container:{{ bridge_ct_id }}"
-    register_method: PATCH
-  loop: "{{ _wifi_phys }}"
+    _phy_ct_id: "{{ bridge_ct_id }}"
 
 # ── Deploy hookscript for PHY persistence across reboots ─────────
 

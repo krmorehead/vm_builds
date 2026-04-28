@@ -1,0 +1,3 @@
+---
+- name: Import base state playbook
+  ansible.builtin.import_playbook: ../../playbooks/base.yml

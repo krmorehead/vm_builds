@@ -7,7 +7,7 @@ Two modes:
       regardless of IP changes. Reports systemd services, listening
       ports, and extension metrics (WiFi, WireGuard, Docker, etc.).
 
-Baked into LXC images via build-images.sh inject_callhome_agent().
+Baked into LXC images via build-images.sh (base template + NM recipe build).
 Configured at deploy time by writing CALLHOME_SERVER to
 /etc/default/callhome. Zero external dependencies — stdlib only.
 

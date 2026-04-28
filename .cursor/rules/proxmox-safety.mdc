@@ -345,22 +345,31 @@ alwaysApply: true
 - Previous bug: E2E cleanup ran `modprobe -r amdgpu` on `ai` (single AMD GPU, USB ethernet). Kernel panicked, host crashed. Required physical power-on. Fix: replaced all GPU `modprobe -r` with sysfs unbind + PCI rescan. Now safe on any host.
 - Previous bug: `ai` was listed in `wol.sh` with its PCIe NIC MAC, but `ai` is connected via USB ethernet only. WoL was impossible.
 
-## Mandatory fleet connectivity checks
+## Fleet health monitoring (API-first, not SSH)
 
-ALWAYS verify SSH connectivity to ALL hosts at these checkpoints:
-1. **Session start:** Before beginning any work, SSH to every host.
-2. **After every build/deploy/converge:** Check ALL hosts, not just the target.
-3. **Before proceeding to next host in multi-host operations:** Verify every
-   host is still accessible before building the next one.
-4. **Every 30 minutes during long sessions:** Periodic health check.
+**PRIMARY: heartbeat system.** Once the base state is established, fleet
+health is monitored via the 4-tier heartbeat chain — not SSH:
+- `curl $CALLHOME_URL/api/fleet/health` — overall fleet status
+- `curl $CALLHOME_URL/api/fleet/stale` — circuit breaker
+- `curl $CALLHOME_URL/api/nodes` — per-node container health
+- The heartbeat watchdog kills the run within 5 seconds of SM API death
+  or any service going stale. Manual SSH checks are redundant.
 
-What counts as a connectivity failure (ALL are SHOW STOPPERS):
-- SSH "Permission denied" (key rejected — lost management access)
-- SSH connection refused or timed out
+NEVER SSH to hosts to determine if they're "healthy" when the heartbeat
+system already does this continuously. If the API says stale, fix THAT.
+
+**SECONDARY: Ansible management access.** SSH is for validating that
+Ansible can REACH hosts for provisioning:
+1. **Session start:** Verify Ansible can reach PRIMARY_HOST
+2. **After network-changing operations:** Confirm management path survived
+
+What counts as a failure (ALL are SHOW STOPPERS):
+- SM API not responding (heartbeat system dead)
+- `/api/fleet/stale` returns stale services
+- SSH "Permission denied" (lost Ansible management access)
 - Proxmox API (port 8006) connection refused
 - Ansible `unreachable=1` in any play recap
-- SuperManager showing 0% disk AND 0% memory for a host (Manager can't
-  SSH to collect metrics)
+- SM showing 0% disk AND 0% memory for a host (Manager broken)
 
 NEVER "skip a broken host and continue building others." If ANY host is
 inaccessible, ALL work stops until it's recovered.

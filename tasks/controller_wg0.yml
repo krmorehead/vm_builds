@@ -1,0 +1,117 @@
+---
+# Configure the controller's WireGuard (wg0) interface.
+# Reads keys from env vars first, falling back to env.generated.
+# Idempotent: compares desired config against current, only writes on diff.
+# Brings up wg0 if not running, or syncs config if already up.
+
+- name: Read controller private key from env.generated (fallback)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      grep '^WIREGUARD_PRIVATE_KEY_CONTROLLER=' "{{ env_generated_path }}" 2>/dev/null | cut -d= -f2-
+    executable: /bin/bash
+  register: _ctrl_privkey_file
+  changed_when: false
+  failed_when: false
+
+- name: Read hub public key from env.generated (fallback)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      grep '^WIREGUARD_HUB_PUBLIC_KEY=' "{{ env_generated_path }}" 2>/dev/null | cut -d= -f2-
+    executable: /bin/bash
+  register: _hub_pubkey_file
+  changed_when: false
+  failed_when: false
+
+- name: Resolve VPN keys (env var → file fallback)
+  vars:
+    _raw_ctrl: "{{ lookup('env', 'WIREGUARD_PRIVATE_KEY_CONTROLLER') | default('', true) }}"
+    _raw_hub: "{{ lookup('env', 'WIREGUARD_HUB_PUBLIC_KEY') | default('', true) }}"
+    _env_ctrl: "{{ _raw_ctrl if (_raw_ctrl | length == 44 and '$' not in _raw_ctrl) else '' }}"
+    _env_hub: "{{ _raw_hub if (_raw_hub | length == 44 and '$' not in _raw_hub) else '' }}"
+    _file_ctrl: "{{ _ctrl_privkey_file.stdout | default('') | trim }}"
+    _file_hub: "{{ _hub_pubkey_file.stdout | default('') | trim }}"
+  ansible.builtin.set_fact:
+    _ctrl_privkey: "{{ (_env_ctrl if _env_ctrl | length > 0 else _file_ctrl) | trim }}"
+    _hub_pubkey: "{{ (_env_hub if _env_hub | length > 0 else _file_hub) | trim }}"
+    _server_endpoint: "{{ lookup('env', 'WIREGUARD_SERVER_ENDPOINT') | default('', true) }}"
+    _ctrl_ip: "{{ controller_vpn_ip }}"
+
+- name: Skip if controller keys not yet generated
+  ansible.builtin.meta: end_play
+  when: >-
+    _ctrl_privkey | length != 44
+    or '$' in _ctrl_privkey
+    or _hub_pubkey | length != 44
+    or '$' in _hub_pubkey
+
+- name: Ensure wireguard config directory exists
+  ansible.builtin.command:
+    cmd: sudo install -d -m 700 /etc/wireguard
+  changed_when: false
+
+- name: Build desired wg0 config
+  ansible.builtin.set_fact:
+    _wg0_desired: |
+      [Interface]
+      PrivateKey = {{ _ctrl_privkey }}
+      Address = {{ _ctrl_ip }}/24
+
+      [Peer]
+      PublicKey = {{ _hub_pubkey }}
+      Endpoint = {{ _server_endpoint }}
+      AllowedIPs = 10.0.0.0/24
+      PersistentKeepalive = 25
+
+- name: Read current wg0 config
+  ansible.builtin.command:
+    cmd: sudo cat /etc/wireguard/wg0.conf
+  register: _wg0_current
+  changed_when: false
+  failed_when: false
+
+- name: Write controller wg0 configuration
+  ansible.builtin.shell:
+    cmd: |
+      sudo install -m 600 /dev/stdin /etc/wireguard/wg0.conf << 'WGEOF'
+      {{ _wg0_desired }}
+      WGEOF
+  changed_when: true
+  when: (_wg0_current.stdout | default('') | trim) != (_wg0_desired | trim)
+
+- name: Check if wg0 interface exists
+  ansible.builtin.command:
+    cmd: ip link show wg0
+  register: _wg0_exists
+  changed_when: false
+  failed_when: false
+
+- name: Bring up wg0 if not running
+  ansible.builtin.command:
+    cmd: sudo wg-quick up wg0
+  changed_when: true
+  when: _wg0_exists.rc != 0
+
+- name: Sync wg0 config if already running and config changed
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      _tmp=$(mktemp)
+      sudo wg-quick strip wg0 > "$_tmp"
+      sudo wg syncconf wg0 "$_tmp"
+      rm -f "$_tmp"
+    executable: /bin/bash
+  changed_when: true
+  when:
+    - _wg0_exists.rc == 0
+    - (_wg0_current.stdout | default('') | trim) != (_wg0_desired | trim)
+
+- name: Verify wg0 is up
+  ansible.builtin.command:
+    cmd: sudo wg show wg0
+  changed_when: false
+
+- name: Wait for WireGuard handshakes to establish
+  ansible.builtin.pause:
+    seconds: 5

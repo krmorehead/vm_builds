@@ -124,7 +124,7 @@ def _card_content(
 
 
 def register() -> None:
-    @ui.page("/hub")
+    @ui.page(Routes.HUB)
     def hub_page() -> None:
         theme.apply_theme()
         theme.nav_sidebar(active="homehub")

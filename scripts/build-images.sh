@@ -302,6 +302,31 @@ UDEV
         done
     '" 2>/dev/null
 
+    # ── Host packages (bake-not-configure for Proxmox hosts) ──────
+    # These are needed by infrastructure roles and MUST be pre-installed.
+    # iw: WiFi PHY management (proxmox_pci_passthrough)
+    # vainfo: VA-API verification (proxmox_igpu)
+    # intel-media-va-driver / mesa-va-drivers: VA-API backends
+    local host_pkgs_needed=""
+    $ssh "command -v iw" >/dev/null 2>&1 || host_pkgs_needed="iw"
+    $ssh "command -v vainfo" >/dev/null 2>&1 || host_pkgs_needed="${host_pkgs_needed} vainfo"
+
+    local igpu_vendor
+    igpu_vendor=$($ssh "lspci -nn 2>/dev/null | grep -ic 'VGA compatible controller.*Intel' || echo 0")
+    if [[ "$igpu_vendor" -gt 0 ]]; then
+        $ssh "dpkg -l intel-media-va-driver 2>/dev/null | grep -q '^ii'" || host_pkgs_needed="${host_pkgs_needed} intel-media-va-driver"
+    else
+        $ssh "dpkg -l mesa-va-drivers 2>/dev/null | grep -q '^ii'" || host_pkgs_needed="${host_pkgs_needed} mesa-va-drivers"
+    fi
+
+    host_pkgs_needed=$(echo "$host_pkgs_needed" | xargs)
+    if [[ -n "$host_pkgs_needed" ]]; then
+        log "  Installing host packages: ${host_pkgs_needed}..."
+        $ssh "apt-get update -qq && apt-get install -y --no-install-recommends ${host_pkgs_needed}"
+    else
+        log "  Host packages already installed — OK"
+    fi
+
     # Ensure MASQUERADE for the container NAT bridge (if it exists).
     # Without this, build containers on NAT bridges can't reach the internet.
     local has_vmbr_ct
@@ -463,17 +488,49 @@ build_remote_service() {
         return 0
     fi
 
+    # Bump version BEFORE sending to NM so the same version is stamped
+    # inside the image (/etc/image_version) and in the sidecar file
+    # (images/<service>.version). Without this, the NM stamps a timestamp
+    # version that never matches the sidecar, causing proxmox_lxc to
+    # destroy and recreate every container on every converge.
+    init_build_version "$service"
+
+    # Inline baked_files content so the NM doesn't need local source paths
+    local resolved_recipe
+    resolved_recipe=$(python3 -c "
+import yaml, sys, base64
+from pathlib import Path
+recipe = yaml.safe_load(Path('${recipe_file}').read_text())
+project_root = Path('${PROJECT_ROOT}')
+for bf in recipe.get('baked_files', []):
+    src = bf.get('src', '')
+    if not src:
+        continue
+    src_path = Path(src) if Path(src).is_absolute() else project_root / src
+    if not src_path.exists():
+        print(f'ERROR: baked_file not found: {src_path}', file=sys.stderr)
+        sys.exit(1)
+    bf['content'] = src_path.read_text()
+    del bf['src']
+yaml.dump(recipe, sys.stdout, default_flow_style=False, sort_keys=False)
+") || die "Failed to resolve baked_files in recipe"
+
+    local resolved_recipe_file
+    resolved_recipe_file=$(mktemp /tmp/recipe-XXXXXX.yml)
+    echo "$resolved_recipe" > "$resolved_recipe_file"
+    trap "rm -f '$resolved_recipe_file'" RETURN
+
     local nm_url="http://${host}:${NM_PORT}"
-    log "Building ${service} on ${host} via NodeManager API..."
+    log "Building ${service} v${_NEW_VERSION} on ${host} via NodeManager API..."
     log "  Recipe: ${recipe_file}"
-    log "  Endpoint: POST ${nm_url}/api/build/${service}"
+    log "  Endpoint: POST ${nm_url}/api/build/${service}?version=${_NEW_VERSION}"
 
     local response http_code
     response=$(curl -sS --connect-timeout 30 --max-time 1800 \
-        -X POST "${nm_url}/api/build/${service}" \
+        -X POST "${nm_url}/api/build/${service}?version=${_NEW_VERSION}" \
         -H "Content-Type: application/x-yaml" \
         -H "x-callhome-token: ${NM_AUTH_TOKEN}" \
-        --data-binary "@${recipe_file}" \
+        --data-binary "@${resolved_recipe_file}" \
         -w "\n%{http_code}" 2>&1) || {
         die "Failed to connect to NodeManager at ${nm_url}"
     }
@@ -503,7 +560,6 @@ build_remote_service() {
     log "  Remote template: ${template_path}"
 
     # Download the built template via SCP from the host filesystem
-    init_build_version "$service"
     local output="${IMAGES_DIR}/$(compute_filename "$service" "$_NEW_VERSION")"
     mkdir -p "$IMAGES_DIR"
 
@@ -678,6 +734,13 @@ for svc in "${REMOTE_SERVICES[@]}"; do
         build_remote_service "$svc" "$PROXMOX_HOST" "${FORCE_BUILD:-false}"
     fi
 done
+
+# Prune old templates on the remote host to prevent disk exhaustion
+if [[ -n "$PROXMOX_HOST" ]]; then
+    log "Pruning old templates on ${PROXMOX_HOST}..."
+    scp -q "${PROJECT_ROOT}/scripts/prune-templates.sh" "root@${PROXMOX_HOST}:/tmp/prune-templates.sh"
+    ssh "root@${PROXMOX_HOST}" "bash /tmp/prune-templates.sh --keep 2 && rm -f /tmp/prune-templates.sh"
+fi
 
 log ""
 log "Done. Custom images in ${IMAGES_DIR}/:"

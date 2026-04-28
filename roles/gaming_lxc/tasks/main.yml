@@ -36,7 +36,7 @@
 # ── Provision container via NM API (skipped when version matches) ─
 - name: Provision Gaming LXC via NM API
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/gaming"
+    url: "{{ nm_api_url }}/api/provision/gaming"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -68,7 +68,9 @@
     timeout: 660
   delegate_to: localhost
   register: _provision_result
-  failed_when: not (_provision_result.json.success | default(false))
+  until: _provision_result.json.success | default(false)
+  retries: 2
+  delay: 10
   when: not (_service_up_to_date | default(false) | bool)
 
 # ── Apply privileged config on host (features/DRI/input need root@pam) ─
@@ -140,24 +142,7 @@
       fi
     executable: /bin/bash
   register: _sunshine_dnat
-  loop:
-    - { proto: tcp, port: 47984 }
-    - { proto: tcp, port: 47989 }
-    - { proto: tcp, port: 47990 }
-    - { proto: tcp, port: 48010 }
-    - { proto: udp, port: 47998 }
-    - { proto: udp, port: 47999 }
-    - { proto: udp, port: 48000 }
-    - { proto: udp, port: 48001 }
-    - { proto: udp, port: 48002 }
-    - { proto: udp, port: 48003 }
-    - { proto: udp, port: 48004 }
-    - { proto: udp, port: 48005 }
-    - { proto: udp, port: 48006 }
-    - { proto: udp, port: 48007 }
-    - { proto: udp, port: 48008 }
-    - { proto: udp, port: 48009 }
-    - { proto: udp, port: 48010 }
+  loop: "{{ _sunshine_ports }}"
   changed_when: "'ADDED' in _sunshine_dnat.stdout"
   when:
     - not (_service_up_to_date | default(false) | bool)
@@ -181,24 +166,7 @@
       fi
     executable: /bin/bash
   register: _sunshine_fwd
-  loop:
-    - { proto: tcp, port: 47984 }
-    - { proto: tcp, port: 47989 }
-    - { proto: tcp, port: 47990 }
-    - { proto: tcp, port: 48010 }
-    - { proto: udp, port: 47998 }
-    - { proto: udp, port: 47999 }
-    - { proto: udp, port: 48000 }
-    - { proto: udp, port: 48001 }
-    - { proto: udp, port: 48002 }
-    - { proto: udp, port: 48003 }
-    - { proto: udp, port: 48004 }
-    - { proto: udp, port: 48005 }
-    - { proto: udp, port: 48006 }
-    - { proto: udp, port: 48007 }
-    - { proto: udp, port: 48008 }
-    - { proto: udp, port: 48009 }
-    - { proto: udp, port: 48010 }
+  loop: "{{ _sunshine_ports }}"
   changed_when: "'ADDED' in _sunshine_fwd.stdout"
   when:
     - not (_service_up_to_date | default(false) | bool)

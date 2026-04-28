@@ -5,7 +5,7 @@ kodi_ct_cores: 2
 kodi_ct_disk: "4"
 kodi_ct_template_path: "{{ kodi_lxc_template_path }}"
 kodi_ct_onboot: false
+kodi_ct_startup_order: 0
 kodi_ct_unprivileged: false
 kodi_ct_features:
   - "nesting=1"
-kodi_ct_ip_offset: "{{ kodi_ct_ip_offset | default(16) }}"

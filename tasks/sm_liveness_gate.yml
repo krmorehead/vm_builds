@@ -1,0 +1,58 @@
+---
+# ── SuperManager liveness gate ────────────────────────────────
+# NM with no heartbeat = DEAD
+# CM with no heartbeat = DEAD
+# SM with no heartbeat = DEAD
+#
+# This gate is the SIMPLEST check: is the SM alive AND receiving
+# heartbeats? If either condition is false, the SM is DEAD.
+# Not "alive but missing heartbeats." DEAD.
+#
+# Hard-fails IMMEDIATELY. No retries. No fallbacks. DEAD.
+
+- name: Probe SM API
+  ansible.builtin.uri:
+    url: "{{ callhome_server_local }}/api/fleet/health"
+    timeout: 5
+    return_content: true
+  register: _sm_probe
+  failed_when: false
+
+- name: "DEAD — SM API NOT RESPONDING"
+  ansible.builtin.fail:
+    msg: >-
+      ════════════════════════════════════════════════════════════════
+      SM IS DEAD — API NOT RESPONDING
+      ════════════════════════════════════════════════════════════════
+      {{ callhome_server_local }}/api/fleet/health
+      HTTP: {{ _sm_probe.status | default('CONNECTION REFUSED') }}
+      SM with no heartbeat = DEAD
+      ════════════════════════════════════════════════════════════════
+  when: (_sm_probe.status | default(0) | int) != 200
+
+- name: Check kiosk heartbeats flowing through SM
+  ansible.builtin.uri:
+    url: "{{ callhome_server_local }}/api/fleet/ready?services=kiosk"
+    timeout: 5
+    return_content: true
+  register: _sm_kiosk
+  failed_when: false
+
+- name: "DEAD — SM HAS NO HEARTBEATS"
+  ansible.builtin.fail:
+    msg: >-
+      ════════════════════════════════════════════════════════════════
+      SM IS DEAD — ZERO KIOSK HEARTBEATS
+      ════════════════════════════════════════════════════════════════
+      NM with no heartbeat = DEAD
+      CM with no heartbeat = DEAD
+      SM with no heartbeat = DEAD
+      Response: {{ _sm_kiosk.json | default('NO DATA') }}
+      INVESTIGATE:
+        curl {{ callhome_server_local }}/api/fleet/ready?services=kiosk
+        curl {{ callhome_server_local }}/api/nodes
+      DO NOT CONTINUE. FIX THE HEARTBEAT CHAIN.
+      ════════════════════════════════════════════════════════════════
+  when: >-
+    (_sm_kiosk.status | default(0) | int) != 200
+    or not (_sm_kiosk.json.all_ready | default(false) | bool)

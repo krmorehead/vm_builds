@@ -161,15 +161,36 @@ Previous bug: bridge-1 and bridge-2 were in `proxmox` but NOT in
 `kiosk_nodes`. They had no Manager, no heartbeat, and were invisible
 to the SuperManager. This was not caught because there was no gate.
 
-### INVARIANT: Heartbeat watchdog kills on stale
-A background watchdog (`scripts/heartbeat_watchdog.sh`) polls
-`/api/fleet/stale` every second during the entire run. The instant
-any previously-healthy service stops heartbeating, the watchdog
-kills the ansible-playbook process. No grace period. No waiting
-for end-of-run circuit breakers. Dead heartbeat = dead run.
+### INVARIANT: Heartbeat watchdog kills on stale OR SM death
+A background watchdog (`scripts/heartbeat_watchdog.sh`) polls every second
+during the entire run and kills the ansible-playbook process for either:
+1. **SM API death** — 5 consecutive failures to reach `/api/fleet/health`
+   means the SuperManager is dead. The heart stopped. Kill immediately.
+2. **Stale service** — any previously-healthy service stops heartbeating
+   (detected via `/api/fleet/stale`). Kill immediately.
+No grace period. No retries. No waiting for end-of-run circuit breakers.
 
-The watchdog starts in Phase 0 of `site.yml` and is cleaned up
-in `cleanup.yml`. Its PID is stored at `.state/watchdog.pid`.
+The watchdog starts in Phase 0 of `base.yml` and is cleaned up in
+`cleanup.yml`. Its PID is stored at `.state/watchdog.pid`. The PGID
+(process group ID) of ansible-playbook is stored at `.state/ansible_pgid`.
+
+- NEVER use `$PPID` from Ansible shell tasks as the watchdog target.
+  `$PPID` resolves to an Ansible worker PID that exits within seconds
+  of the task completing. Use the process GROUP ID instead.
+- Previous bug (2026-04-28): The watchdog targeted `$PPID` (worker PID
+  2856522). The worker exited after the shell task. The watchdog detected
+  the PID gone and exited cleanly. It was dead on arrival for every test
+  run since its creation. No heartbeat monitoring ever ran.
+
+### Heartbeat interval: fast for tests, slow for production
+`callhome_heartbeat_interval` in `group_vars/all.yml` defaults to 5s
+(from `CALLHOME_INTERVAL` env var, defaulting to 5). Production `.env`
+should set `CALLHOME_INTERVAL=60` for national hosts.
+
+ALL callhome config writes (bootstrap, post-provision rewrite, kiosk
+sibling rewrite) set this interval. A 5-second heartbeat ensures the
+fleet readiness gate passes within ~15 seconds of the last container
+provisioning. A 60-second interval is fine for remote national hosts.
 
 - NEVER let UI pages SSH to containers. All operations go through the
   Manager API via HTTP.
@@ -180,8 +201,9 @@ in `cleanup.yml`. Its PID is stored at `.state/watchdog.pid`.
   endpoint. The UI must be able to trigger it via HTTP.
 - Container-side scripts (`wifi_setup.sh`, `batman_trigger.sh`) live in
   the image at `/usr/sbin/`, use `KEY=value` output, and are idempotent.
-- Verify playbooks use the fleet readiness API as the primary path for
-  container liveness, with SSH fallback when the API is unavailable.
+- Verify playbooks use the fleet readiness API as the ONLY path for
+  container liveness. If the API is unavailable, the 4-tier system is
+  broken — fail and fix, never fall back to SSH.
 - When adding a new runtime-configurable feature: create the container-side
   script first, then the Manager API endpoint, then the UI integration.
 
@@ -198,8 +220,57 @@ Shared infrastructure roles run once per host before any service roles:
 - `proxmox_igpu` — detect iGPU (Intel or AMD), verify VA-API, export `igpu_*` facts (hard-fails if no iGPU)
 - `proxmox_lxc` — shared LXC provisioning helper (consumed via `include_role`, not standalone)
 
-## Playbook execution order (site.yml) — phased
+## Two-layer deployment pipeline
+
+The deployment is split into two independently testable layers:
+
+- **`playbooks/base.yml`** — Stable foundation (infra + network + VPN + managers). Rarely changes.
+- **`playbooks/services.yml`** — All services that build on top of base. Iterates fast.
+- **`playbooks/site.yml`** — Thin wrapper: `import_playbook: base.yml` then `import_playbook: services.yml`. Zero play definitions of its own.
+
+### Standard workflow
+```bash
+# ONE TIME (or when base changes): validate base independently
+molecule test -s base          # ~8 min
+
+# DAILY iteration: services only (base is already up)
+molecule converge -s default   # skips base (idempotent), runs services
+molecule verify -s default     # full verification
+
+# CI / clean-state proof
+molecule test -s default       # full E2E (base + services)
 ```
+
+### What goes in base vs services
+
+**Base (stable, rarely changes):**
+- Heartbeat API server lifecycle + watchdog
+- Backup (proxmox_backup)
+- Infrastructure (bridges, PCI, iGPU)
+- OpenWrt VM provision + configure
+- LAN satellite bootstrap + stale container cleanup
+- LAN satellite backup + infrastructure
+- Kiosk LXC provision + LAN NM relays + configure
+- NM readiness gate
+- WireGuard LXC provision + configure + host VPN routing
+- Controller VPN tunnel + VPN reachability gate
+
+**Services (iterate fast):**
+- Pi-hole, rsyslog, Netdata, Home Assistant, Jellyfin, Kodi, Moonlight
+- OpenWrt Mesh, WiFi Bridge
+- Desktop, Gaming
+- Post-provision callhome rewrite
+- Fleet readiness gate + circuit breaker
+- All configure plays
+- Display hookscripts
+- Per-feature OpenWrt config (security, VLANs, DNS, mesh, syslog)
+
+## Playbook execution order — phased
+```
+═══ BASE STATE (playbooks/base.yml) ═══
+
+Phase 0: Heartbeat API + Watchdog (localhost)
+
 Phase 1: Primary hosts (proxmox:!lan_hosts — directly reachable)
   Play 0: proxmox_backup                  tag: backup
            deploy_stamp: backup
@@ -215,6 +286,15 @@ Phase 2: LAN satellites (reachable after OpenWrt creates the LAN)
            deploy_stamp: backup
   Play 6: proxmox_bridges, pci_passthrough, igpu (lan_hosts) tag: lan-satellite, infra
            deploy_stamp: infrastructure
+
+Phase 2.5: Kiosk/Manager (early deploy for event-driven monitoring)
+  Kiosk LXC provision + LAN NM relays + configure
+  NM API readiness gate
+
+VPN Layer: WireGuard provision + configure + controller tunnel
+  VPN reachability gate (every NM reachable via VPN IP)
+
+═══ SERVICES LAYER (playbooks/services.yml) ═══
 
 Phase 3: Services (flavor groups span both primary + LAN hosts)
   Play 7: pihole_lxc (dns_nodes)          tag: pihole
@@ -238,34 +318,24 @@ Phase 3: Services (flavor groups span both primary + LAN hosts)
   Play 19: moonlight_lxc (streaming_nodes) tag: moonlight
            deploy_stamp: moonlight_lxc
   Play 20: moonlight_configure (streaming_nodes) tag: moonlight
-  Play 21: wireguard_lxc (vpn_nodes)      tag: wireguard
-           deploy_stamp: wireguard_lxc
-  Play 22: wireguard_configure (wireguard) tag: wireguard
-  Play 23: openwrt_mesh_lxc (wifi_nodes:!router_nodes) tag: mesh-wifi
+  Play 21: openwrt_mesh_lxc (wifi_nodes:!router_nodes) tag: mesh-wifi
            deploy_stamp: openwrt_mesh_lxc
-  Play 24: openwrt_mesh_configure (openwrt_mesh) tag: mesh-wifi
-  Play 25: openwrt_bridge_lxc (bridge_nodes) tag: bridge
+  Play 22: openwrt_mesh_configure (openwrt_mesh) tag: mesh-wifi
+  Play 23: openwrt_bridge_lxc (bridge_nodes) tag: bridge
            deploy_stamp: openwrt_bridge_lxc
-  Play 26: openwrt_bridge_configure (openwrt_bridge) tag: bridge
-  Play 27: desktop_lxc (desktop_nodes)      tag: desktop
+  Play 24: openwrt_bridge_configure (openwrt_bridge) tag: bridge
+  Play 25: desktop_lxc (desktop_nodes)      tag: desktop
            deploy_stamp: desktop_lxc
-  Play 28: desktop_configure (desktop_nodes) tag: desktop
-  Play 29: kiosk_lxc (desktop_nodes)       tag: kiosk
-           deploy_stamp: kiosk_lxc
-  Play 30: kiosk_configure (desktop_nodes) tag: kiosk
-  Play 30a: Distribute Cluster Manager SSH key (kiosk_nodes) tag: kiosk
-  Play 31: gaming_lxc (gaming_nodes)       tag: gaming
+  Play 26: desktop_configure (desktop_nodes) tag: desktop
+  Play 27: gaming_lxc (gaming_nodes)       tag: gaming
            deploy_stamp: gaming_lxc
-  Play 32: gaming_lxc_configure (gaming_nodes) tag: gaming
+  Play 28: gaming_lxc_configure (gaming_nodes) tag: gaming
 
 Phase 3c: Post-configure hookscript attachment
-  Play 33: desktop_nodes — Attach display-exclusive hookscript to
-           DRI-sharing containers/VMs (Kodi, Kiosk, Moonlight, Desktop)
-           tag: kiosk, desktop, media, moonlight
+  desktop_nodes — Attach display-exclusive hookscript to
+  DRI-sharing containers/VMs (Kodi, Kiosk, Moonlight, Desktop)
 
 Phase 3d: Heartbeat circuit breaker (post-configure)
-  Play 34: localhost — Query /api/fleet/stale, hard-fail if any
-           previously-healthy container stopped heartbeating
 
 Per-feature plays (run in default flow; also invocable via --tags)
 Bootstrap cleanup (proxmox:!lan_hosts)    tag: cleanup
@@ -277,11 +347,11 @@ run on both primary and LAN hosts.
 
 Post-baseline features are added as separate task files in the configure role
 (e.g., `roles/openwrt_configure/tasks/security.yml`). Each feature gets a
-PAIR of plays in `site.yml`: (1) configure on the dynamic group, (2) `deploy_stamp`
-on the flavor group. Both share a tag so they can be invoked individually via
-`--tags`, and they also run in the default (no-tags) flow alongside every other
-service. NEVER use Ansible's `never` special tag — it silently skips plays in
-the default E2E pipeline, creating untested dead code.
+PAIR of plays in `services.yml`: (1) configure on the dynamic group, (2)
+`deploy_stamp` on the flavor group. Both share a tag so they can be invoked
+individually via `--tags`, and they also run in the default (no-tags) flow
+alongside every other service. NEVER use Ansible's `never` special tag — it
+silently skips plays in the default E2E pipeline, creating untested dead code.
 
 Dynamic groups populated by `add_host` are ephemeral. Any entry point that
 runs as a separate `ansible-playbook` invocation (per-feature molecule
@@ -396,6 +466,9 @@ All VMIDs defined in `group_vars/all.yml`.
 | `setup.sh` | Bootstrap .venv + pip + ansible-galaxy + wireguard-tools + NOPASSWD sudoers for wg/wg-quick/install |
 | `run.sh` | Convenience wrapper — delegates to `build.py` |
 | `cleanup.sh` | Restore / full-restore / clean / rollback — delegates to `build.py` |
+| `playbooks/base.yml` | Base state: infra, OpenWrt, LAN bootstrap, Kiosk/NM, WireGuard VPN, controller tunnel. Rarely changes. Run independently via `molecule test -s base` |
+| `playbooks/services.yml` | Services layer: all services that build on top of base state. Iterate fast |
+| `playbooks/site.yml` | Thin wrapper: imports base.yml then services.yml. Full E2E via `molecule test -s default` |
 | `build-images.sh` | Builds custom images (mesh LXC, router VM, Pi-hole, rsyslog, Jellyfin, Netdata, WireGuard, Home Assistant, Kodi, Moonlight, Gaming LXC, Sunshine, Desktop VM). Use `--only <target>` for selective rebuilds |
 | `test.env` | Test machine config (committed, IP: 192.168.86.201) |
 | `.env` | Production secrets (gitignored) |
@@ -425,8 +498,10 @@ All VMIDs defined in `group_vars/all.yml`.
 | `tasks/lxc_lan_network.yml` | Shared LAN-only container IP computation (5 LXC roles) |
 | `tasks/lxc_wan_or_lan_network.yml` | Shared container networking: LAN hosts use OpenWrt LAN, WAN hosts use NAT bridge (10.99.x.x) |
 | `tasks/bootstrap_lan_host.yml` | Reusable bootstrap for LAN hosts (DHCP lease + API token) |
-| `tasks/cleanup_lan_host.yml` | Reusable per-LAN-host cleanup (SSH from primary host) |
-| `molecule/default/` | Full integration tests (home, mesh1, ai, mesh2, bridge-1, bridge-2 — 6-node) |
+| `tasks/cleanup_lan_host.yml` | Full per-LAN-host cleanup including base (SSH from primary host) |
+| `tasks/cleanup_lan_host_services.yml` | Services-only per-LAN-host cleanup — preserves base (SSH from primary host) |
+| `molecule/default/` | Full integration tests — base + services (home, mesh1, ai, mesh2, bridge-1, bridge-2 — 6-node) |
+| `molecule/base/` | Base state validation — infra, OpenWrt, Kiosk/NM, WireGuard VPN (6-node) |
 | `molecule/default/cleanup.yml` | One-line import of `playbooks/cleanup.yml` (unified cleanup) |
 | `molecule/openwrt-*/` | Per-feature scenarios (security, vlans, dns, mesh) |
 | `molecule/wireguard-lxc/` | Per-feature scenario for WireGuard VPN container |
@@ -556,11 +631,29 @@ These categories CANNOT be replaced by heartbeats:
 - `GET /api/fleet/health` — fleet health summary
 - `GET /api/container/{id}/ready` — individual container readiness + extensions
 
-### Service name matching
+### Service name matching and resolution priority
 Fleet readiness matches services by container hostname, node_id, or
 `container_health.container_id`. Container hostnames are set by the
 `<type>_ct_hostname` default (e.g., `pihole`, `rsyslog`, `kiosk`) and
 must match the names in the fleet readiness query.
+
+`_resolve_service` uses a 3-level search with fresh-data preference:
+1. `container_health.container_id` exact match (freshest wins)
+2. `hostname` / `node_id` match (freshest wins)
+3. Nested in `extensions.containers` (4-tier relay)
+
+When containers are initially provisioned, they heartbeat directly to
+the SM (Level 2 entries). After `kiosk_configure` rewrites callhome to
+the local NM, heartbeats flow through the 4-tier relay (Level 3). The
+resolution MUST prefer fresh data at any level — stale Level 2 entries
+must NOT shadow fresh Level 3 relayed data.
+
+- Previous bug (2026-04-28): `_resolve_service` strictly preferred
+  Level 2 over Level 3 regardless of freshness. After callhome rewrite,
+  Level 2 entries went stale, Level 3 had fresh data, but the resolver
+  always picked the stale Level 2. Fleet readiness gate reported 3/11
+  services ready. Fix: iterate levels and return the first match that
+  has recent data.
 
 ## National host expectations
 Remote/national hosts are single-node clusters. Each national host acts as
@@ -620,7 +713,7 @@ the primary IP is unreachable. Add new hosts to `_HOST_VPN_MAP` in
 9. Flavor group already in `molecule/default/molecule.yml` platform groups
 10. Create `molecule/<type>-lxc/` per-feature scenario (converge + verify + cleanup)
 11. Extend `molecule/default/verify.yml` with assertions for the new service
-12. Add the VMID to cleanup lists: `playbooks/cleanup.yml` (`project_ct_ids` and `project_vm_ids`) and `tasks/cleanup_lan_host.yml`
+12. Add the VMID to `debian_sibling_ct_ids` or `openwrt_sibling_ct_ids` in `group_vars/all.yml` (auto-included in `service_ct_ids` for cleanup)
 13. Update `docs/architecture/` with a `<type>-build.md`
 14. Add a CHANGELOG entry under `[Unreleased]`
 15. Update `scripts/webui/data.py` `SERVICE_TAGS` with the new service tag, description, category, and target hosts
@@ -637,7 +730,7 @@ the primary IP is unreachable. Add new hosts to `_HOST_VPN_MAP` in
 9. Flavor group already in `molecule/default/molecule.yml` platform groups
 10. Create `molecule/<type>-vm/` per-feature scenario
 11. Extend `molecule/default/verify.yml` with assertions for the new VM
-12. Add the VMID to cleanup lists: `playbooks/cleanup.yml` (`project_ct_ids` and `project_vm_ids`) and `tasks/cleanup_lan_host.yml`
+12. Add the VMID to `service_vm_ids` in `group_vars/all.yml` for cleanup
 13. Update `docs/architecture/` with a `<type>-build.md`
 14. Add a CHANGELOG entry under `[Unreleased]`
 15. Update `scripts/webui/data.py` `SERVICE_TAGS` with the new service tag, description, category, and target hosts
@@ -680,10 +773,11 @@ the primary IP is unreachable. Add new hosts to `_HOST_VPN_MAP` in
 - Previous bug: `proxmox_pci_passthrough` "gracefully skipped" WiFi passthrough when IOMMU groups were invalid. The real cause was VT-d disabled in BIOS on mesh1. The silent skip masked a fixable BIOS setting for an entire test cycle.
 - Previous bug (2026-04-08): `proxmox_bridges` created a bridge for ai's PCIe NIC (r8169) that had no cable connected. On reboot, the bridge config referenced a NIC that didn't initialize, risking PVE service failures. Note: the SSH instability on ai during this session was separately caused by a kiosk container IP collision (.220) — see WAN container IP collision rule.
 
-## Baseline workflow
+## Baseline workflow (two-layer pipeline)
+- **Base state first**: Run `molecule test -s base` to validate infrastructure, OpenWrt, Kiosk/NM, and WireGuard. This is the stable foundation (~8 min). Only re-run when base components change.
+- **Services on top**: Run `molecule converge -s default` + `molecule verify -s default` for day-to-day service iteration. Base is already up (idempotent), so only services deploy (~15-20 min).
+- **Full E2E**: Run `molecule test -s default` for clean-state validation (CI, pre-commit). Runs base + services end-to-end.
 - The OpenWrt baseline on the primary host is expensive to rebuild (~4 min). Layered scenarios (`mesh1-infra`, `openwrt-security`, etc.) depend on it.
-- Use `molecule converge` + `molecule verify` for day-to-day iteration. This leaves the baseline running so leaf nodes (mesh1) remain accessible.
-- Use `molecule test` for clean-state validation (CI, pre-commit). The test_sequence runs: `dependency → cleanup → syntax → prepare → converge → verify`. There is NO trailing converge or cleanup — the baseline is left running after verify.
 - NEVER add `cleanup` or `destroy` to the end of the test_sequence. That tears down OpenWrt and makes mesh1 permanently unreachable.
 
 ## Testing requirements
@@ -713,25 +807,33 @@ running molecule test. Batman enable, WiFi status, fleet queries all
 returned "No route to host" for WAN hosts. Wasted the entire session.
 
 ## SHOW STOPPER: Unreachable host protocol
-- When ANY host shows `unreachable=1`, fails a connectivity probe, OR SSH auth is rejected: FULL STOP. Do not continue. Do not build other hosts. Do not "skip and continue."
+- When any host goes dark: FULL STOP. Do not continue. Do not build other hosts. Do not "skip and continue."
+- **PRIMARY detection: heartbeat system.** Once base state is established, fleet health is monitored via the 4-tier heartbeat system. The heartbeat watchdog kills the run within 5 seconds of any service going stale or the SM API dying.
+  - `curl $CALLHOME_URL/api/fleet/health` — overall fleet status
+  - `curl $CALLHOME_URL/api/fleet/stale` — circuit breaker for stale services
+  - `curl $CALLHOME_URL/api/nodes` — per-node container health
+- **SECONDARY detection: Ansible recap.** `unreachable=1` in any play recap is a SHOW STOPPER.
+- **MANAGEMENT access: SSH.** SSH "Permission denied" means lost Ansible management access — also a SHOW STOPPER. But SSH is for management, NOT for health monitoring.
 - NEVER dismiss as "pre-existing." NEVER say "not caused by our changes." Investigate immediately.
 - For `wol_capable: false` hosts (ai): physical power-on required 3000 miles away. No remote recovery.
 - Do NOT validate features against a substitute host. If ai runs Sunshine/Doom and ai is down, Moonlight verification is IMPOSSIBLE.
-- ALWAYS run SSH checks to ALL hosts after every build/deploy, not just the target.
-- SSH "Permission denied" is a SHOW STOPPER — treat identically to EHOSTUNREACH.
 - Previous catastrophes: (1) agent dismissed ai unreachable THREE TIMES over 4 hours, wasting the entire session. (2) agent continued building 4 other hosts while ai SSH was failing, instead of stopping immediately.
 
-## Cleanup philosophy: unified, service-specific, not scorched-earth
+## Cleanup philosophy: two-layer, service-only by default
 - `playbooks/cleanup.yml` is the SINGLE cleanup playbook for all contexts (molecule, CLI, SuperManager). `molecule/default/cleanup.yml` is a one-line import of it.
-- Cleanup MUST destroy VMs/containers using **explicit VMIDs** from `group_vars/all.yml`. NEVER iterate `qm list` / `pct list` to destroy ALL resources. Check existence first with `qm status` / `pct status`, then stop + destroy.
-- When adding a new service, add its VMID to the cleanup lists in `playbooks/cleanup.yml` (`project_ct_ids`/`project_vm_ids`) and `tasks/cleanup_lan_host.yml`. There is only ONE place now.
+- **Two-layer cleanup**: Default (no tags) destroys ONLY service containers/VMs. Base layer (OpenWrt VM, Kiosk/NM containers, bridges, PCI config) is PRESERVED. Use `--tags base-cleanup` to tear down the base too.
+- VMID lists in `group_vars/all.yml`: `service_ct_ids` + `service_vm_ids` (default cleanup), `base_ct_ids` + `base_vm_ids` (opt-in base cleanup).
+- When adding a new SERVICE, add its VMID to `debian_sibling_ct_ids` or `openwrt_sibling_ct_ids` in `group_vars/all.yml`. The `service_ct_ids` list derives from these automatically.
+- When adding BASE infrastructure, add its VMID to `base_vm_ids` or `base_ct_ids` in `group_vars/all.yml`.
+- Cleanup uses **explicit VMIDs** from `group_vars/all.yml`. NEVER iterate `qm list` / `pct list` to destroy ALL resources. Check existence first with `qm status` / `pct status`, then stop + destroy.
 - Cleanup MUST NOT restore the host config from backup archive by default. Explicit file removal is sufficient. Backup restore is opt-in via `--tags restore -e rollback=true`.
 - Rollback plays in cleanup.yml are gated by `when: rollback | default(false) | bool`. They NEVER run during default cleanup. Invoke via: `ansible-playbook cleanup.yml --tags <feature>-rollback -e rollback=true`.
-- NEVER use Ansible's `never` special tag on ANY play. It silently skips plays in the default E2E pipeline, creating untested dead code. Every service play runs every time. Idempotency is the gate, not tag exclusion. Previous bug: Gaming LXC was tagged `[gaming, never]` from its first commit and was NEVER tested in any E2E run for over a month. All per-feature OpenWrt plays were also tagged `[never]` — none ran in the default pipeline.
+- NEVER use Ansible's `never` special tag on ANY play. It silently skips plays in the default E2E pipeline, creating untested dead code. Every service play runs every time. Idempotency is the gate, not tag exclusion.
 - Previous bug: blanket `qm list` / `pct list` cleanup destroyed non-project resources, forced full rebuild of every VM/container on every test run, and was slower than explicit VMID lookup.
-- When a provisioning role deploys host-level systemd units (socat proxies, relay services), add the unit name to BOTH `playbooks/cleanup.yml` (primary hosts) AND `tasks/cleanup_lan_host.yml` (LAN hosts). The main cleanup targets `proxmox:!lan_hosts` — LAN hosts are EXCLUDED and only get cleanup via `tasks/cleanup_lan_host.yml`.
+- Previous bug (2026-04-28): `cleanup.yml` had a single "Selective service cleanup" play that destroyed ALL project VMs/containers including OpenWrt (100) and Kiosk (401). Every `molecule test` tore down and rebuilt the entire base layer (~15 min), contradicting the two-layer architecture where the base stays up 95% of the time. Fix: split into service-only (default) and base-cleanup (opt-in via `--tags base-cleanup`).
+- Service cleanup has two corresponding task files: `tasks/cleanup_lan_host_services.yml` (LAN hosts, services only) and `tasks/cleanup_lan_host.yml` (LAN hosts, full teardown including base). Primary hosts: Play 2 (services) vs Play 5 (base).
+- When a provisioning role deploys host-level systemd units (socat proxies, relay services), add the unit name to BOTH `playbooks/cleanup.yml` (primary hosts) AND `tasks/cleanup_lan_host_services.yml` (LAN hosts). The main cleanup targets `proxmox:!lan_hosts` — LAN hosts are EXCLUDED and only get cleanup via the LAN task files.
 - When RENAMING a systemd service, the provisioning role MUST stop and remove the old service BEFORE deploying the replacement. Without this, the old service holds the port and the new service crash-loops. Add a pre-deployment task: `systemctl stop/disable <old> && rm -f /etc/systemd/system/<old>.service && pkill -f 'socat.*TCP-LISTEN:<port>'`.
-- Previous catastrophe (2026-04-14): KasmVNC migration renamed `kiosk-vnc-proxy` to `kiosk-display-proxy`. mesh1 (LAN host, excluded from main cleanup) kept the old service running on port 6080. New service crash-looped 957 times. Instead of diagnosing the port conflict (10 seconds to find via `systemctl status`), retries were added and increased to 100 seconds. The SM/CM heartbeat checks used 6 minutes EACH of retries. Total wasted time: 12+ minutes per molecule test run, across multiple runs, all because the root cause was never investigated.
 
 ## Systemd sandboxing in LXC containers
 - Many Debian packages ship systemd unit files with sandboxing directives (`LogNamespace`, `ProtectSystem`, `ProtectHome`, `ProtectControlGroups`, `BindReadOnlyPaths`, `RuntimeDirectory`) that require mount namespace creation. Inside LXC containers, these fail with exit code 226 (NAMESPACE) unless the container has `nesting=1` feature.

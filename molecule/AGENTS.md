@@ -4,9 +4,13 @@ This AGENTS.md provides specific instructions for agentic coding agents working 
 
 ## SHOW STOPPER: Unreachable Host = FULL STOP
 
-When ANY host shows `unreachable=1` in a PLAY RECAP or fails a connectivity probe:
+When the heartbeat system detects a failure (SM API dead, service stale, or
+Ansible shows `unreachable=1` in a PLAY RECAP):
 - **STOP ALL WORK.** Do not continue development, do not run more tests.
-- **Investigate cause IMMEDIATELY.** Check terminal history for destructive operations.
+- **Check the heartbeat system first:** `curl $CALLHOME_URL/api/fleet/health`
+  and `curl $CALLHOME_URL/api/fleet/stale`. The heartbeat watchdog should
+  have already killed the run — if it didn't, the watchdog itself is broken.
+- **Investigate cause IMMEDIATELY.** Check API logs, not just SSH.
 - **NEVER dismiss as "pre-existing."** Find the root cause.
 - **For `wol_capable: false` hosts (ai): physical power-on required.** No remote recovery.
 - **Do NOT validate features against a substitute host.** If ai runs Sunshine and ai is down, Moonlight verification is IMPOSSIBLE.

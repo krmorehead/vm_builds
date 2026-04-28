@@ -786,7 +786,7 @@ class TestNodeDetail:
         )
         data.register_checkin(state_dir, checkin, "192.168.86.201")
         async with webui(tmp_path) as user:
-            await user.open("/nodes/home")
+            await user.open(Routes.NODE_DETAIL.format(hostname="home"))
             await user.should_see(PageTitles.NODE_DETAIL)
             await user.should_see("home")
 
@@ -800,7 +800,7 @@ class TestNodeDetail:
         )
         data.register_checkin(state_dir, checkin, "192.168.86.201")
         async with webui(tmp_path) as user:
-            await user.open("/nodes/home")
+            await user.open(Routes.NODE_DETAIL.format(hostname="home"))
             await user.should_see("Resources")
             await user.should_see("Disk")
             await user.should_see("Memory")
@@ -816,19 +816,19 @@ class TestNodeDetail:
         )
         data.register_checkin(state_dir, checkin, "192.168.86.201")
         async with webui(tmp_path) as user:
-            await user.open("/nodes/home")
+            await user.open(Routes.NODE_DETAIL.format(hostname="home"))
             await user.should_see("Guests")
 
     async def test_detail_page_not_found(self, tmp_path):
         """Unknown hostname shows error message."""
         async with webui(tmp_path) as user:
-            await user.open("/nodes/nonexistent")
+            await user.open(Routes.NODE_DETAIL.format(hostname="nonexistent"))
             await user.should_see("not found")
 
     async def test_detail_page_back_button(self, tmp_path):
         """Detail page has a back button to nodes list."""
         async with webui(tmp_path) as user:
-            await user.open("/nodes/home")
+            await user.open(Routes.NODE_DETAIL.format(hostname="home"))
             await user.should_see(PageTitles.NODE_DETAIL)
 
 

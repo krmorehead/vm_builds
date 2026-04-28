@@ -9,7 +9,7 @@ from scripts.webui.data import Labels, PageTitles, Routes
 
 
 def register() -> None:
-    @ui.page("/services")
+    @ui.page(Routes.SERVICES)
     def services_page() -> None:
         services = data.get_service_tags()
         profiles = data.get_deploy_profiles()

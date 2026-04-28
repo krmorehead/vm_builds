@@ -258,7 +258,7 @@ async def containers_ctx(tmp_path: Path):
     manager.init(lambda _: None)
     try:
         async with user_simulation() as user:
-            @ui.page("/containers")
+            @ui.page(Routes.CONTAINERS)
             async def _test_containers() -> None:
                 with theme.page_shell("containers"):
                     ui.add_head_html(theme.HOVER_CARD_STYLES)

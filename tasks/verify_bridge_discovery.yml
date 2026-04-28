@@ -1,0 +1,36 @@
+---
+# Shared verify task: discover physical-NIC-backed bridges on a Proxmox host.
+#
+# Exported facts:
+#   _verify_bridge_list  — list of bridge names backed by physical NICs
+#
+# Required variables:
+#   _verify_min_bridges  — minimum expected bridge count (1 for all, 2 for router)
+
+- name: List physical-NIC-backed bridges
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      for br in /sys/class/net/vmbr*/; do
+        brname=$(basename "$br")
+        for iface in $(ls "$br/brif/" 2>/dev/null); do
+          if [ -e "/sys/class/net/$iface/device" ]; then
+            echo "$brname"
+            break
+          fi
+        done
+      done
+    executable: /bin/bash
+  register: _bridge_discovery
+  changed_when: false
+
+- name: Export bridge list fact
+  ansible.builtin.set_fact:
+    _verify_bridge_list: "{{ _bridge_discovery.stdout_lines }}"
+
+- name: Assert minimum bridge count
+  ansible.builtin.assert:
+    that: _verify_bridge_list | length >= (_verify_min_bridges | int)
+    fail_msg: >-
+      Expected at least {{ _verify_min_bridges }} physical-NIC bridge(s),
+      found {{ _verify_bridge_list | length }}

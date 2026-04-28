@@ -199,12 +199,28 @@
     timeout: 10
   when: not vm_exists | bool
 
+- name: Check current VM boot config
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      CFG=$(qm config {{ openwrt_vm_id }})
+      ONBOOT=$(echo "$CFG" | grep -oP '^onboot:\s*\K\d' || echo "0")
+      STARTUP=$(echo "$CFG" | grep -oP 'order=\K\d+' || echo "0")
+      DESC=$(echo "$CFG" | grep -oP '^description:\s*\K.*' || echo "")
+      echo "onboot=${ONBOOT} startup=${STARTUP} desc=${DESC}"
+    executable: /bin/bash
+  register: _vm_boot_check
+  changed_when: false
+
 - name: Configure VM to start on boot
   ansible.builtin.command:
     cmd: >-
       qm set {{ openwrt_vm_id }}
       --onboot 1
       --startup order={{ openwrt_vm_startup_order }}
+  when: >-
+    'onboot=1' not in (_vm_boot_check.stdout | default(''))
+    or ('startup=' + (openwrt_vm_startup_order | string)) not in (_vm_boot_check.stdout | default(''))
   changed_when: true
 
 - name: Stamp image version on VM description
@@ -212,8 +228,10 @@
     cmd: >-
       qm set {{ openwrt_vm_id }}
       --description "image_version={{ openwrt_image_version }}"
+  when:
+    - openwrt_image_version | default('') | length > 0
+    - ('image_version=' + openwrt_image_version) not in (_vm_boot_check.stdout | default(''))
   changed_when: true
-  when: openwrt_image_version | default('') | length > 0
 
 # ── WiFi PCIe passthrough ──────────────────────────────────────
 

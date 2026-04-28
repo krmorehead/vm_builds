@@ -25,19 +25,25 @@ Each `pct_remote` task opens a new SSH connection and takes 15-60 seconds. MINIM
 
 Example: Moving a systemd override from configure role (3 tasks via pct_remote) to the image saved 38% of per-feature test time.
 
-## Fleet API Eliminates Most Verify SSH Overhead
+## Fleet API Is the PRIMARY Health Check (No SSH Fallback)
 
 The fleet readiness API (`/api/fleet/ready`, `/api/container/{id}/ready`)
-replaces most `pct exec` liveness checks in verify with a single HTTP call.
-When the fleet API is available (`_fleet_api_ready`), container health is
-queried via `uri` instead of individual `pct exec` SSH connections.
+is the SOLE mechanism for verifying container and service health. The
+heartbeat system provides continuous liveness monitoring through the 4-tier
+chain: Container → NodeManager → ClusterManager → SuperManager.
 
-SSH batching (below) remains relevant for:
-- The **fallback path** when the fleet API is unavailable
-- **Configure-phase** tasks (pct_remote is the only option during deploy)
-- **Hypervisor checks** (pct config, qm config) that the fleet API doesn't cover
+- NEVER use `pct exec ... systemctl is-active` to check service health
+- NEVER add SSH fallback paths for when the fleet API is unavailable
+- If the fleet API reports a service as not ready, the service IS not ready
+- If the fleet API itself is unreachable, the heartbeat watchdog kills the
+  entire Ansible run within 5 seconds — there is nothing to fall back TO
 
-See the `manager-api-pattern` skill for the full dual-path pattern.
+SSH/`pct exec` remains relevant ONLY for:
+- **Hypervisor-side checks** (`pct config`, `qm config`) — host access required
+- **Cross-service L3 integration** (send log, check DNS) — proves connectivity
+- **Post-failure diagnostics** (`journalctl` inside containers) — debugging only
+
+See the `manager-api-pattern` skill for the fleet health verification pattern.
 
 ## Verify Phase Optimization
 
@@ -53,17 +59,28 @@ ansible.builtin.assert:
   that: "'onboot: 1' in _ct_cfg.stdout"
 ```
 
-**Batch pct exec calls:**
+**Use fleet API for service health (not pct exec):**
 ```yaml
-# Combine independent checks into one call
-ansible.builtin.shell:
-  cmd: >-
-    pct exec {{ ct_id }} -- /bin/sh -c '
-    echo "IFACE=$(ip link show wg0 >/dev/null 2>&1 && echo ok || echo missing)";
-    echo "SVC=$(systemctl is-enabled wg-quick@wg0 2>/dev/null || echo unknown)";
-    echo "NAT=$(iptables -t nat -C POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null && echo present || echo missing)"
-    '
-register: wg_health
+# Query fleet readiness for specific services
+ansible.builtin.uri:
+  url: "{{ callhome_server_local }}/api/fleet/ready?services=wireguard"
+  return_content: true
+register: _fleet_ready
+
+# Per-container health with extensions
+ansible.builtin.uri:
+  url: "{{ callhome_server_local }}/api/container/wireguard/ready"
+  return_content: true
+register: _wg_health
+# Extensions include: wireguard peer count, interface state, etc.
+```
+
+**Batch pct exec for hypervisor-side config validation only:**
+```yaml
+# pct config is hypervisor-side — fleet API doesn't cover it
+ansible.builtin.command:
+  cmd: pct config {{ ct_id }}
+register: _ct_cfg
 ```
 
 ## Wait/Pause Tuning
@@ -120,32 +137,36 @@ ALWAYS add `serial: 2` to configure plays that target 4+ `pct_remote` containers
 
 Previous bug: WireGuard configure ran 4 containers in parallel. Two containers (wireguard-home, wireguard-mesh1) both routed SSH through `home`'s sshd. The rapid connection churn caused "Connection reset by peer (104)" on both. Fix: `serial: 2` processes containers in batches, halving simultaneous SSH load.
 
-## Bypass pct_remote for Health-Only Configure Plays
+## Service Health Uses Fleet API, Not pct exec
 
-When a configure play ONLY checks service health (no container-internal
-configuration changes), bypass `pct_remote` entirely by targeting the Proxmox
-HOST group and using `ansible.builtin.command` with `pct exec`. This eliminates
-paramiko SSH hangs that `serial` and timeout settings cannot prevent:
+NEVER use `pct exec ... systemctl is-active <service>` to verify container
+health. The heartbeat system already monitors every service continuously.
+Use the fleet readiness API instead:
 
 ```yaml
-- name: Configure Netdata
-  hosts: monitoring_nodes
-  gather_facts: false
+- name: Verify fleet health
+  hosts: localhost
+  connection: local
   tasks:
-    - name: Check service health
-      ansible.builtin.command:
-        cmd: pct exec {{ netdata_ct_id }} -- systemctl is-active netdata
-      changed_when: false
-      failed_when: false
-      retries: 10
+    - name: Query fleet readiness
+      ansible.builtin.uri:
+        url: "{{ callhome_server_local }}/api/fleet/ready?services=netdata"
+        return_content: true
+      register: _fleet_ready
+      retries: 12
       delay: 3
-      until: _check.stdout | trim == 'active'
+      until: (_fleet_ready.json.all_ready | default(false))
 ```
+
+The `pct exec` pattern for health checks has multiple problems:
+- Opens new SSH connections per container (15-60s overhead each)
+- Can cause paramiko hangs that `serial` and `timeout` cannot prevent
+- Duplicates what the heartbeat system already knows
 
 Previous bug: `Configure Netdata` play with `pct_remote` hung indefinitely on
 paramiko SSH handshake — even with `serial: 1`, `timeout = 60`, and
-`host_key_auto_add = True`. 0% CPU indicated IO block. Fix: target host group
-directly with `pct exec`, bypassing paramiko entirely.
+`host_key_auto_add = True`. The fleet API would have returned the answer
+in <1 second.
 
 ## Play Merging
 

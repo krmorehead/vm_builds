@@ -13,19 +13,12 @@
 #   _lan_cidr     — LAN CIDR prefix length
 #   _lxc_ct_ip    — computed container IP
 
-- name: Read LAN gateway from generated env
-  ansible.builtin.set_fact:
-    _lan_gateway: >-
-      {{ lookup('pipe', 'grep "^LAN_GATEWAY=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
-         | default('10.10.10.1', true) }}
-    _lan_cidr: >-
-      {{ lookup('pipe', 'grep "^LAN_CIDR=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2')
-         | default('24', true) }}
+- name: Read LAN topology facts
+  ansible.builtin.include_tasks: "{{ project_root }}/tasks/read_lan_topology.yml"
 
 - name: Compute container IP
   ansible.builtin.set_fact:
-    _lxc_ct_ip: >-
-      {{ _lan_gateway.split('.')[0:3] | join('.') }}.{{ lxc_net_ip_offset }}
+    _lxc_ct_ip: "{{ _lan_prefix }}.{{ lxc_net_ip_offset }}"
 
 - name: "Report container IP assignment — {{ lxc_net_service_name }}"
   ansible.builtin.debug:

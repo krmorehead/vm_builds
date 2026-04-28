@@ -9,7 +9,7 @@
 
 - name: Detect local kiosk Manager IP for callhome target
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ kiosk_ct_id }}/exec"
+    url: "{{ nm_api_url }}/api/provision/{{ kiosk_ct_id }}/exec"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -29,7 +29,7 @@
   ansible.builtin.set_fact:
     _desktop_callhome_target: >-
       {{ 'http://' + _desktop_kiosk_ip + ':'
-         + (kiosk_manager_port | default('9001'))
+         + (kiosk_manager_port | string)
          if _desktop_kiosk_ip | length > 0
          else callhome_server }}
 
@@ -37,7 +37,7 @@
 
 - name: Set desktop user password
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ desktop_ct_id }}/exec"
+    url: "{{ nm_api_url }}/api/provision/{{ desktop_ct_id }}/exec"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -52,7 +52,7 @@
 
 - name: Remove desktop user password if none provided
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ desktop_ct_id }}/exec"
+    url: "{{ nm_api_url }}/api/provision/{{ desktop_ct_id }}/exec"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -67,7 +67,7 @@
 
 - name: Configure callhome and start Desktop services
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ desktop_ct_id }}/exec"
+    url: "{{ nm_api_url }}/api/provision/{{ desktop_ct_id }}/exec"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -84,3 +84,12 @@
     status_code: 200
   delegate_to: localhost
   when: callhome_server | default('') | length > 0
+
+# ── Report completion ────────────────────────────────────────────
+
+- name: Report Desktop configuration
+  ansible.builtin.debug:
+    msg: >-
+      Desktop configured: ct={{ desktop_ct_id }},
+      callhome={{ _desktop_callhome_target | default('N/A') }},
+      user={{ desktop_user }}

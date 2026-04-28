@@ -7,12 +7,12 @@ import asyncio
 from nicegui import ui
 
 from scripts.webui import data, theme
-from scripts.webui.data import Labels, PageTitles
+from scripts.webui.data import Labels, PageTitles, Routes
 from scripts.webui.components import test_api_from_table
 
 
 def register() -> None:
-    @ui.page("/hosts")
+    @ui.page(Routes.HOSTS)
     def hosts_page() -> None:
         from scripts.webui.app import load_active_env
 

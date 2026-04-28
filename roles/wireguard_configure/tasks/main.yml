@@ -132,7 +132,7 @@
     _wg_peers: >-
       {{ _wg_peers | default([]) + [{
         'public_key': _ctrl_pubkey_resolved,
-        'vpn_ip': '10.0.0.7' if (_raw_vpn_ip in ['', 'None']) else _raw_vpn_ip
+        'vpn_ip': controller_vpn_ip if (_raw_vpn_ip in ['', 'None']) else _raw_vpn_ip
       }] }}
   when:
     - wireguard_is_hub | bool
@@ -188,7 +188,7 @@
       - _wg_server_pubkey not in ['None', 'null', '']
     fail_msg: >-
       Hub public key is invalid: '{{ _wg_server_pubkey }}'.
-      The hub (vpn_ip=10.0.0.1) must run configure first.
+      The hub (vpn_ip={{ wireguard_hub_vpn_ip }}) must run configure first.
       Check env.generated for WIREGUARD_HUB_PUBLIC_KEY.
   when: not (wireguard_is_hub | bool)
 
@@ -200,7 +200,7 @@
       [Interface]
       PrivateKey = {{ _wg_private_key }}
       Address = {{ wireguard_client_address }}
-      ListenPort = 51820
+      ListenPort = {{ wireguard_listen_port }}
       {% if wireguard_dns | length > 0 %}
       DNS = {{ wireguard_dns }}
       {% endif %}
@@ -237,11 +237,33 @@
   no_log: true
   when: not (wireguard_is_hub | bool)
 
-# ── Push wg0.conf via NM API ───────────────────────────────────
+# ── Push wg0.conf via NM API (idempotent) ──────────────────────
+
+- name: Read existing wg0.conf from container
+  ansible.builtin.uri:
+    url: "{{ nm_api_url }}/api/provision/{{ wireguard_ct_id }}/exec"
+    headers: "{{ nm_auth_headers }}"
+    method: POST
+    body_format: json
+    body:
+      cmd: "cat /etc/wireguard/wg0.conf 2>/dev/null || echo __MISSING__"
+      timeout: 10
+    status_code: 200
+  register: _wg_existing_conf
+  delegate_to: localhost
+  failed_when: false
+  no_log: true
+
+- name: Check if wg0.conf needs update
+  ansible.builtin.set_fact:
+    _wg_conf_changed: >-
+      {{ _wg_existing_conf is failed
+         or '__MISSING__' in (_wg_existing_conf.json.stdout | default('__MISSING__'))
+         or (_wg_existing_conf.json.stdout | default('') | trim) != (_wg0_content | trim) }}
 
 - name: Push wg0.conf via NM API
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ wireguard_ct_id }}/file"
+    url: "{{ nm_api_url }}/api/config/{{ wireguard_ct_id }}/file"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -252,42 +274,68 @@
     status_code: 200
   delegate_to: localhost
   no_log: true
+  when: _wg_conf_changed | bool
 
 # ── Start tunnel and apply firewall ──────────────────────────
 
 - name: Restart WireGuard tunnel via NM API
-  vars:
-    _nm_base: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}"
   ansible.builtin.uri:
-    url: "{{ _nm_base }}/api/config/{{ wireguard_ct_id }}/service/wg-quick@wg0/restart"
+    url: "{{ nm_api_url }}/api/config/{{ wireguard_ct_id }}/service/wg-quick@wg0/restart"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body: {}
     status_code: 200
-    timeout: 60
+    timeout: 120
   delegate_to: localhost
+  retries: 5
+  delay: 10
+  register: _wg_restart
+  until: (_wg_restart.status | default(0)) == 200
+  when: _wg_conf_changed | bool
 
-- name: Read LAN gateway from env.generated
-  ansible.builtin.set_fact:
-    _lan_gateway: >-
-      {{ lookup('pipe', 'grep "^LAN_GATEWAY=" ' + env_generated_path + ' 2>/dev/null | cut -d= -f2') }}
-  when: "'router_nodes' in group_names or 'lan_hosts' in group_names"
+# ── Compute DNAT target (host's bridge IP for VPN port forwarding) ──
+# This runs on vpn_nodes (Proxmox hosts), so group_names is correct.
+# LAN hosts: Proxmox host's LAN bridge IP (where kiosk-manager-proxy listens)
+# WAN hosts: NAT bridge gateway (host IS the gateway)
+- name: Read LAN topology for DNAT computation
+  ansible.builtin.include_tasks: "{{ project_root }}/tasks/read_lan_topology.yml"
 
-- name: Compute VPN DNAT target (Proxmox host IP reachable from WG container)
+- name: Compute VPN DNAT target
   ansible.builtin.set_fact:
     _wg_dnat_target: >-
-      {{ _lan_gateway.split('.')[0:3] | join('.') + '.' +
-         (proxmox_lan_mgmt_ip_offset | default(2) | string)
-         if ('router_nodes' in group_names)
-            and (_lan_gateway | default('')) | length > 0
-         else ansible_host
-              if ('lan_hosts' in group_names)
-         else container_subnet_prefix + '.' + (container_subnet_id | string) + '.1' }}
+      {% if 'router_nodes' in group_names -%}
+        {{ _lan_prefix }}.{{ proxmox_lan_mgmt_ip_offset | default(2) }}
+      {%- elif 'lan_hosts' in group_names -%}
+        {{ ansible_host }}
+      {%- else -%}
+        {{ container_subnet_prefix }}.{{ container_subnet_id }}.1
+      {%- endif %}
+
+- name: Read existing firewall.env from container
+  ansible.builtin.uri:
+    url: "{{ nm_api_url }}/api/provision/{{ wireguard_ct_id }}/exec"
+    headers: "{{ nm_auth_headers }}"
+    method: POST
+    body_format: json
+    body:
+      cmd: "cat /etc/wireguard/firewall.env 2>/dev/null || echo __MISSING__"
+      timeout: 10
+    status_code: 200
+  register: _wg_existing_fw_env
+  delegate_to: localhost
+  failed_when: false
+
+- name: Check if firewall config needs update
+  ansible.builtin.set_fact:
+    _wg_fw_changed: >-
+      {{ _wg_existing_fw_env is failed
+         or '__MISSING__' in (_wg_existing_fw_env.json.stdout | default('__MISSING__'))
+         or ('DNAT_TARGET=' + _wg_dnat_target | trim) not in (_wg_existing_fw_env.json.stdout | default('')) }}
 
 - name: Push firewall.env with DNAT target
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ wireguard_ct_id }}/file"
+    url: "{{ nm_api_url }}/api/config/{{ wireguard_ct_id }}/file"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -297,10 +345,11 @@
       mode: "0644"
     status_code: 200
   delegate_to: localhost
+  when: _wg_fw_changed | bool
 
 - name: Push updated firewall setup script
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ wireguard_ct_id }}/file"
+    url: "{{ nm_api_url }}/api/config/{{ wireguard_ct_id }}/file"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -310,10 +359,11 @@
       mode: "0755"
     status_code: 200
   delegate_to: localhost
+  when: _wg_fw_changed | bool
 
 - name: Apply firewall rules (MASQUERADE + DNAT)
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ wireguard_ct_id }}/exec"
+    url: "{{ nm_api_url }}/api/provision/{{ wireguard_ct_id }}/exec"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -322,3 +372,4 @@
       timeout: 30
     status_code: 200
   delegate_to: localhost
+  when: _wg_fw_changed | bool

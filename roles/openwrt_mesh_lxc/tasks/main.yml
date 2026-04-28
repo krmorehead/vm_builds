@@ -73,7 +73,7 @@
 
 # ── Ensure iw is available on the Proxmox host ───────────────────
 
-- name: Check DNS resolution before apt
+- name: Check DNS resolution for host package availability
   ansible.builtin.command:
     cmd: getent hosts deb.debian.org
   register: _dns_check
@@ -90,12 +90,19 @@
       nameserver 1.1.1.1
   when: _dns_check.rc != 0
 
-- name: Install iw on Proxmox host
-  ansible.builtin.apt:
-    name: iw
-    state: present
-    update_cache: true
-    cache_valid_time: 86400
+- name: Assert iw tool is pre-installed (baked by prepare_host)
+  ansible.builtin.command:
+    cmd: which iw
+  changed_when: false
+  register: _iw_check
+
+- name: Hard-fail if iw is missing
+  ansible.builtin.fail:
+    msg: >-
+      HARD FAILURE: 'iw' not installed on {{ inventory_hostname }}.
+      Run: ./scripts/build-images.sh --host {{ ansible_host }} --only <any>
+      (prepare_host installs iw automatically)
+  when: _iw_check.rc != 0
 
 # ── Determine container network based on host topology ───────────
 
@@ -231,31 +238,10 @@
 
 # ── Move WiFi PHY into container namespace ───────────────────────
 
-- name: Move WiFi PHY devices into container namespace
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      pid=$(lxc-info -n {{ meshwifi_ct_id }} 2>/dev/null | awk '/^PID:/{print $2}')
-      if [ -z "$pid" ] || [ "$pid" = "-1" ]; then
-        echo "ERROR: cannot determine PID for container {{ meshwifi_ct_id }}" >&2
-        exit 1
-      fi
-      for phy in {{ _wifi_phys | join(' ') }}; do
-        iw phy "$phy" set netns "$pid"
-      done
-    executable: /bin/bash
-  changed_when: true
-
-# ── Register PHY namespace move with Manager ─────────────────────
-
-- name: Update PHY namespaces in Manager after move
-  ansible.builtin.include_tasks: "{{ project_root }}/tasks/manager_register.yml"
+- name: Move WiFi PHYs into mesh container
+  ansible.builtin.include_tasks: "{{ project_root }}/tasks/lxc_wifi_phy_move.yml"
   vars:
-    register_path: "api/host/{{ inventory_hostname }}/hardware/phy/{{ item }}"
-    register_body:
-      namespace: "container:{{ meshwifi_ct_id }}"
-    register_method: PATCH
-  loop: "{{ _wifi_phys }}"
+    _phy_ct_id: "{{ meshwifi_ct_id }}"
 
 # ── Deploy hookscript for PHY persistence across reboots ─────────
 

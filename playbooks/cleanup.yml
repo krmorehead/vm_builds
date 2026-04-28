@@ -2,75 +2,62 @@
 # ════════════════════════════════════════════════════════════════════
 # Unified cleanup playbook — single source of truth for all contexts.
 #
+# TWO-LAYER CLEANUP:
+#   Default (no tags) → services-only cleanup. Preserves the base layer
+#   (OpenWrt, Kiosk/NM, bridges, infra). The base stays up 95% of the
+#   time so service iteration is fast.
+#
+#   --tags base-cleanup → tears down the base layer too (OpenWrt VM,
+#   Kiosk containers, bridges, PCI config, controller VPN).
+#
 # Consumers:
-#   molecule/default/cleanup.yml  →  import_playbook (one-line)
-#   build.py --playbook cleanup   →  ansible-playbook (no tags)
+#   molecule/default/cleanup.yml  →  import_playbook (services-only)
+#   build.py --playbook cleanup   →  ansible-playbook (services-only)
 #   cleanup.sh                    →  build.py --playbook cleanup
+#   cleanup.sh --full             →  build.py --playbook cleanup --tags base-cleanup
 #
 # Play ordering:
-#   1. Selective LAN cleanup       — runs by default
-#   2. Selective service cleanup   — runs by default
-#   3. Test control plane teardown — runs by default (env-gated)
-#   4. Per-feature rollback plays  — gated by `rollback` extra-var
-#   5. Full host restore           — gated by `rollback` extra-var
-#   6. Production LAN cleanup      — gated by `rollback` extra-var
+#   1. LAN service cleanup          — runs by default (services only)
+#   2. Service cleanup on primaries — runs by default (services only)
+#   3. Test control plane teardown  — runs by default (env-gated)
+#   4. LAN base cleanup             — opt-in via --tags base-cleanup
+#   5. Base cleanup on primaries    — opt-in via --tags base-cleanup
+#   6. Per-feature rollback plays   — opt-in via rollback extra-var
+#   7. Full host restore            — opt-in via rollback extra-var
+#   8. Production LAN cleanup       — opt-in via rollback extra-var
 #
 # Rollback/restore invocation:
 #   ansible-playbook cleanup.yml --tags <feature>-rollback -e rollback=true
 #   ansible-playbook cleanup.yml --tags restore -e rollback=true
 # ════════════════════════════════════════════════════════════════════
 
-# ── Play 1: Selective LAN satellite cleanup ──────────────────────
-#
-# MUST run BEFORE the selective service cleanup because Play 2
-# destroys OpenWrt and tears down bridges on the primary host,
-# making LAN hosts unreachable.
+# ══════════════════════════════════════════════════════════════════
+# SERVICE-LAYER CLEANUP (default — preserves base)
+# ══════════════════════════════════════════════════════════════════
 
-- name: Selective LAN satellite cleanup
+# ── Play 1: Service cleanup on LAN satellites ──────────────────────
+
+- name: Service cleanup on LAN satellites
   hosts: router_nodes
   gather_facts: false
   ignore_unreachable: true
   tasks:
-    - name: Process each LAN host
-      ansible.builtin.include_tasks: ../tasks/cleanup_lan_host.yml
+    - name: Process each LAN host (services only)
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/cleanup_lan_host_services.yml"
       vars:
         _lan_host_ip: "{{ hostvars[item].ansible_host }}"
         _lan_host_name: "{{ item }}"
       loop: "{{ groups['lan_hosts'] | default([]) }}"
       when: groups['lan_hosts'] | default([]) | length > 0
 
-# ── Play 2: Selective service cleanup (primary hosts) ────────────
+# ── Play 2: Service cleanup on primary hosts ─────────────────────
 #
-# Destroys only known project VMs/containers by explicit VMID.
-# NEVER iterates qm list / pct list — that destroys non-project
-# resources and is slower.
+# Destroys ONLY service VMs/containers. OpenWrt and Kiosk are UNTOUCHED.
 
-- name: Selective service cleanup on primary hosts
+- name: Service cleanup on primary hosts
   hosts: proxmox:!lan_hosts
   gather_facts: false
   ignore_unreachable: true
-  vars:
-    backup_dir: /var/lib/ansible-backup
-    project_vm_ids:
-      - "{{ openwrt_vm_id }}"
-      - "{{ gaming_vm_id }}"
-      - "{{ gaming_vm_id | int + 1 }}"
-      - "{{ gaming_vm_id | int + 2 }}"
-      - "{{ gaming_vm_id | int + 3 }}"
-    project_ct_ids:
-      - "{{ wireguard_ct_id }}"
-      - "{{ pihole_ct_id }}"
-      - "{{ meshwifi_ct_id }}"
-      - "{{ bridge_ct_id }}"
-      - "{{ netdata_ct_id }}"
-      - "{{ rsyslog_ct_id }}"
-      - "{{ homeassistant_ct_id }}"
-      - "{{ jellyfin_ct_id }}"
-      - "{{ kodi_ct_id }}"
-      - "{{ moonlight_ct_id }}"
-      - "{{ kiosk_ct_id }}"
-      - "{{ gaming_ct_id }}"
-      - "{{ desktop_ct_id }}"
   tasks:
     - name: Probe host connectivity
       ansible.builtin.ping:
@@ -80,133 +67,89 @@
       ansible.builtin.meta: end_host
       when: _host_probe.unreachable | default(false)
 
-    - name: Check for backup manifest
-      ansible.builtin.stat:
-        path: "{{ backup_dir }}/manifest.json"
-      register: manifest_stat
+    # ── Destroy service VMs by explicit VMID ─────────────────────
 
-    - name: Skip cleanup if no backup exists
-      ansible.builtin.debug:
-        msg: "No backup found -- skipping cleanup. The playbook must run first to create a backup."
-      when: not manifest_stat.stat.exists
-
-    - name: End play if no backup
-      ansible.builtin.meta: end_play
-      when: not manifest_stat.stat.exists
-
-    # ── Destroy project VMs by explicit VMID ─────────────────────
-
-    - name: Check which project VMs exist
+    - name: Check which service VMs exist
       ansible.builtin.command:
         cmd: qm status {{ item }}
-      loop: "{{ project_vm_ids }}"
-      register: _vm_checks
+      loop: "{{ service_vm_ids }}"
+      register: _svc_vm_checks
       failed_when: false
       changed_when: false
 
-    - name: Stop existing project VMs
+    - name: Stop existing service VMs
       ansible.builtin.command:
         cmd: qm stop {{ item.item }}
-      loop: "{{ _vm_checks.results }}"
+      loop: "{{ _svc_vm_checks.results }}"
       when: item.rc == 0
       failed_when: false
 
-    - name: Wait for VMs to stop
+    - name: Wait for service VMs to stop
       ansible.builtin.pause:
         seconds: 5
-      when: _vm_checks.results | selectattr('rc', 'equalto', 0) | list | length > 0
+      when: _svc_vm_checks.results | selectattr('rc', 'equalto', 0) | list | length > 0
 
-    - name: Destroy existing project VMs
+    - name: Destroy existing service VMs
       ansible.builtin.command:
         cmd: qm destroy {{ item.item }} --purge
-      loop: "{{ _vm_checks.results }}"
+      loop: "{{ _svc_vm_checks.results }}"
       when: item.rc == 0
       failed_when: false
 
-    # ── Destroy project containers by explicit VMID ──────────────
+    # ── Destroy service containers by explicit VMID ──────────────
 
-    - name: Check which project containers exist
+    - name: Check which service containers exist
       ansible.builtin.command:
         cmd: pct status {{ item }}
-      loop: "{{ project_ct_ids }}"
-      register: _ct_checks
+      loop: "{{ service_ct_ids }}"
+      register: _svc_ct_checks
       failed_when: false
       changed_when: false
 
-    - name: Stop existing project containers
+    - name: Stop existing service containers
       ansible.builtin.command:
         cmd: pct stop {{ item.item }}
-      loop: "{{ _ct_checks.results }}"
+      loop: "{{ _svc_ct_checks.results }}"
       when: item.rc == 0
       failed_when: false
 
-    - name: Wait for containers to stop
+    - name: Wait for service containers to stop
       ansible.builtin.pause:
         seconds: 3
-      when: _ct_checks.results | selectattr('rc', 'equalto', 0) | list | length > 0
+      when: _svc_ct_checks.results | selectattr('rc', 'equalto', 0) | list | length > 0
 
-    - name: Destroy existing project containers
+    - name: Destroy existing service containers
       ansible.builtin.command:
         cmd: pct destroy {{ item.item }} --purge
-      loop: "{{ _ct_checks.results }}"
+      loop: "{{ _svc_ct_checks.results }}"
       when: item.rc == 0
       failed_when: false
 
-    # ── Deregister destroyed resources from Manager state ─────────
-    # failed_when: false because the Manager may already be stopped
-    # during cleanup. This is the one exception to fail-fast.
+    # ── Deregister destroyed services from Manager ────────────────
 
-    - name: Deregister destroyed containers from Manager
+    - name: Deregister destroyed service containers from Manager
       ansible.builtin.include_tasks: "{{ project_root }}/tasks/manager_register.yml"
       vars:
         register_path: "api/host/{{ inventory_hostname }}/containers/{{ _deregister_vmid }}"
         register_body: {}
         register_method: DELETE
         register_ignore_errors: true
-      loop: "{{ project_ct_ids }}"
+      loop: "{{ service_ct_ids }}"
       loop_control:
         loop_var: _deregister_vmid
 
-    - name: Deregister destroyed VMs from Manager
+    - name: Deregister destroyed service VMs from Manager
       ansible.builtin.include_tasks: "{{ project_root }}/tasks/manager_register.yml"
       vars:
         register_path: "api/host/{{ inventory_hostname }}/containers/{{ _deregister_vmid }}"
         register_body: {}
         register_method: DELETE
         register_ignore_errors: true
-      loop: "{{ project_vm_ids }}"
+      loop: "{{ service_vm_ids }}"
       loop_control:
         loop_var: _deregister_vmid
 
-    # ── PCI passthrough cleanup ──────────────────────────────────
-
-    - name: Unbind devices from vfio-pci and restore native drivers
-      ansible.builtin.shell:
-        cmd: |
-          for dev in /sys/bus/pci/drivers/vfio-pci/0000:*/; do
-            [ -d "$dev" ] || continue
-            addr=$(basename "$dev")
-            echo "$addr" > /sys/bus/pci/drivers/vfio-pci/unbind 2>/dev/null || true
-            echo "" > "/sys/bus/pci/devices/${addr}/driver_override" 2>/dev/null || true
-          done
-          echo 1 > /sys/bus/pci/rescan 2>/dev/null || true
-          sleep 2
-          for dev in /sys/bus/pci/devices/0000:*/; do
-            [ -d "$dev" ] || continue
-            addr=$(basename "$dev")
-            class=$(cat "${dev}/class" 2>/dev/null)
-            [ "${class:0:4}" = "0x03" ] || continue
-            [ -e "${dev}/driver" ] && continue
-            vendor=$(cat "${dev}/vendor" 2>/dev/null)
-            case "$vendor" in
-              0x8086) echo "$addr" > /sys/bus/pci/drivers/i915/bind 2>/dev/null || true ;;
-              0x1002) echo "$addr" > /sys/bus/pci/drivers/amdgpu/bind 2>/dev/null || true ;;
-            esac
-          done
-          sleep 2
-        executable: /bin/bash
-      changed_when: true
-      failed_when: false
+    # ── Service-specific host-level cleanup ──────────────────────
 
     - name: Remove GPU hookscript state files
       ansible.builtin.shell:
@@ -215,90 +158,13 @@
       changed_when: true
       failed_when: false
 
-    - name: Check if PCI passthrough config exists
-      ansible.builtin.stat:
-        path: /etc/modprobe.d/vfio-pci.conf
-      register: _vfio_conf
-
-    # ── Remove ansible-managed config files ──────────────────────
-
-    - name: Remove ansible-managed config files
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - /etc/network/interfaces.d/ansible-bridges.conf
-        - /etc/network/interfaces.d/ansible-container-bridge.conf
-        - /etc/network/interfaces.d/ansible-proxmox-lan.conf
-        - /etc/network/interfaces.d/ansible-temp-lan.conf
-        - /etc/modprobe.d/blacklist-wifi.conf
-        - /etc/modprobe.d/vfio-pci.conf
-        - /etc/modprobe.d/iwlwifi-options.conf
-        - /etc/ansible/facts.d/vm_builds.fact
-        - /etc/apt/sources.list.d/pve-no-subscription.sources
-        - /etc/modules-load.d/wireguard.conf
-        - /tmp/openwrt-router-24.10.0-x86-64-combined.img.gz
-        - /tmp/openwrt-router-24.10.0-x86-64-combined.img
-        - /tmp/desktop_tmp_key
-        - /tmp/desktop_tmp_key.pub
-
-    # ── Stale pmxcfs node directory cleanup ────────────────────────
-    # When a Proxmox host's hostname changes, the old node directory
-    # persists under /etc/pve/nodes/<old_name>/ with stale LXC/VM
-    # configs. These cause "CT already exists on node <old_name>"
-    # errors when creating containers with the same VMID.
-
-    - name: Clean stale LXC configs from non-local pmxcfs node dirs
+    - name: Stop and remove service display proxy units
       ansible.builtin.shell:
         cmd: |
-          set -o pipefail
-          local_node=$(hostname)
-          for nodedir in /etc/pve/nodes/*/; do
-            node=$(basename "$nodedir")
-            [ "$node" = "$local_node" ] && continue
-            for conf in "$nodedir"lxc/*.conf "$nodedir"qemu-server/*.conf; do
-              [ -f "$conf" ] && rm -v "$conf"
-            done
-          done
-        executable: /bin/bash
-      changed_when: true
-      failed_when: false
-
-    # ── Manager API proxy cleanup ────────────────────────────────────
-
-    - name: Stop and remove all kiosk proxy services (current + legacy)
-      ansible.builtin.shell:
-        cmd: |
-          for svc in kiosk-manager-proxy kiosk-display-proxy \
-                     manager-api-proxy kiosk-vnc-proxy \
+          for svc in desktop-display-proxy desktop-vnc-ws \
+                     kodi-display-proxy kodi-vnc-proxy \
+                     moonlight-display-proxy moonlight-vnc-proxy \
                      wireguard-udp-proxy; do
-            systemctl stop "$svc" 2>/dev/null || true
-            systemctl disable "$svc" 2>/dev/null || true
-            rm -f "/etc/systemd/system/${svc}.service"
-          done
-          for unit in /etc/systemd/system/*-display-proxy.service \
-                      /etc/systemd/system/*-vnc-proxy.service \
-                      /etc/systemd/system/kiosk-display-relay-*.service \
-                      /etc/systemd/system/kiosk-vnc-relay-*.service \
-                      /etc/systemd/system/nm-relay-*.service; do
-            [ -f "$unit" ] || continue
-            name=$(basename "$unit")
-            systemctl stop "$name" 2>/dev/null || true
-            systemctl disable "$name" 2>/dev/null || true
-            rm -f "$unit"
-          done
-          systemctl daemon-reload 2>/dev/null || true
-          pkill -f 'socat.*TCP-LISTEN:9001' || true
-          pkill -f 'socat.*TCP-LISTEN:{{ kiosk_ws_port }}' || true
-          pkill -f 'socat.*UDP4-LISTEN:51820' || true
-        executable: /bin/bash
-      changed_when: true
-      failed_when: false
-
-    - name: Stop and remove Desktop display proxy and legacy VNC bridge
-      ansible.builtin.shell:
-        cmd: |
-          for svc in desktop-display-proxy desktop-vnc-ws; do
             systemctl stop "$svc" 2>/dev/null || true
             systemctl disable "$svc" 2>/dev/null || true
             rm -f "/etc/systemd/system/${svc}.service"
@@ -330,87 +196,7 @@
       changed_when: true
       failed_when: false
 
-    - name: Stop and remove Kodi display proxy
-      ansible.builtin.shell:
-        cmd: |
-          for svc in kodi-display-proxy kodi-vnc-proxy; do
-            systemctl stop "$svc" 2>/dev/null || true
-            systemctl disable "$svc" 2>/dev/null || true
-            rm -f "/etc/systemd/system/${svc}.service"
-          done
-          systemctl daemon-reload 2>/dev/null || true
-        executable: /bin/bash
-      changed_when: true
-      failed_when: false
-
-    - name: Stop and remove Moonlight display proxy
-      ansible.builtin.shell:
-        cmd: |
-          for svc in moonlight-display-proxy moonlight-vnc-proxy; do
-            systemctl stop "$svc" 2>/dev/null || true
-            systemctl disable "$svc" 2>/dev/null || true
-            rm -f "/etc/systemd/system/${svc}.service"
-          done
-          systemctl daemon-reload 2>/dev/null || true
-        executable: /bin/bash
-      changed_when: true
-      failed_when: false
-
-    - name: Stop and remove LAN display relay services
-      ansible.builtin.shell:
-        cmd: |
-          for unit in /etc/systemd/system/*-*-relay.service; do
-            [ -f "$unit" ] || continue
-            name=$(basename "$unit" .service)
-            systemctl stop "$name" 2>/dev/null || true
-            systemctl disable "$name" 2>/dev/null || true
-            rm -f "$unit"
-          done
-          systemctl daemon-reload 2>/dev/null || true
-        executable: /bin/bash
-      changed_when: true
-      failed_when: false
-
-    # ── Container NAT bridge cleanup ────────────────────────────────
-
-    - name: Flush iptables NAT rules for container bridge
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          cnt=$(iptables -t nat -S 2>/dev/null | grep -c '10\.99\.' || true)
-          [ "${cnt:-0}" -gt 0 ] && iptables -t nat -F || true
-        executable: /bin/bash
-      changed_when: true
-      failed_when: false
-
-    - name: Remove iptables FORWARD rules for container bridge
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          iptables -S FORWARD 2>/dev/null | grep 'vmbr_ct\|10\.99\.' | while read -r rule; do
-            iptables $(echo "$rule" | sed 's/^-A/-D/') 2>/dev/null || true
-          done
-        executable: /bin/bash
-      changed_when: true
-      failed_when: false
-
-    - name: Tear down container bridge
-      ansible.builtin.shell:
-        cmd: |
-          ip link set vmbr_ct down 2>/dev/null || true
-          ip link delete vmbr_ct 2>/dev/null || true
-        executable: /bin/bash
-      changed_when: true
-      failed_when: false
-
-    - name: Remove VPN subnet route
-      ansible.builtin.shell:
-        cmd: ip route del {{ vpn_subnet }} 2>/dev/null || true
-        executable: /bin/bash
-      changed_when: true
-      failed_when: false
-
-    - name: Remove hookscripts from snippets
+    - name: Remove service hookscripts from snippets
       ansible.builtin.shell:
         cmd: |
           rm -f /var/lib/vz/snippets/mesh-wifi-phy-*.sh
@@ -430,102 +216,29 @@
         - /usr/local/bin/batman_trigger.sh
       failed_when: false
 
-    - name: Re-enable enterprise repos if disabled
-      ansible.builtin.shell:
-        cmd: |
-          for f in /etc/apt/sources.list.d/pve-enterprise.sources.disabled \
-                   /etc/apt/sources.list.d/ceph.sources.disabled; do
-            [ -f "$f" ] && mv "$f" "${f%.disabled}"
-          done
-        executable: /bin/bash
-      changed_when: true
-      failed_when: false
-
-    - name: Tear down stale bridges
+    - name: Clean stale LXC configs from non-local pmxcfs node dirs
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          for br in $(ip -o link show type bridge | awk -F': ' '{print $2}'); do
-            grep -q "auto $br" /etc/network/interfaces 2>/dev/null && continue
-            ip link set "$br" down 2>/dev/null || true
-            ip link delete "$br" 2>/dev/null || true
+          local_node=$(hostname)
+          for nodedir in /etc/pve/nodes/*/; do
+            node=$(basename "$nodedir")
+            [ "$node" = "$local_node" ] && continue
+            for conf in "$nodedir"lxc/*.conf "$nodedir"qemu-server/*.conf; do
+              [ -f "$conf" ] && rm -v "$conf"
+            done
           done
         executable: /bin/bash
       changed_when: true
-
-    # ── Kernel / PCI state restoration ───────────────────────────
-
-    - name: Update initramfs after PCI config removal
-      ansible.builtin.command:
-        cmd: update-initramfs -u -k all
-      changed_when: true
-      when: _vfio_conf.stat.exists | default(false)
-
-    - name: Rebind WiFi PCI devices via sysfs (no modprobe -r)
-      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/sysfs_wifi_rebind.yml"
-      when: >-
-        ('router_nodes' in group_names) or
-        ('wifi_nodes' in group_names) or
-        ('bridge_nodes' in group_names)
-
-    - name: Rescan PCI bus to restore original drivers
-      ansible.builtin.shell:
-        cmd: echo 1 > /sys/bus/pci/rescan
-        executable: /bin/bash
-      changed_when: true
       failed_when: false
 
-    - name: Bring up interfaces from restored config
-      ansible.builtin.command:
-        cmd: ifup --all --force
-      changed_when: true
-      failed_when: false
-
-    - name: Unload wireguard kernel module
-      ansible.builtin.command:
-        cmd: modprobe -r wireguard
-      failed_when: false
-      changed_when: true
-
-    # ── Controller state ─────────────────────────────────────────
-
-    - name: Tear down controller VPN tunnel
-      ansible.builtin.command:
-        cmd: sudo wg-quick down wg0
-      failed_when: false
-      changed_when: true
-      delegate_to: localhost
-
-    - name: Remove controller wg0 config
-      ansible.builtin.command:
-        cmd: sudo rm -f /etc/wireguard/wg0.conf
-      changed_when: true
-      failed_when: false
-      delegate_to: localhost
-
-    - name: Remove local state file from controller
-      ansible.builtin.file:
-        path: "{{ playbook_dir }}/../.state/addresses.json"
-        state: absent
-      delegate_to: localhost
-
-    - name: Remove generated env files from controller
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - "{{ playbook_dir }}/../.env.generated"
-        - "{{ playbook_dir }}/../test.env.generated"
-      delegate_to: localhost
-
-    - name: Remove temporary Desktop VM SSH keys from controller
+    - name: Remove temporary files
       ansible.builtin.file:
         path: "{{ item }}"
         state: absent
       loop:
         - /tmp/desktop_tmp_key
         - /tmp/desktop_tmp_key.pub
-      delegate_to: localhost
 
 # ── Play 3: Test control plane teardown ──────────────────────────
 #
@@ -605,9 +318,366 @@
         - socat.pid
         - watchdog.pid
         - watchdog.log
+        - ansible_pgid
         - callhome_url
         - nodes.json
         - tunnel.log
+
+# ══════════════════════════════════════════════════════════════════
+# BASE-LAYER CLEANUP (opt-in via --tags base-cleanup)
+# Tears down the foundation: OpenWrt VM, Kiosk/NM containers,
+# bridges, PCI config, controller VPN. ONLY run when you need
+# to rebuild the base itself.
+# ══════════════════════════════════════════════════════════════════
+
+# ── Play 4: Base cleanup on LAN satellites ────────────────────────
+
+- name: Base cleanup on LAN satellites
+  hosts: router_nodes
+  gather_facts: false
+  ignore_unreachable: true
+  tags: [base-cleanup]
+  tasks:
+    - name: Process each LAN host (base layer)
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/cleanup_lan_host.yml"
+      vars:
+        _lan_host_ip: "{{ hostvars[item].ansible_host }}"
+        _lan_host_name: "{{ item }}"
+      loop: "{{ groups['lan_hosts'] | default([]) }}"
+      when: groups['lan_hosts'] | default([]) | length > 0
+
+# ── Play 5: Base cleanup on primary hosts ─────────────────────────
+
+- name: Base cleanup on primary hosts
+  hosts: proxmox:!lan_hosts
+  gather_facts: false
+  ignore_unreachable: true
+  tags: [base-cleanup]
+  vars:
+    backup_dir: /var/lib/ansible-backup
+  tasks:
+    - name: Probe host connectivity
+      ansible.builtin.ping:
+      register: _host_probe
+
+    - name: End cleanup for unreachable hosts
+      ansible.builtin.meta: end_host
+      when: _host_probe.unreachable | default(false)
+
+    - name: Check for backup manifest
+      ansible.builtin.stat:
+        path: "{{ backup_dir }}/manifest.json"
+      register: manifest_stat
+
+    - name: Skip base cleanup if no backup exists
+      ansible.builtin.debug:
+        msg: "No backup found -- skipping base cleanup."
+      when: not manifest_stat.stat.exists
+
+    - name: End play if no backup
+      ansible.builtin.meta: end_play
+      when: not manifest_stat.stat.exists
+
+    # ── Destroy base VMs (OpenWrt) ───────────────────────────────
+
+    - name: Check which base VMs exist
+      ansible.builtin.command:
+        cmd: qm status {{ item }}
+      loop: "{{ base_vm_ids }}"
+      register: _base_vm_checks
+      failed_when: false
+      changed_when: false
+
+    - name: Stop existing base VMs
+      ansible.builtin.command:
+        cmd: qm stop {{ item.item }}
+      loop: "{{ _base_vm_checks.results }}"
+      when: item.rc == 0
+      failed_when: false
+
+    - name: Wait for base VMs to stop
+      ansible.builtin.pause:
+        seconds: 5
+      when: _base_vm_checks.results | selectattr('rc', 'equalto', 0) | list | length > 0
+
+    - name: Destroy existing base VMs
+      ansible.builtin.command:
+        cmd: qm destroy {{ item.item }} --purge
+      loop: "{{ _base_vm_checks.results }}"
+      when: item.rc == 0
+      failed_when: false
+
+    # ── Destroy base containers (Kiosk/NM) ───────────────────────
+
+    - name: Check which base containers exist
+      ansible.builtin.command:
+        cmd: pct status {{ item }}
+      loop: "{{ base_ct_ids }}"
+      register: _base_ct_checks
+      failed_when: false
+      changed_when: false
+
+    - name: Stop existing base containers
+      ansible.builtin.command:
+        cmd: pct stop {{ item.item }}
+      loop: "{{ _base_ct_checks.results }}"
+      when: item.rc == 0
+      failed_when: false
+
+    - name: Wait for base containers to stop
+      ansible.builtin.pause:
+        seconds: 3
+      when: _base_ct_checks.results | selectattr('rc', 'equalto', 0) | list | length > 0
+
+    - name: Destroy existing base containers
+      ansible.builtin.command:
+        cmd: pct destroy {{ item.item }} --purge
+      loop: "{{ _base_ct_checks.results }}"
+      when: item.rc == 0
+      failed_when: false
+
+    # ── Deregister base resources from Manager ───────────────────
+
+    - name: Deregister destroyed base containers from Manager
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/manager_register.yml"
+      vars:
+        register_path: "api/host/{{ inventory_hostname }}/containers/{{ _deregister_vmid }}"
+        register_body: {}
+        register_method: DELETE
+        register_ignore_errors: true
+      loop: "{{ base_ct_ids }}"
+      loop_control:
+        loop_var: _deregister_vmid
+
+    - name: Deregister destroyed base VMs from Manager
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/manager_register.yml"
+      vars:
+        register_path: "api/host/{{ inventory_hostname }}/containers/{{ _deregister_vmid }}"
+        register_body: {}
+        register_method: DELETE
+        register_ignore_errors: true
+      loop: "{{ base_vm_ids }}"
+      loop_control:
+        loop_var: _deregister_vmid
+
+    # ── PCI passthrough cleanup ──────────────────────────────────
+
+    - name: Unbind devices from vfio-pci and restore native drivers
+      ansible.builtin.shell:
+        cmd: |
+          for dev in /sys/bus/pci/drivers/vfio-pci/0000:*/; do
+            [ -d "$dev" ] || continue
+            addr=$(basename "$dev")
+            echo "$addr" > /sys/bus/pci/drivers/vfio-pci/unbind 2>/dev/null || true
+            echo "" > "/sys/bus/pci/devices/${addr}/driver_override" 2>/dev/null || true
+          done
+          echo 1 > /sys/bus/pci/rescan 2>/dev/null || true
+          sleep 2
+          for dev in /sys/bus/pci/devices/0000:*/; do
+            [ -d "$dev" ] || continue
+            addr=$(basename "$dev")
+            class=$(cat "${dev}/class" 2>/dev/null)
+            [ "${class:0:4}" = "0x03" ] || continue
+            [ -e "${dev}/driver" ] && continue
+            vendor=$(cat "${dev}/vendor" 2>/dev/null)
+            case "$vendor" in
+              0x8086) echo "$addr" > /sys/bus/pci/drivers/i915/bind 2>/dev/null || true ;;
+              0x1002) echo "$addr" > /sys/bus/pci/drivers/amdgpu/bind 2>/dev/null || true ;;
+            esac
+          done
+          sleep 2
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Check if PCI passthrough config exists
+      ansible.builtin.stat:
+        path: /etc/modprobe.d/vfio-pci.conf
+      register: _vfio_conf
+
+    # ── Remove ansible-managed infrastructure config files ───────
+
+    - name: Remove ansible-managed config files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/network/interfaces.d/ansible-bridges.conf
+        - /etc/network/interfaces.d/ansible-container-bridge.conf
+        - /etc/network/interfaces.d/ansible-proxmox-lan.conf
+        - /etc/network/interfaces.d/ansible-temp-lan.conf
+        - /etc/modprobe.d/blacklist-wifi.conf
+        - /etc/modprobe.d/vfio-pci.conf
+        - /etc/modprobe.d/iwlwifi-options.conf
+        - /etc/ansible/facts.d/vm_builds.fact
+        - /etc/apt/sources.list.d/pve-no-subscription.sources
+        - /etc/modules-load.d/wireguard.conf
+        - /tmp/openwrt-router-24.10.0-x86-64-combined.img.gz
+        - /tmp/openwrt-router-24.10.0-x86-64-combined.img
+
+    # ── Base infrastructure proxy cleanup ────────────────────────
+
+    - name: Stop and remove base infrastructure proxy units
+      ansible.builtin.shell:
+        cmd: |
+          for svc in kiosk-manager-proxy kiosk-display-proxy \
+                     manager-api-proxy kiosk-vnc-proxy \
+                     supermanager-relay; do
+            systemctl stop "$svc" 2>/dev/null || true
+            systemctl disable "$svc" 2>/dev/null || true
+            rm -f "/etc/systemd/system/${svc}.service"
+          done
+          for unit in /etc/systemd/system/kiosk-display-relay-*.service \
+                      /etc/systemd/system/kiosk-vnc-relay-*.service \
+                      /etc/systemd/system/nm-relay-*.service; do
+            [ -f "$unit" ] || continue
+            name=$(basename "$unit")
+            systemctl stop "$name" 2>/dev/null || true
+            systemctl disable "$name" 2>/dev/null || true
+            rm -f "$unit"
+          done
+          systemctl daemon-reload 2>/dev/null || true
+          pkill -f 'socat.*TCP-LISTEN:9001' || true
+          pkill -f 'socat.*TCP-LISTEN:{{ kiosk_ws_port }}' || true
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    # ── Container NAT bridge cleanup ─────────────────────────────
+
+    - name: Flush iptables NAT rules for container bridge
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          cnt=$(iptables -t nat -S 2>/dev/null | grep -c '10\.99\.' || true)
+          [ "${cnt:-0}" -gt 0 ] && iptables -t nat -F || true
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Remove iptables FORWARD rules for container bridge
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          iptables -S FORWARD 2>/dev/null | grep 'vmbr_ct\|10\.99\.' | while read -r rule; do
+            iptables $(echo "$rule" | sed 's/^-A/-D/') 2>/dev/null || true
+          done
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Tear down container bridge
+      ansible.builtin.shell:
+        cmd: |
+          ip link set vmbr_ct down 2>/dev/null || true
+          ip link delete vmbr_ct 2>/dev/null || true
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Remove VPN subnet route
+      ansible.builtin.shell:
+        cmd: ip route del {{ vpn_subnet }} 2>/dev/null || true
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Re-enable enterprise repos if disabled
+      ansible.builtin.shell:
+        cmd: |
+          for f in /etc/apt/sources.list.d/pve-enterprise.sources.disabled \
+                   /etc/apt/sources.list.d/ceph.sources.disabled; do
+            [ -f "$f" ] && mv "$f" "${f%.disabled}"
+          done
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Tear down stale bridges
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          for br in $(ip -o link show type bridge | awk -F': ' '{print $2}'); do
+            grep -q "auto $br" /etc/network/interfaces 2>/dev/null && continue
+            ip link set "$br" down 2>/dev/null || true
+            ip link delete "$br" 2>/dev/null || true
+          done
+        executable: /bin/bash
+      changed_when: true
+
+    # ── Kernel / PCI state restoration ───────────────────────────
+
+    - name: Update initramfs after PCI config removal
+      ansible.builtin.command:
+        cmd: update-initramfs -u -k all
+      changed_when: true
+      when: _vfio_conf.stat.exists | default(false)
+
+    - name: Rebind WiFi PCI devices via sysfs (no modprobe -r)
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/sysfs_wifi_rebind.yml"
+      when: >-
+        ('router_nodes' in group_names) or
+        ('wifi_nodes' in group_names) or
+        ('bridge_nodes' in group_names)
+
+    - name: Rescan PCI bus to restore original drivers
+      ansible.builtin.shell:
+        cmd: echo 1 > /sys/bus/pci/rescan
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Bring up interfaces from restored config
+      ansible.builtin.command:
+        cmd: ifup --all --force
+      changed_when: true
+      failed_when: false
+
+    - name: Unload wireguard kernel module
+      ansible.builtin.command:
+        cmd: modprobe -r wireguard
+      failed_when: false
+      changed_when: true
+
+    # ── Controller state ─────────────────────────────────────────
+
+    - name: Tear down controller VPN tunnel
+      ansible.builtin.command:
+        cmd: sudo wg-quick down wg0
+      failed_when: false
+      changed_when: true
+      delegate_to: localhost
+
+    - name: Remove controller wg0 config
+      ansible.builtin.command:
+        cmd: sudo rm -f /etc/wireguard/wg0.conf
+      changed_when: true
+      failed_when: false
+      delegate_to: localhost
+
+    - name: Remove local state file from controller
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../.state/addresses.json"
+        state: absent
+      delegate_to: localhost
+
+    - name: Remove generated env files from controller
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ playbook_dir }}/../.env.generated"
+        - "{{ playbook_dir }}/../test.env.generated"
+      delegate_to: localhost
+
+    - name: Remove temporary Desktop VM SSH keys from controller
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/desktop_tmp_key
+        - /tmp/desktop_tmp_key.pub
+      delegate_to: localhost
 
 # ════════════════════════════════════════════════════════════════════
 # Per-feature rollback plays (opt-in via --tags <feature>-rollback)
@@ -638,7 +708,7 @@
       when: not (rollback | default(false) | bool)
 
     - name: Include group reconstruction
-      ansible.builtin.include_tasks: ../tasks/reconstruct_openwrt_group.yml
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/reconstruct_openwrt_group.yml"
 
 # ── Per-feature rollback: security hardening ─────────────────────
 
@@ -804,7 +874,7 @@
       when: not (rollback | default(false) | bool)
 
     - name: Include group reconstruction
-      ansible.builtin.include_tasks: ../tasks/reconstruct_wireguard_group.yml
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/reconstruct_wireguard_group.yml"
 
 - name: Rollback WireGuard VPN
   hosts: vpn_nodes
@@ -1478,7 +1548,7 @@
       changed_when: true
 
     - name: Rebind WiFi PCI devices via sysfs (no modprobe -r)
-      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/sysfs_wifi_rebind.yml"
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/sysfs_wifi_rebind.yml"
       when: >-
         ('router_nodes' in group_names) or
         ('wifi_nodes' in group_names) or
@@ -1522,7 +1592,7 @@
       when: not (rollback | default(false) | bool)
 
     - name: Process each LAN host
-      ansible.builtin.include_tasks: ../tasks/cleanup_lan_host.yml
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/cleanup_lan_host.yml"
       vars:
         _lan_host_ip: "{{ hostvars[item].ansible_host }}"
         _lan_host_name: "{{ item }}"

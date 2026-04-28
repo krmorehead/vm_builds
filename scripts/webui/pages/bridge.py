@@ -16,7 +16,7 @@ from scripts.webui.heartbeat import signal_quality
 
 
 def register() -> None:
-    @ui.page("/bridge")
+    @ui.page(Routes.BRIDGE)
     def bridge_page() -> None:
         with theme.page_shell("bridge"):
             _bridge_content()

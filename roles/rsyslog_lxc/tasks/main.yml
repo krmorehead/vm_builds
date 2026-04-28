@@ -36,7 +36,7 @@
 # ── Provision container via NM API (skipped when version matches) ─
 - name: Provision rsyslog LXC via NM API
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/rsyslog"
+    url: "{{ nm_api_url }}/api/provision/rsyslog"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -59,8 +59,22 @@
     timeout: 660
   delegate_to: localhost
   register: _provision_result
-  failed_when: not (_provision_result.json.success | default(false))
+  until: _provision_result.json.success | default(false)
+  retries: 2
+  delay: 10
   when: not (_service_up_to_date | default(false) | bool)
+
+# ── Apply privileged config on host (features need root@pam) ─────
+- name: Apply privileged LXC config on host for rsyslog
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/apply_privileged_lxc_config.yml"
+  vars:
+    _priv_ct_id: "{{ rsyslog_ct_id }}"
+    _priv_features: "{{ rsyslog_ct_features | join(',') }}"
+    _priv_mount_entries: []
+    _priv_lxc_conf_entries: []
+  when:
+    - not (_service_up_to_date | default(false) | bool)
+    - (_provision_result.json.status | default('')) == 'created_needs_host_config'
 
 # ── Configure callhome via NM API (skipped when version matches) ─
 - name: Configure callhome on rsyslog

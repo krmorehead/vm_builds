@@ -39,11 +39,7 @@
         qm stop \$vm --timeout 15 2>/dev/null || true;
         qm destroy \$vm --purge 2>/dev/null || true;
       done;
-      for ct in {{ wireguard_ct_id }} {{ meshwifi_ct_id }}
-      {{ bridge_ct_id }} {{ netdata_ct_id }} {{ rsyslog_ct_id }}
-      {{ pihole_ct_id }} {{ homeassistant_ct_id }} {{ jellyfin_ct_id }}
-      {{ kodi_ct_id }} {{ moonlight_ct_id }} {{ kiosk_ct_id }}
-      {{ gaming_ct_id }} {{ desktop_ct_id }}; do
+      for ct in {{ (debian_sibling_ct_ids + openwrt_sibling_ct_ids + [kiosk_ct_id | string]) | join(' ') }}; do
         pct status \$ct >/dev/null 2>&1 || continue;
         pct stop \$ct 2>/dev/null || true;
         pct destroy \$ct --purge 2>/dev/null || true;
@@ -75,19 +71,7 @@
     register_body: {}
     register_method: DELETE
     register_ignore_errors: true
-  loop:
-    - "{{ wireguard_ct_id }}"
-    - "{{ pihole_ct_id }}"
-    - "{{ meshwifi_ct_id }}"
-    - "{{ netdata_ct_id }}"
-    - "{{ rsyslog_ct_id }}"
-    - "{{ homeassistant_ct_id }}"
-    - "{{ jellyfin_ct_id }}"
-    - "{{ kodi_ct_id }}"
-    - "{{ moonlight_ct_id }}"
-    - "{{ desktop_ct_id }}"
-    - "{{ kiosk_ct_id }}"
-    - "{{ gaming_ct_id }}"
+  loop: "{{ debian_sibling_ct_ids + openwrt_sibling_ct_ids + [kiosk_ct_id | string] }}"
   loop_control:
     loop_var: _deregister_vmid
 

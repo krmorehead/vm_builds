@@ -18,11 +18,12 @@
   when: not (_service_up_to_date | default(false) | bool)
 
 # ── Determine container network ─────────────────────────────────
-- name: Compute Jellyfin LAN network
-  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_lan_network.yml"
+- name: Compute Jellyfin container network
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_wan_or_lan_network.yml"
   vars:
     lxc_net_service_name: jellyfin
     lxc_net_ip_offset: "{{ jellyfin_ct_ip_offset }}"
+    lxc_net_flavor_group: media_nodes
 
 # ── Ensure media path exists on host ──────────────────────────────
 - name: Ensure media directory exists on host
@@ -52,7 +53,7 @@
 # ── Provision container via NM API (skipped when version matches) ─
 - name: Provision Jellyfin LXC via NM API
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/jellyfin"
+    url: "{{ nm_api_url }}/api/provision/jellyfin"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -67,10 +68,10 @@
       startup_order: "{{ jellyfin_ct_startup_order }}"
       unprivileged: "{{ jellyfin_ct_unprivileged }}"
       features: "{{ jellyfin_ct_features | join(',') }}"
-      ip: "{{ _lxc_ct_ip }}/{{ _lan_cidr }}"
-      gateway: "{{ _lan_gateway }}"
-      nameserver: "{{ _lan_gateway }}"
-      bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
+      ip: "{{ _lxc_net_ip }}/{{ _lxc_net_cidr }}"
+      gateway: "{{ _lxc_net_gateway }}"
+      nameserver: "{{ _lxc_net_nameserver }}"
+      bridge: "{{ _lxc_net_bridge }}"
       mount_entries: "{{ _jellyfin_mount_entries }}"
       lxc_conf_entries:
         - "lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir"
@@ -80,7 +81,9 @@
     timeout: 660
   delegate_to: localhost
   register: _provision_result
-  failed_when: not (_provision_result.json.success | default(false))
+  until: _provision_result.json.success | default(false)
+  retries: 2
+  delay: 10
   when: not (_service_up_to_date | default(false) | bool)
 
 # ── Apply privileged config on host (features/mounts/DRI need root@pam) ─
@@ -128,5 +131,5 @@
 # ── Export static IP for downstream roles ─────────────────────────
 - name: Export Jellyfin static IP for downstream roles
   ansible.builtin.set_fact:
-    jellyfin_static_ip: "{{ _lxc_ct_ip }}"
+    jellyfin_static_ip: "{{ _lxc_net_ip }}"
     cacheable: true

@@ -10,12 +10,12 @@ from __future__ import annotations
 from nicegui import ui
 
 from scripts.webui import theme
-from scripts.webui.data import Labels, PageTitles, get_mesh_nodes
+from scripts.webui.data import ApiRoutes, Labels, PageTitles, Routes, get_mesh_nodes
 from scripts.webui.heartbeat import signal_quality
 
 
 def register() -> None:
-    @ui.page("/mesh")
+    @ui.page(Routes.MESH)
     def mesh_page() -> None:
         with theme.page_shell("mesh"):
             _mesh_content()
@@ -225,7 +225,7 @@ def _render_batman_section(container) -> None:
                 from scripts.webui.api_client import api
                 try:
                     resp = await api.get(
-                        "/api/batman/status",
+                        ApiRoutes.BATMAN_STATUS,
                         timeout=15.0,
                     )
                     if resp.status_code == 200:
@@ -313,8 +313,9 @@ def _render_batman_section(container) -> None:
                 from scripts.webui.api_client import api
                 action = "enable" if enable else "disable"
                 try:
+                    route = ApiRoutes.BATMAN_ENABLE if enable else ApiRoutes.BATMAN_DISABLE
                     resp = await api.post(
-                        f"/api/batman/{action}",
+                        route,
                         timeout=60.0,
                     )
                     if resp.status_code == 200:

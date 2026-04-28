@@ -29,7 +29,7 @@
 
 - name: Deploy streaming config via NM API
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ netdata_ct_id }}/file"
+    url: "{{ nm_api_url }}/api/config/{{ netdata_ct_id }}/file"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -43,7 +43,7 @@
 
 - name: Remove streaming config when parent IP is not set
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ netdata_ct_id }}/exec"
+    url: "{{ nm_api_url }}/api/provision/{{ netdata_ct_id }}/exec"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -59,16 +59,16 @@
 - name: Restart netdata service via NM API
   ansible.builtin.uri:
     url: >-
-      http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ netdata_ct_id }}/service/netdata/restart
+      {{ nm_api_url }}/api/config/{{ netdata_ct_id }}/service/netdata/restart
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body: {}
     status_code: 200
-    timeout: 60
+    timeout: 120
   delegate_to: localhost
-  retries: 3
-  delay: 5
+  retries: 5
+  delay: 10
   register: _netdata_restart
   until: (_netdata_restart.status | default(0)) == 200
 

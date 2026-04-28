@@ -218,7 +218,6 @@ os.environ["NICEGUI_STORAGE_PATH"] = _STORAGE_DIR
 #
 # Both are upstream issues — remove when upgrading past the fix.
 
-from nicegui.persistence.file_persistent_dict import FilePersistentDict  # noqa: E402
 from nicegui.storage import Storage  # noqa: E402
 from nicegui import background_tasks  # noqa: E402
 

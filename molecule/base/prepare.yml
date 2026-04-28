@@ -1,0 +1,101 @@
+---
+- name: Verify image version sidecars exist
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    _project_root: "{{ playbook_dir }}/../.."
+    images_dir: "{{ _project_root }}/images"
+    _required_version_files:
+      - kiosk
+      - wireguard
+      - mesh
+      - router
+  tasks:
+    - name: Check version sidecar files exist
+      ansible.builtin.stat:
+        path: "{{ images_dir }}/{{ item }}.version"
+      loop: "{{ _required_version_files }}"
+      register: _version_checks
+
+    - name: Identify missing version files
+      ansible.builtin.set_fact:
+        missing_versions: >-
+          {{ _version_checks.results
+             | selectattr('stat.exists', 'false')
+             | map(attribute='item')
+             | list }}
+
+    - name: Fail if version files are missing
+      ansible.builtin.fail:
+        msg: |-
+          Missing version sidecar files:
+          {% for v in missing_versions %}
+            - images/{{ v }}.version
+          {% endfor %}
+
+          Build them with: ./build-images.sh
+      when: missing_versions | length > 0
+
+- name: Generate controller VPN keypair
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Check if controller keypair already exists
+      vars:
+        _raw: "{{ lookup('env', 'WIREGUARD_PRIVATE_KEY_CONTROLLER') }}"
+      ansible.builtin.set_fact:
+        _ctrl_key_exists: "{{ _raw | length == 44 and '$' not in _raw and _raw not in ['None', 'null'] }}"
+
+    - name: Generate controller keypair via Python X25519
+      ansible.builtin.command:
+        cmd: >-
+          {{ playbook_dir }}/../../.venv/bin/python3 -c
+          "from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey;
+          import base64;
+          k = X25519PrivateKey.generate();
+          print(base64.b64encode(k.private_bytes_raw()).decode());
+          print(base64.b64encode(k.public_key().public_bytes_raw()).decode())"
+      register: _ctrl_keygen
+      changed_when: true
+      when: not (_ctrl_key_exists | bool)
+
+    - name: Extract controller keys
+      ansible.builtin.set_fact:
+        _ctrl_privkey: "{{ _ctrl_keygen.stdout_lines[0] }}"
+        _ctrl_pubkey: "{{ _ctrl_keygen.stdout_lines[1] }}"
+      when: not (_ctrl_key_exists | bool)
+
+    - name: Write controller keypair to env.generated
+      ansible.builtin.blockinfile:
+        path: "{{ env_generated_path }}"
+        create: true
+        mode: "0600"
+        marker: "# {mark} WireGuard CONTROLLER (auto-generated)"
+        block: |
+          WIREGUARD_PRIVATE_KEY_CONTROLLER={{ _ctrl_privkey }}
+          WIREGUARD_PUBLIC_KEY_CONTROLLER={{ _ctrl_pubkey }}
+      when: not (_ctrl_key_exists | bool)
+
+- name: Start heartbeat API server
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    _project_root: "{{ playbook_dir }}/../.."
+  tasks:
+    - name: Clear stale nodes.json from previous runs
+      ansible.builtin.file:
+        path: "{{ _project_root }}/.state/nodes.json"
+        state: absent
+
+    - name: Detect controller IP and start API server
+      ansible.builtin.command:
+        cmd: "{{ _project_root }}/.venv/bin/python3 {{ _project_root }}/scripts/start_test_api.py"
+      register: _api_start
+      changed_when: true
+
+    - name: Report API server URL
+      ansible.builtin.debug:
+        msg: "Heartbeat API server: {{ _api_start.stdout }}"

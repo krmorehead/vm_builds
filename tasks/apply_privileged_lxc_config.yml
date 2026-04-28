@@ -45,10 +45,19 @@
   loop: "{{ _priv_lxc_conf_entries | default([]) }}"
   changed_when: true
 
-- name: "Start container after host config — CT {{ _priv_ct_id }}"
-  ansible.builtin.command:
-    cmd: pct start {{ _priv_ct_id }}
-  changed_when: true
+- name: "Ensure container is running — CT {{ _priv_ct_id }}"
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      if pct status {{ _priv_ct_id }} 2>/dev/null | grep -q running; then
+        echo ALREADY_RUNNING
+      else
+        pct start {{ _priv_ct_id }}
+        echo STARTED
+      fi
+    executable: /bin/bash
+  register: _priv_start
+  changed_when: "'STARTED' in _priv_start.stdout"
 
 - name: "Wait for container networking — CT {{ _priv_ct_id }}"
   ansible.builtin.shell:

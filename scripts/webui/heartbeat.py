@@ -20,6 +20,8 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from scripts.webui.constants import Ports, VMIDs
+
 
 # ── Data models ──────────────────────────────────────────────────────
 
@@ -234,9 +236,11 @@ def reset_circuit(ip: str) -> None:
 
 # ── HTTP command execution ────────────────────────────────────────────
 
-CALLHOME_CMD_PORT = 9002
+CALLHOME_CMD_PORT = Ports.CALLHOME_CMD
 
-OPENWRT_VMIDS: frozenset[int] = frozenset({100, 103, 104})
+OPENWRT_VMIDS: frozenset[int] = frozenset({
+    VMIDs.ROUTER_VM, VMIDs.MESH_CT, VMIDs.BRIDGE_CT,
+})
 
 
 def cmd_path_for_vmid(vmid: int | None) -> str:
@@ -285,7 +289,7 @@ def _http_exec(
 # ── Metric collectors ────────────────────────────────────────────────
 
 
-def collect_wifi_metrics(ip: str, node_id: str = "", *, token: str = "", vmid: int | None = None) -> HeartbeatCache:
+def collect_wifi_metrics(ip: str, _node_id: str = "", *, token: str = "", vmid: int | None = None) -> HeartbeatCache:
     """Collect WiFi interface and link metrics from an OpenWrt node via HTTP.
 
     Uses wifi_setup.sh (baked into mesh/bridge images) as the primary
@@ -298,7 +302,8 @@ def collect_wifi_metrics(ip: str, node_id: str = "", *, token: str = "", vmid: i
         "stations": [],
         "radio": {},
     }
-    _exec = lambda cmd, t=10: _http_exec(ip, cmd, token, t, vmid)
+    def _exec(cmd: str, t: int = 10) -> tuple[bool, str]:
+        return _http_exec(ip, cmd, token, t, vmid)
 
     ok, metrics_out = _exec("/usr/sbin/wifi_setup.sh metrics 2>/dev/null")
     if ok and "PHY=" in metrics_out:
@@ -343,16 +348,18 @@ def collect_wifi_metrics(ip: str, node_id: str = "", *, token: str = "", vmid: i
     )
 
 
-def collect_bridge_metrics(ip: str, node_id: str = "", *, token: str = "", vmid: int | None = None) -> HeartbeatCache:
+def collect_bridge_metrics(ip: str, _node_id: str = "", *, token: str = "", vmid: int | None = None) -> HeartbeatCache:
     """Collect WiFi bridge metrics (superset of wifi metrics) via HTTP.
 
     When wifi_setup.sh is available, all data (interfaces, stations,
     bridge, STP) comes from the script's metrics output via the container's
     HTTP command endpoint.
     """
-    wifi = collect_wifi_metrics(ip, node_id, token=token, vmid=vmid)
+    wifi = collect_wifi_metrics(ip, _node_id, token=token, vmid=vmid)
     now = datetime.now().isoformat(timespec="seconds")
-    _exec = lambda cmd, t=10: _http_exec(ip, cmd, token, t, vmid)
+
+    def _exec(cmd: str, t: int = 10) -> tuple[bool, str]:
+        return _http_exec(ip, cmd, token, t, vmid)
 
     bridge_data = dict(wifi.data)
     bridge_data["bridge"] = {}
@@ -383,11 +390,13 @@ def collect_bridge_metrics(ip: str, node_id: str = "", *, token: str = "", vmid:
     )
 
 
-def collect_router_metrics(ip: str, node_id: str = "", *, token: str = "", vmid: int | None = None) -> HeartbeatCache:
+def collect_router_metrics(ip: str, _node_id: str = "", *, token: str = "", vmid: int | None = None) -> HeartbeatCache:
     """Collect router-level metrics from an OpenWrt node via HTTP."""
     now = datetime.now().isoformat(timespec="seconds")
     data: dict = {}
-    _exec = lambda cmd, t=10: _http_exec(ip, cmd, token, t, vmid)
+
+    def _exec(cmd: str, t: int = 10) -> tuple[bool, str]:
+        return _http_exec(ip, cmd, token, t, vmid)
 
     ok, wan_out = _exec(
         "uci get network.wan.proto 2>/dev/null; "
@@ -450,13 +459,13 @@ def collect_router_metrics(ip: str, node_id: str = "", *, token: str = "", vmid:
     )
 
 
-def collect_mesh_metrics(ip: str, node_id: str = "", *, token: str = "", vmid: int | None = None) -> HeartbeatCache:
+def collect_mesh_metrics(ip: str, _node_id: str = "", *, token: str = "", vmid: int | None = None) -> HeartbeatCache:
     """Collect mesh network metrics (WiFi + peer info) via HTTP.
 
     Role detection uses wifi_setup.sh when available (baked into the
     mesh/bridge image). Falls back to iw interface type parsing.
     """
-    wifi = collect_wifi_metrics(ip, node_id, token=token, vmid=vmid)
+    wifi = collect_wifi_metrics(ip, _node_id, token=token, vmid=vmid)
     now = datetime.now().isoformat(timespec="seconds")
     mesh_data = dict(wifi.data)
 
@@ -797,7 +806,7 @@ def _parse_batman_interfaces(output: str) -> list[dict]:
     return interfaces
 
 
-def collect_batman_metrics(ip: str, node_id: str = "", *, token: str = "", vmid: int | None = None) -> HeartbeatCache:
+def collect_batman_metrics(ip: str, _node_id: str = "", *, token: str = "", vmid: int | None = None) -> HeartbeatCache:
     """Collect batman-adv status from a node via HTTP command endpoint.
 
     batman_trigger.sh runs inside the container. The command endpoint

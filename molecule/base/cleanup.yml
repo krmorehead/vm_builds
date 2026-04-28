@@ -1,0 +1,3 @@
+---
+- name: Import unified cleanup
+  ansible.builtin.import_playbook: ../../playbooks/cleanup.yml

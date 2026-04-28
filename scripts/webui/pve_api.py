@@ -193,12 +193,18 @@ class PveApiClient:
             self._put(f"/nodes/{self._node}/lxc/{vmid}/config", data=params)
 
     def ct_interfaces(self, vmid: int) -> list[dict]:
-        """Get container network interfaces (like ``ip addr`` inside)."""
+        """Get container network interfaces (like ``ip addr`` inside).
+
+        Returns empty list when the container is stopped (404) or the
+        QEMU Guest Agent is unavailable.  Re-raises on unexpected errors.
+        """
         try:
             resp = self._get(f"/nodes/{self._node}/lxc/{vmid}/interfaces")
             return resp.get("data", [])
-        except PveApiError:
-            return []
+        except PveApiError as exc:
+            if exc.status in (404, 500):
+                return []
+            raise
 
     # ── QEMU VM operations ────────────────────────────────────────
 

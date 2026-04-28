@@ -18,11 +18,12 @@
   when: not (_service_up_to_date | default(false) | bool)
 
 # ── Determine container network ─────────────────────────────────
-- name: Compute Home Assistant LAN network
-  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_lan_network.yml"
+- name: Compute Home Assistant container network
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_wan_or_lan_network.yml"
   vars:
     lxc_net_service_name: homeassistant
     lxc_net_ip_offset: "{{ homeassistant_ct_ip_offset }}"
+    lxc_net_flavor_group: service_nodes
 
 # ── Build USB device mount entries (optional) ────────────────────
 - name: Build USB device mount entries
@@ -56,7 +57,7 @@
 # ── Provision container via NM API (skipped when version matches) ─
 - name: Provision Home Assistant LXC via NM API
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/homeassistant"
+    url: "{{ nm_api_url }}/api/provision/homeassistant"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -70,17 +71,19 @@
       onboot: "{{ homeassistant_ct_onboot }}"
       startup_order: "{{ homeassistant_ct_startup_order }}"
       features: "{{ homeassistant_ct_features | join(',') }}"
-      ip: "{{ _lxc_ct_ip }}/{{ _lan_cidr }}"
-      gateway: "{{ _lan_gateway }}"
-      nameserver: "{{ _lan_gateway }}"
-      bridge: "{{ proxmox_all_bridges[1] | default('vmbr0') }}"
+      ip: "{{ _lxc_net_ip }}/{{ _lxc_net_cidr }}"
+      gateway: "{{ _lxc_net_gateway }}"
+      nameserver: "{{ _lxc_net_nameserver }}"
+      bridge: "{{ _lxc_net_bridge }}"
       mount_entries: "{{ _ha_mount_entries }}"
       image_version: "{{ homeassistant_image_version }}"
     status_code: 200
     timeout: 660
   delegate_to: localhost
   register: _provision_result
-  failed_when: not (_provision_result.json.success | default(false))
+  until: _provision_result.json.success | default(false)
+  retries: 2
+  delay: 10
   when: not (_service_up_to_date | default(false) | bool)
 
 # ── Apply privileged config on host (bind mounts need root@pam) ─
@@ -126,5 +129,5 @@
 # ── Export static IP for downstream roles ─────────────────────────
 - name: Export Home Assistant static IP for downstream roles
   ansible.builtin.set_fact:
-    homeassistant_static_ip: "{{ _lxc_ct_ip }}"
+    homeassistant_static_ip: "{{ _lxc_net_ip }}"
     cacheable: true

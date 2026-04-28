@@ -27,7 +27,7 @@
 
 - name: Push Moonlight config via NM API
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ moonlight_ct_id }}/file"
+    url: "{{ nm_api_url }}/api/config/{{ moonlight_ct_id }}/file"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -43,20 +43,22 @@
 # ── Server pairing via NM API (optional) ─────────────────────────
 
 - name: Restart moonlight-display to pick up config changes
-  vars:
-    _nm_base: >-
-      http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}
   ansible.builtin.uri:
-    url: "{{ _nm_base | trim }}/api/config/{{ moonlight_ct_id }}/service/moonlight-display/restart"
+    url: "{{ nm_api_url }}/api/config/{{ moonlight_ct_id }}/service/moonlight-display/restart"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
     body: {}
     status_code: 200
-    timeout: 60
+    timeout: 120
   delegate_to: localhost
   register: _restart_result
+  retries: 5
+  delay: 10
   when: moonlight_server_ip | default('', true) | length > 0
+  until: >-
+    (_restart_result.status | default(0)) == 200
+    or ('not found' in (_restart_result.json.output | default('')))
   failed_when: >-
     _restart_result.json is defined
     and not (_restart_result.json.success | default(false))

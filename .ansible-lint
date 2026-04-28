@@ -12,6 +12,7 @@ exclude_paths:
   - roles/*/tasks/manager_register.yml
   - roles/*/tasks/resolve_deployed_version.yml
   - roles/*/tasks/resolve_kiosk_version.yml
+  - roles/*/tasks/sysfs_wifi_rebind.yml
 
 skip_list:
   - command-instead-of-module

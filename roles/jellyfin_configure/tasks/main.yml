@@ -14,10 +14,8 @@
     _render_user: jellyfin
 
 - name: Start Jellyfin service
-  vars:
-    _nm_url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}"
   ansible.builtin.uri:
-    url: "{{ _nm_url }}/api/config/{{ jellyfin_ct_id }}/service/jellyfin/restart"
+    url: "{{ nm_api_url }}/api/config/{{ jellyfin_ct_id }}/service/jellyfin/restart"
     headers: "{{ nm_auth_headers }}"
     method: POST
     status_code: 200
@@ -48,7 +46,7 @@
 
 - name: Push transcoding config via NM API
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/config/{{ jellyfin_ct_id }}/file"
+    url: "{{ nm_api_url }}/api/config/{{ jellyfin_ct_id }}/file"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -63,7 +61,7 @@
 
 - name: Wait for Jellyfin web interface to be ready
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/{{ jellyfin_ct_id }}/exec"
+    url: "{{ nm_api_url }}/api/provision/{{ jellyfin_ct_id }}/exec"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -98,4 +96,5 @@
       JELLYFIN_ADMIN_PASSWORD={{ _jellyfin_admin_password }}
       JELLYFIN_WEB_URL=http://{{ jellyfin_static_ip }}:8096
   delegate_to: localhost
+  no_log: true
   when: jellyfin_admin_password | length == 0

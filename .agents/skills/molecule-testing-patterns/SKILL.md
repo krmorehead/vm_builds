@@ -124,7 +124,7 @@ Sunshine (gaming_nodes), ai CANNOT also run Moonlight (streaming_nodes).
 ## Pre-Test Checklist
 
 1. Source test env: `set -a; source test.env; set +a`
-2. Verify SSH: `ssh root@$PRIMARY_HOST hostname`
+2. Verify access: `curl -sf http://localhost:$WEBUI_PORT/api/fleet/health` (if base state up) or `ansible home -m ping` (first run)
 3. Build custom images (required): `scripts/build-images.sh`
 4. Verify images exist: `ls images/openwrt-router-*.img.gz images/openwrt-mesh-lxc-*-rootfs.tar.gz images/debian-*.tar.zst`
 5. If previous run left host in bad state, power-cycle the machine
@@ -133,7 +133,7 @@ Sunshine (gaming_nodes), ai CANNOT also run Moonlight (streaming_nodes).
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `UNREACHABLE` during converge | SSH broken or host down | Check `PRIMARY_HOST`, verify SSH |
+| `UNREACHABLE` during converge | Host down or network broken | Check `curl $CALLHOME_URL/api/fleet/health`, then Ansible access |
 | `community.proxmox` not found | Collections missing | `ansible-galaxy collection install -r requirements.yml` |
 | Bridge numbers keep incrementing | Cleanup didn't remove bridges | `scripts/cleanup.sh clean test.env` |
 | WiFi radios=0 after converge | PCI passthrough not cleaned up | Ensure cleanup unbinds vfio-pci, reloads modules, rescans PCI |

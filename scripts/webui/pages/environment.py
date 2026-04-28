@@ -5,11 +5,11 @@ from __future__ import annotations
 from nicegui import ui
 
 from scripts.webui import data, theme
-from scripts.webui.data import Labels, PageTitles
+from scripts.webui.data import Labels, PageTitles, Routes
 
 
 def register() -> None:
-    @ui.page("/environment")
+    @ui.page(Routes.ENVIRONMENT)
     def environment_page() -> None:
         from scripts.webui.app import get_env_path
 

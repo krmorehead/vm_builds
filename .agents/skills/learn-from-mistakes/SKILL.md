@@ -113,9 +113,9 @@ for EVERY iteration. Over a month of test cycles, that's HOURS of accumulated
 waste — all to avoid spending 10 minutes diagnosing the actual root cause.
 
 **When you see a check failing with retries:**
-1. SSH into the host and run the check manually — RIGHT NOW.
-2. If it's a service not starting: `systemctl status`, `journalctl -u`, check for port conflicts.
-3. If it's a heartbeat not arriving: check the relay chain hop by hop.
+1. Query the fleet API first: `curl <SM_URL>/api/fleet/ready?services=<name>` and `curl <SM_URL>/api/container/<name>/ready` — this shows heartbeat status, extensions, and last-seen time.
+2. If the fleet API shows the service as not ready, check the relay chain: Container → NM → CM → SM. Query each hop's `/api/nodes` endpoint.
+3. For host-level issues only (not container health): check `journalctl -u kiosk-server` on the Proxmox host for NM errors, or `pct exec <vmid> -- journalctl -u callhome` for callhome agent errors.
 4. Fix the root cause. Remove the retries. The ideal retry count is zero.
 
 Previous catastrophe (2026-04-14): A legacy VNC proxy held port 6080 on

@@ -49,6 +49,13 @@ COLOR_ERROR = "#f87171"
 COLOR_WARNING = "#fbbf24"
 COLOR_INFO = "#60a5fa"
 
+CHART_BG = "rgba(10, 22, 44, 0.9)"
+CHART_AREA_TEAL = "rgba(20, 184, 166, 0.08)"
+CHART_AREA_TEAL_STRONG = "rgba(20, 184, 166, 0.12)"
+CHART_AREA_BLUE = "rgba(96, 165, 250, 0.08)"
+CHART_AREA_BLUE_STRONG = "rgba(96, 165, 250, 0.12)"
+CODE_BG = "rgba(4, 10, 22, 0.8)"
+
 SIDEBAR_WIDTH = "210px"
 
 # ── Generated CSS ─────────────────────────────────────────────────────
@@ -363,21 +370,15 @@ def status_color(status: str) -> str:
 def status_dot(status: str) -> ui.icon:
     """Render a small colored status dot icon.
 
-    Color semantics:
+    Color semantics follow status_color():
     - online → green (healthy, heartbeat active)
-    - reachable → orange (PVE API or NM reachable, but no heartbeat)
-    - stale → orange (heartbeat was active, now stale)
-    - unreachable → red (PVE API and NM not responding)
-    - offline → red (heartbeat reports offline)
+    - reachable/stale → orange (partially reachable or stale heartbeat)
+    - unreachable/offline → red (not responding)
     - unknown / anything else → grey (not probed yet)
     """
-    if status == "online":
-        return ui.icon("circle", size="xs").style(f"color: {COLOR_SUCCESS}")
-    if status in ("stale", "reachable"):
-        return ui.icon("radio_button_unchecked", size="xs").style(f"color: {COLOR_WARNING}")
-    if status in ("offline", "unreachable"):
-        return ui.icon("circle", size="xs").style(f"color: {COLOR_ERROR}")
-    return ui.icon("circle", size="xs").style(f"color: {TEXT_DISABLED}")
+    color = status_color(status)
+    icon_name = "radio_button_unchecked" if status in ("stale", "reachable") else "circle"
+    return ui.icon(icon_name, size="xs").style(f"color: {color}")
 
 
 def stat_value(value: str, label: str) -> None:
@@ -553,6 +554,18 @@ def help_tooltip(text: str) -> None:
         )
 
 
+def _is_fleet_capable() -> bool:
+    """Check if the current manager instance supports fleet operations.
+
+    Lazy-imports manager to avoid a hard coupling between theme and
+    the manager tier at module load time.
+    """
+    from scripts.webui import manager as _mgr
+
+    mgr = _mgr.try_get_instance()
+    return bool(mgr and mgr.supports_fleet)
+
+
 def kiosk_nav_bar() -> None:
     """Render a fixed top bar with Home button for kiosk-mode pages.
 
@@ -565,10 +578,7 @@ def kiosk_nav_bar() -> None:
         f"padding: 0 16px; gap: 12px; "
         f"background: {BG_CARD}; border-bottom: 1px solid {BORDER};"
     )
-    from scripts.webui import manager as _mgr
     from scripts.webui.data import KIOSK_NAV_ITEMS, Labels, Routes
-
-    mgr = _mgr.try_get_instance()
 
     with ui.element("div").style(bar_style):
         ui.button(
@@ -577,7 +587,7 @@ def kiosk_nav_bar() -> None:
         ui.label(Labels.HOME_HUB).classes("text-sm").style(f"color: {TEXT_SECONDARY}")
         ui.space()
         for nav_label, nav_path, nav_icon in KIOSK_NAV_ITEMS:
-            if nav_path == Routes.FLEET and (not mgr or not mgr.supports_fleet):
+            if nav_path == Routes.FLEET and not _is_fleet_capable():
                 continue
             ui.button(
                 nav_label, icon=nav_icon,
@@ -587,7 +597,7 @@ def kiosk_nav_bar() -> None:
 
 
 @contextmanager
-def kiosk_page_shell(page_name: str = "") -> Generator[ui.column, None, None]:
+def kiosk_page_shell(_page_name: str = "") -> Generator[ui.column, None, None]:
     """Apply theme, render kiosk nav bar, and yield a centered content column.
 
     Like page_shell() but uses a slim home bar instead of the full sidebar.

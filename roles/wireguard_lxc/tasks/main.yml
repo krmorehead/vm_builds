@@ -12,9 +12,9 @@
 
 # ── Host-level kernel module setup (SSH) ─────────────────────────
 - name: Load wireguard kernel module on Proxmox host
-  ansible.builtin.command:
-    cmd: modprobe wireguard
-  changed_when: true
+  community.general.modprobe:
+    name: wireguard
+    state: present
 
 - name: Persist wireguard module across reboots
   ansible.builtin.copy:
@@ -22,7 +22,17 @@
     dest: /etc/modules-load.d/wireguard.conf
     mode: "0644"
 
-# ── Determine container network based on host topology ───────────
+# ── Verify template exists (skipped when version matches) ──────────
+- name: Verify WireGuard template exists
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/verify_lxc_template.yml"
+  vars:
+    lxc_template_path: "{{ wireguard_ct_template_path }}"
+    lxc_service_name: WireGuard
+  when: not (_service_up_to_date | default(false) | bool)
+
+# ── Container network: LAN on router/LAN hosts, NAT on WAN hosts ───
+# Same topology as all other services. WireGuard is externally reachable
+# via DNAT regardless of which bridge the container is on.
 - name: Compute WireGuard container network
   ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/lxc_wan_or_lan_network.yml"
   vars:
@@ -41,7 +51,7 @@
 # ── Provision container via NM API (skipped when version matches) ─
 - name: Provision WireGuard LXC via NM API
   ansible.builtin.uri:
-    url: "http://{{ nm_api_host | default(ansible_host) }}:{{ nm_api_port | default(kiosk_manager_port) }}/api/provision/wireguard"
+    url: "{{ nm_api_url }}/api/provision/wireguard"
     headers: "{{ nm_auth_headers }}"
     method: POST
     body_format: json
@@ -64,13 +74,27 @@
     timeout: 660
   delegate_to: localhost
   register: _provision_result
-  failed_when: not (_provision_result.json.success | default(false))
+  until: _provision_result.json.success | default(false)
+  retries: 2
+  delay: 10
   when: not (_service_up_to_date | default(false) | bool)
 
 - name: Report provision result
   ansible.builtin.debug:
     msg: "WireGuard on {{ inventory_hostname }}: {{ _provision_result.json.status }} — {{ _provision_result.json.log | default([]) | join(', ') }}"
   when: not (_service_up_to_date | default(false) | bool)
+
+# ── Apply privileged config on host (features need root@pam) ─────
+- name: Apply privileged LXC config on host for WireGuard
+  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/apply_privileged_lxc_config.yml"
+  vars:
+    _priv_ct_id: "{{ wireguard_ct_id }}"
+    _priv_features: "{{ wireguard_ct_features | join(',') }}"
+    _priv_mount_entries: []
+    _priv_lxc_conf_entries: []
+  when:
+    - not (_service_up_to_date | default(false) | bool)
+    - (_provision_result.json.status | default('')) == 'created_needs_host_config'
 
 # ── Configure callhome via NM API (skipped when version matches) ─
 - name: Configure callhome on WireGuard
@@ -98,74 +122,97 @@
     _wg_parent_ansible_host: "{{ hostvars[item].ansible_host }}"
   loop: "{{ ansible_play_hosts }}"
 
-# ── Port forwarding for WireGuard on NAT bridge (WAN hosts only) ──
-- name: Add WireGuard DNAT rule (WAN hosts)
+# ── Export static IP for downstream roles ─────────────────────────
+- name: Export WireGuard static IP for downstream roles
+  ansible.builtin.set_fact:
+    wireguard_static_ip: "{{ _lxc_net_ip }}"
+    cacheable: true
+
+# ── Port forwarding: DNAT from WAN bridge to container (ALL hosts) ──
+- name: Add WireGuard DNAT rule
+  vars:
+    _wan: "{{ proxmox_wan_bridge }}"
+    _port: "{{ wireguard_listen_port }}"
+    _dest: "{{ _lxc_net_ip }}:{{ wireguard_listen_port }}"
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
-      if iptables -t nat -C PREROUTING -i {{ proxmox_wan_bridge }} -p udp --dport 51820 -j DNAT --to-destination {{ _lxc_net_ip }}:51820 2>/dev/null; then
+      if iptables -t nat -C PREROUTING -i {{ _wan }} -p udp --dport {{ _port }} \
+         -j DNAT --to-destination {{ _dest }} 2>/dev/null; then
         echo EXISTS
       else
-        iptables -t nat -A PREROUTING -i {{ proxmox_wan_bridge }} -p udp --dport 51820 -j DNAT --to-destination {{ _lxc_net_ip }}:51820
+        iptables -t nat -A PREROUTING -i {{ _wan }} -p udp --dport {{ _port }} \
+           -j DNAT --to-destination {{ _dest }}
         echo ADDED
       fi
     executable: /bin/bash
   register: _wg_dnat
   changed_when: "'ADDED' in _wg_dnat.stdout"
-  when:
-    - not (_service_up_to_date | default(false) | bool)
-    - not (_lxc_net_on_lan | bool)
 
-- name: Add WireGuard FORWARD rule (WAN hosts)
+- name: Add WireGuard FORWARD rules (inbound + return)
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
-      if iptables -C FORWARD -i {{ proxmox_wan_bridge }} -o {{ proxmox_container_bridge }} -p udp --dport 51820 -j ACCEPT 2>/dev/null; then
-        echo EXISTS
-      else
-        iptables -A FORWARD -i {{ proxmox_wan_bridge }} -o {{ proxmox_container_bridge }} -p udp --dport 51820 -j ACCEPT
-        echo ADDED
+      WAN="{{ proxmox_wan_bridge }}"
+      CT="{{ _lxc_net_bridge }}"
+      CHANGED=0
+      if ! iptables -C FORWARD -i "$WAN" -o "$CT" -p udp --dport {{ wireguard_listen_port }} -j ACCEPT 2>/dev/null; then
+        iptables -A FORWARD -i "$WAN" -o "$CT" -p udp --dport {{ wireguard_listen_port }} -j ACCEPT
+        CHANGED=1
       fi
+      if ! iptables -C FORWARD -i "$CT" -o "$WAN" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
+        iptables -A FORWARD -i "$CT" -o "$WAN" -m state --state RELATED,ESTABLISHED -j ACCEPT
+        CHANGED=1
+      fi
+      [ "$CHANGED" -eq 1 ] && echo ADDED || echo EXISTS
     executable: /bin/bash
   register: _wg_fwd
   changed_when: "'ADDED' in _wg_fwd.stdout"
-  when:
-    - not (_service_up_to_date | default(false) | bool)
-    - not (_lxc_net_on_lan | bool)
 
-# ── UDP proxy for WireGuard on router node (cross-bridge, avoids hairpin NAT) ──
-# The hub WireGuard container is on the LAN bridge but clients connect via the
-# WAN IP. iptables DNAT between bridges causes hairpin NAT. socat avoids this.
-- name: Deploy wireguard-udp-proxy (host:51820 → container:51820, router only)
-  ansible.builtin.copy:
-    content: |
-      [Unit]
-      Description=WireGuard UDP proxy (host:51820 -> wg-container:51820)
-      After=network.target pve-guests.service
-      Wants=pve-guests.service
+# When the WireGuard container is on the LAN bridge (router/LAN hosts),
+# its gateway is OpenWrt (10.10.10.1), not the Proxmox host. Without
+# MASQUERADE, DNAT'd reply packets route through OpenWrt and bypass
+# the host's conntrack — the source IP is never un-DNAT'd and the
+# remote peer drops the reply. MASQUERADE makes the container see the
+# Proxmox host's bridge IP as the source, so replies go back through
+# the host's conntrack for proper un-DNAT.
+- name: Add MASQUERADE for DNAT'd WireGuard traffic (LAN bridge only)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      CT_BR="{{ _lxc_net_bridge }}"
+      CT_IP="{{ _lxc_net_ip }}"
+      if ! iptables -t nat -C POSTROUTING -o "$CT_BR" -d "$CT_IP" -p udp --dport {{ wireguard_listen_port }} -j MASQUERADE 2>/dev/null; then
+        iptables -t nat -A POSTROUTING -o "$CT_BR" -d "$CT_IP" -p udp --dport {{ wireguard_listen_port }} -j MASQUERADE
+        echo ADDED
+      else
+        echo EXISTS
+      fi
+    executable: /bin/bash
+  register: _wg_masq
+  changed_when: "'ADDED' in _wg_masq.stdout"
+  when: _lxc_net_on_lan | default(false) | bool
 
-      [Service]
-      Type=simple
-      ExecStart=/usr/bin/socat UDP4-LISTEN:51820,reuseaddr,fork UDP4:{{ _lxc_net_ip }}:51820
-      Restart=always
-      RestartSec=3
+- name: Flush stale conntrack entries for WireGuard port
+  ansible.builtin.command:
+    cmd: conntrack -D -p udp --dport {{ wireguard_listen_port }}
+  changed_when: true
+  failed_when: false
+  when: _wg_dnat.stdout | default('') == 'ADDED'
 
-      [Install]
-      WantedBy=multi-user.target
-    dest: /etc/systemd/system/wireguard-udp-proxy.service
-    mode: "0644"
-  when:
-    - not (_service_up_to_date | default(false) | bool)
-    - _lxc_net_on_lan | bool
-    - "'router_nodes' in group_names"
-
-- name: Enable wireguard-udp-proxy
-  ansible.builtin.systemd:
-    name: wireguard-udp-proxy
-    daemon_reload: true
-    enabled: true
-    state: restarted
-  when:
-    - not (_service_up_to_date | default(false) | bool)
-    - _lxc_net_on_lan | bool
-    - "'router_nodes' in group_names"
+# ── Clean up legacy socat proxy (removed — all hosts use DNAT now) ──
+- name: Stop and remove legacy wireguard-udp-proxy
+  ansible.builtin.shell:
+    cmd: |
+      if systemctl is-active wireguard-udp-proxy 2>/dev/null; then
+        systemctl stop wireguard-udp-proxy
+        systemctl disable wireguard-udp-proxy
+        rm -f /etc/systemd/system/wireguard-udp-proxy.service
+        systemctl daemon-reload
+        echo REMOVED
+      else
+        echo ABSENT
+      fi
+    executable: /bin/bash
+  register: _wg_proxy_cleanup
+  changed_when: "'REMOVED' in _wg_proxy_cleanup.stdout"

@@ -83,10 +83,14 @@
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
-      grep -rl 'blacklist {{ _igpu_driver }}' /etc/modprobe.d/ 2>/dev/null | \
-        xargs -r sed -i '/blacklist {{ _igpu_driver }}/d'
+      FILES=$(grep -rl 'blacklist {{ _igpu_driver }}' /etc/modprobe.d/ 2>/dev/null || true)
+      if [ -n "$FILES" ]; then
+        echo "$FILES" | xargs sed -i '/blacklist {{ _igpu_driver }}/d'
+        echo CHANGED
+      fi
     executable: /bin/bash
-  changed_when: true
+  register: _blacklist_removal
+  changed_when: "'CHANGED' in _blacklist_removal.stdout"
   failed_when: false
   when:
     - igpu_available | bool
@@ -232,97 +236,33 @@
          | first | default('') }}
   when: igpu_available | bool
 
-# ── DNS check (apt needs working DNS) ─────────────────────────────
-
-- name: Check DNS resolution
-  ansible.builtin.command:
-    cmd: getent hosts deb.debian.org
-  register: _dns_check
-  changed_when: false
-  failed_when: false
-  when: igpu_available | bool
-
-- name: Add fallback DNS if resolution fails
-  ansible.builtin.copy:
-    dest: /etc/resolv.conf
-    mode: "0644"
-    content: |
-      nameserver {{ ansible_default_ipv4.gateway | default('8.8.8.8') }}
-      nameserver 8.8.8.8
-      nameserver 1.1.1.1
-  when:
-    - igpu_available | bool
-    - _dns_check.rc != 0
-
-# ── Sync system clock before apt operations ───────────────────────
-# Clock skew causes GPG signature verification to fail ("Not live
-# until" errors). Force NTP sync before any apt cache update.
-
-- name: Check clock skew against apt GPG signatures
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      skew=$(chronyc -n tracking 2>/dev/null | awk '/System time/{print $4}' || echo "999")
-      echo "$skew"
-    executable: /bin/bash
-  register: _clock_skew
-  changed_when: false
-  failed_when: false
-  when: igpu_available | bool
-
-- name: Force NTP time sync
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      synced=false
-
-      if command -v chronyc >/dev/null 2>&1; then
-        systemctl restart chronyd 2>/dev/null || true
-        chronyc -a 'burst 4/4' 2>/dev/null || true
-        sleep 6
-        chronyc -a makestep 2>/dev/null && synced=true
-      fi
-
-      if [ "$synced" = false ] && command -v ntpdate >/dev/null 2>&1; then
-        ntpdate -b pool.ntp.org 2>/dev/null && synced=true
-      fi
-
-      if [ "$synced" = false ] && command -v timedatectl >/dev/null 2>&1; then
-        timedatectl set-ntp true 2>/dev/null || true
-        sleep 5
-        synced=true
-      fi
-
-      if [ "$synced" = false ]; then
-        http_date=$(wget -qS --spider http://google.com/ 2>&1 | grep -i '^ *Date:' | head -1 | sed 's/^ *[Dd]ate: //')
-        if [ -n "$http_date" ]; then
-          date -s "$http_date" 2>/dev/null && synced=true
-        fi
-      fi
-
-      echo "Clock after sync: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    executable: /bin/bash
-  register: _clock_sync
-  changed_when: false
-  failed_when: false
-  when:
-    - igpu_available | bool
-    - (_clock_skew.stdout | default('999') | float) > 30.0
-
-- name: Display clock sync result
-  ansible.builtin.debug:
-    msg: "{{ _clock_sync.stdout | default('skipped — clock skew < 30s') }}"
-  when: igpu_available | bool
-
 # ── VA-API verification ──────────────────────────────────────────
+# DNS and NTP sync are handled by infra_pre_tasks.yml (runs before
+# this role). VA-API packages are baked by prepare_host() in
+# build-images.sh. This section only verifies they are present.
 
-- name: Install VA-API packages
-  ansible.builtin.apt:
-    name: "{{ _igpu_vaapi_packages }}"
-    state: present
-    update_cache: true
-    cache_valid_time: 86400
+- name: Assert VA-API packages are pre-installed (baked by prepare_host)
+  ansible.builtin.command:
+    cmd: "dpkg -l {{ item }}"
+  loop: "{{ _igpu_vaapi_packages }}"
+  changed_when: false
+  failed_when: false
+  register: _vaapi_pkg_check
   when: igpu_available | bool
+
+- name: Hard-fail if VA-API packages are missing
+  ansible.builtin.fail:
+    msg: >-
+      HARD FAILURE: VA-API package '{{ item.item }}' not installed on {{ inventory_hostname }}.
+      Run: ./scripts/build-images.sh --host {{ ansible_host }} --only <any>
+      (prepare_host installs VA-API packages automatically)
+  loop: "{{ _vaapi_pkg_check.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item | default('N/A') }}"
+  when:
+    - igpu_available | bool
+    - item.rc is defined
+    - item.rc != 0
 
 - name: Run vainfo to verify VA-API
   ansible.builtin.command:

@@ -1,14 +1,25 @@
 ---
-# Per-host private key — looked up by host suffix (e.g. WIREGUARD_PRIVATE_KEY_HOME).
-# Falls back to the legacy single-key env var for backwards compat with
-# the per-feature scenario which only has one host.
+# Per-host private key — resolution order:
+#   1. Env var WIREGUARD_PRIVATE_KEY_<HOST> (set in .env or exported)
+#   2. env_generated_path file (written by previous converge runs)
+# The generated-file fallback prevents key regeneration on every run
+# when molecule doesn't export env_generated_path vars.
 _wg_host_suffix: >-
   {{ _wg_parent_host | default(inventory_hostname | regex_replace('^wireguard-', ''))
      | upper | replace('-', '_') }}
-wireguard_private_key: >-
+_wg_env_key: >-
   {{ lookup('env', 'WIREGUARD_PRIVATE_KEY_' + _wg_host_suffix)
-     | default(lookup('env', 'WIREGUARD_PRIVATE_KEY'), true)
      | default('', true) }}
+_wg_file_key: >-
+  {{ lookup('pipe', 'grep "^WIREGUARD_PRIVATE_KEY_' + _wg_host_suffix + '="'
+     + ' ' + env_generated_path + ' 2>/dev/null | cut -d= -f2-')
+     | default('', true) | trim }}
+wireguard_private_key: >-
+  {{ _wg_env_key
+     if (_wg_env_key | length == 44 and '$' not in _wg_env_key)
+     else _wg_file_key
+     if (_wg_file_key | length == 44 and '$' not in _wg_file_key)
+     else '' }}
 
 wireguard_client_address: >-
   {{ (vpn_ip + '/24')
@@ -17,24 +28,30 @@ wireguard_client_address: >-
 
 # Hub detection: the hub node (vpn_ip == 10.0.0.1) runs as the WireGuard
 # server. All other nodes are clients connecting to it.
-wireguard_is_hub: "{{ vpn_ip | default('') == '10.0.0.1' }}"
 wireguard_hub_vpn_ip: "10.0.0.1"
+wireguard_is_hub: "{{ vpn_ip | default('') == wireguard_hub_vpn_ip }}"
 
 # Server endpoint — clients connect to the hub host's WAN IP on UDP 51820.
 # Validate that the env var is a real 44-char WireGuard key and not a literal
 # ${VAR_NAME} from unexpanded molecule provisioner.env, or Python 'None'.
 _wg_raw_server_pk: >-
   {{ lookup('env', 'WIREGUARD_HUB_PUBLIC_KEY')
-     | default(lookup('env', 'WIREGUARD_SERVER_PUBLIC_KEY'), true)
      | default('', true) }}
+_wg_file_server_pk: >-
+  {{ lookup('pipe', 'grep "^WIREGUARD_HUB_PUBLIC_KEY="'
+     + ' ' + env_generated_path + ' 2>/dev/null | cut -d= -f2-')
+     | default('', true) | trim }}
 wireguard_server_public_key: >-
   {{ _wg_raw_server_pk
      if (_wg_raw_server_pk | length == 44
          and '$' not in _wg_raw_server_pk
          and _wg_raw_server_pk not in ['None', 'null'])
+     else _wg_file_server_pk
+     if (_wg_file_server_pk | length == 44
+         and '$' not in _wg_file_server_pk)
      else '' }}
-wireguard_server_endpoint: "{{ lookup('env', 'WIREGUARD_SERVER_ENDPOINT') | default('198.51.100.1:51820', true) }}"
-wireguard_allowed_ips: "{{ lookup('env', 'WIREGUARD_ALLOWED_IPS') | default('10.0.0.0/24', true) }}"
+wireguard_server_endpoint: "{{ lookup('env', 'WIREGUARD_SERVER_ENDPOINT') | default('198.51.100.1:' + (wireguard_listen_port | string), true) }}"
+wireguard_allowed_ips: "{{ lookup('env', 'WIREGUARD_ALLOWED_IPS') | default(vpn_subnet, true) }}"
 wireguard_preshared_key: "{{ lookup('env', 'WIREGUARD_PRESHARED_KEY') | default('', true) }}"
 wireguard_dns: "{{ lookup('env', 'WIREGUARD_DNS') | default('', true) }}"
 wireguard_keepalive: 25

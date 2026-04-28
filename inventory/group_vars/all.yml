@@ -26,11 +26,22 @@ callhome_port: "{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
 callhome_server_local: "http://localhost:{{ callhome_port }}"
 callhome_public_key: "{{ lookup('env', 'CALLHOME_PUBLIC_KEY') }}"
 callhome_private_key: "{{ lookup('env', 'CALLHOME_PRIVATE_KEY') }}"
+# Heartbeat interval in seconds. 5s for test/active monitoring, 60s for production.
+# Containers heartbeat this often to their local NodeManager.
+callhome_heartbeat_interval: "{{ lookup('env', 'CALLHOME_INTERVAL') | default('5', true) }}"
 
 # Auth header dict for all ansible.builtin.uri calls to NM mutation endpoints.
 # Usage: headers: "{{ nm_auth_headers }}"
 nm_auth_headers:
   x-callhome-token: "{{ callhome_public_key }}"
+
+# Computed NM API base URL. Uses nm_api_host/nm_api_port overrides
+# (set in host_vars for LAN hosts behind relays) or defaults to the
+# host's own IP and kiosk_manager_port.
+# Usage in roles: url: "{{ nm_api_url }}/api/provision/{{ ct_id }}/exec"
+nm_api_url: >-
+  http://{{ nm_api_host | default(ansible_host) }}:{{
+  nm_api_port | default(kiosk_manager_port) }}
 
 # Single source of truth for fleet service names used by readiness gates,
 # staleness checks, and the heartbeat watchdog. Add new services HERE.
@@ -51,18 +62,11 @@ fleet_monitored_services:
 
 # Subset used for pre-configure readiness (excludes mesh/bridge which
 # are provisioned later and don't have callhome yet at that point).
-fleet_ready_services:
-  - pihole
-  - rsyslog
-  - netdata
-  - wireguard
-  - homeassistant
-  - jellyfin
-  - kodi
-  - moonlight
-  - desktop
-  - kiosk
-  - gaming
+fleet_late_provision_services:
+  - openwrt-mesh
+  - openwrt-bridge
+fleet_ready_services: >-
+  {{ fleet_monitored_services | difference(fleet_late_provision_services) }}
 
 # ── Container NAT networking ──────────────────────────────────────
 # WAN hosts get a private internal bridge for containers. Each host
@@ -141,6 +145,7 @@ openwrt_image_version: "{{ lookup('file', project_root + '/images/router.version
 openwrt_image_path: "images/router-{{ openwrt_image_version }}-openwrt-24.10.0-x86-64-combined-ext4.img.gz"
 openwrt_vm_id: 100
 openwrt_vm_name: openwrt-router
+openwrt_lan_ip: "10.10.10.1"
 openwrt_vm_memory: 512
 openwrt_vm_cores: 2
 openwrt_vm_disk_size: 512M
@@ -148,7 +153,10 @@ openwrt_vm_disk_size: 512M
 # ── WireGuard LXC ─────────────────────────────────────────────────
 wireguard_image_version: "{{ lookup('file', project_root + '/images/wireguard.version') }}"
 wireguard_lxc_template_path: "images/wireguard-{{ wireguard_image_version }}-debian-12-amd64.tar.zst"
+wireguard_ct_ip_offset: 3
+wireguard_listen_port: 51820
 vpn_subnet: "10.0.0.0/24"
+controller_vpn_ip: "{{ lookup('env', 'CONTROLLER_VPN_IP') | default('10.0.0.7', true) }}"
 
 # ── Network Tier (100-199) ───────────────────────────────────────
 wireguard_ct_id: 101
@@ -190,6 +198,51 @@ gaming_image_path: "images/sunshine-{{ sunshine_image_version }}-win11-amd64.qco
 # ── Gaming (600-699) ─────────────────────────────────────────────
 gaming_vm_id: 600
 gaming_ct_id: 601
+
+# ── Sibling VMID lists (single source of truth for callhome rewrite) ──
+# Used by kiosk_configure and post_provision_callhome to iterate all
+# non-kiosk containers when updating callhome server/key.
+debian_sibling_ct_ids:
+  - "{{ pihole_ct_id }}"
+  - "{{ rsyslog_ct_id }}"
+  - "{{ netdata_ct_id }}"
+  - "{{ wireguard_ct_id }}"
+  - "{{ homeassistant_ct_id }}"
+  - "{{ jellyfin_ct_id }}"
+  - "{{ kodi_ct_id }}"
+  - "{{ moonlight_ct_id }}"
+  - "{{ desktop_ct_id }}"
+  - "{{ gaming_ct_id }}"
+
+openwrt_sibling_ct_ids:
+  - "{{ meshwifi_ct_id }}"
+  - "{{ bridge_ct_id }}"
+
+# ── Cleanup scope: base vs services ──────────────────────────────
+# Base layer: OpenWrt + Kiosk/NM — the foundation that stays up 95% of
+# the time. ONLY torn down with explicit --tags base-cleanup.
+base_vm_ids:
+  - "{{ openwrt_vm_id }}"
+base_ct_ids:
+  - "{{ kiosk_ct_id }}"
+
+# Service layer: everything deployed ON TOP of the base. Default
+# cleanup target — torn down and rebuilt on every service iteration.
+service_ct_ids: "{{ debian_sibling_ct_ids + openwrt_sibling_ct_ids }}"
+service_vm_ids:
+  - "{{ gaming_vm_id }}"
+  - "{{ gaming_vm_id | int + 1 }}"
+  - "{{ gaming_vm_id | int + 2 }}"
+  - "{{ gaming_vm_id | int + 3 }}"
+
+# ── Service web ports (for kiosk URL composition) ────────────────
+# Single source of truth — kiosk_configure references these instead of
+# hardcoding port numbers in URL construction templates.
+jellyfin_web_port: 8096
+kodi_web_port: 8080
+homeassistant_web_port: 8123
+sunshine_web_port: 47990
+netdata_web_port: 19999
 
 # ── Startup order ────────────────────────────────────────────────
 # Maps VMID to Proxmox boot priority. Lower numbers start first.

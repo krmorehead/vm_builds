@@ -1,13 +1,40 @@
 ---
 # Kiosk LXC provisioning via shared proxmox_lxc role.
-# Version check skips provisioning when the deployed version matches.
+# The kiosk IS the Node Manager — it cannot query its own API for
+# version checks. Uses pct exec to read /etc/image_version directly.
 
-# ── Version-aware skip check ──────────────────────────────────────
-- name: Check Kiosk version via NM API
-  ansible.builtin.include_tasks: "{{ role_path }}/../../tasks/check_service_version.yml"
-  vars:
-    _check_service_name: kiosk
-    _check_image_version: "{{ kiosk_image_version }}"
+# ── Check container existence ────────────────────────────────────
+
+- name: Check if Kiosk container exists
+  ansible.builtin.command:
+    cmd: pct status {{ kiosk_ct_id }}
+  register: _ct_status
+  failed_when: false
+  changed_when: false
+
+- name: Set container existence flag
+  ansible.builtin.set_fact:
+    _lxc_exists: "{{ _ct_status.rc | default(1) == 0 }}"
+
+# ── Resolve deployed version (pct exec — kiosk self-check) ───────
+
+- name: Resolve deployed Kiosk version
+  ansible.builtin.include_tasks: "{{ project_root }}/tasks/resolve_kiosk_version.yml"
+
+- name: Evaluate kiosk version match
+  ansible.builtin.set_fact:
+    _service_up_to_date: >-
+      {{ _lxc_exists | bool
+         and (_deployed_version | default('')) == kiosk_image_version
+         and kiosk_image_version | length > 0 }}
+
+- name: Report kiosk version status
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: kiosk
+      deployed={{ _deployed_version | default('unknown') }},
+      expected={{ kiosk_image_version }},
+      {{ 'UP-TO-DATE — skipping' if (_service_up_to_date | bool) else 'NEEDS UPDATE' }}
 
 # ── Verify Kiosk template exists (skipped when version matches) ──
 - name: Verify Kiosk template exists
@@ -25,27 +52,6 @@
     lxc_net_ip_offset: "{{ kiosk_ct_ip_offset }}"
     lxc_net_flavor_group: kiosk_nodes
 
-# ── Check container existence (skipped when version matches) ─────
-
-- name: Check if Kiosk container exists
-  ansible.builtin.command:
-    cmd: pct status {{ kiosk_ct_id }}
-  register: _ct_status
-  failed_when: false
-  changed_when: false
-  when: not (_service_up_to_date | default(false) | bool)
-
-- name: Set container existence flag
-  ansible.builtin.set_fact:
-    _lxc_exists: "{{ _ct_status.rc | default(1) == 0 }}"
-  when: not (_service_up_to_date | default(false) | bool)
-
-# ── Resolve deployed version (skipped when version matches) ──────
-
-- name: Resolve deployed Kiosk version
-  ansible.builtin.include_tasks: "{{ project_root }}/tasks/resolve_kiosk_version.yml"
-  when: not (_service_up_to_date | default(false) | bool)
-
 # ── Provision via shared proxmox_lxc role (skipped when version matches)
 
 - name: Provision Kiosk LXC container
@@ -59,7 +65,7 @@
     lxc_ct_cores: "{{ kiosk_ct_cores }}"
     lxc_ct_disk: "{{ kiosk_ct_disk }}"
     lxc_ct_onboot: "{{ kiosk_ct_onboot }}"
-    lxc_ct_startup_order: 6
+    lxc_ct_startup_order: "{{ kiosk_ct_startup_order }}"
     lxc_ct_template_path: "{{ kiosk_ct_template_path }}"
     lxc_ct_ip: "{{ _lxc_net_ip }}/{{ _lxc_net_cidr }}"
     lxc_ct_gateway: "{{ _lxc_net_gateway }}"
@@ -149,34 +155,35 @@
 - name: Clean up legacy proxy services
   ansible.builtin.shell:
     cmd: |
-      for svc in kiosk-vnc-proxy kiosk-display-proxy manager-api-proxy; do
-        systemctl stop "$svc" 2>/dev/null || true
-        systemctl disable "$svc" 2>/dev/null || true
-        rm -f "/etc/systemd/system/${svc}.service"
+      CHANGED=0
+      for svc in kiosk-vnc-proxy manager-api-proxy; do
+        if [ -f "/etc/systemd/system/${svc}.service" ]; then
+          systemctl stop "$svc" 2>/dev/null || true
+          systemctl disable "$svc" 2>/dev/null || true
+          rm -f "/etc/systemd/system/${svc}.service"
+          CHANGED=1
+        fi
       done
-      for f in /etc/systemd/system/*-display-proxy.service; do
-        [ -f "$f" ] || continue
-        svc="$(basename "$f" .service)"
-        systemctl stop "$svc" 2>/dev/null || true
-        systemctl disable "$svc" 2>/dev/null || true
-        rm -f "$f"
-      done
-      systemctl daemon-reload
+      [ "$CHANGED" -eq 1 ] && systemctl daemon-reload && echo CLEANED
+      true
     executable: /bin/bash
-  changed_when: true
+  register: _legacy_proxy_cleanup
+  changed_when: "'CLEANED' in _legacy_proxy_cleanup.stdout"
   failed_when: false
 
-- name: Deploy kiosk-manager-proxy (host:9001 → container:9001)
+- name: Deploy kiosk-manager-proxy
+  vars:
+    _ka: "keepalive,keepidle=15,keepcnt=3,keepintvl=5"
   ansible.builtin.copy:
     content: |
       [Unit]
-      Description=Manager API proxy (host:9001 -> kiosk:9001)
+      Description=Manager API proxy (host:{{ kiosk_manager_port }} -> kiosk:{{ kiosk_manager_port }})
       After=network.target pve-guests.service
       Wants=pve-guests.service
 
       [Service]
       Type=simple
-      ExecStart=/usr/bin/socat TCP-LISTEN:9001,reuseaddr,fork,keepalive,keepidle=15,keepcnt=3,keepintvl=5 TCP:{{ _lxc_net_ip }}:9001,keepalive,keepidle=15,keepcnt=3,keepintvl=5
+      ExecStart=/usr/bin/socat TCP-LISTEN:{{ kiosk_manager_port }},reuseaddr,fork,{{ _ka }} TCP:{{ _lxc_net_ip }}:{{ kiosk_manager_port }},{{ _ka }}
       Restart=always
       RestartSec=3
 
@@ -184,8 +191,11 @@
       WantedBy=multi-user.target
     dest: /etc/systemd/system/kiosk-manager-proxy.service
     mode: "0644"
+  register: _mgr_proxy_unit
 
 - name: Deploy kiosk display proxy on port {{ kiosk_ws_port }}
+  vars:
+    _ka: "keepalive,keepidle=15,keepcnt=3,keepintvl=5"
   ansible.builtin.copy:
     content: |
       [Unit]
@@ -195,9 +205,7 @@
 
       [Service]
       Type=simple
-      ExecStart=/usr/bin/socat \
-        TCP-LISTEN:{{ kiosk_ws_port }},reuseaddr,fork,keepalive,keepidle=15,keepcnt=3,keepintvl=5 \
-        TCP:{{ _lxc_net_ip }}:{{ kiosk_ws_port }},keepalive,keepidle=15,keepcnt=3,keepintvl=5
+      ExecStart=/usr/bin/socat TCP-LISTEN:{{ kiosk_ws_port }},reuseaddr,fork,{{ _ka }} TCP:{{ _lxc_net_ip }}:{{ kiosk_ws_port }},{{ _ka }}
       Restart=always
       RestartSec=3
 
@@ -205,13 +213,23 @@
       WantedBy=multi-user.target
     dest: /etc/systemd/system/kiosk-display-proxy.service
     mode: "0644"
+  register: _display_proxy_unit
 
-- name: Enable kiosk proxy services
+- name: Reload systemd and enable kiosk proxy services
   ansible.builtin.systemd:
     name: "{{ item }}"
     daemon_reload: true
     enabled: true
+    state: started
+  loop:
+    - kiosk-manager-proxy
+    - kiosk-display-proxy
+
+- name: Restart proxies if config changed
+  ansible.builtin.systemd:
+    name: "{{ item }}"
     state: restarted
   loop:
     - kiosk-manager-proxy
     - kiosk-display-proxy
+  when: _mgr_proxy_unit is changed or _display_proxy_unit is changed

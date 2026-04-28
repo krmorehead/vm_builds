@@ -34,10 +34,10 @@
     label: "{{ item.0 }}:{{ item.1.name }}"
   vars:
     _display_services:
-      - { name: kiosk, port: "{{ kiosk_ws_port }}" }
-      - { name: desktop, port: "{{ desktop_ws_port }}" }
-      - { name: kodi, port: "{{ kodi_ws_port }}" }
-      - { name: moonlight, port: "{{ moonlight_ws_port }}" }
+      - {name: kiosk, port: "{{ kiosk_ws_port }}"}
+      - {name: desktop, port: "{{ desktop_ws_port }}"}
+      - {name: kodi, port: "{{ kodi_ws_port }}"}
+      - {name: moonlight, port: "{{ moonlight_ws_port }}"}
 
 - name: Deploy LAN display relay units
   ansible.builtin.copy:
@@ -61,13 +61,14 @@
   loop: "{{ _lan_display_relays }}"
   loop_control:
     label: "{{ item.name }}"
+  register: _display_relay_units
 
 - name: Enable and start LAN display relays
   ansible.builtin.systemd:
-    name: "{{ item.name }}"
-    daemon_reload: true
+    name: "{{ item.item.name }}"
+    daemon_reload: "{{ item is changed }}"
     enabled: true
-    state: restarted
-  loop: "{{ _lan_display_relays }}"
+    state: "{{ 'restarted' if item is changed else 'started' }}"
+  loop: "{{ _display_relay_units.results }}"
   loop_control:
-    label: "{{ item.name }}"
+    label: "{{ item.item.name }}"

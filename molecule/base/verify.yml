@@ -1,0 +1,997 @@
+---
+# ══════════════════════════════════════════════════════════════════
+# BASE STATE VERIFICATION
+# ══════════════════════════════════════════════════════════════════
+# Validates only the base layer: infra, OpenWrt, LAN satellites,
+# Kiosk/NM, WireGuard VPN, and controller tunnel.
+# Services (Pi-hole, rsyslog, Netdata, HA, media, etc.) are NOT
+# checked here — they belong in molecule/default/verify.yml.
+
+# ── Play 0: 4-tier architecture gate ─────────────────────────────
+
+- name: Verify 4-tier Manager coverage
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Assert every Proxmox host has a Manager (kiosk_nodes membership)
+      ansible.builtin.assert:
+        that:
+          - item in groups['kiosk_nodes']
+        fail_msg: >-
+          SHOW STOPPER: {{ item }} is in proxmox but NOT in kiosk_nodes.
+          Every physical host MUST have a NodeManager (Kiosk LXC) for 4-tier
+          heartbeat. Add {{ item }} to kiosk_nodes in inventory/hosts.yml.
+      loop: "{{ groups['proxmox'] }}"
+
+# ── Play 1: Common infrastructure (all Proxmox hosts) ────────────
+
+- name: Verify common Proxmox infrastructure
+  hosts: proxmox
+  gather_facts: false
+  tasks:
+    # ── Bridge discovery ──────────────────────────────────────────
+
+    - name: Discover physical-NIC-backed bridges
+      ansible.builtin.include_tasks: ../../tasks/verify_bridge_discovery.yml
+      vars:
+        _verify_min_bridges: 1
+
+    # ── IOMMU ─────────────────────────────────────────────────────
+
+    - name: Check IOMMU status
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          dmesg | grep -i -c 'IOMMU enabled\|DMAR.*IOMMU\|Adding to iommu group'
+        executable: /bin/bash
+      register: iommu_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Report IOMMU status
+      ansible.builtin.debug:
+        msg: >-
+          IOMMU {{ 'active' if (iommu_verify.stdout | int) > 0
+          else 'not active (no WiFi passthrough)' }}
+
+    # ── Container NAT bridge ─────────────────────────────────────
+
+    - name: Check container bridge exists
+      ansible.builtin.command:
+        cmd: ip link show vmbr_ct
+      register: _ct_bridge_check
+      changed_when: false
+      failed_when: false
+
+    - name: Assert container bridge exists on all hosts
+      ansible.builtin.assert:
+        that: _ct_bridge_check.rc == 0
+        fail_msg: >-
+          Container NAT bridge (vmbr_ct) not found on {{ inventory_hostname }}.
+          Every host should have a container NAT bridge for uniform topology.
+
+    - name: Get container bridge IP
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ip -4 addr show vmbr_ct | grep -oP 'inet \K[0-9./]+'
+        executable: /bin/bash
+      register: _ct_bridge_ip
+      changed_when: false
+      when: _ct_bridge_check.rc == 0
+
+    - name: Assert container bridge has correct subnet IP
+      ansible.builtin.assert:
+        that:
+          - "'10.99.' + (container_subnet_id | string) + '.1/24' == _ct_bridge_ip.stdout | trim"
+        fail_msg: >-
+          Container bridge IP mismatch. Expected 10.99.{{ container_subnet_id }}.1/24,
+          got {{ _ct_bridge_ip.stdout | trim }}
+      when: _ct_bridge_check.rc == 0
+
+    - name: Check iptables MASQUERADE rule for container subnet
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          iptables -t nat -S POSTROUTING | grep -c '10\.99\.{{ container_subnet_id }}\.0/24.*MASQUERADE'
+        executable: /bin/bash
+      register: _nat_rule_check
+      changed_when: false
+      failed_when: false
+
+    - name: Assert MASQUERADE rule exists
+      ansible.builtin.assert:
+        that: (_nat_rule_check.stdout | int) > 0
+        fail_msg: >-
+          Missing iptables MASQUERADE rule for container subnet
+          10.99.{{ container_subnet_id }}.0/24 on {{ inventory_hostname }}
+
+    # ── iGPU detection (Intel or AMD) ──────────────────────────────
+
+    - name: Detect iGPU vendor, PCI address, and driver in one pass
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          lspci_out=$(lspci -nn)
+          intel=$(echo "$lspci_out" | grep -ic 'VGA compatible controller.*Intel' || true)
+          amd=$(echo "$lspci_out" | grep -icE 'VGA compatible controller.*(AMD|ATI)|Display controller.*(AMD|ATI)' || true)
+          if [ "$intel" -gt 0 ]; then
+            vendor=intel
+            driver_loaded=$(lsmod | grep -c '^i915' || true)
+          elif [ "$amd" -gt 0 ]; then
+            vendor=amd
+            driver_loaded=$(lsmod | grep -c '^amdgpu' || true)
+          else
+            vendor=none
+            driver_loaded=0
+          fi
+          echo "VENDOR=$vendor"
+          echo "DRIVER_LOADED=$driver_loaded"
+        executable: /bin/bash
+      register: _igpu_probe
+      changed_when: false
+
+    - name: Set iGPU facts from probe
+      ansible.builtin.set_fact:
+        _verify_igpu_vendor: "{{ _igpu_probe.stdout | regex_search('VENDOR=(\\S+)', '\\1') | first }}"
+        _verify_igpu_present: "{{ _igpu_probe.stdout | regex_search('VENDOR=(\\S+)', '\\1') | first != 'none' }}"
+        _verify_driver_loaded: "{{ (_igpu_probe.stdout | regex_search('DRIVER_LOADED=(\\d+)', '\\1') | first | int) > 0 }}"
+
+    - name: Assert an iGPU is present
+      ansible.builtin.assert:
+        that: _verify_igpu_present | bool
+        fail_msg: "No iGPU (Intel or AMD) found on {{ inventory_hostname }}"
+
+    - name: Assert GPU driver is loaded
+      ansible.builtin.assert:
+        that: _verify_driver_loaded | bool
+        fail_msg: >-
+          {{ _verify_igpu_vendor }} iGPU detected but
+          {{ 'i915' if _verify_igpu_vendor == 'intel' else 'amdgpu' }}
+          driver is not loaded
+      when: _verify_igpu_present | bool
+
+    - name: Detect render device
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ls /dev/dri/renderD* 2>/dev/null | head -1
+        executable: /bin/bash
+      register: _verify_render_dev
+      changed_when: false
+      when: _verify_igpu_present | bool
+
+    - name: Assert render device exists
+      ansible.builtin.assert:
+        that: _verify_render_dev.stdout | trim | length > 0
+        fail_msg: "No render device found in /dev/dri/ despite iGPU and loaded driver"
+      when: _verify_igpu_present | bool
+
+    - name: Verify enterprise repos are disabled
+      ansible.builtin.stat:
+        path: /etc/apt/sources.list.d/pve-enterprise.sources
+      register: enterprise_repo
+
+    - name: Assert enterprise repo is disabled
+      ansible.builtin.assert:
+        that: not enterprise_repo.stat.exists
+        fail_msg: "pve-enterprise.sources still active"
+
+    # ── Backup manifest ────────────────────────────────────────
+
+    - name: Check backup manifest exists
+      ansible.builtin.stat:
+        path: /var/lib/ansible-backup/manifest.json
+      register: backup_manifest
+
+    - name: Assert backup manifest was created
+      ansible.builtin.assert:
+        that: backup_manifest.stat.exists
+        fail_msg: "Backup manifest not found at /var/lib/ansible-backup/manifest.json"
+
+    # ── Deployment tracking (base plays only) ─────────────────────
+
+    - name: Check deploy_stamp fact file exists
+      ansible.builtin.stat:
+        path: /etc/ansible/facts.d/vm_builds.fact
+      register: stamp_file
+
+    - name: Assert deploy_stamp was written
+      ansible.builtin.assert:
+        that: stamp_file.stat.exists
+        fail_msg: "/etc/ansible/facts.d/vm_builds.fact not found"
+
+    - name: Read deploy_stamp fact file
+      ansible.builtin.slurp:
+        src: /etc/ansible/facts.d/vm_builds.fact
+      register: stamp_raw
+
+    - name: Parse deploy_stamp
+      ansible.builtin.set_fact:
+        stamp: "{{ stamp_raw.content | b64decode | from_json }}"
+
+    - name: Assert stamp contains base plays
+      ansible.builtin.assert:
+        that:
+          - "'backup' in stamp.plays"
+          - "'infrastructure' in stamp.plays"
+        fail_msg: "deploy_stamp missing base play entries: {{ stamp.plays.keys() | list }}"
+
+    - name: Assert stamp contains openwrt_vm (router nodes only)
+      ansible.builtin.assert:
+        that: "'openwrt_vm' in stamp.plays"
+        fail_msg: "deploy_stamp missing openwrt_vm entry"
+      when: "'router_nodes' in group_names"
+
+    - name: Assert stamp contains kiosk_lxc (all hosts)
+      ansible.builtin.assert:
+        that: "'kiosk_lxc' in stamp.plays"
+        fail_msg: "deploy_stamp missing kiosk_lxc entry"
+
+    - name: Assert stamp contains wireguard_lxc (vpn nodes only)
+      ansible.builtin.assert:
+        that: "'wireguard_lxc' in stamp.plays"
+        fail_msg: "deploy_stamp missing wireguard_lxc entry"
+      when: "'vpn_nodes' in group_names"
+
+    # ── Host recoverability ──────────────────────────────────────
+
+    - name: Assert wol_capable is defined for every host
+      ansible.builtin.assert:
+        that: wol_capable is defined
+        fail_msg: >-
+          {{ inventory_hostname }} has no wol_capable host var.
+          Every host MUST declare wol_capable (true/false).
+
+    # ── USB autosuspend protection (critical for USB ethernet hosts) ──
+
+    - name: Check USB autosuspend kernel parameter
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          grep -c 'usbcore.autosuspend=-1' /proc/cmdline || echo 0
+        executable: /bin/bash
+      register: _usb_autosuspend
+      changed_when: false
+
+    - name: Assert USB autosuspend is disabled on USB ethernet hosts
+      ansible.builtin.assert:
+        that: (_usb_autosuspend.stdout | trim | int) > 0
+        fail_msg: >-
+          USB autosuspend NOT disabled on {{ inventory_hostname }}
+          (wol_capable={{ wol_capable }}). GRUB needs usbcore.autosuspend=-1.
+          Run build-images.sh to trigger prepare_host() fix.
+      when: not (wol_capable | default(true) | bool)
+
+# ── Play 1.5: Heartbeat watchdog check ──────────────────────────
+
+- name: Verify heartbeat watchdog is running
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Check watchdog PID file exists
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../../.state/watchdog.pid"
+      register: _watchdog_pid_file
+
+    - name: Read watchdog PID
+      ansible.builtin.slurp:
+        src: "{{ playbook_dir }}/../../.state/watchdog.pid"
+      register: _watchdog_pid_raw
+      when: _watchdog_pid_file.stat.exists
+
+    - name: Check watchdog process is alive
+      ansible.builtin.command:
+        cmd: "kill -0 {{ (_watchdog_pid_raw.content | b64decode | trim) }}"
+      register: _watchdog_alive
+      changed_when: false
+      failed_when: false
+      when: _watchdog_pid_file.stat.exists
+
+    - name: Assert watchdog is running
+      ansible.builtin.assert:
+        that:
+          - _watchdog_pid_file.stat.exists
+          - _watchdog_alive.rc == 0
+        fail_msg: >-
+          Heartbeat watchdog is NOT running. It should have been started
+          in Phase 0b of base.yml. Check .state/watchdog.log for errors.
+      when: _watchdog_pid_file.stat.exists
+
+# ── Play 1.6: LAN NM relay services ─────────────────────────────
+
+- name: Verify LAN NM relay services
+  hosts: router_nodes
+  gather_facts: false
+  tasks:
+    - name: Check NM relay services for LAN hosts
+      ansible.builtin.command:
+        cmd: "systemctl is-active nm-relay-{{ item }}"
+      register: _nm_relay_check
+      loop: "{{ groups['lan_hosts'] | default([]) }}"
+      changed_when: false
+      failed_when: false
+      when: groups['lan_hosts'] | default([]) | length > 0
+
+    - name: Assert NM relay services are active
+      ansible.builtin.assert:
+        that: item.stdout | default('') | trim == 'active'
+        fail_msg: >-
+          NM relay service for {{ item.item }} is not active on {{ inventory_hostname }}.
+          LAN hosts require an NM API relay through the router node.
+      loop: "{{ _nm_relay_check.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item | default('N/A') }}"
+      when:
+        - _nm_relay_check.results is defined
+        - _nm_relay_check.results | length > 0
+
+# ── Play 2: Router node assertions ───────────────────────────────
+
+- name: Verify router node state
+  hosts: router_nodes
+  gather_facts: false
+  vars:
+    proxmox_lan_mgmt_ip_offset: 2
+  tasks:
+    # ── Bridge topology ──────────────────────────────────────────
+
+    - name: Discover physical-NIC-backed bridges
+      ansible.builtin.include_tasks: ../../tasks/verify_bridge_discovery.yml
+      vars:
+        _verify_min_bridges: 2
+
+    # ── WAN bridge detection ──────────────────────────────────────
+
+    - name: Detect WAN bridge from default route
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ip -o route show default | awk '{print $5}' | head -1
+        executable: /bin/bash
+      register: wan_bridge_raw
+      changed_when: false
+
+    - name: Set WAN and LAN bridge facts
+      ansible.builtin.set_fact:
+        wan_bridge: "{{ wan_bridge_raw.stdout | trim }}"
+        lan_bridges: >-
+          {{ _verify_bridge_list
+             | difference([wan_bridge_raw.stdout | trim])
+             | sort }}
+
+    - name: Assert WAN bridge is a known physical bridge
+      ansible.builtin.assert:
+        that: wan_bridge in _verify_bridge_list
+        fail_msg: >-
+          WAN bridge {{ wan_bridge }} not found in physical bridges
+          {{ _verify_bridge_list | join(', ') }}
+
+    - name: Set primary LAN bridge
+      ansible.builtin.set_fact:
+        lan_bridge: "{{ lan_bridges | first }}"
+
+    # ── VM state ──────────────────────────────────────────────────
+
+    - name: Read OpenWrt VM state and config
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          qm status {{ openwrt_vm_id }}
+          qm config {{ openwrt_vm_id }}
+        executable: /bin/bash
+      register: vm_cfg
+      changed_when: false
+
+    - name: Assert VM is in running state
+      ansible.builtin.assert:
+        that: "'running' in vm_cfg.stdout"
+        fail_msg: "VM {{ openwrt_vm_id }} is not running"
+
+    - name: Assert VM is configured to start on boot
+      ansible.builtin.assert:
+        that: "'onboot: 1' in vm_cfg.stdout"
+        fail_msg: "VM {{ openwrt_vm_id }} missing onboot: 1"
+
+    - name: Assert VM has startup order 1
+      ansible.builtin.assert:
+        that: vm_cfg.stdout is regex('startup:.*order=1')
+        fail_msg: "VM {{ openwrt_vm_id }} missing startup order=1"
+
+    - name: Assert VM has WiFi PCI passthrough
+      ansible.builtin.assert:
+        that: "'hostpci' in vm_cfg.stdout"
+        fail_msg: "Router VM {{ openwrt_vm_id }} has no WiFi PCI passthrough"
+
+    - name: Assert VM uses q35 machine type for PCI passthrough
+      ansible.builtin.assert:
+        that: "'q35' in vm_cfg.stdout"
+        fail_msg: "Router VM {{ openwrt_vm_id }} missing q35 machine type"
+
+    - name: Extract net0 bridge from config
+      ansible.builtin.set_fact:
+        vm_net0_bridge_value: "{{ vm_cfg.stdout | regex_search('net0:.*bridge=([^,\\s]+)', '\\1') | first }}"
+
+    - name: Assert net0 is the WAN bridge
+      ansible.builtin.assert:
+        that: vm_net0_bridge_value == wan_bridge
+        fail_msg: >-
+          VM net0 is on {{ vm_net0_bridge_value }},
+          expected WAN bridge {{ wan_bridge }}
+
+    # ── Proxmox LAN management IP ────────────────────────────────
+
+    - name: Check Proxmox LAN management IP on LAN bridge
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ip -o -4 addr show dev {{ lan_bridge }} \
+            | awk '{print $4}' | cut -d/ -f1
+        executable: /bin/bash
+      register: lan_bridge_ips
+      changed_when: false
+
+    - name: Assert Proxmox has at least one IP on LAN bridge
+      ansible.builtin.assert:
+        that: lan_bridge_ips.stdout_lines | length > 0
+        fail_msg: >-
+          No IPv4 address found on LAN bridge {{ lan_bridge }}.
+
+    - name: Set Proxmox LAN IP fact
+      ansible.builtin.set_fact:
+        proxmox_lan_ip: "{{ lan_bridge_ips.stdout_lines | first }}"
+
+    - name: Compute expected OpenWrt LAN IP from Proxmox LAN IP
+      ansible.builtin.set_fact:
+        openwrt_lan_ip: >-
+          {{ proxmox_lan_ip.split('.')[0:3] | join('.') }}.1
+
+    # ── OpenWrt connectivity ────────────────────────────────────
+
+    - name: Set OpenWrt SSH command
+      ansible.builtin.set_fact:
+        openwrt_ssh: >-
+          sshpass -p '' ssh
+          -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+          -o PubkeyAuthentication=no -o ConnectTimeout=10
+          root@{{ openwrt_lan_ip }}
+
+    - name: Wait for OpenWrt SSH on LAN
+      ansible.builtin.wait_for:
+        host: "{{ openwrt_lan_ip }}"
+        port: 22
+        delay: 2
+        timeout: 30
+
+    - name: Check OpenWrt WAN/LAN info
+      ansible.builtin.shell:
+        cmd: >-
+          {{ openwrt_ssh }}
+          "wan_dev=\$(ip -o route show default | sed -n 's/.*dev \([^ ]*\).*/\1/p' | head -1);
+          echo \"WAN_INFO=\$(ip -o -4 addr show dev \$wan_dev 2>/dev/null | awk '{print \$2, \$4}')\";
+          echo \"LAN_IP=\$(uci get network.lan.ipaddr)\""
+      register: _openwrt_net_batch
+      changed_when: false
+
+    - name: Parse WAN/LAN results
+      ansible.builtin.set_fact:
+        wan_info_line: "{{ _openwrt_net_batch.stdout | regex_search('WAN_INFO=(.*)', '\\1') | first | default('') }}"
+        lan_ip_line: "{{ _openwrt_net_batch.stdout | regex_search('LAN_IP=(.*)', '\\1') | first | default('') }}"
+
+    - name: Assert WAN has an IP address
+      ansible.builtin.assert:
+        that: wan_info_line | trim | length > 0
+        fail_msg: "WAN interface has no IPv4 address"
+
+    - name: Check DHCP config
+      ansible.builtin.shell:
+        cmd: >-
+          {{ openwrt_ssh }}
+          "echo \"DHCP_START=\$(uci get dhcp.lan.start)\";
+          echo \"DHCP_LIMIT=\$(uci get dhcp.lan.limit)\""
+      register: _dhcp_batch
+      changed_when: false
+
+    - name: Parse DHCP results
+      ansible.builtin.set_fact:
+        dhcp_start_val: "{{ _dhcp_batch.stdout | regex_search('DHCP_START=(.*)', '\\1') | first | default('0') }}"
+        dhcp_limit_val: "{{ _dhcp_batch.stdout | regex_search('DHCP_LIMIT=(.*)', '\\1') | first | default('0') }}"
+
+    - name: Assert DHCP is configured
+      ansible.builtin.assert:
+        that:
+          - (dhcp_start_val | trim | int) > 0
+          - (dhcp_limit_val | trim | int) > 0
+        fail_msg: "DHCP not configured: start={{ dhcp_start_val | trim }}, limit={{ dhcp_limit_val | trim }}"
+
+    - name: Report router verification
+      ansible.builtin.debug:
+        msg: >-
+          Router: VM running, WAN={{ wan_info_line | trim }},
+          LAN={{ lan_ip_line | trim }}, DHCP configured
+
+# ── Play 3: LAN satellite hosts ──────────────────────────────────
+
+- name: Verify LAN satellite hosts
+  hosts: lan_hosts
+  gather_facts: false
+  tasks:
+    - name: Check Proxmox API is responsive
+      ansible.builtin.command:
+        cmd: pvesh get /version --output-format json
+      register: pve_version
+      changed_when: false
+
+    - name: Assert PVE API returned valid response
+      ansible.builtin.assert:
+        that: (pve_version.stdout | from_json).version is defined
+        fail_msg: "Proxmox API not responsive on {{ inventory_hostname }}"
+
+    - name: Report LAN host verification
+      ansible.builtin.debug:
+        msg: "LAN host {{ inventory_hostname }} PVE API responsive"
+
+# ── Play 4: Kiosk/NM on all hosts ────────────────────────────────
+
+- name: Verify Kiosk on kiosk nodes
+  hosts: kiosk_nodes
+  gather_facts: false
+  vars:
+    _api_base: "{{ callhome_server_local }}"
+  tasks:
+    - name: Read Kiosk container state and config
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct status {{ kiosk_ct_id }}
+          pct config {{ kiosk_ct_id }}
+        executable: /bin/bash
+      register: _kiosk_cfg
+      changed_when: false
+
+    - name: Assert Kiosk container is configured correctly
+      ansible.builtin.assert:
+        that:
+          - "'status: ' in _kiosk_cfg.stdout"
+          - "'onboot: 1' in _kiosk_cfg.stdout"
+          - _kiosk_cfg.stdout is regex('startup:.*order=6')
+        fail_msg: "Kiosk container {{ kiosk_ct_id }} config incorrect on {{ inventory_hostname }}"
+
+    - name: Check if Desktop container is running (display-exclusive stops Kiosk)
+      ansible.builtin.command:
+        cmd: pct status {{ desktop_ct_id }}
+      register: _desktop_status_for_kiosk
+      changed_when: false
+      failed_when: false
+
+    - name: Assert Kiosk is running OR stopped by display-exclusive hookscript
+      ansible.builtin.assert:
+        that: >-
+          'running' in _kiosk_cfg.stdout or
+          ('stopped' in _kiosk_cfg.stdout and 'running' in (_desktop_status_for_kiosk.stdout | default('')))
+        fail_msg: >-
+          Kiosk container {{ kiosk_ct_id }} is stopped but Desktop container is not running
+
+    - name: Query kiosk from API
+      ansible.builtin.uri:
+        url: "{{ _api_base }}/api/container/kiosk/ready"
+        return_content: true
+      register: _kiosk_api
+      delegate_to: localhost
+
+    - name: Assert Kiosk ready via API
+      ansible.builtin.assert:
+        that:
+          - _kiosk_api.json.ready | default(false) | bool
+        fail_msg: "Kiosk not ready via API: {{ _kiosk_api.json | default({}) }}"
+      when: "'running' in _kiosk_cfg.stdout"
+
+    - name: Assert kiosk heartbeat reports config_files extension
+      ansible.builtin.assert:
+        that:
+          - (_kiosk_api.json.extensions.config_files | default(none)) is not none
+        fail_msg: >-
+          Kiosk on {{ inventory_hostname }} not reporting config_files extension.
+          Check CALLHOME_CONFIG_FILES in /etc/default/callhome.
+      when: "'running' in _kiosk_cfg.stdout"
+
+    - name: Verify kiosk-manager-proxy is active
+      ansible.builtin.command:
+        cmd: systemctl is-active kiosk-manager-proxy
+      register: _mgr_proxy
+      changed_when: false
+      failed_when: _mgr_proxy.stdout | default('') | trim != 'active'
+
+    - name: Verify kiosk-display-proxy is active
+      ansible.builtin.command:
+        cmd: systemctl is-active kiosk-display-proxy
+      register: _display_proxy
+      changed_when: false
+      failed_when: _display_proxy.stdout | default('') | trim != 'active'
+
+    - name: Query kiosk config via NM API over VPN
+      ansible.builtin.uri:
+        url: "http://{{ vpn_ip }}:{{ kiosk_manager_port | default(9001) }}/api/config/self"
+        return_content: true
+        timeout: 15
+      register: _kiosk_config_api
+      delegate_to: localhost
+      retries: 3
+      delay: 10
+      until: _kiosk_config_api.status == 200
+
+    - name: Assert 4-tier config for ClusterManager (router_nodes)
+      ansible.builtin.assert:
+        that:
+          - _kiosk_config_api.json.IS_CLUSTER_MANAGER | string | lower in ['true', '1', 'yes']
+          - _kiosk_config_api.json.MANAGEMENT_SERVER is search(lookup('env', 'WEBUI_PORT') | default('52500', true))
+        fail_msg: >-
+          ClusterManager 4-tier config wrong on {{ inventory_hostname }}.
+          IS_CLUSTER_MANAGER={{ _kiosk_config_api.json.IS_CLUSTER_MANAGER }},
+          MANAGEMENT_SERVER={{ _kiosk_config_api.json.MANAGEMENT_SERVER }}
+      when: "'router_nodes' in group_names"
+
+    - name: Assert 4-tier config for NodeManagers (non-router)
+      ansible.builtin.assert:
+        that:
+          - _kiosk_config_api.json.IS_CLUSTER_MANAGER | string | lower in ['false', '0', 'no', '']
+          - _kiosk_config_api.json.MANAGEMENT_SERVER is search(':9001')
+        fail_msg: >-
+          NodeManager 4-tier config wrong on {{ inventory_hostname }}.
+          IS_CLUSTER_MANAGER={{ _kiosk_config_api.json.IS_CLUSTER_MANAGER }},
+          MANAGEMENT_SERVER={{ _kiosk_config_api.json.MANAGEMENT_SERVER }}
+      when: "'router_nodes' not in group_names"
+
+    # ── Per-interface forwarding ──────────────────────────────────────
+    - name: Check global IP forwarding
+      ansible.builtin.command:
+        cmd: sysctl -n net.ipv4.ip_forward
+      register: _global_fwd
+      changed_when: false
+
+    - name: Assert global IP forwarding is enabled
+      ansible.builtin.assert:
+        that: _global_fwd.stdout | trim == "1"
+        fail_msg: "Global IP forwarding disabled on {{ inventory_hostname }}"
+
+# ── Play 5: WireGuard LXC on VPN nodes ───────────────────────────
+
+- name: Verify WireGuard LXC on VPN nodes
+  hosts: vpn_nodes
+  gather_facts: false
+  vars:
+    _api_base: "{{ callhome_server_local }}"
+  tasks:
+    - name: Read WireGuard container state and config
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct status {{ wireguard_ct_id }}
+          pct config {{ wireguard_ct_id }}
+        executable: /bin/bash
+      register: wg_ct_cfg
+      changed_when: false
+
+    - name: Assert WireGuard container is running with correct config
+      ansible.builtin.assert:
+        that:
+          - "'running' in wg_ct_cfg.stdout"
+          - "'onboot: 1' in wg_ct_cfg.stdout"
+          - wg_ct_cfg.stdout is regex('startup:.*order=2')
+          - "'nesting=1' in wg_ct_cfg.stdout"
+        fail_msg: "WireGuard container {{ wireguard_ct_id }} config incorrect on {{ inventory_hostname }}"
+
+    - name: Assert WireGuard has correct network topology
+      ansible.builtin.assert:
+        that:
+          - wg_ct_cfg.stdout is regex('net0:.*bridge=')
+          - wg_ct_cfg.stdout is regex('net0:.*ip=10\\.')
+        fail_msg: >-
+          WireGuard container on {{ inventory_hostname }} network config issue.
+          Got: {{ wg_ct_cfg.stdout | regex_search('net0:.*') }}
+
+    - name: Assert WireGuard DNAT rule exists
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          iptables -t nat -S PREROUTING | grep -c 'dport {{ wireguard_listen_port }}.*DNAT'
+        executable: /bin/bash
+      register: _wg_dnat_check
+      changed_when: false
+      failed_when: false
+
+    - name: Assert WireGuard DNAT rule present
+      ansible.builtin.assert:
+        that: (_wg_dnat_check.stdout | int) > 0
+        fail_msg: >-
+          Missing WireGuard DNAT rule on {{ inventory_hostname }}.
+          UDP {{ wireguard_listen_port }} should be forwarded to the WireGuard container.
+
+    # ── Direct container verification (ground truth) ─────────────
+
+    - name: Check WireGuard service and peers directly
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ wireguard_ct_id }} -- wg show wg0 2>&1
+        executable: /bin/bash
+      register: _wg_show
+      changed_when: false
+
+    - name: Assert wg0 interface is up
+      ansible.builtin.assert:
+        that: "'public key' in _wg_show.stdout"
+        fail_msg: >-
+          WireGuard wg0 interface not active on {{ inventory_hostname }}.
+          Output: {{ _wg_show.stdout }}
+
+    - name: Count WireGuard peers
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          pct exec {{ wireguard_ct_id }} -- wg show wg0 | grep -c '^peer:' || echo 0
+        executable: /bin/bash
+      register: _wg_peer_count_raw
+      changed_when: false
+
+    - name: Assert at least one WireGuard peer exists
+      ansible.builtin.assert:
+        that: (_wg_peer_count_raw.stdout | trim | int) >= 1
+        fail_msg: >-
+          WireGuard on {{ inventory_hostname }} has
+          {{ _wg_peer_count_raw.stdout | trim }}
+          peers — expected at least 1
+
+    # ── 4-tier API verification (validates full heartbeat chain) ──
+    # _resolve_service now returns the freshest match when multiple
+    # containers share the same container_id, so the SM API should
+    # return current data.
+
+    - name: Query WireGuard readiness from SM API
+      ansible.builtin.uri:
+        url: "{{ _api_base }}/api/container/wireguard/ready"
+        return_content: true
+        timeout: 10
+      register: _wg_api
+      delegate_to: localhost
+      run_once: true
+      retries: 3
+      delay: 5
+      until: (_wg_api.status | default(0)) == 200
+
+    - name: Assert WireGuard heartbeat flowing through 4-tier chain
+      ansible.builtin.assert:
+        that:
+          - _wg_api.json.ready | default(false) | bool
+        fail_msg: >-
+          WireGuard not reporting ready via SM API.
+          This means the 4-tier heartbeat chain is broken.
+          API response: {{ _wg_api.json | default({}) }}
+      run_once: true
+
+    # ── VPN tunnel health ─────────────────────────────────────────
+
+    - name: Get WireGuard container VPN IP
+      ansible.builtin.command:
+        cmd: pct exec {{ wireguard_ct_id }} -- ip -4 addr show wg0
+      register: _wg_vpn_addr
+      changed_when: false
+      failed_when: false
+
+    - name: Assert VPN IP matches host_vars vpn_ip
+      ansible.builtin.assert:
+        that: _wg_vpn_addr.stdout is search(vpn_ip)
+        fail_msg: >-
+          WireGuard container on {{ inventory_hostname }} has wrong VPN IP.
+          Expected {{ vpn_ip }}, got: {{ _wg_vpn_addr.stdout }}
+      when: _wg_vpn_addr.rc == 0
+
+    - name: Ping VPN hub from client containers
+      ansible.builtin.command:
+        cmd: pct exec {{ wireguard_ct_id }} -- ping -c 1 -W 3 10.0.0.1
+      register: _wg_ping_hub
+      changed_when: false
+      failed_when: false
+      when: vpn_ip != '10.0.0.1'
+
+    - name: Assert client can reach hub via VPN
+      ansible.builtin.assert:
+        that: _wg_ping_hub.rc == 0
+        fail_msg: >-
+          WireGuard client on {{ inventory_hostname }} ({{ vpn_ip }}) cannot
+          ping hub (10.0.0.1). Tunnel not connected.
+      when:
+        - vpn_ip != '10.0.0.1'
+        - _wg_ping_hub is defined
+
+    - name: Verify VPN subnet route exists on host
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ip route show {{ vpn_subnet }} | grep -c via || echo 0
+        executable: /bin/bash
+      register: _vpn_route
+      changed_when: false
+
+    - name: Assert VPN route is configured
+      ansible.builtin.assert:
+        that: (_vpn_route.stdout | trim | int) > 0
+        fail_msg: "Missing VPN subnet route on {{ inventory_hostname }}"
+
+# ── Play 6: Controller VPN tunnel ────────────────────────────────
+
+- name: Verify controller VPN tunnel
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Check wg0 interface exists on controller
+      ansible.builtin.command:
+        cmd: sudo wg show wg0
+      register: _ctrl_wg0
+      changed_when: false
+      failed_when: false
+
+    - name: Assert controller wg0 is up
+      ansible.builtin.assert:
+        that: _ctrl_wg0.rc == 0
+        fail_msg: >-
+          HARD FAILURE — CONTROLLER VPN NOT UP. This breaks ALL API-driven
+          verification. Run: sudo wg-quick up wg0
+
+    - name: Ping VPN hub from controller
+      ansible.builtin.command:
+        cmd: ping -c 1 -W 3 10.0.0.1
+      register: _ctrl_ping_hub
+      changed_when: false
+      failed_when: false
+
+    - name: Assert controller can reach VPN hub
+      ansible.builtin.assert:
+        that: _ctrl_ping_hub.rc == 0
+        fail_msg: >-
+          HARD FAILURE — VPN HUB UNREACHABLE from controller. Cannot ping 10.0.0.1.
+          FULL STOP until VPN is working.
+
+# ── Play 7: NM reachability via VPN (end-to-end gate) ────────────
+
+- name: Verify NM reachability via VPN
+  hosts: kiosk_nodes
+  gather_facts: false
+  tasks:
+    - name: Query NM API via VPN IP
+      ansible.builtin.uri:
+        url: "http://{{ vpn_ip }}:{{ kiosk_manager_port | default(9001) }}/api/health"
+        return_content: true
+        timeout: 10
+      register: _nm_vpn_check
+      delegate_to: localhost
+      failed_when: false
+
+    - name: Assert NM reachable via VPN
+      ansible.builtin.assert:
+        that: (_nm_vpn_check.status | default(0)) == 200
+        fail_msg: >-
+          Node Manager on {{ inventory_hostname }} (VPN IP {{ vpn_ip }})
+          not reachable via VPN. Base state is incomplete.
+
+    - name: Report base state verification
+      ansible.builtin.debug:
+        msg: >-
+          Base state OK: {{ inventory_hostname }} — NM reachable via VPN
+          ({{ vpn_ip }}:{{ kiosk_manager_port | default(9001) }})
+
+# ── Play 8: Fleet-level health summary (SM API) ─────────────────
+
+- name: Verify fleet health through SuperManager
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    _api_base: "{{ callhome_server_local }}"
+  tasks:
+    - name: Query fleet health from SuperManager
+      ansible.builtin.uri:
+        url: "{{ _api_base }}/api/fleet/health"
+        return_content: true
+        timeout: 10
+      register: _fleet_health
+
+    - name: Assert fleet health API is responding
+      ansible.builtin.assert:
+        that: _fleet_health.status == 200
+        fail_msg: >-
+          SuperManager fleet health API not responding.
+          The 4-tier heartbeat chain is broken.
+
+    - name: Query all nodes from SuperManager
+      ansible.builtin.uri:
+        url: "{{ _api_base }}/api/nodes"
+        return_content: true
+        timeout: 10
+      register: _fleet_nodes
+
+    # ── Kiosk heartbeats: every single one MUST be flowing ───────
+    - name: Query fleet readiness for kiosk heartbeats
+      ansible.builtin.uri:
+        url: "{{ _api_base }}/api/fleet/ready?services=kiosk"
+        return_content: true
+        timeout: 10
+      register: _fleet_kiosk
+      failed_when: false
+
+    - name: "DEAD — KIOSK HEARTBEATS NOT FLOWING"
+      ansible.builtin.assert:
+        that:
+          - (_fleet_kiosk.status | default(0) | int) == 200
+          - _fleet_kiosk.json.all_ready | default(false) | bool
+        fail_msg: >-
+          ════════════════════════════════════════════════════════════════
+          THE HEARTBEAT SYSTEM IS DEAD — KIOSK HEARTBEATS NOT FLOWING
+          ════════════════════════════════════════════════════════════════
+          NM with no heartbeat = DEAD
+          CM with no heartbeat = DEAD
+          SM with no heartbeat = DEAD
+          SM response: {{ _fleet_kiosk.json | default('NO DATA') }}
+          EVERY UNIT MUST BE HEARTBEATING. THIS IS A BASE REQUIREMENT.
+          ════════════════════════════════════════════════════════════════
+
+    # ── WireGuard heartbeats: every single one MUST be flowing ──
+    - name: Query fleet readiness for wireguard heartbeats
+      ansible.builtin.uri:
+        url: "{{ _api_base }}/api/fleet/ready?services=wireguard"
+        return_content: true
+        timeout: 10
+      register: _fleet_wg
+      failed_when: false
+
+    - name: "DEAD — WIREGUARD HEARTBEATS NOT FLOWING"
+      ansible.builtin.assert:
+        that:
+          - (_fleet_wg.status | default(0) | int) == 200
+          - _fleet_wg.json.all_ready | default(false) | bool
+        fail_msg: >-
+          ════════════════════════════════════════════════════════════════
+          THE HEARTBEAT SYSTEM IS DEAD — WIREGUARD HEARTBEATS NOT FLOWING
+          ════════════════════════════════════════════════════════════════
+          SM response: {{ _fleet_wg.json | default('NO DATA') }}
+          VPN MUST be established as a BASE REQUIREMENT.
+          ════════════════════════════════════════════════════════════════
+
+    # ── Stale heartbeat check: nothing can be stale ─────────────
+    - name: Query fleet staleness for base services
+      ansible.builtin.uri:
+        url: "{{ _api_base }}/api/fleet/stale?services=kiosk,wireguard&max_age_seconds=120"
+        return_content: true
+        timeout: 10
+      register: _fleet_stale
+      failed_when: false
+
+    - name: "DEAD — STALE HEARTBEATS DETECTED"
+      ansible.builtin.assert:
+        that:
+          - not (_fleet_stale.json.has_stale | default(false) | bool)
+        fail_msg: >-
+          ════════════════════════════════════════════════════════════════
+          HEARTBEATS WENT STALE — SOMETHING DIED
+          ════════════════════════════════════════════════════════════════
+          Stale services: {{ _fleet_stale.json.stale | default([]) }}
+          A service that was heartbeating has STOPPED. Find it and fix it.
+          ════════════════════════════════════════════════════════════════
+      when: (_fleet_stale.status | default(0) | int) == 409
+
+    - name: "ALL HEARTBEATS VERIFIED — BASE IS ALIVE"
+      ansible.builtin.debug:
+        msg: >-
+          ═══════════════════════════════════════════════════════════
+          BASE STATE VERIFIED — ALL HEARTBEATS FLOWING
+          ═══════════════════════════════════════════════════════════
+          Fleet health API: {{ _fleet_health.status }}
+          Kiosk heartbeats: ALL FLOWING (all_ready=true)
+          WireGuard heartbeats: ALL FLOWING (all_ready=true)
+          Stale check: {{ 'CLEAN' if (_fleet_stale.status | default(200)) == 200 else 'STALE DETECTED' }}
+          Registered nodes: {{ (_fleet_nodes.json | default([])) | length }}
+          4-tier chain: Container → NM → CM → SM = ALIVE
+          ═══════════════════════════════════════════════════════════

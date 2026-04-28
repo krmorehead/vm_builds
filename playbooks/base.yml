@@ -1,0 +1,429 @@
+---
+# ══════════════════════════════════════════════════════════════════
+# BASE STATE: Infrastructure + Network + VPN + Managers
+# ══════════════════════════════════════════════════════════════════
+# This playbook establishes the stable foundation that all services
+# build on. It rarely changes. After it completes:
+#   - Every host has bridges, PCI passthrough, iGPU
+#   - OpenWrt router is running (DHCP, firewall, LAN)
+#   - LAN satellites are bootstrapped and reachable
+#   - Every host has a Kiosk/Manager (NM) running on port 9001
+#   - Every host has a WireGuard VPN tunnel with active handshakes
+#   - The controller has wg0 up and can reach all NMs via VPN
+#
+# Run independently: molecule test -s base
+# Run as part of full deploy: molecule test -s default (imports site.yml)
+
+# ── Phase 0a: Ensure heartbeat API server is running ───────────
+# In molecule test, cleanup removes .state/callhome_url but prepare
+# may be skipped. This play detects a missing API and starts one.
+
+- name: Ensure heartbeat API server is running
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    _is_molecule: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') | length > 0 }}"
+    _api_start_cmd: "{{ playbook_dir }}/../.venv/bin/python3 {{ playbook_dir }}/../scripts/start_test_api.py"
+    _api_env:
+      MOLECULE_PROJECT_DIRECTORY: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') | default('', true) }}"
+  tasks:
+    - name: Check API server health
+      ansible.builtin.uri:
+        url: "{{ callhome_server_local }}/api/fleet/health"
+        return_content: true
+        timeout: 3
+      register: _api_health
+      retries: 3
+      delay: 2
+      until: _api_health.status == 200
+      failed_when: false
+
+    - name: Start or restart API server if unhealthy
+      ansible.builtin.command:
+        cmd: "{{ _api_start_cmd }}"
+      environment: "{{ _api_env }}"
+      register: _api_start
+      changed_when: true
+      when:
+        - _is_molecule | bool
+        - (_api_health.status | default(-1) | int) != 200
+
+    - name: Verify API server after start
+      ansible.builtin.uri:
+        url: "{{ callhome_server_local }}/api/fleet/health"
+        return_content: true
+      register: _api_verify
+      retries: 5
+      delay: 2
+      until: _api_verify.status == 200
+      when: (_api_health.status | default(-1) | int) != 200
+
+    - name: Report API server status
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'API server started' if (_api_health.status | default(-1) | int) != 200
+             else 'API server already healthy' }}
+
+# ── Phase 0b: Start heartbeat watchdog ─────────────────────────
+# Background process polls /api/fleet/stale every second.
+# Kills ansible-playbook the instant any previously-healthy service
+# stops heartbeating. No grace period, no waiting for end-of-run.
+
+- name: Start heartbeat watchdog
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Launch watchdog in background
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          CALLHOME_URL="{{ callhome_server_local }}"
+          if [ -z "$CALLHOME_URL" ] || [ "$CALLHOME_URL" = "http://localhost:" ]; then
+            echo "No callhome port — watchdog skipped"
+            exit 0
+          fi
+          STATE_DIR="{{ playbook_dir }}/../.state"
+          PID_FILE="$STATE_DIR/watchdog.pid"
+          PGID_FILE="$STATE_DIR/ansible_pgid"
+          if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+            echo "Watchdog already running (PID $(cat "$PID_FILE")) — reusing"
+            exit 0
+          fi
+          PGID=$(ps -o pgid= -p $$ | tr -d ' ')
+          echo "$PGID" > "$PGID_FILE"
+          SERVICES="{{ fleet_monitored_services | join(',') }}"
+          nohup "{{ playbook_dir }}/../scripts/heartbeat_watchdog.sh" \
+            "$CALLHOME_URL" "$PGID_FILE" "$SERVICES" 120 \
+            >> "$STATE_DIR/watchdog.log" 2>&1 &
+          echo "Watchdog started (PID $!) monitoring PGID $PGID services=$SERVICES"
+        executable: /bin/bash
+      register: _watchdog_start
+      changed_when: "'started' in _watchdog_start.stdout"
+
+    - name: Report watchdog status
+      ansible.builtin.debug:
+        msg: "{{ _watchdog_start.stdout }}"
+
+# ── Phase 1: Primary hosts (directly reachable) ──────────────────
+
+- name: Back up primary Proxmox hosts
+  hosts: proxmox:!lan_hosts
+  gather_facts: true
+  tags: [backup]
+  pre_tasks:
+    - name: Validate API token is configured
+      ansible.builtin.assert:
+        that: proxmox_api_token_secret | length > 0
+        fail_msg: >-
+          {{ _api_token_env_var }} is missing or empty in your .env file.
+          Create a token: pveum user token add root@pam ansible --privsep=0
+  roles:
+    - proxmox_backup
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: backup
+
+- name: Configure shared infrastructure on primary hosts
+  hosts: proxmox:!lan_hosts
+  gather_facts: true
+  tags: [infra]
+  pre_tasks:
+    - name: Infrastructure pre-flight (repos, health, NTP)
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/infra_pre_tasks.yml"
+  roles:
+    - proxmox_bridges
+    - proxmox_pci_passthrough
+    - proxmox_igpu
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: infrastructure
+
+- name: Provision OpenWrt VM
+  hosts: router_nodes
+  gather_facts: false
+  tags: [openwrt]
+  roles:
+    - openwrt_vm
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: openwrt_vm
+
+- name: Configure OpenWrt
+  hosts: openwrt
+  gather_facts: false
+  tags: [openwrt]
+  roles:
+    - openwrt_configure
+
+# ── Phase 2: LAN satellites (reachable after OpenWrt) ───────────
+
+- name: Bootstrap LAN satellite hosts
+  hosts: router_nodes
+  gather_facts: true
+  tags: [lan-satellite]
+  tasks:
+    - name: Bootstrap each LAN host
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/bootstrap_lan_host.yml"
+      vars:
+        _lan_host_ip: "{{ hostvars[item].ansible_host }}"
+        _lan_host_name: "{{ item }}"
+      loop: "{{ groups['lan_hosts'] | default([]) }}"
+      when: groups['lan_hosts'] | default([]) | length > 0
+
+# LAN hosts are unreachable during molecule cleanup (router not yet
+# deployed).  Containers from the previous run survive.  This pass
+# destroys them now that the LAN is reachable, so the NM provision
+# handler only does fresh creation — not destroy+create in one request.
+- name: Clean stale containers on LAN hosts
+  hosts: router_nodes
+  gather_facts: false
+  tags: [lan-satellite]
+  tasks:
+    - name: Destroy stale containers on each LAN host
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/cleanup_lan_host_containers.yml"
+      vars:
+        _lan_host_ip: "{{ hostvars[item].ansible_host }}"
+        _lan_host_name: "{{ item }}"
+      loop: "{{ groups['lan_hosts'] | default([]) }}"
+      when: groups['lan_hosts'] | default([]) | length > 0
+
+- name: Back up LAN satellite hosts
+  hosts: lan_hosts
+  gather_facts: true
+  tags: [lan-satellite, backup]
+  pre_tasks:
+    - name: Clear stale SSH state to LAN hosts
+      ansible.builtin.meta: reset_connection
+
+    - name: Wait for SSH via ProxyCommand to stabilize
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+        delay: 3
+  roles:
+    - proxmox_backup
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: backup
+
+- name: Configure shared infrastructure on LAN satellites
+  hosts: lan_hosts
+  gather_facts: true
+  tags: [lan-satellite, infra]
+  pre_tasks:
+    - name: Infrastructure pre-flight (repos, health, NTP)
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/infra_pre_tasks.yml"
+  roles:
+    - proxmox_bridges
+    - proxmox_pci_passthrough
+    - proxmox_igpu
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: infrastructure
+
+# ── Phase 2.5: Kiosk (early deploy for event-driven monitoring) ──
+
+- name: Provision Kiosk LXC
+  hosts: kiosk_nodes
+  gather_facts: false
+  tags: [kiosk]
+  roles:
+    - kiosk_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: kiosk_lxc
+
+# ── Deploy NM API relay for LAN hosts ─────────────────────────────
+# LAN hosts are unreachable from the controller via HTTP. The router
+# node (home) relays NM API traffic to each LAN host's Node Manager.
+# MUST run BEFORE kiosk_configure (which checks NM API health) and
+# before the NM readiness gate.
+
+- name: Deploy LAN NM API relays
+  hosts: router_nodes
+  gather_facts: false
+  tags: [kiosk]
+  tasks:
+    - name: Deploy LAN NM relay services
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/lan_nm_relay.yml"
+      when: groups.get('lan_hosts', []) | length > 0
+
+- name: Configure Kiosk
+  hosts: kiosk_nodes
+  gather_facts: false
+  tags: [kiosk]
+  roles:
+    - kiosk_configure
+
+# ── NM API readiness gate ──────────────────────────────────────────
+# Everything ABOVE this point is Ansible bootstrap: infrastructure,
+# OpenWrt, LAN bootstrap, and Kiosk/Manager deployment.
+# Everything BELOW this point uses NM APIs for all operations.
+# The NM gate verifies every Node Manager is responding before
+# proceeding to API-driven provisioning and configuration.
+
+- name: Node Manager API readiness gate (hard-fail)
+  hosts: kiosk_nodes
+  gather_facts: false
+  tags: [kiosk]
+  tasks:
+    - name: NM readiness gate (post-kiosk-deploy)
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/nm_readiness_gate.yml"
+      vars:
+        _nm_gate_url: "{{ nm_api_url }}/api/images/versions"
+        _nm_gate_retries: 20
+        _nm_gate_delay: 5
+
+# ══════════════════════════════════════════════════════════════════
+# VPN Layer: WireGuard provision + configure + controller tunnel
+# ══════════════════════════════════════════════════════════════════
+# VPN is the last layer of base state. After this, every host is
+# reachable via VPN IP and all cross-host communication uses VPN.
+
+- name: Provision WireGuard LXC
+  hosts: vpn_nodes
+  gather_facts: false
+  tags: [wireguard]
+  roles:
+    - wireguard_lxc
+    - role: deploy_stamp
+      vars:
+        deploy_stamp_play: wireguard_lxc
+
+- name: Configure WireGuard (API-driven)
+  hosts: vpn_nodes
+  gather_facts: false
+  tags: [wireguard]
+  roles:
+    - wireguard_configure
+
+# ── VPN host-side routing ──────────────────────────────────────
+# Each Proxmox host needs a route to the VPN subnet (10.0.0.0/24)
+# through its local WireGuard container. This lets host-level socat
+# proxies reach any peer via VPN IP — one path for all topologies.
+- name: Configure VPN routing on Proxmox hosts
+  hosts: vpn_nodes
+  gather_facts: false
+  tags: [wireguard]
+  tasks:
+    - name: Configure VPN host route
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/vpn_host_route.yml"
+
+# ── Controller VPN (wg0 on the build/test machine) ──────────────
+# The SuperManager resolves display URLs via VPN IPs. The controller
+# needs a wg0 interface to reach those IPs. All keys are already in
+# env.generated (controller keypair from prepare.yml, hub pubkey from
+# wireguard_configure). This play reads them and brings up wg0.
+- name: Configure controller VPN tunnel
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [wireguard]
+  tasks:
+    - name: Configure controller wg0
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/controller_wg0.yml"
+
+# ── VPN NM reachability gate ─────────────────────────────────────
+# Controller VPN is up. Verify all NMs are reachable via VPN IPs.
+# This confirms the VPN tunnel is functional for API-driven config.
+
+- name: NM reachability via VPN (post-WireGuard)
+  hosts: kiosk_nodes
+  gather_facts: false
+  tags: [wireguard, kiosk]
+  tasks:
+    - name: NM readiness gate (post-VPN)
+      ansible.builtin.include_tasks: "{{ project_root }}/tasks/nm_readiness_gate.yml"
+      vars:
+        _nm_gate_url: "{{ nm_api_url }}/api/health"
+        _nm_gate_retries: 6
+        _nm_gate_delay: 5
+        _nm_gate_label: "{{ inventory_hostname }} (post-VPN)"
+
+# ══════════════════════════════════════════════════════════════════
+# FINAL HEARTBEAT GATE — BASE REQUIREMENTS
+# ══════════════════════════════════════════════════════════════════
+# This is the LAST play in base.yml. If heartbeats are not flowing
+# from EVERY kiosk and EVERY wireguard through the full 4-tier chain
+# to the SM, the base converge FAILS. Period.
+#
+# NM with no heartbeat = DEAD
+# CM with no heartbeat = DEAD
+# SM with no heartbeat = DEAD
+
+- name: "FINAL GATE: Wait for kiosk heartbeats to reach SM"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Wait for ALL kiosk heartbeats to flow through SM
+      ansible.builtin.uri:
+        url: "{{ callhome_server_local }}/api/fleet/ready?services=kiosk"
+        return_content: true
+        timeout: 10
+      register: _final_kiosk
+      retries: 30
+      delay: 10
+      until: >-
+        (_final_kiosk.status | default(0)) == 200
+        and (_final_kiosk.json.all_ready | default(false) | bool)
+      failed_when: false
+
+    - name: "DEAD — KIOSK HEARTBEATS NOT FLOWING AFTER CONVERGE"
+      ansible.builtin.fail:
+        msg: >-
+          ════════════════════════════════════════════════════════════════
+          BASE CONVERGE FAILED — KIOSK HEARTBEATS ARE DEAD
+          ════════════════════════════════════════════════════════════════
+          After deploying everything, kiosk heartbeats are NOT flowing
+          through the 4-tier chain to the SuperManager.
+          NM with no heartbeat = DEAD
+          CM with no heartbeat = DEAD
+          SM with no heartbeat = DEAD
+          SM response: {{ _final_kiosk.json | default('NO DATA') }}
+          INVESTIGATE:
+            curl {{ callhome_server_local }}/api/fleet/ready?services=kiosk
+            curl {{ callhome_server_local }}/api/nodes
+          ════════════════════════════════════════════════════════════════
+      when: >-
+        (_final_kiosk.status | default(0) | int) != 200
+        or not (_final_kiosk.json.all_ready | default(false) | bool)
+
+    - name: Wait for ALL wireguard heartbeats to flow through SM
+      ansible.builtin.uri:
+        url: "{{ callhome_server_local }}/api/fleet/ready?services=wireguard"
+        return_content: true
+        timeout: 10
+      register: _final_wg
+      retries: 30
+      delay: 10
+      until: >-
+        (_final_wg.status | default(0)) == 200
+        and (_final_wg.json.all_ready | default(false) | bool)
+      failed_when: false
+
+    - name: "DEAD — WIREGUARD HEARTBEATS NOT FLOWING AFTER CONVERGE"
+      ansible.builtin.fail:
+        msg: >-
+          ════════════════════════════════════════════════════════════════
+          BASE CONVERGE FAILED — WIREGUARD HEARTBEATS ARE DEAD
+          ════════════════════════════════════════════════════════════════
+          After deploying everything, wireguard heartbeats are NOT flowing
+          through the 4-tier chain to the SuperManager.
+          SM response: {{ _final_wg.json | default('NO DATA') }}
+          ════════════════════════════════════════════════════════════════
+      when: >-
+        (_final_wg.status | default(0) | int) != 200
+        or not (_final_wg.json.all_ready | default(false) | bool)
+
+    - name: "BASE CONVERGE COMPLETE — ALL HEARTBEATS FLOWING"
+      ansible.builtin.debug:
+        msg: >-
+          ═══════════════════════════════════════════════════════════
+          BASE CONVERGE COMPLETE — ALL HEARTBEATS VERIFIED
+          ═══════════════════════════════════════════════════════════
+          Kiosk heartbeats:     ALL FLOWING
+          WireGuard heartbeats: ALL FLOWING
+          4-tier chain:         Container → NM → CM → SM = ALIVE
+          ═══════════════════════════════════════════════════════════

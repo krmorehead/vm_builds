@@ -12,7 +12,7 @@ from nicegui import ui
 
 from scripts.webui import data, theme
 from scripts.webui.api_client import api
-from scripts.webui.data import Fleet, Labels, PageTitles
+from scripts.webui.data import Fleet, Labels, PageTitles, Routes
 
 
 async def _fetch_guests() -> list[dict]:
@@ -201,7 +201,7 @@ async def _do_action(vmid: str, action: str, refresh_callback) -> None:
 
 
 def register() -> None:
-    @ui.page("/containers")
+    @ui.page(Routes.CONTAINERS)
     async def containers_page() -> None:
         import asyncio
         from scripts.webui.app import get_state_dir, load_active_env

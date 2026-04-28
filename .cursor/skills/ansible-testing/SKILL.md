@@ -515,7 +515,7 @@ path resolved from `molecule/proxmox-lxc/` instead of the project root.
 ## Before running tests
 
 1. Source test env: `set -a; source test.env; set +a`
-2. Verify SSH: `ssh root@$PRIMARY_HOST hostname`
+2. Verify access: `curl -sf http://localhost:$WEBUI_PORT/api/fleet/health` (if base state up) or `ansible home -m ping` (first run)
 3. Build custom images (required): `./build-images.sh`
 4. Verify images exist: `ls images/openwrt-router-*.img.gz images/openwrt-mesh-lxc-*-rootfs.tar.gz images/debian-*.tar.zst`
 5. If previous run left host in bad state, power-cycle the machine
@@ -827,17 +827,15 @@ verify. Apply these rules to avoid wasting time:
 - Previous savings: batching eliminated ~43 individual SSH calls in the
   default verify, saving ~60-80 seconds across 4 hosts.
 
-### Verify phase: fleet API as primary, SSH as fallback
+### Verify phase: fleet API as primary (no SSH fallback)
 - For container liveness checks (service running, health status), use the
   fleet readiness API (`/api/fleet/ready`, `/api/container/{id}/ready`) as
-  the primary path. Fall back to batched `pct exec` only when the API is
-  unavailable.
-- The `_fleet_api_ready` fact gates the dual path: when True, `uri` calls
-  to the API; when False, `pct exec` SSH fallback.
-- New services added to verify MUST follow this dual-path pattern. See the
+  the ONLY path. If the API is unavailable, the 4-tier heartbeat system is
+  broken — fix it, don't fall back to SSH.
+- The `_fleet_api_ready` fact confirms the API is up. If it's not, the
+  heartbeat system is broken — fail and fix, don't fall back to SSH.
+- New services added to verify MUST use the fleet API. See the
   `manager-api-pattern` skill for the full pattern.
-- Batched `pct exec` (above) is the optimization for the **fallback path**
-  and for configure-phase tasks. It is NOT the primary verify approach.
 - SSH-only operations (hypervisor config, L3 integration, QEMU GA, OpenWrt
   deep checks) remain unchanged — the fleet API does not replace these.
 
@@ -869,7 +867,7 @@ verify. Apply these rules to avoid wasting time:
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `UNREACHABLE` during converge | SSH broken or host down | Check `PRIMARY_HOST`, verify SSH |
+| `UNREACHABLE` during converge | Host down or network broken | Check `curl $CALLHOME_URL/api/fleet/health`, then Ansible access |
 | `community.proxmox` not found | Collections missing | `ansible-galaxy collection install -r requirements.yml` |
 | Bridge numbers keep incrementing | Cleanup didn't remove bridges | `./cleanup.sh clean test.env` |
 | WiFi radios=0 after converge | PCI passthrough not cleaned up | Ensure cleanup unbinds vfio-pci, reloads modules, rescans PCI |

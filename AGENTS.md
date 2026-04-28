@@ -13,19 +13,34 @@ This is an Ansible project that automates VM and LXC container provisioning on P
 - For `wol_capable: false` hosts (`ai`): physical power-on required. No remote recovery. Report this to the user immediately.
 - Do NOT validate features against a substitute host when the actual target is down. If `ai` runs Sunshine and `ai` is unreachable, Moonlight verification is IMPOSSIBLE.
 
-### Mandatory fleet health checks
+### Mandatory fleet health monitoring
 
-Run SSH connectivity checks to ALL hosts at these mandatory checkpoints:
-1. **Session start** — before beginning any work
-2. **After every build/deploy/converge** — check ALL hosts, not just the target
-3. **Before proceeding to next host** — in multi-host operations
-4. **Every 30 minutes** — during long sessions
+**PRIMARY (API-first — the heartbeat system IS the health check):**
+Once the base state is established (kiosk/NM deployed, heartbeats flowing),
+fleet health is monitored via the 4-tier heartbeat system. NEVER SSH to
+hosts to check health when the API can tell you:
+- `curl $CALLHOME_URL/api/fleet/health` — overall fleet status
+- `curl $CALLHOME_URL/api/fleet/ready?services=...` — per-service readiness
+- `curl $CALLHOME_URL/api/fleet/stale?services=...` — circuit breaker
+- `curl $CALLHOME_URL/api/nodes` — all nodes with container health + extensions
+- The heartbeat watchdog (`heartbeat_watchdog.sh`) polls every second and
+  kills the ansible-playbook process instantly if the SM API dies (5
+  consecutive failures) or any service goes stale.
 
-Any of these are SHOW STOPPERS (not just EHOSTUNREACH):
-- SSH "Permission denied" (authentication failure = lost access)
-- SSH connection refused or timed out
+If the SM API itself is not responding, that IS the emergency. The heart
+stopped beating. FULL STOP. Fix the SM, not SSH.
+
+**SECONDARY (management-plane access — Ansible prerequisites):**
+SSH/Ansible connectivity checks are for validating that Ansible can REACH
+hosts for provisioning — not for determining fleet health:
+1. **Session start** — verify Ansible can reach hosts before running playbooks
+2. **After network-changing operations** — confirm management path survived
+
+Any of these are SHOW STOPPERS:
+- SM API not responding (heartbeat system dead)
+- `/api/fleet/stale` returns stale services (container/host went down)
+- SSH "Permission denied" (lost Ansible management access)
 - Proxmox API (port 8006) connection refused
-- SuperManager showing 0% disk AND 0% memory (Manager can't SSH to host)
 - Ansible `unreachable=1` in any play recap
 
 ### Previous catastrophes
@@ -160,8 +175,8 @@ This tree organizes all skills by domain area to help agents quickly find releva
 ## Project Structure
 
 - `roles/` - Ansible roles with two-role pattern: `<type>_vm/lxc` + `<type>_configure`
-- `playbooks/` - Main playbook execution flows and cleanup
-- `molecule/` - Test scenarios: default (full integration), per-feature scenarios
+- `playbooks/` - Two-layer pipeline: `base.yml` (stable foundation), `services.yml` (iterate fast), `site.yml` (thin wrapper), `cleanup.yml`
+- `molecule/` - Test scenarios: `base` (base state), `default` (full integration), per-feature scenarios
 - `inventory/` - Host groups and variables by deployment topology
 - `images/` - Custom VM/container images (built via build-images.sh)
 - `.state/` - Runtime state files (gitignored, environment-specific)
@@ -200,15 +215,18 @@ This tree organizes all skills by domain area to help agents quickly find releva
 # Lint checking before commits
 ansible-lint && yamllint .
 
-# FAST iteration loop (90% of the time — preserves baseline)
-molecule converge && molecule verify
+# Validate base independently (only when base changes)
+molecule test -s base                        # ~8 min
+
+# FAST iteration loop (90% of the time — base already up)
+molecule converge && molecule verify         # services only (base idempotent)
 
 # Fix ONE broken image (fastest loop)
 ./scripts/build-images.sh --host $PRIMARY_HOST --only pihole  # ~2-3 min
 molecule test -s pihole-lxc                                    # per-feature
 
 # Full E2E clean-state proof (LAST STEP — after all images pass)
-molecule test                                # Full integration (6 nodes)
+molecule test                                # Full integration (base + services)
 
 # Build custom images (IN PARALLEL across 6 hosts)
 ./scripts/build-images.sh --only router      # Build single image
@@ -251,8 +269,9 @@ pytest tests/ -v
 
 **MANDATORY: Environment Validation**
 - ALWAYS run `set -a && source test.env && set +a` before ANY molecule commands
-- Test environment setup immediately: SSH connectivity, Ansible ping, variable export
-- Validate with: `ssh -o StrictHostKeyChecking=no root@$PRIMARY_HOST "echo test"` and `ansible home -m ping`
+- Test environment setup: source env vars, verify Ansible can reach PRIMARY_HOST
+- After base state is established, validate fleet via: `curl http://localhost:$WEBUI_PORT/api/fleet/health`
+- For pre-base-state Ansible access: `ansible home -m ping`
 
 **MANDATORY: Heartbeat API Server (callhome)**
 - `.state/callhome_url` is the SOLE source of truth for `callhome_server`. Both `build.py` (production), `prepare.yml` (test), and the NiceGUI app write this file on startup. Ansible hard-fails if it is missing.
@@ -335,13 +354,15 @@ pytest tests/ -v
 - Use detached scripts for network topology changes (firewall, interface assignment)
 - NEVER assume PRIMARY_HOST is only reachability path
 
-### Cleanup Completeness
-- `playbooks/cleanup.yml` is the SINGLE unified cleanup for all contexts (molecule, CLI, SuperManager). `molecule/default/cleanup.yml` is a one-line import.
+### Cleanup Completeness (Two-Layer)
+- `playbooks/cleanup.yml` is the SINGLE unified cleanup for all contexts. `molecule/default/cleanup.yml` is a one-line import.
+- **Default (no tags)**: Destroys ONLY service containers/VMs (`service_ct_ids` + `service_vm_ids`). Base layer (OpenWrt VM, Kiosk/NM, bridges, PCI config) is PRESERVED. This is what runs during every `molecule test`.
+- **`--tags base-cleanup`**: Also tears down the base layer (`base_vm_ids` + `base_ct_ids`). Only use when rebuilding the foundation itself.
+- VMID lists live in `group_vars/all.yml`: `service_ct_ids` derives from `debian_sibling_ct_ids + openwrt_sibling_ct_ids`. `base_ct_ids` and `base_vm_ids` are separate.
 - When ANY role deploys files, add to `playbooks/cleanup.yml` only — there is ONE cleanup to maintain
 - Cleanup removes ONLY files playbook deployed, NEVER operator-created credentials
-- Remove generated env files: `test.env.generated`, `.env.generated`
 - Use explicit VMID destruction, NEVER iterate `qm list`/`pct list`
-- **LAN host gap**: Main cleanup targets `proxmox:!lan_hosts`. LAN hosts ONLY get cleanup via `tasks/cleanup_lan_host.yml`. Host-level systemd units MUST be added to BOTH files.
+- **LAN host cleanup**: `tasks/cleanup_lan_host_services.yml` (services only, default) and `tasks/cleanup_lan_host.yml` (full teardown including base, opt-in). Primary hosts: Play 2 (services) vs Play 5 (base).
 - **Service migration**: When renaming a systemd service, provisioning roles MUST stop/remove the old service BEFORE deploying the replacement. Without this, the old service holds the port indefinitely.
 
 ### Verify Retries: Fail Fast
@@ -483,9 +504,29 @@ just rebuild. Straightforward clean management.
 
 ## Deployment and Testing Strategy
 
-- **Molecule default**: Full integration test with 6 nodes (home, mesh1, ai, mesh2, bridge-1, bridge-2)
+### Two-Layer Pipeline (MANDATORY)
+Deployment is split into two independently testable layers:
+- **Base state** (`playbooks/base.yml`): Infra + OpenWrt + Kiosk/NM + WireGuard VPN. Rarely changes.
+- **Services** (`playbooks/services.yml`): All services built on top of base. Iterates fast.
+- **Full E2E** (`playbooks/site.yml`): Thin wrapper importing base.yml then services.yml.
+
+### Standard workflow
+```bash
+# Validate base independently (only when base components change)
+molecule test -s base          # ~8 min
+
+# Daily iteration: services only (base already up)
+molecule converge -s default   # base is idempotent, services deploy
+molecule verify -s default     # full verification
+
+# CI / clean-state proof
+molecule test -s default       # full E2E (base + services)
+```
+
+### Key principles
+- **Molecule base**: Base state validation — infra, OpenWrt, Kiosk/NM, WireGuard VPN (6-node)
+- **Molecule default**: Full integration test — base + services (6-node)
 - **Per-feature scenarios**: Test individual features in isolation
-- **Baseline workflow**: Use converge/verify for iteration, test for validation
 - **Test machine**: Use for debugging before touching production
 - **TDD approach**: Write assertions first, then implement features
 

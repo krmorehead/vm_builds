@@ -8,4 +8,4 @@ kiosk_ct_onboot: true
 kiosk_ct_unprivileged: false
 kiosk_ct_features:
   - "nesting=1"
-kiosk_ct_ip_offset: "{{ kiosk_ct_ip_offset | default(19) }}"
+kiosk_ct_startup_order: 6

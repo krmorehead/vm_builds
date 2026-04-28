@@ -5,7 +5,7 @@ from __future__ import annotations
 from nicegui import ui
 
 from scripts.webui import data, theme
-from scripts.webui.data import Labels, PageTitles
+from scripts.webui.data import Labels, PageTitles, Routes
 from scripts.webui.run_process import stream_process
 
 LOCAL_TARGETS = [
@@ -15,7 +15,7 @@ LOCAL_TARGETS = [
 
 
 def register() -> None:
-    @ui.page("/images")
+    @ui.page(Routes.IMAGES)
     def images_page() -> None:
         from scripts.webui.app import get_images_dir, load_active_env
 

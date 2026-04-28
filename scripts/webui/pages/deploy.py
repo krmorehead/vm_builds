@@ -14,7 +14,7 @@ import time
 from nicegui import app as nicegui_app, ui
 
 from scripts.webui import data, theme
-from scripts.webui.data import Labels, PageTitles
+from scripts.webui.data import Labels, PageTitles, Routes
 from scripts.webui.run_process import DEPLOY_LOG, stream_process
 
 _deploy_state: dict = {
@@ -27,7 +27,7 @@ _deploy_state: dict = {
 
 
 def register() -> None:
-    @ui.page("/deploy")
+    @ui.page(Routes.DEPLOY)
     def deploy_page() -> None:
         from scripts.webui.app import get_env_path, get_state_dir
 

@@ -12,16 +12,21 @@ Use when starting new projects, implementing new service types, or when you want
 **Before ANY development work:**
 ```bash
 set -a && source test.env && set +a
-echo "HOME_API_TOKEN: $HOME_API_TOKEN"
 echo "PRIMARY_HOST: $PRIMARY_HOST"
 echo "AI_HOST: $AI_HOST"
 echo "MESH_2_HOST: $MESH_2_HOST"
-# Probe ALL hosts — not just PRIMARY_HOST
-ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@$PRIMARY_HOST "echo 'home OK'"
-ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@$AI_HOST "echo 'ai OK'"
-ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@$MESH_2_HOST "echo 'mesh2 OK'"
+
+# If base state is already established, use the heartbeat system:
+curl -sf http://localhost:$WEBUI_PORT/api/fleet/health && echo "Fleet OK"
+curl -sf http://localhost:$WEBUI_PORT/api/nodes | python3 -m json.tool
+
+# If base state is NOT established (first run), verify Ansible access:
 ansible all -m ping
 ```
+
+**If the SM API is not responding or any service is stale → FULL STOP.**
+The heartbeat system IS the health check. If `/api/fleet/health` fails,
+the heart stopped — fix the SM, don't SSH around it.
 
 **If ANY host is unreachable → FULL STOP. Investigate immediately.**
 Do NOT continue development with a degraded fleet. An unreachable host is a
@@ -113,7 +118,7 @@ yamllint roles/<service>_*/ molecule/<scenario>/
 | Early Symptom | Likely Cause | Prevention |
 |---------------|--------------|------------|
 | "hostname none" | Environment not exported | Always use `set -a && source test.env && set +a` |
-| UNREACHABLE hosts | SSH or host connectivity | Validate with `ansible home -m ping` first |
+| UNREACHABLE hosts | Host or heartbeat connectivity | Check `curl $CALLHOME_URL/api/fleet/health` first; if pre-base-state, use `ansible home -m ping` |
 | Container template failures | Missing nesting=1 or cgroup | Load `lxc-container-patterns` early |
 | Docker access fails | Wrong execution context | Use `service_nodes` host, not container group |
 | SSH auth intermittently fails + host key oscillates | IP address conflict (container on another host has same IP) | Check `pct config` on all hosts for IP conflicts before investigating hardware |
@@ -147,7 +152,7 @@ the real operation completed on real hardware.
 - Start real services on real hosts (deploy with `molecule converge` if needed)
 - Let real heartbeats flow from real containers
 - Click every button, toggle, and action on the page
-- Verify the real outcome on the real hardware (SSH, pct exec, API query)
+- Verify the real outcome via the fleet API (`/api/fleet/ready`, `/api/container/{id}/ready`) and host-side `pct config`/`qm config` for hypervisor checks
 
 Fabricated test data is mocking with extra steps. It proves the UI can render
 JSON — not that the system works.

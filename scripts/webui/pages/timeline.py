@@ -5,11 +5,11 @@ from __future__ import annotations
 from nicegui import ui
 
 from scripts.webui import data, theme
-from scripts.webui.data import PageTitles
+from scripts.webui.data import PageTitles, Routes
 
 
 def register() -> None:
-    @ui.page("/timeline")
+    @ui.page(Routes.TIMELINE)
     def timeline_page() -> None:
         from scripts.webui.app import get_state_dir
 

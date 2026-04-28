@@ -1,0 +1,31 @@
+---
+# Move WiFi PHY devices into an LXC container namespace and register
+# the move with the Node Manager API.
+#
+# Required vars:
+#   _phy_ct_id:    Container VMID (e.g. meshwifi_ct_id, bridge_ct_id)
+#   _wifi_phys:    List of PHY names to move (e.g. ['phy0'])
+
+- name: Move WiFi PHY devices into container namespace
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      pid=$(lxc-info -n {{ _phy_ct_id }} 2>/dev/null | awk '/^PID:/{print $2}')
+      if [ -z "$pid" ] || [ "$pid" = "-1" ]; then
+        echo "ERROR: cannot determine PID for container {{ _phy_ct_id }}" >&2
+        exit 1
+      fi
+      for phy in {{ _wifi_phys | join(' ') }}; do
+        iw phy "$phy" set netns "$pid"
+      done
+    executable: /bin/bash
+  changed_when: true
+
+- name: Update PHY namespaces in Manager after move
+  ansible.builtin.include_tasks: "{{ project_root }}/tasks/manager_register.yml"
+  vars:
+    register_path: "api/host/{{ inventory_hostname }}/hardware/phy/{{ item }}"
+    register_body:
+      namespace: "container:{{ _phy_ct_id }}"
+    register_method: PATCH
+  loop: "{{ _wifi_phys }}"
