@@ -626,22 +626,26 @@
       ansible.builtin.assert:
         that:
           - _kiosk_config_api.json.IS_CLUSTER_MANAGER | string | lower in ['true', '1', 'yes']
-          - _kiosk_config_api.json.MANAGEMENT_SERVER is search(lookup('env', 'WEBUI_PORT') | default('52500', true))
+          - _kiosk_config_api.json.MANAGEMENT_SERVER is search('10\\.0\\.0\\.')
+          - _kiosk_config_api.json.MANAGEMENT_SERVER is search(lookup('env', 'WEBUI_PORT') | default('40500', true))
         fail_msg: >-
           ClusterManager 4-tier config wrong on {{ inventory_hostname }}.
           IS_CLUSTER_MANAGER={{ _kiosk_config_api.json.IS_CLUSTER_MANAGER }},
-          MANAGEMENT_SERVER={{ _kiosk_config_api.json.MANAGEMENT_SERVER }}
+          MANAGEMENT_SERVER={{ _kiosk_config_api.json.MANAGEMENT_SERVER }}.
+          Must use VPN IP (10.0.0.x), not WAN.
       when: "'router_nodes' in group_names"
 
-    - name: Assert 4-tier config for NodeManagers (non-router)
+    - name: Assert 4-tier config for NodeManagers (non-router) uses VPN
       ansible.builtin.assert:
         that:
           - _kiosk_config_api.json.IS_CLUSTER_MANAGER | string | lower in ['false', '0', 'no', '']
+          - _kiosk_config_api.json.MANAGEMENT_SERVER is search('10\\.0\\.0\\.')
           - _kiosk_config_api.json.MANAGEMENT_SERVER is search(':9001')
         fail_msg: >-
           NodeManager 4-tier config wrong on {{ inventory_hostname }}.
           IS_CLUSTER_MANAGER={{ _kiosk_config_api.json.IS_CLUSTER_MANAGER }},
-          MANAGEMENT_SERVER={{ _kiosk_config_api.json.MANAGEMENT_SERVER }}
+          MANAGEMENT_SERVER={{ _kiosk_config_api.json.MANAGEMENT_SERVER }}.
+          Must use VPN IP (10.0.0.x), not WAN.
       when: "'router_nodes' not in group_names"
 
     # ── Per-interface forwarding ──────────────────────────────────────
@@ -861,27 +865,13 @@
   hosts: kiosk_nodes
   gather_facts: false
   tasks:
-    - name: Query NM API via VPN IP
+    - name: "NM API via VPN — MUST respond or base is DEAD"
       ansible.builtin.uri:
         url: "http://{{ vpn_ip }}:{{ kiosk_manager_port | default(9001) }}/api/health"
         return_content: true
         timeout: 10
       register: _nm_vpn_check
       delegate_to: localhost
-      failed_when: false
-
-    - name: Assert NM reachable via VPN
-      ansible.builtin.assert:
-        that: (_nm_vpn_check.status | default(0)) == 200
-        fail_msg: >-
-          Node Manager on {{ inventory_hostname }} (VPN IP {{ vpn_ip }})
-          not reachable via VPN. Base state is incomplete.
-
-    - name: Report base state verification
-      ansible.builtin.debug:
-        msg: >-
-          Base state OK: {{ inventory_hostname }} — NM reachable via VPN
-          ({{ vpn_ip }}:{{ kiosk_manager_port | default(9001) }})
 
 # ── Play 8: Fleet-level health summary (SM API) ─────────────────
 
@@ -911,87 +901,56 @@
         url: "{{ _api_base }}/api/nodes"
         return_content: true
         timeout: 10
+        headers: "{{ nm_auth_headers }}"
       register: _fleet_nodes
 
-    # ── Kiosk heartbeats: every single one MUST be flowing ───────
-    - name: Query fleet readiness for kiosk heartbeats
+    # ── Kiosk heartbeats: all registered NMs MUST report ─────────
+    - name: "KIOSK HEARTBEATS — all registered NMs MUST report"
       ansible.builtin.uri:
         url: "{{ _api_base }}/api/fleet/ready?services=kiosk"
         return_content: true
         timeout: 10
+        headers: "{{ nm_auth_headers }}"
       register: _fleet_kiosk
-      failed_when: false
 
-    - name: "DEAD — KIOSK HEARTBEATS NOT FLOWING"
+    - name: "DEAD — KIOSK HEARTBEATS"
       ansible.builtin.assert:
-        that:
-          - (_fleet_kiosk.status | default(0) | int) == 200
-          - _fleet_kiosk.json.all_ready | default(false) | bool
+        that: _fleet_kiosk.json.all_ready | bool
         fail_msg: >-
-          ════════════════════════════════════════════════════════════════
-          THE HEARTBEAT SYSTEM IS DEAD — KIOSK HEARTBEATS NOT FLOWING
-          ════════════════════════════════════════════════════════════════
-          NM with no heartbeat = DEAD
-          CM with no heartbeat = DEAD
-          SM with no heartbeat = DEAD
-          SM response: {{ _fleet_kiosk.json | default('NO DATA') }}
-          EVERY UNIT MUST BE HEARTBEATING. THIS IS A BASE REQUIREMENT.
-          ════════════════════════════════════════════════════════════════
+          {{ _fleet_kiosk.json.ready_count }}/{{ _fleet_kiosk.json.registered_hosts }}
+          registered NMs have kiosk heartbeating. MISSING KIOSKS ARE DEAD.
+          Response: {{ _fleet_kiosk.json }}
 
-    # ── WireGuard heartbeats: every single one MUST be flowing ──
-    - name: Query fleet readiness for wireguard heartbeats
+    # ── WireGuard heartbeats: all registered NMs MUST report ───
+    - name: "WIREGUARD HEARTBEATS — all registered NMs MUST report"
       ansible.builtin.uri:
         url: "{{ _api_base }}/api/fleet/ready?services=wireguard"
         return_content: true
         timeout: 10
+        headers: "{{ nm_auth_headers }}"
       register: _fleet_wg
-      failed_when: false
 
-    - name: "DEAD — WIREGUARD HEARTBEATS NOT FLOWING"
+    - name: "DEAD — WIREGUARD HEARTBEATS"
       ansible.builtin.assert:
-        that:
-          - (_fleet_wg.status | default(0) | int) == 200
-          - _fleet_wg.json.all_ready | default(false) | bool
+        that: _fleet_wg.json.all_ready | bool
         fail_msg: >-
-          ════════════════════════════════════════════════════════════════
-          THE HEARTBEAT SYSTEM IS DEAD — WIREGUARD HEARTBEATS NOT FLOWING
-          ════════════════════════════════════════════════════════════════
-          SM response: {{ _fleet_wg.json | default('NO DATA') }}
-          VPN MUST be established as a BASE REQUIREMENT.
-          ════════════════════════════════════════════════════════════════
+          {{ _fleet_wg.json.ready_count }}/{{ _fleet_wg.json.registered_hosts }}
+          registered NMs have wireguard heartbeating. MISSING VPN TUNNELS ARE DEAD.
+          Response: {{ _fleet_wg.json }}
 
     # ── Stale heartbeat check: nothing can be stale ─────────────
-    - name: Query fleet staleness for base services
+    - name: "STALE CHECK — NOTHING MAY BE STALE"
       ansible.builtin.uri:
         url: "{{ _api_base }}/api/fleet/stale?services=kiosk,wireguard&max_age_seconds=120"
         return_content: true
         timeout: 10
+        headers: "{{ nm_auth_headers }}"
+        status_code: [200]
       register: _fleet_stale
-      failed_when: false
-
-    - name: "DEAD — STALE HEARTBEATS DETECTED"
-      ansible.builtin.assert:
-        that:
-          - not (_fleet_stale.json.has_stale | default(false) | bool)
-        fail_msg: >-
-          ════════════════════════════════════════════════════════════════
-          HEARTBEATS WENT STALE — SOMETHING DIED
-          ════════════════════════════════════════════════════════════════
-          Stale services: {{ _fleet_stale.json.stale | default([]) }}
-          A service that was heartbeating has STOPPED. Find it and fix it.
-          ════════════════════════════════════════════════════════════════
-      when: (_fleet_stale.status | default(0) | int) == 409
 
     - name: "ALL HEARTBEATS VERIFIED — BASE IS ALIVE"
       ansible.builtin.debug:
         msg: >-
-          ═══════════════════════════════════════════════════════════
-          BASE STATE VERIFIED — ALL HEARTBEATS FLOWING
-          ═══════════════════════════════════════════════════════════
-          Fleet health API: {{ _fleet_health.status }}
-          Kiosk heartbeats: ALL FLOWING (all_ready=true)
-          WireGuard heartbeats: ALL FLOWING (all_ready=true)
-          Stale check: {{ 'CLEAN' if (_fleet_stale.status | default(200)) == 200 else 'STALE DETECTED' }}
-          Registered nodes: {{ (_fleet_nodes.json | default([])) | length }}
-          4-tier chain: Container → NM → CM → SM = ALIVE
-          ═══════════════════════════════════════════════════════════
+          BASE VERIFIED: kiosk=ALL READY, wireguard=ALL READY,
+          stale=NONE, nodes={{ (_fleet_nodes.json | default([])) | length }},
+          4-tier chain=ALIVE

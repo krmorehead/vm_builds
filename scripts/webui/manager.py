@@ -1430,19 +1430,29 @@ class BaseManager:
         """
 
     async def _relay_loop(self) -> None:
-        """Background loop: refresh metrics → emit payload upstream."""
+        """Background loop: refresh metrics → emit payload upstream.
+
+        Uses a dedicated ThreadPoolExecutor so container metric collectors
+        (which may hang on unreachable containers) cannot starve the relay.
+        """
+        import concurrent.futures
         log = logging.getLogger("vm_builds.relay")
+        relay_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="relay",
+        )
+        loop = asyncio.get_running_loop()
+        log.warning("Relay loop STARTED for %s → %s", self._host_name, self._management_server)
         await asyncio.sleep(1)
         while True:
             try:
-                await asyncio.to_thread(self._refresh_metrics)
-                ok = await asyncio.to_thread(self.emit)
+                await loop.run_in_executor(relay_pool, self._refresh_metrics)
+                ok = await loop.run_in_executor(relay_pool, self.emit)
                 if ok:
-                    log.debug("Relayed heartbeat for %s", self._host_name)
-                elif self._management_server:
+                    log.warning("Relayed heartbeat for %s", self._host_name)
+                else:
                     log.warning("Failed relay for %s", self._host_name)
             except (OSError, ValueError, TypeError, RuntimeError) as exc:
-                log.error("Relay error: %s", exc)
+                log.error("Relay error for %s: %s", self._host_name, exc)
             await asyncio.sleep(5)
 
     def start_poller(self) -> None:

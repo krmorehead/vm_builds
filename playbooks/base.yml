@@ -352,78 +352,53 @@
 # CM with no heartbeat = DEAD
 # SM with no heartbeat = DEAD
 
-- name: "FINAL GATE: Wait for kiosk heartbeats to reach SM"
+- name: "FINAL GATE: All registered NMs must heartbeat"
   hosts: localhost
   connection: local
   gather_facts: false
   tasks:
-    - name: Wait for ALL kiosk heartbeats to flow through SM
+    - name: Wait for ALL kiosk heartbeats (driven by host registry)
       ansible.builtin.uri:
         url: "{{ callhome_server_local }}/api/fleet/ready?services=kiosk"
         return_content: true
         timeout: 10
+        headers: "{{ nm_auth_headers }}"
       register: _final_kiosk
       retries: 30
       delay: 10
-      until: >-
-        (_final_kiosk.status | default(0)) == 200
-        and (_final_kiosk.json.all_ready | default(false) | bool)
-      failed_when: false
+      until: _final_kiosk.json.all_ready | default(false) | bool
 
-    - name: "DEAD — KIOSK HEARTBEATS NOT FLOWING AFTER CONVERGE"
-      ansible.builtin.fail:
-        msg: >-
-          ════════════════════════════════════════════════════════════════
-          BASE CONVERGE FAILED — KIOSK HEARTBEATS ARE DEAD
-          ════════════════════════════════════════════════════════════════
-          After deploying everything, kiosk heartbeats are NOT flowing
-          through the 4-tier chain to the SuperManager.
-          NM with no heartbeat = DEAD
-          CM with no heartbeat = DEAD
-          SM with no heartbeat = DEAD
-          SM response: {{ _final_kiosk.json | default('NO DATA') }}
-          INVESTIGATE:
-            curl {{ callhome_server_local }}/api/fleet/ready?services=kiosk
-            curl {{ callhome_server_local }}/api/nodes
-          ════════════════════════════════════════════════════════════════
-      when: >-
-        (_final_kiosk.status | default(0) | int) != 200
-        or not (_final_kiosk.json.all_ready | default(false) | bool)
+    - name: "DEAD — KIOSK HEARTBEATS"
+      ansible.builtin.assert:
+        that: _final_kiosk.json.all_ready | bool
+        fail_msg: >-
+          {{ _final_kiosk.json.ready_count }}/{{ _final_kiosk.json.registered_hosts }}
+          registered NMs have kiosk heartbeating. MISSING KIOSKS ARE DEAD.
+          Response: {{ _final_kiosk.json }}
 
-    - name: Wait for ALL wireguard heartbeats to flow through SM
+    - name: Wait for ALL wireguard heartbeats (driven by host registry)
       ansible.builtin.uri:
         url: "{{ callhome_server_local }}/api/fleet/ready?services=wireguard"
         return_content: true
         timeout: 10
+        headers: "{{ nm_auth_headers }}"
       register: _final_wg
       retries: 30
       delay: 10
-      until: >-
-        (_final_wg.status | default(0)) == 200
-        and (_final_wg.json.all_ready | default(false) | bool)
-      failed_when: false
+      until: _final_wg.json.all_ready | default(false) | bool
 
-    - name: "DEAD — WIREGUARD HEARTBEATS NOT FLOWING AFTER CONVERGE"
-      ansible.builtin.fail:
-        msg: >-
-          ════════════════════════════════════════════════════════════════
-          BASE CONVERGE FAILED — WIREGUARD HEARTBEATS ARE DEAD
-          ════════════════════════════════════════════════════════════════
-          After deploying everything, wireguard heartbeats are NOT flowing
-          through the 4-tier chain to the SuperManager.
-          SM response: {{ _final_wg.json | default('NO DATA') }}
-          ════════════════════════════════════════════════════════════════
-      when: >-
-        (_final_wg.status | default(0) | int) != 200
-        or not (_final_wg.json.all_ready | default(false) | bool)
+    - name: "DEAD — WIREGUARD HEARTBEATS"
+      ansible.builtin.assert:
+        that: _final_wg.json.all_ready | bool
+        fail_msg: >-
+          {{ _final_wg.json.ready_count }}/{{ _final_wg.json.registered_hosts }}
+          registered NMs have wireguard heartbeating. MISSING VPN TUNNELS ARE DEAD.
+          Response: {{ _final_wg.json }}
 
     - name: "BASE CONVERGE COMPLETE — ALL HEARTBEATS FLOWING"
       ansible.builtin.debug:
         msg: >-
-          ═══════════════════════════════════════════════════════════
-          BASE CONVERGE COMPLETE — ALL HEARTBEATS VERIFIED
-          ═══════════════════════════════════════════════════════════
-          Kiosk heartbeats:     ALL FLOWING
-          WireGuard heartbeats: ALL FLOWING
-          4-tier chain:         Container → NM → CM → SM = ALIVE
-          ═══════════════════════════════════════════════════════════
+          BASE COMPLETE:
+          {{ _final_kiosk.json.ready_count }}/{{ _final_kiosk.json.registered_hosts }} kiosks,
+          {{ _final_wg.json.ready_count }}/{{ _final_wg.json.registered_hosts }} wireguard.
+          4-tier chain ALIVE.

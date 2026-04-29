@@ -24,6 +24,18 @@ LOCAL_VPN_IP=$(ip -4 addr show wg0 2>/dev/null | awk '/inet /{sub(/\/.*/, "", $2
 iptables -t nat -C POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || \
   iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
 
+# MASQUERADE outbound VPN traffic so containers behind the NAT bridge
+# can reach remote VPN peers. Without this, replies can't route back
+# (source stays as 10.99.x.20 which is unreachable from remote peers).
+iptables -t nat -C POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null || \
+  iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE
+
+# Allow forwarding from the local bridge (eth0) to the VPN tunnel (wg0).
+# Host routes 10.0.0.0/24 via this container; this FORWARD rule lets
+# container-originated traffic traverse the tunnel.
+iptables -C FORWARD -i eth0 -o wg0 -j ACCEPT 2>/dev/null || \
+  iptables -A FORWARD -i eth0 -o wg0 -j ACCEPT
+
 for PORT in 6080 6081 6082 6083 9001; do
   iptables -t nat -C PREROUTING -i wg0 -d "$LOCAL_VPN_IP" -p tcp --dport "$PORT" \
     -j DNAT --to-destination "$TARGET:$PORT" 2>/dev/null || \

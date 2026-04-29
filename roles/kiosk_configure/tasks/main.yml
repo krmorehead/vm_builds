@@ -71,16 +71,16 @@
 
 # ── Build node IP map for the per-host manager ──────────────────
 
-- name: Build child Manager IP map (host IPs reachable from kiosk container)
+- name: Build child Manager IP map (VPN IPs for encrypted cross-host communication)
   ansible.builtin.set_fact:
     _child_manager_ips: >-
       {{ _child_manager_ips | default({})
-         | combine({item: hostvars[item]['ansible_host']})
+         | combine({item: hostvars[item]['vpn_ip']})
       }}
   loop: "{{ groups.get('kiosk_nodes', []) | difference([inventory_hostname]) }}"
   when: >-
     item in hostvars
-    and hostvars[item].get('ansible_host', '') | length > 0
+    and hostvars[item].get('vpn_ip', '') | length > 0
 
 # ── Compute LAN prefix for deterministic service IPs ─────────
 
@@ -137,16 +137,16 @@
       gaming: "{{ _lan_prefix }}.{{ gaming_ct_ip_offset }}"
   when: item.value | length > 0
 
-- name: Build node IP map — Proxmox host IPs
+- name: Build node IP map — Proxmox host VPN IPs
   ansible.builtin.set_fact:
     _kiosk_node_ips: >-
       {{ _kiosk_node_ips | default({})
-         | combine({item: hostvars[item]['ansible_host']})
+         | combine({item: hostvars[item]['vpn_ip']})
       }}
   loop: "{{ groups.get('kiosk_nodes', []) }}"
   when:
     - item in hostvars
-    - hostvars[item].get('ansible_host', '') | length > 0
+    - hostvars[item].get('vpn_ip', '') | length > 0
 
 # ── Compute host IP reachable from the kiosk container ─────────
 
@@ -205,11 +205,10 @@
            else '' }}
       MANAGEMENT_SERVER: >-
         {{ kiosk_management_server if (kiosk_management_server | default('')) | length > 0
-           else ('http://' + _kiosk_host_ip | trim + ':' + callhome_port)
+           else callhome_server
                 if inventory_hostname in groups.get('router_nodes', [])
-           else (
-             'http://' + hostvars[groups['router_nodes'][0]]['ansible_host'] + ':' + kiosk_manager_port
-           ) if (groups.get('router_nodes', []) | length > 0)
+           else 'http://' + hostvars[groups['router_nodes'][0]]['vpn_ip'] + ':' + kiosk_manager_port
+                if (groups.get('router_nodes', []) | length > 0)
            else callhome_server }}
       CALLHOME_SERVER: "{{ callhome_server }}"
       CALLHOME_PUBLIC_KEY: "{{ callhome_public_key }}"
@@ -313,27 +312,28 @@
   register: _callhome_cfg_files
   changed_when: "'CHANGED' in _callhome_cfg_files.stdout"
 
-# ── Restart kiosk services only when config changed ──────────────
+# ── Always restart kiosk services ──────────────────────────────────
+# kiosk-web reads config.json ONCE at startup. If the process was
+# restarted (image rebuild, container recreate) but config.json was
+# already on disk from a previous run, _kiosk_config_changed is false
+# and the service never picks up the config. ALWAYS restart.
 
-- name: Restart kiosk-web (Manager API) with new config
+- name: Restart kiosk-web (Manager API) to load current config
   ansible.builtin.command:
     cmd: "pct exec {{ kiosk_ct_id }} -- systemctl restart kiosk-web"
   changed_when: true
-  when: _kiosk_config_changed | bool or _callhome_set is changed
 
-- name: Restart kiosk-display so Chromium reconnects to new kiosk-web
+- name: Restart kiosk-display so Chromium reconnects
   ansible.builtin.command:
     cmd: "pct exec {{ kiosk_ct_id }} -- systemctl restart kiosk-display"
   changed_when: true
   failed_when: false
-  when: _kiosk_config_changed | bool
 
-- name: Restart callhome so it reports config_files extension
+- name: Restart callhome to report config_files extension
   ansible.builtin.command:
     cmd: "pct exec {{ kiosk_ct_id }} -- systemctl restart callhome"
   changed_when: true
   failed_when: false
-  when: _callhome_set is changed or _callhome_cfg_files is changed
 
 # ── Rewrite callhome on sibling containers → local Manager ───────
 # After kiosk-web restarts, point all sibling containers to the local

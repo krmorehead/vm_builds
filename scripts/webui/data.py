@@ -51,7 +51,7 @@ from scripts.webui.constants import (  # noqa: F401
 
 # ── Server port for internal API calls ────────────────────────────────
 
-_SERVER_PORT: int = int(os.environ.get("WEBUI_PORT", "52500"))
+_SERVER_PORT: int = int(os.environ.get("WEBUI_PORT", "40500"))
 
 
 def set_server_port(port: int) -> None:
@@ -61,7 +61,7 @@ def set_server_port(port: int) -> None:
 
 
 def get_api_base_url() -> str:
-    """Return the base URL for internal API calls (e.g. http://127.0.0.1:52500)."""
+    """Return the base URL for internal API calls (e.g. http://127.0.0.1:40500)."""
     return f"http://127.0.0.1:{_SERVER_PORT}"
 
 
@@ -253,7 +253,7 @@ ENV_TEMPLATE: list[EnvVar] = [
     EnvVar("MOONLIGHT_PAIR_PIN", "Moonlight pairing PIN", False, "", True),
     EnvVar("DESKTOP_USER", "Desktop LXC username", False, "desktop", False),
     EnvVar("HA_ADMIN_PASSWORD", "Home Assistant admin password", False, "", True),
-    EnvVar("WEBUI_PORT", "Web UI / API port (firewall must allow)", False, "52500", False),
+    EnvVar("WEBUI_PORT", "Web UI / API port (firewall must allow)", False, "40500", False),
     EnvVar("CALLHOME_SERVER", "Management server URL for fleet call-home (auto-detected)", False, "", False),
     EnvVar("CALLHOME_PRIVATE_KEY", "Server-side secret for validating call-home tokens", False, "", True),
     EnvVar("CALLHOME_PUBLIC_KEY", "Token distributed to nodes for call-home auth", False, "", True),

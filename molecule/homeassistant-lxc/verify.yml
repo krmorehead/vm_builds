@@ -13,7 +13,7 @@
   tasks:
     - name: Query homeassistant readiness from API
       ansible.builtin.uri:
-        url: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}/api/container/homeassistant/ready"
+        url: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('40500', true) }}/api/container/homeassistant/ready"
         return_content: true
       register: _container_api
       failed_when: false

@@ -11,6 +11,7 @@ Run with: pytest tests/test_webui_app.py -v
 """
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -1347,6 +1348,14 @@ CONTAINER_CHECKIN = {
 }
 
 
+def _seed_registry(state_dir: Path, count: int = 1) -> None:
+    """Write a minimal registry.json so fleet readiness knows expected host count."""
+    hosts = [{"name": f"host-{i}", "ip": f"10.0.0.{i+1}", "mac": "",
+              "bucket": "", "source": "test", "wol_capable": True, "vpn_ip": f"10.0.0.{i+1}"}
+             for i in range(count)]
+    (state_dir / "registry.json").write_text(json.dumps(hosts))
+
+
 class TestFleetReadyEndpoint:
     async def test_missing_services_param(self, tmp_path):
         async with api_client(tmp_path) as client:
@@ -1356,6 +1365,8 @@ class TestFleetReadyEndpoint:
 
     async def test_all_ready(self, tmp_path):
         async with api_client(tmp_path) as client:
+            state_dir = tmp_path / "state"
+            _seed_registry(state_dir, count=1)
             await client.post(ApiRoutes.CHECKIN, json=CONTAINER_CHECKIN)
             resp = await client.get("/api/fleet/ready?services=pihole")
             assert resp.status_code == 200
@@ -1363,9 +1374,12 @@ class TestFleetReadyEndpoint:
             assert body["all_ready"] is True
             assert body["ready_count"] == 1
             assert body["total"] == 1
+            assert body["registered_hosts"] == 1
 
     async def test_missing_service_not_ready(self, tmp_path):
         async with api_client(tmp_path) as client:
+            state_dir = tmp_path / "state"
+            _seed_registry(state_dir, count=1)
             resp = await client.get("/api/fleet/ready?services=netdata")
             assert resp.status_code == 200
             body = resp.json()
@@ -1374,13 +1388,17 @@ class TestFleetReadyEndpoint:
 
     async def test_partial_readiness(self, tmp_path):
         async with api_client(tmp_path) as client:
+            state_dir = tmp_path / "state"
+            _seed_registry(state_dir, count=2)
             await client.post(ApiRoutes.CHECKIN, json=CONTAINER_CHECKIN)
             resp = await client.get("/api/fleet/ready?services=pihole,netdata")
             assert resp.status_code == 200
             body = resp.json()
             assert body["all_ready"] is False
             assert body["ready_count"] == 1
-            assert body["total"] == 2
+            assert body["total"] == 1
+            assert body["registered_hosts"] == 2
+            assert body["services"]["netdata"]["status"] == "unknown"
 
 
 class TestFleetStaleEndpoint:
@@ -1706,6 +1724,8 @@ class TestEndToEndCallhomeFlow:
         """Fleet readiness gate works with real callhome payloads."""
         from scripts.callhome import build_container_payload
         async with api_client(tmp_path) as client:
+            state_dir = tmp_path / "state"
+            _seed_registry(state_dir, count=3)
             for svc in ["pihole", "netdata", "wireguard"]:
                 payload = build_container_payload(svc)
                 payload["node_id"] = f"ct-{svc}"

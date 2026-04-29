@@ -1,25 +1,14 @@
 ---
 # ── Base state gate ──────────────────────────────────────────────
-# HARD FAIL if ANY tier of the heartbeat system is dead.
-#
 # NM with no heartbeat = DEAD
 # CM with no heartbeat = DEAD
 # SM with no heartbeat = DEAD
 #
-# If there is no heartbeat when running with BASE REQUIREMENTS,
-# then the system is DEAD. Not "alive." DEAD.
-#
-# Check order:
-# 1. Controller VPN (wg0) — can we reach anything?
-# 2. Each NM API — is each Node Manager alive?
-# 3. Each NM has containers — are containers heartbeating to their NM?
-# 4. SM fleet/ready for kiosk — are ALL kiosks heartbeating through
-#    the full 4-tier chain (Container → NM → CM → SM)?
-# 5. SM fleet/ready for wireguard — are ALL VPN tunnels heartbeating?
-#
-# Every tier. No heartbeat = DEAD. Not alive. DEAD.
+# fleet/ready is driven by the host registry. all_ready means:
+# every registered NM has the service AND it's heartbeating.
+# 6 registered, 1 reporting = NOT ready.
 
-# ── Tier 0: Controller VPN ──────────────────────────────────────
+# ── Controller VPN ──────────────────────────────────────────────
 
 - name: Check controller wg0 interface
   ansible.builtin.command:
@@ -28,69 +17,22 @@
   changed_when: false
   failed_when: false
 
-- name: "DEAD — TIER 0: Controller VPN is down"
-  ansible.builtin.fail:
-    msg: >-
-      ════════════════════════════════════════════════════════════════
-      TIER 0 DEAD — CONTROLLER VPN (wg0) IS DOWN
-      ════════════════════════════════════════════════════════════════
-      Cannot reach any Node Manager without VPN.
-      Run base.yml first or: sudo wg-quick up wg0
-      ════════════════════════════════════════════════════════════════
-  when: _gate_wg0.rc != 0
+- name: "DEAD — Controller VPN is down"
+  ansible.builtin.assert:
+    that: _gate_wg0.rc == 0
+    fail_msg: "Controller VPN (wg0) is DOWN. Run base.yml or: sudo wg-quick up wg0"
 
-# ── Tier 3: Node Managers ───────────────────────────────────────
-# Every host MUST have a running NM. NM not responding = DEAD.
+# ── Every NM API MUST respond ──────────────────────────────────
 
-- name: Check every NM API responds
+- name: "Every NM API MUST respond — {{ item }}"
   ansible.builtin.uri:
     url: "{{ hostvars[item].nm_api_url }}/api/health"
     timeout: 5
-  register: _gate_nm_checks
   loop: "{{ groups['kiosk_nodes'] | default([]) }}"
-  failed_when: false
 
-- name: Identify dead NMs
-  ansible.builtin.set_fact:
-    _dead_nms: >-
-      {{ _gate_nm_checks.results | default([])
-         | rejectattr('status', 'defined')
-         | map(attribute='item') | list
-         + _gate_nm_checks.results | default([])
-         | selectattr('status', 'defined')
-         | rejectattr('status', 'equalto', 200)
-         | map(attribute='item') | list }}
-    _nm_total: "{{ groups['kiosk_nodes'] | default([]) | length }}"
+# ── Every VPN tunnel MUST be active ────────────────────────────
 
-- name: "DEAD — TIER 3: Node Managers have no pulse"
-  ansible.builtin.fail:
-    msg: >-
-      ════════════════════════════════════════════════════════════════
-      TIER 3 DEAD — NODE MANAGERS NOT RESPONDING
-      ════════════════════════════════════════════════════════════════
-      NM with no heartbeat = DEAD
-      Dead NMs: {{ _dead_nms | join(', ') }}
-      Total: {{ (_nm_total | int) - (_dead_nms | length) }}/{{ _nm_total }} alive
-      Run base.yml to deploy Kiosk/NM containers.
-      ════════════════════════════════════════════════════════════════
-  when: (_dead_nms | length) > 0 or (_nm_total | int) == 0
-
-# ── Tier 3 continued: NMs receiving container heartbeats ────────
-# Each NM must have containers heartbeating to it.
-# An NM with zero container heartbeats = DEAD NM.
-
-- name: Check each NM has container heartbeats
-  ansible.builtin.uri:
-    url: "{{ hostvars[item].nm_api_url }}/api/guests"
-    timeout: 10
-    return_content: true
-  register: _gate_nm_guests
-  loop: "{{ groups['kiosk_nodes'] | default([]) }}"
-  failed_when: false
-
-# ── Tier 3→2: VPN tunnels active ────────────────────────────────
-
-- name: Check WireGuard via NM exec
+- name: "Every VPN tunnel MUST be active — {{ item }}"
   ansible.builtin.uri:
     url: "{{ hostvars[item].nm_api_url }}/api/provision/{{ wireguard_ct_id }}/exec"
     method: POST
@@ -99,121 +41,54 @@
       cmd: "wg show wg0 latest-handshakes 2>/dev/null | head -1 | awk '{print $2}'"
       timeout: 5
     timeout: 10
-    headers: "{{ nm_auth_headers | default({}) }}"
-  register: _gate_wg_checks
+    headers: "{{ nm_auth_headers }}"
   loop: "{{ groups['vpn_nodes'] | default([]) }}"
-  failed_when: false
 
-- name: Identify dead VPN tunnels
-  ansible.builtin.set_fact:
-    _dead_vpn: >-
-      {{ _gate_wg_checks.results | default([])
-         | rejectattr('status', 'defined')
-         | map(attribute='item') | list
-         + _gate_wg_checks.results | default([])
-         | selectattr('status', 'defined')
-         | rejectattr('status', 'equalto', 200)
-         | map(attribute='item') | list }}
-    _vpn_total: "{{ groups['vpn_nodes'] | default([]) | length }}"
+# ── SM kiosk heartbeats — all registered NMs must report ───────
 
-- name: "DEAD — VPN tunnels not active"
-  ansible.builtin.fail:
-    msg: >-
-      ════════════════════════════════════════════════════════════════
-      VPN TUNNELS DEAD
-      ════════════════════════════════════════════════════════════════
-      Dead tunnels: {{ _dead_vpn | join(', ') }}
-      Total: {{ (_vpn_total | int) - (_dead_vpn | length) }}/{{ _vpn_total }} alive
-      Run base.yml to provision WireGuard containers.
-      ════════════════════════════════════════════════════════════════
-  when: (_dead_vpn | length) > 0 or (_vpn_total | int) == 0
-
-# ── Tier 2: Cluster Manager receiving NM heartbeats ─────────────
-# The CM aggregates child NM heartbeats. If kiosk heartbeats reach
-# the SM, the CM MUST be alive and relaying. Checked via SM below.
-
-# ── Tier 1: SuperManager — the top of the chain ────────────────
-# SM with no heartbeat = DEAD. Not alive. DEAD.
-# SM must have ALL kiosk heartbeats flowing through the full chain:
-# Container → NM → CM → SM
-
-- name: Check SM has kiosk heartbeats (full 4-tier chain proof)
+- name: "SM KIOSK HEARTBEATS — all registered NMs must report"
   ansible.builtin.uri:
     url: "{{ callhome_server_local }}/api/fleet/ready?services=kiosk"
     return_content: true
     timeout: 10
+    headers: "{{ nm_auth_headers }}"
   register: _gate_sm_kiosk
-  failed_when: false
 
-- name: "DEAD — FULL 4-TIER CHAIN: SM HAS NO KIOSK HEARTBEATS"
-  ansible.builtin.fail:
-    msg: >-
-      ════════════════════════════════════════════════════════════════
-      THE ENTIRE HEARTBEAT CHAIN IS DEAD
-      ════════════════════════════════════════════════════════════════
-      NM with no heartbeat = DEAD
-      CM with no heartbeat = DEAD
-      SM with no heartbeat = DEAD
-      SM API at {{ callhome_server_local }} returned:
-        HTTP {{ _gate_sm_kiosk.status | default('CONNECTION REFUSED') }}
-        Body: {{ _gate_sm_kiosk.json | default('NO RESPONSE') }}
-      ZERO kiosk heartbeats means the ENTIRE 4-tier chain is broken:
-        Container → NM → CM → SM = NOTHING ARRIVED
-      INVESTIGATE EACH TIER:
-        Tier 3 (NM):  curl <nm_ip>:9001/api/health
-        Tier 2 (CM):  curl <cm_ip>:9001/api/cluster/nodes
-        Tier 1 (SM):  curl {{ callhome_server_local }}/api/fleet/ready?services=kiosk
-        Full debug:   curl {{ callhome_server_local }}/api/nodes
-      DO NOT CONTINUE. FIX THE HEARTBEAT CHAIN.
-      ════════════════════════════════════════════════════════════════
-  when: >-
-    (_gate_sm_kiosk.status | default(0) | int) != 200
-    or not (_gate_sm_kiosk.json.all_ready | default(false) | bool)
+- name: "DEAD — KIOSK HEARTBEATS"
+  ansible.builtin.assert:
+    that: _gate_sm_kiosk.json.all_ready | bool
+    fail_msg: >-
+      {{ _gate_sm_kiosk.json.ready_count }}/{{ _gate_sm_kiosk.json.registered_hosts }}
+      registered NMs have kiosk heartbeating. MISSING KIOSKS ARE DEAD.
+      Response: {{ _gate_sm_kiosk.json }}
 
-- name: Check SM has WireGuard heartbeats
+# ── SM wireguard heartbeats — all registered NMs must report ───
+
+- name: "SM WIREGUARD HEARTBEATS — all registered NMs must report"
   ansible.builtin.uri:
     url: "{{ callhome_server_local }}/api/fleet/ready?services=wireguard"
     return_content: true
     timeout: 10
+    headers: "{{ nm_auth_headers }}"
   register: _gate_sm_wg
-  failed_when: false
 
-- name: "DEAD — WIREGUARD HEARTBEATS NOT FLOWING THROUGH SM"
-  ansible.builtin.fail:
-    msg: >-
-      ════════════════════════════════════════════════════════════════
-      WIREGUARD HEARTBEAT CHAIN IS DEAD
-      ════════════════════════════════════════════════════════════════
-      SM reports WireGuard not ready:
-        {{ _gate_sm_wg.json | default('NO RESPONSE') }}
-      VPN containers MUST heartbeat through the full 4-tier chain.
-      ════════════════════════════════════════════════════════════════
-  when: >-
-    (_gate_sm_wg.status | default(0) | int) != 200
-    or not (_gate_sm_wg.json.all_ready | default(false) | bool)
+- name: "DEAD — WIREGUARD HEARTBEATS"
+  ansible.builtin.assert:
+    that: _gate_sm_wg.json.all_ready | bool
+    fail_msg: >-
+      {{ _gate_sm_wg.json.ready_count }}/{{ _gate_sm_wg.json.registered_hosts }}
+      registered NMs have wireguard heartbeating. MISSING VPN TUNNELS ARE DEAD.
+      Response: {{ _gate_sm_wg.json }}
 
-# ── ALL TIERS ALIVE ─────────────────────────────────────────────
+# ── ALL CHECKS PASSED ─────────────────────────────────────────
 
 - name: Set gate results
   ansible.builtin.set_fact:
     _base_state_valid: true
-    _base_state_details:
-      controller_wg0: "up"
-      nm_apis: "ALL {{ _nm_total }} ALIVE"
-      vpn_tunnels: "ALL {{ _vpn_total }} ALIVE"
-      sm_kiosk_heartbeats: "ALL FLOWING"
-      sm_wireguard_heartbeats: "ALL FLOWING"
 
-- name: ALL TIERS ALIVE — base state verified
+- name: Base state verified
   ansible.builtin.debug:
     msg: >-
-      ═══════════════════════════════════════════════════════════
-      ALL TIERS ALIVE — BASE STATE VERIFIED
-      ═══════════════════════════════════════════════════════════
-      Tier 0 (Controller): wg0=UP
-      Tier 3 (NMs): ALL {{ _nm_total }} RESPONDING
-      Tier 2 (VPN): ALL {{ _vpn_total }} TUNNELS ACTIVE
-      Tier 1 (SM):  KIOSK + WIREGUARD HEARTBEATS FLOWING
-      Full 4-tier chain: Container → NM → CM → SM = VERIFIED
-      ═══════════════════════════════════════════════════════════
-      Proceeding to services.
+      BASE STATE VERIFIED: wg0=UP, all NMs responding, all VPN tunnels active,
+      {{ _gate_sm_kiosk.json.ready_count }}/{{ _gate_sm_kiosk.json.registered_hosts }} kiosks,
+      {{ _gate_sm_wg.json.ready_count }}/{{ _gate_sm_wg.json.registered_hosts }} wireguard.

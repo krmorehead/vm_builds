@@ -58,7 +58,7 @@ topology (IPs, bridges, subnets, peer keys).
   batman_trigger.sh. Initial instinct was `opkg install` on the running VM.
   Correct fix: add to `ROUTER_PACKAGES` in `build-images.sh`, rebuild, redeploy.
 - Previous bug (2026-04-12): socat TCP proxies for 4-tier heartbeat
-  (manager-api-proxy on port 9001, supermanager-relay on port 52525)
+  (manager-api-proxy on port 9001, supermanager-relay on port 40500)
   were started with `nohup socat &` via SSH. Both died when Ansible's
   SSH ControlMaster session closed, breaking the entire heartbeat relay
   chain. Fix: deploy as systemd units with `Restart=always`.
@@ -449,7 +449,7 @@ All VMIDs defined in `group_vars/all.yml`.
 - **Primary host**: `PRIMARY_HOST` in `.env`/`test.env` — the entry point IP that `build.py` probes.
 - **Additional host IPs**: `AI_HOST`, `MESH_2_HOST` in `.env`/`test.env` for directly reachable nodes.
 - **Optional env vars**: `.env` file → `lookup('env', 'VAR_NAME') | default('', true)` in role `defaults/main.yml` (e.g., `WAN_MAC`)
-- **Web UI / API port**: `WEBUI_PORT` in `.env`/`test.env` (default: 52500). Controls the NiceGUI web UI, callhome API, and headless API server ports. MUST be in a range open in the controller's firewall (currently 52500-53000). `build.py`, `app.py`, and `start_test_api.py` all read this env var.
+- **Web UI / API port**: `WEBUI_PORT` in `.env`/`test.env` (default: 40500). Controls the NiceGUI web UI, callhome API, and headless API server ports. MUST be in a range open in the controller's firewall (currently 40500-53000). `build.py`, `app.py`, and `start_test_api.py` all read this env var.
 - **Generated secrets and dynamic config**: Auto-generated during runs → written to `{{ env_generated_path }}` on the controller via `blockinfile`. Resolves to `test.env.generated` under Molecule, `.env.generated` in production. Includes auto-generated keys (WireGuard) and dynamic runtime config (LAN_GATEWAY, LAN_CIDR). See `secret-generation` rule.
 - **Callhome server URL**: Written to `.state/callhome_url` by `build.py` (production), `prepare.yml` (test), or the NiceGUI app on startup. Read by `callhome_server` in `group_vars/all.yml` via `lookup('file')`. Hard-fails if missing. NEVER set via env var or hardcode in `.env`/`test.env`.
 - **Shared VM params**: `group_vars/all.yml` (VMID, image path, storage, `project_root`, `env_generated_path`, `callhome_server`)
@@ -556,7 +556,7 @@ appeared as independent fleet members on the dashboard.
 The central management API (`app.py --headless`) starts BEFORE Ansible
 provisioning begins. Both `build.py` (production) and molecule's
 `prepare.yml` (test) launch it as a background subprocess on the port
-set by `WEBUI_PORT` env var (default 52500) and write the URL to
+set by `WEBUI_PORT` env var (default 40500) and write the URL to
 `.state/callhome_url`. Ansible reads this file via
 the `callhome_server` variable in `group_vars/all.yml` — hard-fails if
 missing. This is base infrastructure — all containers depend on it for

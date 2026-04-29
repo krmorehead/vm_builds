@@ -142,7 +142,7 @@ identical.
 - **Lifecycle:** `prepare.yml` starts the headless API server and writes the
   state file + PID. `cleanup.yml` stops the server and removes both files.
 - **Observability:** During molecule runs, query `http://localhost:$WEBUI_PORT/api/fleet/health`
-  or `http://localhost:$WEBUI_PORT/api/nodes` for real-time fleet status (default port 52500).
+  or `http://localhost:$WEBUI_PORT/api/nodes` for real-time fleet status (default port 40500).
 - NEVER hardcode `CALLHOME_SERVER` in env files. The URL is detected
   dynamically from the controller's routable IP.
 

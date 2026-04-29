@@ -588,8 +588,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--port",
         type=int,
-        default=int(os.environ.get("WEBUI_PORT", "52500")),
-        help="Port to serve on (default: env WEBUI_PORT or 52500)",
+        default=int(os.environ.get("WEBUI_PORT", "40500")),
+        help="Port to serve on (default: env WEBUI_PORT or 40500)",
     )
     parser.add_argument(
         "--host",

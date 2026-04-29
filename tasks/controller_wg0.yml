@@ -112,6 +112,20 @@
     cmd: sudo wg show wg0
   changed_when: false
 
+- name: Trust wg0 interface in UFW (VPN traffic is already authenticated)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      if sudo -n ufw status verbose 2>/dev/null | grep -q 'wg0'; then
+        echo ALREADY_TRUSTED
+      else
+        sudo -n ufw allow in on wg0
+        echo ADDED
+      fi
+    executable: /bin/bash
+  register: _ufw_wg0
+  changed_when: "'ADDED' in _ufw_wg0.stdout"
+
 - name: Wait for WireGuard handshakes to establish
   ansible.builtin.pause:
     seconds: 5

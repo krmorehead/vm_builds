@@ -1751,7 +1751,7 @@ class TestAppConfigure:
         from scripts.webui.app import parse_args
         args = parse_args([])
         assert args.env is None
-        expected_port = int(os.environ.get("WEBUI_PORT", "52500"))
+        expected_port = int(os.environ.get("WEBUI_PORT", "40500"))
         assert args.port == expected_port
         assert args.host == "127.0.0.1"
 
@@ -2222,6 +2222,14 @@ class TestCheckContainerReady:
 class TestCheckFleetReadiness:
     """Tests for check_fleet_readiness()."""
 
+    @staticmethod
+    def _seed_registry(state_dir: Path, count: int = 1) -> None:
+        hosts = [{"name": f"host-{i}", "ip": f"10.0.0.{i+1}", "mac": "",
+                  "bucket": "", "source": "test", "wol_capable": True,
+                  "vpn_ip": f"10.0.0.{i+1}"} for i in range(count)]
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "registry.json").write_text(json.dumps(hosts))
+
     def _register_service(
         self, tmp_path, node_id, container_id, ready=True,
     ):
@@ -2240,6 +2248,7 @@ class TestCheckFleetReadiness:
         data.register_checkin(tmp_path, checkin, "10.10.10.10")
 
     def test_all_ready(self, tmp_path):
+        self._seed_registry(tmp_path, count=2)
         self._register_service(tmp_path, "pihole-ct", "pihole")
         self._register_service(tmp_path, "rsyslog-ct", "rsyslog")
         result = data.check_fleet_readiness(tmp_path, ["pihole", "rsyslog"])
@@ -2248,6 +2257,7 @@ class TestCheckFleetReadiness:
         assert result["total"] == 2
 
     def test_partial_ready(self, tmp_path):
+        self._seed_registry(tmp_path, count=2)
         self._register_service(tmp_path, "pihole-ct", "pihole", ready=True)
         self._register_service(tmp_path, "rsyslog-ct", "rsyslog", ready=False)
         result = data.check_fleet_readiness(tmp_path, ["pihole", "rsyslog"])
@@ -2255,6 +2265,7 @@ class TestCheckFleetReadiness:
         assert result["ready_count"] == 1
 
     def test_missing_service(self, tmp_path):
+        self._seed_registry(tmp_path, count=1)
         self._register_service(tmp_path, "pihole-ct", "pihole")
         result = data.check_fleet_readiness(tmp_path, ["pihole", "netdata"])
         assert result["all_ready"] is False
@@ -2263,11 +2274,12 @@ class TestCheckFleetReadiness:
 
     def test_empty_services_list(self, tmp_path):
         result = data.check_fleet_readiness(tmp_path, [])
-        assert result["all_ready"] is True
+        assert result["all_ready"] is False
         assert result["total"] == 0
         assert result["ready_count"] == 0
 
     def test_match_by_hostname(self, tmp_path):
+        self._seed_registry(tmp_path, count=1)
         checkin = data.NodeCheckin(
             node_id="wireguard-home", hostname="wireguard-home",
             local_ips=["10.10.10.3"], uptime_seconds=120,
@@ -2281,6 +2293,7 @@ class TestCheckFleetReadiness:
 
     def test_finds_nested_containers_in_3tier_relay(self, tmp_path):
         """Fleet readiness finds services nested inside Manager relay payloads."""
+        self._seed_registry(tmp_path, count=1)
         checkin = data.NodeCheckin(
             node_id="home", hostname="home",
             container_health=data.ContainerHealth(
@@ -2309,6 +2322,7 @@ class TestCheckFleetReadiness:
 
     def test_nested_container_not_ready(self, tmp_path):
         """Nested container with ready=False reports not ready."""
+        self._seed_registry(tmp_path, count=1)
         checkin = data.NodeCheckin(
             node_id="home", hostname="home",
             container_health=data.ContainerHealth(
@@ -2802,7 +2816,7 @@ class TestCallhomeClient:
         request was sent with real networking, no mocks.
         """
         from scripts.callhome import send_checkin
-        port = int(os.environ.get("WEBUI_PORT", "52525"))
+        port = int(os.environ.get("WEBUI_PORT", "40500"))
         url = f"http://127.0.0.1:{port}"
         token = os.environ.get("CALLHOME_PUBLIC_KEY", "test-token")
         result = send_checkin(url, {"node_id": "pytest-header-test"}, token=token)
@@ -4074,7 +4088,7 @@ class TestManagerRelayPost:
     def test_post_to_upstream_success(self):
         """POST to the real API server running on WEBUI_PORT."""
         import socket
-        port = int(os.environ.get("WEBUI_PORT", "52525"))
+        port = int(os.environ.get("WEBUI_PORT", "40500"))
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             sock.settimeout(1)

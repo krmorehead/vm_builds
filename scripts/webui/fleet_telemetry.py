@@ -524,27 +524,108 @@ def check_container_ready(state_dir: Path, container_id: str) -> dict:
     return result
 
 
+def _resolve_all_instances(
+    nodes: list[RegisteredNode], service_id: str,
+    max_age: int = CONTAINER_READY_SECONDS,
+) -> list[ServiceMatch]:
+    """Find ALL instances of a service across all nodes.
+
+    Unlike _resolve_service (which returns the single freshest match),
+    this returns every node that has the service — via direct heartbeat
+    OR via relayed container data in extensions.containers.
+    """
+    results: list[ServiceMatch] = []
+    seen_node_ids: set[str] = set()
+    for n in nodes:
+        if n.container_health and n.container_health.container_id == service_id:
+            if n.node_id not in seen_node_ids:
+                results.append(_build_service_match(1, n, service_id, max_age))
+                seen_node_ids.add(n.node_id)
+        elif service_id in (n.hostname, n.node_id):
+            if n.node_id not in seen_node_ids:
+                results.append(_build_service_match(2, n, service_id, max_age))
+                seen_node_ids.add(n.node_id)
+        elif n.container_health:
+            nested = n.container_health.extensions.get("containers", {})
+            if service_id in nested and n.node_id not in seen_node_ids:
+                results.append(_build_service_match(3, n, service_id, max_age))
+                seen_node_ids.add(n.node_id)
+    return results
+
+
+def _load_registered_host_count(state_dir: Path) -> int:
+    """Load the number of registered physical hosts from registry.json.
+
+    The host registry is the source of truth for how many NMs exist.
+    Every registered host MUST have a kiosk (kiosk_nodes = all hosts).
+    """
+    registry_file = state_dir / "registry.json"
+    if not registry_file.exists():
+        return 0
+    try:
+        records = json.loads(registry_file.read_text())
+        if isinstance(records, list):
+            return len(records)
+    except (json.JSONDecodeError, OSError):
+        pass
+    return 0
+
+
 def check_fleet_readiness(
     state_dir: Path, expected_services: list[str],
 ) -> dict:
-    """Check readiness of multiple services at once."""
-    nodes = load_node_registry(state_dir)
-    results: dict[str, dict] = {}
-    for svc in expected_services:
-        m = _resolve_service(nodes, svc)
-        results[svc] = {
-            "ready": m.ready,
-            "status": m.status,
-            "last_seen": m.last_seen,
-            "node_id": m.node_id,
-        }
+    """Check readiness of ALL instances of each service across fleet.
 
-    all_ready = all(r["ready"] for r in results.values())
+    Driven by the host registry: total = registered NMs that SHOULD
+    have the service heartbeating. A fleet with 6 registered hosts
+    returns total=6 for kiosk (since kiosk_nodes = all hosts).
+
+    all_ready = every registered host has the service AND it's ready.
+    If 6 hosts are registered but only 1 has kiosk heartbeats, that's
+    1/6 — NOT ready.
+    """
+    nodes = load_node_registry(state_dir)
+    registered_count = _load_registered_host_count(state_dir)
+    services: dict[str, dict] = {}
+    total_instances = 0
+    total_ready = 0
+
+    any_missing = False
+    for svc in expected_services:
+        instances = _resolve_all_instances(nodes, svc)
+        ready_instances = [m for m in instances if m.ready]
+        total_instances += len(instances)
+        total_ready += len(ready_instances)
+        if not instances:
+            any_missing = True
+            services[svc] = {
+                "ready": False,
+                "status": "unknown",
+                "last_seen": "",
+                "node_id": "",
+            }
+        else:
+            for m in instances:
+                key = f"{svc}" if len(instances) == 1 else f"{svc}.{m.node_id}"
+                services[key] = {
+                    "ready": m.ready,
+                    "status": m.status,
+                    "last_seen": m.last_seen,
+                    "node_id": m.node_id,
+                }
+
+    all_ready = (
+        registered_count > 0
+        and not any_missing
+        and total_instances >= registered_count
+        and total_ready == total_instances
+    )
     return {
         "all_ready": all_ready,
-        "total": len(expected_services),
-        "ready_count": sum(1 for r in results.values() if r["ready"]),
-        "services": results,
+        "total": total_instances,
+        "ready_count": total_ready,
+        "registered_hosts": registered_count,
+        "services": services,
     }
 
 

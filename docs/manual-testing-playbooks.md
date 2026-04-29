@@ -442,7 +442,7 @@ with entries for every container on that host. Versions match the baked
 
 ```bash
 echo "=== Fleet versions (SuperManager) ==="
-curl -s "http://localhost:${WEBUI_PORT:-52500}/api/fleet/versions" | python3 -m json.tool
+curl -s "http://localhost:${WEBUI_PORT:-40500}/api/fleet/versions" | python3 -m json.tool
 ```
 
 **Expected**: Returns `{"fleet_versions": {"home": {"pihole": "1.0.0", ...}, ...}}`
@@ -472,7 +472,7 @@ sleep 5
 ### Step 1: Dashboard loads
 
 ```bash
-curl -s http://localhost:${WEBUI_PORT:-52525}/ | head -5
+curl -s http://localhost:${WEBUI_PORT:-40500}/ | head -5
 ```
 
 **Expected**: Returns HTML content (NiceGUI app).
@@ -480,7 +480,7 @@ curl -s http://localhost:${WEBUI_PORT:-52525}/ | head -5
 ### Step 2: Fleet health API
 
 ```bash
-curl -s http://localhost:${WEBUI_PORT:-52525}/api/fleet/health | python3 -m json.tool
+curl -s http://localhost:${WEBUI_PORT:-40500}/api/fleet/health | python3 -m json.tool
 ```
 
 **Expected**: Shows total nodes, healthy count, stale count.
@@ -488,7 +488,7 @@ curl -s http://localhost:${WEBUI_PORT:-52525}/api/fleet/health | python3 -m json
 ### Step 3: All nodes reporting
 
 ```bash
-curl -s http://localhost:${WEBUI_PORT:-52525}/api/nodes | python3 -c "
+curl -s http://localhost:${WEBUI_PORT:-40500}/api/nodes | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
 nodes = data.get('nodes', [])
@@ -509,7 +509,7 @@ for n in sorted(nodes, key=lambda x: x['node_id']):
 # Check a specific container
 for svc in pihole rsyslog wireguard kiosk; do
   echo -n "$svc: "
-  curl -s http://localhost:${WEBUI_PORT:-52525}/api/container/$svc/ready | python3 -c "
+  curl -s http://localhost:${WEBUI_PORT:-40500}/api/container/$svc/ready | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
 print(f'ready={d.get(\"ready\")}, ports={d.get(\"listening_ports\", [])}')" 2>/dev/null || echo "not found"
@@ -521,7 +521,7 @@ done
 ### Step 5: Fleet readiness gate
 
 ```bash
-curl -s "http://localhost:${WEBUI_PORT:-52525}/api/fleet/ready?services=pihole,rsyslog,wireguard,kiosk" | python3 -m json.tool
+curl -s "http://localhost:${WEBUI_PORT:-40500}/api/fleet/ready?services=pihole,rsyslog,wireguard,kiosk" | python3 -m json.tool
 ```
 
 **Expected**: `{"ready": true}` or lists which services are not ready.
@@ -529,7 +529,7 @@ curl -s "http://localhost:${WEBUI_PORT:-52525}/api/fleet/ready?services=pihole,r
 ### Step 6: Stale heartbeat detection
 
 ```bash
-curl -s "http://localhost:${WEBUI_PORT:-52525}/api/fleet/stale?services=pihole,rsyslog,wireguard,kiosk&max_age_seconds=120" -w "\nHTTP %{http_code}\n"
+curl -s "http://localhost:${WEBUI_PORT:-40500}/api/fleet/stale?services=pihole,rsyslog,wireguard,kiosk&max_age_seconds=120" -w "\nHTTP %{http_code}\n"
 ```
 
 **Expected**: HTTP 200 (no stale services). HTTP 409 means a service stopped heartbeating.
@@ -702,7 +702,7 @@ setting up the socat relay below.
 kill $(lsof -ti :9098) 2>/dev/null
 
 # SuperManager runs on the controller (no tunnel needed):
-# http://localhost:${WEBUI_PORT:-52525}/
+# http://localhost:${WEBUI_PORT:-40500}/
 
 # Cluster Manager (home kiosk at 10.10.10.23:9001)
 # NOTE: Direct tunnel to 10.10.10.23 may fail due to LAN IP collisions.
@@ -723,7 +723,7 @@ ssh -o StrictHostKeyChecking=no -L 9097:10.99.3.20:9001 root@$AI_HOST -N -f
 
 ### Step 1: SuperManager dashboard
 
-Open `http://localhost:${WEBUI_PORT:-52525}/` in a browser.
+Open `http://localhost:${WEBUI_PORT:-40500}/` in a browser.
 
 **Verify:**
 - Hosts section shows all 6 hosts with IPs, disk/memory metrics
@@ -910,7 +910,7 @@ xstartup symlink.
 
 ### 13.2 SuperManager → ClusterManager drill-down via iframe
 
-1. Open SuperManager at `http://localhost:${WEBUI_PORT:-52525}/nodes`
+1. Open SuperManager at `http://localhost:${WEBUI_PORT:-40500}/nodes`
 2. Click home host card → `/nodes/home`
 3. Verify "Open Kiosk" button visible with `cast` icon
 4. Click "Open Kiosk" → `/remote/home?back=/nodes/home`
@@ -1439,15 +1439,15 @@ tested by PB12 (which only spot-checks dashboard, nodes, deploy, hub).
 - SuperManager running in UI mode (see Known Issues — headless vs UI mode):
   ```bash
   kill $(cat .state/test_api.pid) 2>/dev/null
-  python scripts/webui/app.py --port ${WEBUI_PORT:-52525} --env test.env &
+  python scripts/webui/app.py --port ${WEBUI_PORT:-40500} --env test.env &
   echo $! > .state/test_api.pid
   sleep 5
   ```
-- Browser open at `http://localhost:${WEBUI_PORT:-52525}/`
+- Browser open at `http://localhost:${WEBUI_PORT:-40500}/`
 
 ### 16.1 Dashboard (`/`)
 
-1. Open `http://localhost:${WEBUI_PORT:-52525}/`
+1. Open `http://localhost:${WEBUI_PORT:-40500}/`
 2. Verify **Environment badge** at top — shows active env file
 3. Verify **Hosts section** — 6 host cards with names, IPs, and status
    dot (green = reachable, red = unreachable)
@@ -1588,7 +1588,7 @@ path for local kiosk users (through KasmVNC) and remote operators
 
 ### 17.1 Desktop launch from SuperManager `/hub`
 
-1. Open `http://localhost:${WEBUI_PORT:-52525}/hub`
+1. Open `http://localhost:${WEBUI_PORT:-40500}/hub`
 2. Locate the **Desktop** tile in the "Desktop & Media" section
 3. Verify the tile shows a **"Launch"** badge (not "Not available")
 4. Click the Desktop tile → verify navigation to `/launch?vmid=400&title=Desktop&url_key=DESKTOP_URL`
@@ -1715,7 +1715,7 @@ compatibility, and service functionality through the viewer.
 
 ### 18.1 Jellyfin via SM hub tile
 
-1. Navigate to `http://localhost:${WEBUI_PORT:-52525}/hub`
+1. Navigate to `http://localhost:${WEBUI_PORT:-40500}/hub`
 2. Click the **Jellyfin** tile in "Desktop & Media" section
 3. Verify navigation to `/view?url=http://10.10.10.15:8096&title=Jellyfin`
 4. Verify the viewer page renders:
@@ -2073,7 +2073,7 @@ configured on the containers.
 
 ```bash
 # Check callhome extensions for bridge containers
-curl -s http://localhost:${WEBUI_PORT:-52525}/api/container/openwrt-bridge/ready \
+curl -s http://localhost:${WEBUI_PORT:-40500}/api/container/openwrt-bridge/ready \
   | python3 -m json.tool
 ```
 
@@ -2082,7 +2082,7 @@ curl -s http://localhost:${WEBUI_PORT:-52525}/api/container/openwrt-bridge/ready
 
 ```bash
 # Also check the UCI wireless extension
-curl -s http://localhost:${WEBUI_PORT:-52525}/api/container/openwrt-bridge/ready \
+curl -s http://localhost:${WEBUI_PORT:-40500}/api/container/openwrt-bridge/ready \
   | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d.get('extensions',{}).get('uci_wireless',{}), indent=2))"
 ```
 
@@ -2278,7 +2278,7 @@ The `molecule prepare` phase starts the SuperManager in headless mode
 the full UI:
 
 1. Kill the headless server: `kill $(cat .state/test_api.pid)`
-2. Start UI mode: `python scripts/webui/app.py --port ${WEBUI_PORT:-52525} --env test.env &`
+2. Start UI mode: `python scripts/webui/app.py --port ${WEBUI_PORT:-40500} --env test.env &`
 3. Update `.state/test_api.pid` with the new PID
 
 The socat tunnel on the primary host continues forwarding heartbeats to

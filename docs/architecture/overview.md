@@ -51,7 +51,7 @@ The **SuperManager** provides global fleet visibility across all clusters
 │  Global fleet view across ALL clusters and national hosts      │
 │  Receives relay heartbeats from every Cluster Manager          │
 │  nodes.json persistent storage, deploy orchestration           │
-│  Port: $WEBUI_PORT (default 52500)                             │
+│  Port: $WEBUI_PORT (default 40500)                             │
 │                                                                │
 │  ┌───────────────────────┐     ┌────────────────────────────┐  │
 │  │ Cluster "Home Lab"    │     │ National Host "cabin"      │  │

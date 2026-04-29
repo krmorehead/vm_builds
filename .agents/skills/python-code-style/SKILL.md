@@ -222,7 +222,7 @@ user.find(Labels.START_DEPLOY).click()
   relay to their ClusterManager. ClusterManagers relay to the SuperManager.
   NEVER let containers POST directly to the SuperManager's `/api/checkin`
   in the final architecture.
-- NEVER hardcode ports. Use `WEBUI_PORT` env var (default 52500). Ports in the
+- NEVER hardcode ports. Use `WEBUI_PORT` env var (default 40500). Ports in the
   ephemeral range (32768-60999) can collide with outbound connections. Choose a
   port in the firewall's allowed range and set it in `.env`/`test.env`.
 - NEVER duplicate `build.py:get_controller_ip()`. Import from `build` module.

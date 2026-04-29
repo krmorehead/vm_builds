@@ -170,7 +170,7 @@ infrastructure on each Proxmox host to expose port 9001:
 - **LAN hosts**: no forwarding needed — direct LAN access.
 
 The SuperManager relay (`supermanager-relay.service`) on the router node
-forwards port 52525 through an SSH reverse tunnel to the controller
+forwards port 40500 through an SSH reverse tunnel to the controller
 where the SM API runs. Both relay units use `Restart=always` so they
 survive reboots and SSH session teardown.
 

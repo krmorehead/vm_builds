@@ -31,13 +31,11 @@ if ! command -v wg &>/dev/null; then
 fi
 
 SUDOERS_FILE="/etc/sudoers.d/vm-builds-wireguard"
-if [ ! -f "$SUDOERS_FILE" ]; then
+SUDOERS_CONTENT="$(whoami) ALL=(root) NOPASSWD: /usr/bin/wg-quick *, /usr/bin/wg *, /usr/bin/install *, /usr/bin/rm /etc/wireguard/*, /usr/sbin/ufw *"
+if [ ! -f "$SUDOERS_FILE" ] || ! sudo grep -qF '/usr/sbin/ufw' "$SUDOERS_FILE" 2>/dev/null; then
     echo ""
-    echo "Setting up passwordless sudo for WireGuard operations..."
-    CURRENT_USER=$(whoami)
-    sudo tee "$SUDOERS_FILE" > /dev/null << EOF
-$CURRENT_USER ALL=(root) NOPASSWD: /usr/bin/wg-quick *, /usr/bin/wg *, /usr/bin/install *, /usr/bin/rm /etc/wireguard/*
-EOF
+    echo "Setting up passwordless sudo for WireGuard + UFW operations..."
+    echo "$SUDOERS_CONTENT" | sudo tee "$SUDOERS_FILE" > /dev/null
     sudo chmod 440 "$SUDOERS_FILE"
     echo "  Sudoers rule installed at $SUDOERS_FILE"
 fi

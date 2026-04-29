@@ -277,7 +277,7 @@ pytest tests/ -v
 - `.state/callhome_url` is the SOLE source of truth for `callhome_server`. Both `build.py` (production), `prepare.yml` (test), and the NiceGUI app write this file on startup. Ansible hard-fails if it is missing.
 - `prepare.yml` starts the headless API server automatically before converge. `cleanup.yml` stops it.
 - NEVER hardcode `CALLHOME_SERVER` in env files. The URL is detected dynamically.
-- ALL ports are controlled by the `WEBUI_PORT` env var (default: 52500, set to 52525 in test.env/.env). This port MUST be open in the controller's firewall.
+- ALL ports are controlled by the `WEBUI_PORT` env var (default: 40500, set to 40500 in test.env/.env). This port MUST be open in the controller's firewall.
 - During molecule runs, query `http://localhost:$WEBUI_PORT/api/fleet/health` for real-time fleet status.
 
 **MANDATORY: Testing Workflow (Fail-Fast)**

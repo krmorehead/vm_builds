@@ -1004,7 +1004,7 @@
   tasks:
     - name: Verify management API is running (REQUIRED for 4-tier system)
       ansible.builtin.uri:
-        url: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}/api/nodes"
+        url: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('40500', true) }}/api/nodes"
         method: GET
         return_content: true
         status_code: [200, 403]
@@ -1014,7 +1014,7 @@
     - name: Query fleet readiness from API
       ansible.builtin.uri:
         url: >-
-          http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}/api/fleet/ready?services={{
+          http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('40500', true) }}/api/fleet/ready?services={{
             fleet_ready_services | join(',')
           }}
         method: GET
@@ -1064,10 +1064,10 @@
             | map(attribute='key') | list | join(', ')
           }}.
           INVESTIGATE:
-          1. Check SM fleet health: curl http://localhost:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}/api/fleet/health
-          2. Check individual service: curl http://localhost:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}/api/container/<service>/ready
+          1. Check SM fleet health: curl http://localhost:{{ lookup('env', 'WEBUI_PORT') | default('40500', true) }}/api/fleet/health
+          2. Check individual service: curl http://localhost:{{ lookup('env', 'WEBUI_PORT') | default('40500', true) }}/api/container/<service>/ready
           3. Verify VPN is up: sudo wg show wg0
-          4. Verify relay chain: Container → NM (port 9001) → CM → SM (port {{ lookup('env', 'WEBUI_PORT') | default('52500', true) }})
+          4. Verify relay chain: Container → NM (port 9001) → CM → SM (port {{ lookup('env', 'WEBUI_PORT') | default('40500', true) }})
           5. Check each NM: curl http://10.0.0.<N>:9001/api/heartbeat (use VPN IPs)
           Do NOT add SSH fallbacks. Fix the heartbeat chain.
 
@@ -1100,7 +1100,7 @@
   hosts: dns_nodes
   gather_facts: false
   vars:
-    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('40500', true) }}"
   tasks:
     - name: Read Pi-hole container state and config
       ansible.builtin.shell:
@@ -1164,7 +1164,7 @@
   hosts: monitoring_nodes
   gather_facts: false
   vars:
-    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('40500', true) }}"
   tasks:
     - name: Check if br_netfilter is loaded
       ansible.builtin.stat:
@@ -1321,7 +1321,7 @@
   hosts: vpn_nodes
   gather_facts: false
   vars:
-    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('40500', true) }}"
   tasks:
     - name: Read WireGuard container state and config
       ansible.builtin.shell:
@@ -1861,7 +1861,7 @@
   hosts: service_nodes
   gather_facts: false
   vars:
-    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('40500', true) }}"
   tasks:
     - name: Read Home Assistant container state and config
       ansible.builtin.shell:
@@ -1923,7 +1923,7 @@
   hosts: media_nodes
   gather_facts: false
   vars:
-    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('40500', true) }}"
   tasks:
     - name: Read Jellyfin container state and config
       ansible.builtin.shell:
@@ -2082,7 +2082,7 @@
   hosts: streaming_nodes
   gather_facts: false
   vars:
-    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('40500', true) }}"
   tasks:
     - name: Read Moonlight container state and config
       ansible.builtin.shell:
@@ -2138,7 +2138,7 @@
   hosts: desktop_nodes
   gather_facts: false
   vars:
-    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('40500', true) }}"
   tasks:
     - name: Read Desktop container state and config
       ansible.builtin.shell:
@@ -2221,7 +2221,7 @@
   hosts: kiosk_nodes
   gather_facts: false
   vars:
-    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('40500', true) }}"
   tasks:
     - name: Read Kiosk container state and config
       ansible.builtin.shell:
@@ -2316,30 +2316,30 @@
         _kiosk_is_cm: "{{ _kiosk_config_api.json.IS_CLUSTER_MANAGER | default('') }}"
         _kiosk_mgmt_server: "{{ _kiosk_config_api.json.MANAGEMENT_SERVER | default('') }}"
 
-    - name: Assert ClusterManager (router_nodes) points to SuperManager
+    - name: Assert ClusterManager (router_nodes) points to SuperManager via VPN
       ansible.builtin.assert:
         that:
           - _kiosk_is_cm | string | lower in ['true', '1', 'yes']
-          - _kiosk_mgmt_server is search(lookup('env', 'WEBUI_PORT') | default('52500', true))
+          - _kiosk_mgmt_server is search('10\\.0\\.0\\.')
+          - _kiosk_mgmt_server is search(lookup('env', 'WEBUI_PORT') | default('40500', true))
         fail_msg: >-
           HARD FAILURE: ClusterManager on {{ inventory_hostname }} has wrong 4-tier config.
           IS_CLUSTER_MANAGER={{ _kiosk_is_cm }},
           MANAGEMENT_SERVER={{ _kiosk_mgmt_server }}.
-          INVESTIGATE: Check kiosk_configure pushed correct config.json.
-          Expected IS_CLUSTER_MANAGER=true and MANAGEMENT_SERVER pointing to SM port.
+          INVESTIGATE: MANAGEMENT_SERVER must use VPN IP (10.0.0.x), not WAN.
       when: "'router_nodes' in group_names"
 
-    - name: Assert NodeManagers (non-router) point to ClusterManager (kiosk port)
+    - name: Assert NodeManagers (non-router) point to ClusterManager via VPN
       ansible.builtin.assert:
         that:
           - _kiosk_is_cm | string | lower in ['false', '0', 'no', '']
+          - _kiosk_mgmt_server is search('10\\.0\\.0\\.')
           - _kiosk_mgmt_server is search(':9001')
         fail_msg: >-
           HARD FAILURE: NodeManager on {{ inventory_hostname }} has wrong 4-tier config.
           IS_CLUSTER_MANAGER={{ _kiosk_is_cm }},
           MANAGEMENT_SERVER={{ _kiosk_mgmt_server }}.
-          INVESTIGATE: Check kiosk_configure pushed correct config.json.
-          Expected IS_CLUSTER_MANAGER=false and MANAGEMENT_SERVER pointing to CM port 9001.
+          INVESTIGATE: MANAGEMENT_SERVER must use VPN IP (10.0.0.x), not WAN.
       when: "'router_nodes' not in group_names"
 
     - name: Check display-exclusive hookscript exists
@@ -2403,7 +2403,7 @@
   hosts: gaming_nodes
   gather_facts: false
   vars:
-    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('40500', true) }}"
   tasks:
     - name: Check Gaming LXC container exists
       ansible.builtin.command:
@@ -2501,7 +2501,7 @@
   connection: local
   gather_facts: false
   vars:
-    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}"
+    _api_base: "http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('40500', true) }}"
     _container_names:
       - pihole
       - rsyslog
@@ -2699,7 +2699,7 @@
     - name: Query fleet versions from SuperManager
       ansible.builtin.uri:
         url: >-
-          http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}/api/fleet/versions
+          http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('40500', true) }}/api/fleet/versions
         return_content: true
         timeout: 10
       register: _fleet_versions
@@ -2724,7 +2724,7 @@
   gather_facts: false
   vars:
     _api_base: >-
-      http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('52500', true) }}
+      http://127.0.0.1:{{ lookup('env', 'WEBUI_PORT') | default('40500', true) }}
   tasks:
     - name: Query Manager for home host state
       ansible.builtin.uri:

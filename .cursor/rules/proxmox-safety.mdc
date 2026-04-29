@@ -559,9 +559,9 @@ is ALWAYS wrong for infrastructure hosts.
 
 ## SSH reverse tunnel persistence
 - The SSH reverse tunnel from controller to PRIMARY_HOST (used by the SuperManager relay) can die during long idle periods between converge runs.
-- `start_test_api.py` deploys a socat systemd unit on the host (`supermanager-relay.service`) to relay port 52525 → 52526 (the tunnel). If the tunnel dies, socat has no backend.
+- `start_test_api.py` deploys a socat systemd unit on the host (`supermanager-relay.service`) to relay port 40500 → 52526 (the tunnel). If the tunnel dies, socat has no backend.
 - ALWAYS re-run `start_test_api.py` before a converge if significant time has passed since the last run. Check by SSHing to PRIMARY_HOST: `ss -tlnp | grep 52526` (the tunnel port).
-- Previous bug (2026-04-15): Tunnel died between converge runs. Heartbeats reached home's socat on 52525 but had nowhere to go (52526 not listening). All services appeared stale on the SuperManager despite running correctly.
+- Previous bug (2026-04-15): Tunnel died between converge runs. Heartbeats reached home's socat on 40500 but had nowhere to go (52526 not listening). All services appeared stale on the SuperManager despite running correctly.
 
 ## Build machine VPN — explicit sudo, never become
 - The build machine (where molecule runs) needs a wg0 VPN tunnel for display streaming. The "Configure controller VPN tunnel" play in site.yml targets `localhost`.

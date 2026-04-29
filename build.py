@@ -88,7 +88,7 @@ from urllib.error import URLError
 PROJECT_ROOT = Path(__file__).resolve().parent
 VENV_DIR = PROJECT_ROOT / ".venv"
 DEFAULT_PLAYBOOK = "site.yml"
-API_PORT = int(os.environ.get("WEBUI_PORT", "52500"))
+API_PORT = int(os.environ.get("WEBUI_PORT", "40500"))
 
 REQUIRED_ENV = [
     "HOME_API_TOKEN",
@@ -563,8 +563,10 @@ def main(argv: list[str] | None = None) -> int:
 
     api_proc: subprocess.Popen | None = None
     if not args.no_api:
-        controller_ip = get_controller_ip()
-        callhome_url = f"http://{controller_ip}:{API_PORT}"
+        controller_vpn_ip = os.environ.get("CONTROLLER_VPN_IP", "")
+        if not controller_vpn_ip:
+            controller_vpn_ip = get_controller_ip()
+        callhome_url = f"http://{controller_vpn_ip}:{API_PORT}"
         print(f"API:      {callhome_url}")
 
         api_proc = start_api_server(env_path, port=API_PORT)
